@@ -1,6 +1,6 @@
 [project]
 name = "licenseal"
-version = "0.1.0"
+version = "0.1.1"
 description = "License compatibility checker for Python, JS/TS, Rust, Go, Java/JVM, .NET, PHP, Ruby, Elixir/Erlang, and R dependencies"
 readme = "README.md"
 authors = [
@@ -156,7 +156,7 @@ exclude = ["tests"]
 
 [tool.commitizen]
 name = "cz_conventional_commits"
-version = "0.1.0"
+version = "0.1.1"
 version_files = [
     "src/licenseal/__init__.py:__version__",
     "pyproject.toml:version",
