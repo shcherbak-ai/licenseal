@@ -4,27 +4,51 @@
 </h1>
 
 <p align="center">
-  <strong>Catch dependency-license problems before they block a release, customer approval, or audit.</strong><br>
-  Fast cross-ecosystem license compatibility checker for CI, audits, and enterprise adoption.<br>
-  Includes a Claude Code review skill for investigating flagged findings and recording documented decisions.
+  Fast cross-ecosystem license compatibility checker for CI, audits, and enterprise adoption.
 </p>
+<br>
 
-<p align="center">
-  <a href="https://pypi.org/project/licenseal/"><img src="https://img.shields.io/pypi/v/licenseal?v=1" alt="PyPI"></a>
-  <a href="https://pypi.org/project/licenseal/"><img src="https://img.shields.io/pypi/pyversions/licenseal?v=1" alt="Python"></a>
-  <a href="https://github.com/shcherbak-ai/licenseal/blob/main/LICENSE"><img src="https://img.shields.io/badge/license-Apache--2.0-blue.svg" alt="License: Apache-2.0"></a>
-  <br>
-  <a href="https://github.com/shcherbak-ai/licenseal/actions/workflows/ci.yml"><img src="https://github.com/shcherbak-ai/licenseal/actions/workflows/ci.yml/badge.svg?branch=main" alt="CI"></a>
-  <a href="https://github.com/shcherbak-ai/licenseal/actions/workflows/ci.yml"><img src="https://img.shields.io/endpoint?url=https://gist.githubusercontent.com/SergiiShcherbak/17230af3dfe294ebd8a8fd9c4cd775a8/raw/licenseal-coverage.json" alt="coverage"></a>
-  <a href="https://github.com/shcherbak-ai/licenseal/actions/workflows/licenseal.yml"><img src="https://github.com/shcherbak-ai/licenseal/actions/workflows/licenseal.yml/badge.svg?branch=main" alt="License compatibility"></a>
-  <a href="https://github.com/shcherbak-ai/licenseal/actions/workflows/codeql.yml"><img src="https://github.com/shcherbak-ai/licenseal/actions/workflows/codeql.yml/badge.svg?branch=main" alt="CodeQL"></a>
-  <a href="https://github.com/PyCQA/bandit"><img src="https://img.shields.io/badge/security-bandit-yellow.svg" alt="security: bandit"></a>
-  <br>
-  <a href="https://github.com/astral-sh/ruff"><img src="https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/ruff/main/assets/badge/v2.json" alt="Ruff"></a>
-  <a href="https://github.com/astral-sh/uv"><img src="https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/uv/main/assets/badge/v0.json" alt="uv"></a>
-  <a href="https://github.com/astral-sh/ty"><img src="https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/ty/main/assets/badge/v0.json" alt="ty"></a>
-  <a href="https://github.com/shcherbak-ai/tethered"><img src="https://img.shields.io/badge/egress-tethered-orange?labelColor=4B8BBE" alt="egress: tethered"></a>
-</p>
+<!-- markdownlint-disable MD033 -->
+<table align="center">
+  <tr>
+    <td align="center"><strong>Prevent release blockers</strong><br>Catch dependency-license problems before release, approval, or audit.</td>
+    <td align="center"><strong>Run in CI</strong><br>Scan dependency trees from manifests, lockfiles, and registries.</td>
+    <td align="center"><strong>Document reviews</strong><br>Use the Claude Code skill to investigate findings and record decisions.</td>
+  </tr>
+</table>
+<br>
+
+<table align="center">
+  <tr>
+    <td align="right"><strong>Package</strong></td>
+    <td>
+      <a href="https://pypi.org/project/licenseal/"><img src="https://img.shields.io/pypi/v/licenseal?v=1" alt="PyPI"></a>
+      <a href="https://pypi.org/project/licenseal/"><img src="https://img.shields.io/pypi/pyversions/licenseal?v=1" alt="Python"></a>
+      <a href="https://github.com/shcherbak-ai/licenseal/blob/main/LICENSE"><img src="https://img.shields.io/badge/license-Apache--2.0-blue.svg" alt="License: Apache-2.0"></a>
+    </td>
+  </tr>
+  <tr>
+    <td align="right"><strong>Quality</strong></td>
+    <td>
+      <a href="https://github.com/shcherbak-ai/licenseal/actions/workflows/ci.yml"><img src="https://github.com/shcherbak-ai/licenseal/actions/workflows/ci.yml/badge.svg?branch=main" alt="CI"></a>
+      <a href="https://github.com/shcherbak-ai/licenseal/actions/workflows/ci.yml"><img src="https://img.shields.io/endpoint?url=https://gist.githubusercontent.com/SergiiShcherbak/17230af3dfe294ebd8a8fd9c4cd775a8/raw/licenseal-coverage.json" alt="coverage"></a>
+      <a href="https://github.com/shcherbak-ai/licenseal/actions/workflows/licenseal.yml"><img src="https://github.com/shcherbak-ai/licenseal/actions/workflows/licenseal.yml/badge.svg?branch=main" alt="License compatibility"></a>
+      <a href="https://github.com/shcherbak-ai/licenseal/actions/workflows/codeql.yml"><img src="https://github.com/shcherbak-ai/licenseal/actions/workflows/codeql.yml/badge.svg?branch=main" alt="CodeQL"></a>
+      <a href="https://github.com/PyCQA/bandit"><img src="https://img.shields.io/badge/security-bandit-yellow.svg" alt="security: bandit"></a>
+    </td>
+  </tr>
+  <tr>
+    <td align="right"><strong>Tooling</strong></td>
+    <td>
+      <a href="https://github.com/astral-sh/ruff"><img src="https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/ruff/main/assets/badge/v2.json" alt="Ruff"></a>
+      <a href="https://github.com/astral-sh/uv"><img src="https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/uv/main/assets/badge/v0.json" alt="uv"></a>
+      <a href="https://github.com/astral-sh/ty"><img src="https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/ty/main/assets/badge/v0.json" alt="ty"></a>
+      <a href="https://github.com/shcherbak-ai/tethered"><img src="https://img.shields.io/badge/egress-tethered-orange?labelColor=4B8BBE" alt="egress: tethered"></a>
+    </td>
+  </tr>
+</table>
+<br>
+<!-- markdownlint-enable MD033 -->
 
 **licenseal is a license compatibility checker for dependency trees across language ecosystems.** It makes that compliance check cheap enough to run in CI: scan manifests, lockfiles, and public registry metadata, then tell you whether your dependency licenses are compatible with the license you ship under. It does not install dependencies, run package-manager commands, execute build scripts, or download package archives.
 
