@@ -693,6 +693,7 @@ class TestRenderMarkdown:
         assert "[requests (2.31.0)](https://pypi.org/project/requests/)" in md
         assert "[Apache-2.0](https://spdx.org/licenses/Apache-2.0.html)" in md
         assert "**Summary:**" in md
+        assert "\n**Summary:** 1 violation, 1 warning, 1 unknown, 3 ok\n\n" in md
         assert "**Completed in:** 0.42s" in md
         assert "1 violation," in md
         assert f"_{_REPORT_NOTE.replace('licenseal check', '`licenseal check`')}_" in md

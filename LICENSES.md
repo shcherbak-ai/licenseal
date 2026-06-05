@@ -26,7 +26,8 @@
 |[tomli (2.4.1)](https://pypi.org/project/tomli/)|python|prod|[pyproject.toml](pyproject.toml)|[MIT](https://spdx.org/licenses/MIT.html)|permissive|✓|
 
 **Summary:** 0 violations, 1 warning, 0 unknown, 19 ok (of which 1 reviewed)
-**Completed in:** 0.79s
+
+**Completed in:** 0.72s
 
 ## Details
 

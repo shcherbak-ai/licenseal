@@ -13,7 +13,6 @@ keywords = ["license", "compliance", "spdx", "dependencies", "python", "pypi", "
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Developers",
-    "License :: OSI Approved :: Apache Software License",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
@@ -170,5 +169,5 @@ pre_bump_hooks = [
 ]
 
 [build-system]
-requires = ["uv_build>=0.8.19,<0.9.0"]
+requires = ["uv_build>=0.11.19,<0.12"]
 build-backend = "uv_build"

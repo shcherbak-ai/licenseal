@@ -653,6 +653,7 @@ def render_markdown(report: AnalysisReport) -> str:
     if n_reviewed:
         summary += f" (of which {n_reviewed} reviewed)"
     lines.append(f"**Summary:** {summary}")
+    lines.append("")
     lines.append(f"**Completed in:** {_format_elapsed(report.elapsed_seconds)}")
 
     detail_results = [r for r in grouped if r.verdict != CompatibilityVerdict.COMPATIBLE]
