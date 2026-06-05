@@ -512,9 +512,23 @@ class TestResolveNpmSpecDistTags:
 
 
 class TestPyPIResolver:
+    def test_exact_constraint_counts_as_pinned(self):
+        assert extract_python_pinned_version("==2.28.1") == "2.28.1"
+        assert extract_python_pinned_version("===2.28.1") == "2.28.1"
+        assert extract_python_pinned_version("2.28.1") == "2.28.1"
+        assert extract_python_pinned_version("==v2.28.1") == "2.28.1"
+        assert extract_python_pinned_version("==2.6.0+cu124") == "2.6.0+cu124"
+        assert extract_python_pinned_version("==1!2.0") == "1!2.0"
+
     def test_non_exact_constraint_does_not_count_as_pinned(self):
         assert extract_python_pinned_version(">=2.28") is None
         assert extract_python_pinned_version("2.*") is None
+        assert extract_python_pinned_version("=2.28.1") is None
+        assert extract_python_pinned_version("==final") is None
+        assert extract_python_pinned_version("==v") is None
+
+    def test_malformed_dot_chain_does_not_count_as_pinned(self):
+        assert extract_python_pinned_version("==9.9" + ".0" * 1000 + "@") is None
 
     def test_normalize_repository_url_variants(self):
         assert normalize_python_repository_url("git+https://github.com/org/repo.git") == (

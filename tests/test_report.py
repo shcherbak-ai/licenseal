@@ -1140,6 +1140,43 @@ class TestRenderMarkdown:
             == "Inspect LICENSE file at https://codeberg.org/owner/repo/src/branch/HEAD/LICENSE"
         )
 
+    def test_actionability_unknown_ignores_embedded_forge_hostname(self):
+        report = AnalysisReport(
+            project_license="MIT",
+            results=[
+                _make_result(
+                    "p",
+                    "UNKNOWN",
+                    RiskLevel.UNKNOWN,
+                    CompatibilityVerdict.UNKNOWN,
+                    repository_url="https://evil.example/://codeberg.org/owner/repo",
+                )
+            ],
+        )
+        data = json.loads(render_json(report))
+        a = data["dependencies"][0]["actionability"]
+        assert (
+            a["next_steps"][0]
+            == "Inspect LICENSE file at https://evil.example/://codeberg.org/owner/repo"
+        )
+
+    def test_actionability_unknown_non_http_repo_uses_bare_url(self):
+        report = AnalysisReport(
+            project_license="MIT",
+            results=[
+                _make_result(
+                    "p",
+                    "UNKNOWN",
+                    RiskLevel.UNKNOWN,
+                    CompatibilityVerdict.UNKNOWN,
+                    repository_url="git://github.com/owner/repo",
+                )
+            ],
+        )
+        data = json.loads(render_json(report))
+        a = data["dependencies"][0]["actionability"]
+        assert a["next_steps"][0] == "Inspect LICENSE file at git://github.com/owner/repo"
+
     def test_actionability_unknown_unknown_host_uses_bare_repo_url(self):
         # Self-hosted Gitea / SourceHut / random forge: no hint path; fall
         # back to the bare URL so the agent can navigate the file tree.

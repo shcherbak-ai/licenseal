@@ -852,58 +852,67 @@ def _trim_deps_dev_v3(data: dict) -> dict:
 def _trim_for_cache(url: str, data: dict | None) -> dict | None:
     if data is None:
         return None
-    if "pypi.org/pypi/" in url:
+    parsed = urlsplit(url)
+    host = (parsed.hostname or "").lower()
+    path = parsed.path
+    if host == "pypi.org" and path.startswith("/pypi/"):
         return _trim_pypi(data)
-    if "registry.npmjs.org" in url:
+    if host == "registry.npmjs.org":
         # /registry/{name} has a 'versions' dict; /registry/{name}/{version}
         # doesn't. Discriminate on shape.
         if "versions" in data and isinstance(data["versions"], dict):
             return _trim_npm_project(data)
         return _trim_npm_version(data)
-    if "api.deps.dev/v3/systems/" in url:
+    if host == "api.deps.dev" and path.startswith("/v3/systems/"):
         # ``:dependencies`` sub-resource has a different shape than the
         # plain version endpoint; route it to its own trim. Match by the
         # ``:dependencies`` suffix (URLs are e.g. ``…/versions/1.0.0:dependencies``).
-        if ":dependencies" in url:
+        if path.endswith(":dependencies"):
             return _trim_deps_dev_dependencies(data)
         return _trim_deps_dev_v3(data)
-    if (
-        "maven.apache.org" in url
-        or "maven.org" in url
-        or "dl.google.com/dl/android/maven2" in url
-        or "repo.jenkins-ci.org" in url
-    ):
+    is_maven_central = host in {
+        "repo.maven.apache.org",
+        "repo1.maven.apache.org",
+        "repo1.maven.org",
+    } and path.startswith("/maven2/")
+    is_google_maven = host == "dl.google.com" and path.startswith("/dl/android/maven2/")
+    is_jenkins_maven = host == "repo.jenkins-ci.org" and path.startswith("/public/")
+    if is_maven_central or is_google_maven or is_jenkins_maven:
         # Match any Maven-style registry licenseal queries — Maven Central
         # (``repo.maven.apache.org`` plus its historical ``repo1`` aliases),
         # Google Android Maven, and the Jenkins public repository. All
         # serve POM XML at the canonical layout, so the same trim handles
         # every response shape.
         return _trim_maven_central_pom(data)
-    if "api.nuget.org/v3-flatcontainer" in url and url.endswith(".nuspec"):
+    if (
+        host == "api.nuget.org"
+        and path.startswith("/v3-flatcontainer/")
+        and path.endswith(".nuspec")
+    ):
         # The flatcontainer service serves raw ``.nuspec`` XML at
         # ``api.nuget.org/v3-flatcontainer/{id}/{version}/{id}.nuspec``.
         # Other flatcontainer endpoints (``/index.json``) aren't used by
         # the resolver, so the ``.nuspec`` suffix check disambiguates.
         return _trim_nuspec(data)
-    if "repo.packagist.org/p2/" in url:
+    if host == "repo.packagist.org" and path.startswith("/p2/"):
         # Packagist v2 metadata — full version history per package, kept
         # entries trimmed to the SPDX / repository / require fields the
         # resolver and the manifest-only transitive walker consume.
         return _trim_packagist(data)
-    if "rubygems.org/api/v2/rubygems/" in url:
+    if host == "rubygems.org" and path.startswith("/api/v2/rubygems/"):
         # RubyGems v2 per-version endpoint — single-version response with
         # the licenses array plus a dependencies.runtime sub-array for the
         # manifest-only transitive walker.
         return _trim_rubygems_version(data)
-    if "rubygems.org/api/v1/gems/" in url:
+    if host == "rubygems.org" and path.startswith("/api/v1/gems/"):
         # RubyGems v1 latest-version fallback for unpinned deps; same kept
         # fields modulo ``number`` vs ``version`` for the resolved version.
         return _trim_rubygems_gem(data)
-    if "hex.pm/api/packages/" in url:
+    if host == "hex.pm" and path.startswith("/api/packages/"):
         # Two hex.pm endpoints share this prefix: the per-version release
         # (``.../releases/{version}``) carries the transitive requirements;
         # the package endpoint carries the package-level license + links.
-        if "/releases/" in url:
+        if "/releases/" in path:
             return _trim_hex_release(data)
         return _trim_hex_package(data)
     # crates.io responses are small and varied; not worth trimming.

@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 
-import re
 from collections.abc import Callable
 
 import httpx
 from packaging.markers import Marker
 from packaging.requirements import InvalidRequirement, Requirement
+from packaging.version import InvalidVersion, Version
 
 from licenseal.analysis.spdx import normalize_license
 from licenseal.models import Dependency, DependencyGroup, Ecosystem, LicenseInfo
@@ -27,9 +27,6 @@ _LICENSE_CLASSIFIER_PREFIX = "License :: OSI Approved :: "
 
 # Patterns that indicate the license field contains junk, not a license ID
 _JUNK_INDICATORS = ("copyright", "\n", "all rights reserved", "permission is hereby")
-_PINNED_VERSION_RE = re.compile(
-    r"^(?:={2,3}\s*)?(v?(?:\d+[A-Za-z0-9.+!_-]*)(?:\.\d+[A-Za-z0-9.+!_-]*)*)$"
-)
 _PROJECT_URL_KEYS = (
     "source",
     "sources",
@@ -56,10 +53,24 @@ def _extract_pinned_version(version_constraint: str) -> str | None:
         return None
     if spec[0] in "^~<>!*":
         return None
-    match = _PINNED_VERSION_RE.fullmatch(spec)
-    if not match:
+
+    if spec.startswith("==="):
+        version = spec[3:]
+    elif spec.startswith("=="):
+        version = spec[2:]
+    elif spec.startswith("="):
         return None
-    return match.group(1).lstrip("v")
+    else:
+        version = spec
+
+    stripped = version[1:] if version.startswith("v") else version
+    if not stripped or not stripped[0].isdigit():
+        return None
+    try:
+        Version(version)
+    except InvalidVersion:
+        return None
+    return stripped
 
 
 def _normalize_repository_url(url: str) -> str:

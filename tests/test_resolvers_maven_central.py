@@ -1197,6 +1197,15 @@ class TestTrimMavenCentralPom:
         )
         assert "maven-compiler-plugin" not in trimmed["text"]
 
+    def test_dispatch_ignores_embedded_jenkins_hostname(self):
+        data = {"text": _HEAVY_POM}
+        result = _trim_for_cache(
+            "https://example.com/repo.jenkins-ci.org/public/x/y/1/y-1.pom",
+            data,
+        )
+        assert result is data
+        assert "maven-compiler-plugin" in result["text"]
+
     def test_dispatch_for_unrelated_url_passes_through(self):
         # The Maven trim only fires for known Maven-registry URL roots.
         data = {"text": _HEAVY_POM}

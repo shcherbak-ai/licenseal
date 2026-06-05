@@ -490,12 +490,6 @@ def _parse_pnpm_package_key(key: str) -> tuple[str, str]:
 # ---------------------------------------------------------------- yarn
 
 
-# The trailing descriptors use ``[^",]*`` (not ``[^"]*``) so each repetition is
-# anchored to exactly one comma-separated descriptor. ``[^"]*`` matches commas,
-# which makes the boundary between repetitions ambiguous and the pattern
-# catastrophically backtrack on a long un-terminated header line (ReDoS) — a
-# malicious yarn.lock could otherwise hang the scan.
-_YARN_HEADER_RE = re.compile(r'^"?([^"@]+(?:@[^"@]+)?)"?(?:,\s*"?[^",]*"?)*\s*:$')
 _YARN_VERSION_RE = re.compile(r'^\s+version\s+"([^"]+)"')
 _YARN_DEP_RE = re.compile(r'^\s{4}"?([^"\s]+)"?\s+"[^"]*"\s*$')
 

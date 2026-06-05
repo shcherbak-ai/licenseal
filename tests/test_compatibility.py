@@ -133,9 +133,11 @@ class TestCheckCompatibility:
         assert "permissive" in result.reason
 
     def test_unknown_dep_but_not_unknown_id_reason(self):
-        li = _make_license_info("SomeCustomLicense")
+        li = _make_license_info("SomeCustomLicense", name="custom-pkg")
         result = check_compatibility("MIT", li)
-        assert "Could not determine" in result.reason
+        assert result.reason == (
+            "custom-pkg uses SomeCustomLicense — could not determine compatibility with MIT"
+        )
 
     def test_proprietary_dep_with_permissive_project_requires_review(self):
         """A proprietary DEP always requires manual review regardless of the
@@ -313,8 +315,8 @@ class TestSourceAvailableProjectLicense:
     SSPL-1.0, Elastic-2.0, ...) it should behave like a permissive license
     for compatibility-matrix purposes: the project's restrictive choice
     constrains downstream USE of the project, not what deps the project
-    consumes. Without this rule, every dep ends up UNKNOWN with reason
-    ``Could not determine compatibility of <X> with BUSL-1.1`` — a project
+    consumes. Without this rule, every dep ends up UNKNOWN with a reason like
+    ``<dep> uses <license> — could not determine compatibility with BUSL-1.1`` — a project
     with thousands of correctly-licensed deps reports zero useful signal."""
 
     def _li(self, dep_license: str, name: str = "dep") -> LicenseInfo:

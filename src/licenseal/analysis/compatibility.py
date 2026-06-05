@@ -19,8 +19,8 @@ from licenseal.models import (
 # the compatibility matrix: the project's restrictive license is the
 # project's own choice; it doesn't constrain what deps it can consume.
 # Without this override, a BUSL / SSPL / Elastic / FSL-* project sees
-# ``Could not determine compatibility of <X> with <license>`` for every
-# dep, turning a clean dep tree into 100% UNKNOWN.
+# ``<dep> uses <license> — could not determine compatibility with <project>``
+# for every dep, turning a clean dep tree into 100% UNKNOWN.
 #
 # Prefix matching covers all version/variant suffixes — FSL alone has
 # FSL-1.0-Apache-2.0, FSL-1.0-MIT, FSL-1.1-Apache-2.0, FSL-1.1-MIT,
@@ -268,7 +268,7 @@ def _build_reason(
                 f"license — manual review required"
             )
         return f"{dep_name} has no license information — manual review required"
-    return f"Could not determine compatibility of {dep_license} with {project_spdx}"
+    return f"{dep_name} uses {dep_license} — could not determine compatibility with {project_spdx}"
 
 
 def analyze(project_license: str, license_infos: list[LicenseInfo]) -> AnalysisReport:

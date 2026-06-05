@@ -888,6 +888,25 @@ class TestParseYarnLock:
         assert names["react"].depth == 0
         assert names["scheduler"].depth == 1
 
+    def test_v1_malformed_repeated_header_does_not_block_parse(self, tmp_path):
+        path = tmp_path / "yarn.lock"
+        path.write_text(
+            "# yarn lockfile v1\n"
+            + "!,"
+            + " ," * 1000
+            + "\n"
+            + textwrap.dedent(
+                """\
+                react@18.2.0:
+                  version "18.2.0"
+                """
+            )
+        )
+        deps = parse_yarn_lock(
+            path, prod_root_names={"react"}, dev_root_names=set(), include_dev=False
+        )
+        assert [d.name for d in deps] == ["react"]
+
     def test_parses_v1_scoped_package(self, tmp_path):
         path = tmp_path / "yarn.lock"
         path.write_text(

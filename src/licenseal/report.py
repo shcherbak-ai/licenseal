@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 from rich.console import Console
 from rich.markup import escape as _escape_markup
@@ -210,13 +211,17 @@ def _license_file_hint_url(repository_url: str) -> str:
     if not repository_url:
         return ""
     stripped = repository_url.rstrip("/")
-    if "://github.com/" in repository_url:
+    parsed = urlsplit(stripped)
+    host = (parsed.hostname or "").lower()
+    if parsed.scheme not in {"http", "https"}:
+        return stripped
+    if host == "github.com":
         return f"{stripped}/blob/HEAD/LICENSE"
-    if "://gitlab.com/" in repository_url:
+    if host == "gitlab.com":
         return f"{stripped}/-/blob/HEAD/LICENSE"
-    if "://bitbucket.org/" in repository_url:
+    if host == "bitbucket.org":
         return f"{stripped}/src/HEAD/LICENSE"
-    if "://codeberg.org/" in repository_url:
+    if host == "codeberg.org":
         return f"{stripped}/src/branch/HEAD/LICENSE"
     return stripped
 
