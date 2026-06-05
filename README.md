@@ -12,7 +12,7 @@
 <table align="center">
   <tr>
     <td align="center"><strong>Prevent release blockers</strong><br>Catch dependency-license problems before release, approval, or audit.</td>
-    <td align="center"><strong>Run in CI</strong><br>Scan dependency trees from manifests, lockfiles, and registries.</td>
+    <td align="center"><strong>10 ecosystems</strong><br>Scan Python, JS/TS, Rust, Go, Java/JVM, .NET, PHP, Ruby, Elixir/Erlang, and R.</td>
     <td align="center"><strong>Document reviews</strong><br>Use the Claude Code skill to investigate findings and record decisions.</td>
   </tr>
 </table>
@@ -50,7 +50,7 @@
 <br>
 <!-- markdownlint-enable MD033 -->
 
-**licenseal is a license compatibility checker for dependency trees across language ecosystems.** It makes that compliance check cheap enough to run in CI: scan manifests, lockfiles, and public registry metadata, then tell you whether your dependency licenses are compatible with the license you ship under. It does not install dependencies, run package-manager commands, execute build scripts, or download package archives.
+**licenseal is a fast license compatibility checker for dependency trees across language ecosystems.** It makes that compliance check cheap enough to run in CI: scan manifests, lockfiles, and public registry metadata, then tell you whether your dependency licenses are compatible with the license you ship under. It does not install dependencies, run package-manager commands, execute build scripts, or download package archives.
 
 ```bash
 uvx licenseal check
