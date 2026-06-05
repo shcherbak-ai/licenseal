@@ -1,0 +1,15 @@
+{
+  "info": {
+    "name": "attrs",
+    "version": "25.0.0",
+    "license_expression": "MIT",
+    "license": "",
+    "classifiers": [
+      "Development Status :: 5 - Production/Stable",
+      "Programming Language :: Python :: 3"
+    ],
+    "project_urls": {
+      "Source": "https://github.com/python-attrs/attrs"
+    }
+  }
+}

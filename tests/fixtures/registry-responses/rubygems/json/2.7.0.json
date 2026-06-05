@@ -1,0 +1,11 @@
+{
+  "name": "json",
+  "number": "2.7.0",
+  "licenses": ["Ruby"],
+  "homepage_uri": "https://github.com/ruby/json",
+  "source_code_uri": "https://github.com/ruby/json",
+  "dependencies": {
+    "runtime": [],
+    "development": []
+  }
+}

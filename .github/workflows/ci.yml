@@ -1,0 +1,107 @@
+name: CI
+
+on:
+  push:
+    branches: [main, dev]
+    tags: ["v*"]
+  pull_request:
+    branches: [main, dev]
+  workflow_dispatch:
+
+# Note: the publish workflow (.github/workflows/publish.yml) triggers
+# via workflow_run after CI succeeds. A tag push and main push may both
+# trigger CI; the publish workflow uses a concurrency group to cancel
+# the duplicate.
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78  # v7
+
+      - name: Set up Python
+        run: uv python install 3.13
+
+      - name: Install dependencies
+        run: uv sync
+
+      - name: Run pre-commit checks (ruff, ty, bandit, interrogate, markdownlint)
+        run: uv run pre-commit run --all-files
+
+  test:
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        python-version: ["3.10", "3.11", "3.12", "3.13", "3.14"]
+
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78  # v7
+
+      - name: Set up Python ${{ matrix.python-version }}
+        run: uv python install ${{ matrix.python-version }}
+
+      - name: Install dependencies
+        run: uv sync --python ${{ matrix.python-version }}
+
+      - name: Run tests with coverage
+        run: uv run pytest tests/ -n auto --cov=src/licenseal --cov-report=xml --cov-report=term-missing --cov-fail-under=100
+
+      - name: Extract coverage percentage
+        if: matrix.os == 'ubuntu-latest' && matrix.python-version == '3.13'
+        id: coverage
+        run: |
+          RATE=$(python3 -c "import xml.etree.ElementTree as ET; print(ET.parse('coverage.xml').getroot().get('line-rate'))")
+          PCT=$(python3 -c "print(round(float('$RATE') * 100))")
+          echo "pct=$PCT" >> "$GITHUB_OUTPUT"
+
+      - name: Update coverage badge
+        if: matrix.os == 'ubuntu-latest' && matrix.python-version == '3.13' && github.ref == 'refs/heads/main'
+        uses: schneegans/dynamic-badges-action@e9a478b16159b4d31420099ba146cdc50f134483  # v1.7.0
+        with:
+          auth: ${{ secrets.GIST_TOKEN }}
+          gistID: ${{ vars.COVERAGE_GIST_ID }}
+          filename: licenseal-coverage.json
+          label: coverage
+          message: ${{ steps.coverage.outputs.pct }}%
+          valColorRange: ${{ steps.coverage.outputs.pct }}
+          minColorRange: 50
+          maxColorRange: 100
+
+  smoke:
+    name: Real-CLI smoke test
+    needs: test
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78  # v7
+
+      - name: Set up Python
+        run: uv python install 3.13
+
+      - name: Install dependencies
+        run: uv sync
+
+      # Real network call to pypi.org / registry.npmjs.org. Catches bugs
+      # that mocked tests can hide (e.g. concurrency races during real I/O,
+      # registry-response shape regressions, contextvar/threading issues).
+      - name: licenseal check (no mocks)
+        run: uv run licenseal check --no-dev
+
+      - name: licenseal check --dev (no mocks)
+        run: uv run licenseal check --dev

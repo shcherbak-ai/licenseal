@@ -1,0 +1,15 @@
+{
+  "info": {
+    "name": "scipy",
+    "version": "1.12.0",
+    "license_expression": null,
+    "license": "Copyright (c) 2001-2002 Enthought, Inc. 2003-2024, SciPy Developers.\nAll rights reserved.\n\nRedistribution and use in source and binary forms, with or without\nmodification, are permitted provided that the following conditions\nare met:\n\n1. Redistributions of source code must retain the above copyright\nnotice, this list of conditions and the following disclaimer.\n",
+    "classifiers": [
+      "License :: OSI Approved :: BSD License",
+      "Programming Language :: Python :: 3"
+    ],
+    "project_urls": {
+      "Homepage": "https://scipy.org"
+    }
+  }
+}

@@ -1,0 +1,10 @@
+{
+    "name": "acme/monorepo-api",
+    "license": "MIT",
+    "require": {
+        "vendor-b/lib-two": "^2.0"
+    },
+    "require-dev": {
+        "vendor-d/dev-tool": "^3.0"
+    }
+}

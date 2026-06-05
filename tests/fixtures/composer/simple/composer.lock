@@ -1,0 +1,66 @@
+{
+    "_readme": ["Synthetic Composer lockfile for licenseal tests."],
+    "content-hash": "0000000000000000000000000000000000000000000000000000000000000000",
+    "packages": [
+        {
+            "name": "vendor-a/lib-one",
+            "version": "1.2.3",
+            "source": {"type": "git", "url": "https://github.com/vendor-a/lib-one.git", "reference": "abcdef"},
+            "dist": {"type": "zip", "url": "https://example.com/lib-one-1.2.3.zip"},
+            "license": ["MIT"],
+            "homepage": "https://example.com/lib-one",
+            "require": {
+                "php": "^8.1",
+                "vendor-x/transitive-shared": "^4.0"
+            }
+        },
+        {
+            "name": "vendor-b/lib-two",
+            "version": "2.0.1",
+            "source": {"type": "git", "url": "git@github.com:vendor-b/lib-two.git", "reference": "fedcba"},
+            "dist": {"type": "zip", "url": "https://example.com/lib-two-2.0.1.zip"},
+            "license": ["MIT", "Apache-2.0"],
+            "require": {
+                "php": "^8.1",
+                "vendor-x/transitive-shared": "^4.0"
+            }
+        },
+        {
+            "name": "vendor-c/proprietary-lib",
+            "version": "1.0.0",
+            "source": {"type": "git", "url": "https://example.com/proprietary-lib.git", "reference": "0001"},
+            "dist": {"type": "zip", "url": "https://example.com/proprietary-lib-1.0.0.zip"},
+            "license": ["proprietary"],
+            "require": {"php": "^8.1"}
+        },
+        {
+            "name": "vendor-x/transitive-shared",
+            "version": "4.5.6",
+            "source": {"type": "git", "url": "https://github.com/vendor-x/transitive-shared.git", "reference": "deadbe"},
+            "dist": {"type": "zip", "url": "https://example.com/transitive-shared-4.5.6.zip"},
+            "license": [],
+            "require": {"php": "^8.1"}
+        }
+    ],
+    "packages-dev": [
+        {
+            "name": "vendor-d/dev-tool",
+            "version": "3.0.0",
+            "source": {"type": "git", "url": "https://github.com/vendor-d/dev-tool.git", "reference": "cafe01"},
+            "dist": {"type": "zip", "url": "https://example.com/dev-tool-3.0.0.zip"},
+            "license": "BSD-3-Clause",
+            "require": {
+                "php": "^8.1",
+                "vendor-y/dev-only-transitive": "^1.0"
+            }
+        },
+        {
+            "name": "vendor-y/dev-only-transitive",
+            "version": "1.1.0",
+            "source": {"type": "git", "url": "https://github.com/vendor-y/dev-only-transitive.git", "reference": "111111"},
+            "dist": {"type": "zip", "url": "https://example.com/dev-only-transitive-1.1.0.zip"},
+            "license": ["MIT"],
+            "require": {"php": "^8.1"}
+        }
+    ]
+}

@@ -1,0 +1,5 @@
+# Default CodeQL config. Currently no paths to ignore — tests don't run
+# untrusted input through the analyzed paths, and there are no excluded
+# scripts (unlike tethered's example-runner harness).
+paths:
+  - src

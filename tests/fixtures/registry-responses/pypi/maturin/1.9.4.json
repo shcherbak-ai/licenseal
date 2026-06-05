@@ -1,0 +1,16 @@
+{
+  "info": {
+    "name": "maturin",
+    "version": "1.9.4",
+    "license_expression": null,
+    "license": "",
+    "classifiers": [
+      "Programming Language :: Rust",
+      "Programming Language :: Python :: 3"
+    ],
+    "home_page": "",
+    "project_urls": {
+      "Source Code": "https://github.com/PyO3/maturin"
+    }
+  }
+}

@@ -1,0 +1,25 @@
+source "https://rubygems.org"
+ruby "3.3.0"
+
+# Top-level production gems.
+gem "rails", "~> 7.1.0"
+gem "pg", ">= 1.5"
+gem "puma"
+
+# Block-form dev/test groups.
+group :development, :test do
+  gem "rspec-rails"
+  gem "factory_bot_rails"
+end
+
+group :development do
+  gem "rubocop", require: false
+end
+
+# Inline group: kwarg.
+gem "byebug", group: :development
+
+# Off-registry sources — skipped silently by the Gemfile parser.
+gem "edge", git: "https://github.com/example/edge.git", branch: "main"
+gem "vendored", path: "vendor/foo"
+gem "shorthand", github: "example/shorthand"

@@ -1,0 +1,11 @@
+{
+    "name": "acme/manifest-only",
+    "license": ["MIT", "Apache-2.0"],
+    "require": {
+        "php": "^8.0",
+        "vendor-a/lib-one": "^1.2"
+    },
+    "require-dev": {
+        "vendor-d/dev-tool": "*"
+    }
+}

@@ -1,0 +1,42 @@
+cff-version: 1.2.0
+message: "If you use this software, please cite it as below."
+type: software
+title: "Licenseal"
+abstract: "License compatibility checker for Python, JS/TS, Rust, Go, Java/JVM, .NET, PHP, Ruby, Elixir/Erlang, and R dependencies"
+version: 0.1.0
+date-released: 2026-05-03
+license: Apache-2.0
+repository-code: "https://github.com/shcherbak-ai/licenseal"
+url: "https://github.com/shcherbak-ai/licenseal"
+authors:
+  - family-names: "Shcherbak"
+    given-names: "Sergii"
+keywords:
+  - license
+  - compliance
+  - spdx
+  - dependencies
+  - python
+  - pypi
+  - javascript
+  - typescript
+  - npm
+  - rust
+  - crates
+  - go
+  - java
+  - jvm
+  - maven
+  - gradle
+  - dotnet
+  - nuget
+  - php
+  - composer
+  - packagist
+  - ruby
+  - rubygems
+  - elixir
+  - erlang
+  - hex
+  - r
+  - cran

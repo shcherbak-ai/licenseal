@@ -1,0 +1,14 @@
+{
+  "name": "sidekiq",
+  "number": "7.3.0",
+  "licenses": ["LGPL-3.0"],
+  "homepage_uri": "https://sidekiq.org",
+  "source_code_uri": "https://github.com/sidekiq/sidekiq",
+  "dependencies": {
+    "runtime": [
+      {"name": "connection_pool", "requirements": ">= 2.4.0"},
+      {"name": "redis-client", "requirements": ">= 0.22.0"}
+    ],
+    "development": []
+  }
+}

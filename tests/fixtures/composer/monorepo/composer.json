@@ -1,0 +1,7 @@
+{
+    "name": "acme/monorepo-root",
+    "license": "MIT",
+    "require": {
+        "vendor-a/lib-one": "^1.0"
+    }
+}

@@ -1,0 +1,62 @@
+GIT
+  remote: https://github.com/example/edge.git
+  revision: deadbeef
+  branch: main
+  specs:
+    edge (0.0.1)
+
+PATH
+  remote: vendor/foo
+  specs:
+    vendored (0.0.1)
+
+GEM
+  remote: https://rubygems.org/
+  specs:
+    actionpack (7.1.3.2)
+      activesupport (= 7.1.3.2)
+      rack (~> 2.0)
+    activesupport (7.1.3.2)
+      tzinfo (~> 2.0)
+    byebug (11.1.3)
+    factory_bot_rails (6.4.3)
+      factory_bot (~> 6.4.0)
+    factory_bot (6.4.0)
+    nokogiri (1.16.0-x86_64-linux)
+      racc (~> 1.4)
+    pg (1.5.4)
+    puma (6.4.2)
+    rack (2.2.8)
+    racc (1.7.3)
+    rails (7.1.3.2)
+      actionpack (= 7.1.3.2)
+      activesupport (= 7.1.3.2)
+      nokogiri (>= 1.8.5)
+    rspec-rails (6.1.0)
+      rspec-core (~> 3.12)
+    rspec-core (3.12.0)
+    rubocop (1.59.0)
+    tzinfo (2.0.6)
+
+PLATFORMS
+  ruby
+  x86_64-linux
+
+DEPENDENCIES
+  byebug
+  edge!
+  factory_bot_rails
+  nokogiri
+  pg (>= 1.5)
+  puma
+  rails (~> 7.1.0)
+  rspec-rails
+  rubocop
+  shorthand!
+  vendored!
+
+RUBY VERSION
+   ruby 3.3.0p0
+
+BUNDLED WITH
+   2.5.3

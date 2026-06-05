@@ -1,0 +1,11 @@
+{
+  "version": "1.7.10",
+  "requirements": {
+    "plug": {"app": "plug", "optional": false, "requirement": "~> 1.14"},
+    "telemetry": {"app": "telemetry", "optional": false, "requirement": "~> 0.4 or ~> 1.0"},
+    "jason": {"app": "jason", "optional": true, "requirement": "~> 1.0"}
+  },
+  "meta": {"app": "phoenix", "build_tools": ["mix"]},
+  "has_docs": true,
+  "downloads": 1234
+}

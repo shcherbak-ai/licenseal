@@ -1,0 +1,170 @@
+[project]
+name = "licenseal"
+version = "0.1.0"
+description = "License compatibility checker for Python, JS/TS, Rust, Go, Java/JVM, .NET, PHP, Ruby, Elixir/Erlang, and R dependencies"
+readme = "README.md"
+authors = [
+    { name = "SergiiShcherbak", email = "sergii@shcherbak.ai" }
+]
+requires-python = ">=3.10"
+license = "Apache-2.0"
+license-files = ["LICENSE", "NOTICE"]
+keywords = ["license", "compliance", "spdx", "dependencies", "python", "pypi", "javascript", "typescript", "npm", "rust", "crates", "go", "java", "jvm", "maven", "gradle", "dotnet", "nuget", "php", "composer", "packagist", "ruby", "rubygems", "elixir", "erlang", "hex", "r", "cran"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: Apache Software License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Operating System :: POSIX :: Linux",
+    "Operating System :: MacOS",
+    "Operating System :: Microsoft :: Windows",
+    "Topic :: Software Development :: Libraries",
+    "Topic :: Software Development :: Quality Assurance",
+    "Environment :: Console",
+    "Typing :: Typed",
+]
+dependencies = [
+    "click>=8.1",
+    "rich>=13.0",
+    "httpx>=0.27",
+    "packaging>=24.0",
+    "semantic-version>=2.10",
+    "tomli>=2.0; python_version < '3.11'",
+    "tethered>=0.5.1",
+    "pyyaml>=6.0.3",
+    "defusedxml>=0.7.1",
+]
+
+[project.urls]
+Homepage = "https://github.com/shcherbak-ai/licenseal"
+Repository = "https://github.com/shcherbak-ai/licenseal"
+Issues = "https://github.com/shcherbak-ai/licenseal/issues"
+
+[project.scripts]
+licenseal = "licenseal.cli:main"
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0",
+    "pytest-cov>=6.0",
+    "pytest-asyncio>=0.24",
+    "pytest-xdist>=3.6",
+    "respx>=0.22",
+    "coverage[toml]>=7.0",
+    "pre-commit>=4.0",
+    "ruff>=0.9",
+    "bandit>=1.8",
+    "ty>=0.0.33",
+    "interrogate>=1.7",
+    "commitizen>=4.13",
+    "vulture>=2.16",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+markers = [
+    "no_default_deps_dev_mock: skip conftest's empty deps.dev batch mock so the test can register its own batch response",
+]
+
+[tool.coverage.run]
+source = ["licenseal"]
+branch = true
+
+[tool.coverage.report]
+show_missing = true
+fail_under = 100
+exclude_lines = [
+    "pragma: no cover",
+    "if TYPE_CHECKING:",
+    "if __name__",
+]
+partial_branches = [
+    "pragma: no branch",
+    "elif isinstance\\(",
+    "elif output_format",
+]
+
+[tool.coverage.paths]
+source = ["src"]
+
+[tool.ruff]
+target-version = "py310"
+line-length = 100
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = [
+    "E",      # pycodestyle errors
+    "W",      # pycodestyle warnings
+    "F",      # pyflakes
+    "I",      # isort
+    "N",      # pep8-naming
+    "UP",     # pyupgrade
+    "B",      # flake8-bugbear
+    "S",      # flake8-bandit
+    "T20",    # flake8-print
+    "SIM",    # flake8-simplify
+    "FA",     # flake8-future-annotations (FA100: require from __future__ import annotations)
+]
+ignore = [
+    "S101",   # assert used (fine in tests)
+    "UP007",  # Use X | Y for union types (keep Optional for 3.10 compat in non-annotations context)
+]
+
+[tool.ruff.lint.isort]
+required-imports = ["from __future__ import annotations"]
+known-first-party = ["licenseal"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**/*.py" = ["S", "T20"]
+"src/licenseal/analysis/spdx.py" = ["E501"]
+"scripts/**/*.py" = ["T20"]
+
+[tool.ty.src]
+include = ["src"]
+exclude = ["tests"]
+
+[tool.bandit]
+exclude_dirs = ["tests"]
+skips = ["B101"]
+
+[tool.vulture]
+paths = ["src"]
+min_confidence = 60
+# `@main.command(...)`-decorated callbacks are invoked by Click via the
+# decorator, never by direct reference, so vulture can't see the call site.
+ignore_decorators = ["@main.command"]
+
+[tool.interrogate]
+ignore-init-method = true
+ignore-init-module = true
+ignore-magic = true
+ignore-private = true
+ignore-semiprivate = true
+fail-under = 100
+exclude = ["tests"]
+
+[tool.commitizen]
+name = "cz_conventional_commits"
+version = "0.1.0"
+version_files = [
+    "src/licenseal/__init__.py:__version__",
+    "pyproject.toml:version",
+    "CITATION.cff:version",
+]
+tag_format = "v$version"
+annotated_tag = true
+pre_bump_hooks = [
+    "uv lock --no-upgrade",
+    "git add uv.lock",
+]
+
+[build-system]
+requires = ["uv_build>=0.8.19,<0.9.0"]
+build-backend = "uv_build"

@@ -1,0 +1,16 @@
+{
+  "info": {
+    "name": "attrs",
+    "version": "24.3.0",
+    "license_expression": null,
+    "license": "",
+    "classifiers": [
+      "Development Status :: 5 - Production/Stable",
+      "Programming Language :: Python :: 3"
+    ],
+    "home_page": "",
+    "project_urls": {
+      "Source": "https://github.com/python-attrs/attrs"
+    }
+  }
+}

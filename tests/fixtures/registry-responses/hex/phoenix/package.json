@@ -1,0 +1,21 @@
+{
+  "name": "phoenix",
+  "meta": {
+    "licenses": ["MIT"],
+    "links": {
+      "GitHub": "https://github.com/phoenixframework/phoenix",
+      "Website": "https://www.phoenixframework.org"
+    },
+    "description": "Peace of mind from prototype to production",
+    "maintainers": ["chrismccord"]
+  },
+  "latest_version": "1.8.0-rc.0",
+  "latest_stable_version": "1.7.14",
+  "html_url": "https://hex.pm/packages/phoenix",
+  "docs_html_url": "https://hexdocs.pm/phoenix/",
+  "downloads": {"all": 99999999, "recent": 1234567},
+  "releases": [
+    {"version": "1.7.14", "url": "https://hex.pm/api/packages/phoenix/releases/1.7.14"},
+    {"version": "1.7.10", "url": "https://hex.pm/api/packages/phoenix/releases/1.7.10"}
+  ]
+}

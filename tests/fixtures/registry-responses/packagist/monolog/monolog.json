@@ -1,0 +1,36 @@
+{
+    "packages": {
+        "monolog/monolog": [
+            {
+                "version": "3.5.0",
+                "version_normalized": "3.5.0.0",
+                "license": ["MIT"],
+                "source": {
+                    "type": "git",
+                    "url": "https://github.com/Seldaek/monolog.git",
+                    "reference": "0000000000000000000000000000000000000000"
+                },
+                "homepage": "https://github.com/Seldaek/monolog",
+                "require": {
+                    "php": ">=8.1",
+                    "psr/log": "^2.0 || ^3.0"
+                }
+            },
+            {
+                "version": "2.9.0",
+                "version_normalized": "2.9.0.0",
+                "license": ["MIT"],
+                "source": {
+                    "type": "git",
+                    "url": "git@github.com:Seldaek/monolog.git",
+                    "reference": "1111111111111111111111111111111111111111"
+                },
+                "homepage": "https://github.com/Seldaek/monolog",
+                "require": {
+                    "php": ">=7.2",
+                    "psr/log": "^1.0.1 || ^2.0 || ^3.0"
+                }
+            }
+        ]
+    }
+}

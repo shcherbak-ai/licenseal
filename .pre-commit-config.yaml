@@ -1,0 +1,60 @@
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: 3e8a8703264a2f4a69428a0aa4dcb512790b2c8c  # v6.0.0
+    hooks:
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+      - id: check-yaml
+      - id: check-toml
+
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: 0839f92796ae388643a08a21640a029b322be5c2  # v0.15.2
+    hooks:
+      - id: ruff-check
+        args: [--fix]
+      - id: ruff-format
+
+  - repo: https://github.com/DavidAnson/markdownlint-cli2
+    rev: 5387279b3b4c24822c0f86d4df4f28b37e3e8992  # v0.21.0
+    hooks:
+      - id: markdownlint-cli2
+
+  - repo: https://github.com/PyCQA/bandit
+    rev: ea0d187d78b2e6365e35f676d2eb9b1be264c091  # 1.9.2
+    hooks:
+      - id: bandit
+        args: ["-c", "pyproject.toml"]
+        additional_dependencies: ["bandit[toml]"]
+
+  - repo: local
+    hooks:
+      - id: ty
+        name: ty
+        entry: uv run ty check src/
+        language: system
+        types: [python]
+        pass_filenames: false
+      - id: interrogate
+        name: interrogate
+        entry: uv run interrogate src/
+        language: system
+        types: [python]
+        pass_filenames: false
+      - id: vulture
+        name: vulture
+        entry: uv run vulture
+        language: system
+        types: [python]
+        pass_filenames: false
+      - id: validate-spdx-ids
+        name: validate SPDX IDs against vendored canonical list
+        entry: uv run python scripts/validate_spdx_ids.py
+        language: system
+        files: ^src/licenseal/analysis/(spdx|risk)\.py$|^src/licenseal/data/spdx-license-ids\.json$
+        pass_filenames: false
+
+  - repo: https://github.com/commitizen-tools/commitizen
+    rev: 7179a42b3544e953e3683a670056ad385892365d  # v4.13.8
+    hooks:
+      - id: commitizen
+        stages: [commit-msg]
