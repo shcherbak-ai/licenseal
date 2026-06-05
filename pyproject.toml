@@ -63,6 +63,7 @@ dev = [
     "interrogate>=1.7",
     "commitizen>=4.13",
     "vulture>=2.16",
+    "deptry>=0.25.1",
 ]
 
 [tool.pytest.ini_options]
@@ -129,6 +130,9 @@ known-first-party = ["licenseal"]
 [tool.ty.src]
 include = ["src"]
 exclude = ["tests"]
+
+[tool.deptry]
+known_first_party = ["licenseal"]
 
 [tool.bandit]
 exclude_dirs = ["tests"]

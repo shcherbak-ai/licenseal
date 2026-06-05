@@ -1,18 +1,26 @@
 """License risk classification.
 
 Classification is driven by:
-* A vendored list of canonical SPDX IDs (``data/spdx-license-ids.json``,
-  CC0-1.0 from github.com/jslicense/spdx-license-ids) — the *recognition*
-  layer. An ID we don't recognise at this layer falls through to UNKNOWN.
+* An **override map** (tried first) — explicit per-ID risk for the cases
+  family patterns get wrong or don't cover: non-OSI source-available
+  licenses (Elastic, SSPL, BUSL), the no-commercial-use CC variants
+  (CC-BY-NC-*, CC-BY-ND-*), permissive licenses with no family prefix
+  (Zlib, ISC, PostgreSQL, Beerware…), and ``Proprietary`` (project-side
+  permissive sentinel).
 * A small set of family **patterns** that map SPDX-ID name prefixes to
   risk levels (e.g. ``^GPL-`` → STRONG_COPYLEFT). The conventions are
   consistent enough across the SPDX namespace that patterns cover the
   vast majority of the ~700 IDs without per-ID enumeration.
-* An **override map** for the cases family patterns get wrong or don't
-  cover: non-OSI source-available licenses (Elastic, SSPL, BUSL), the
-  no-commercial-use CC variants (CC-BY-NC-*, CC-BY-ND-*), permissive
-  licenses with no family prefix (Zlib, ISC, PostgreSQL, Beerware…), and
-  ``Proprietary`` (project-side permissive sentinel).
+* A vendored list of canonical SPDX IDs (``data/spdx-license-ids.json``,
+  CC0-1.0 from github.com/jslicense/spdx-license-ids) — the *recognition*
+  layer that backs the patterns. A *permissive* prefix match is only
+  honoured when the ID is in this list; an unrecognised ID that merely
+  shares a permissive prefix (``MIT-NonCommercial``, ``BSD-5-Clause``)
+  routes to UNKNOWN rather than to a false-clean PERMISSIVE. Copyleft /
+  source-available prefix matches are not gated — over-matching them only
+  adds scrutiny, never removes it.
+
+An ID matched by none of the above falls through to UNKNOWN.
 
 Compound SPDX expressions (OR / AND / WITH / parens / ``+`` suffix) are
 handled by a hand-rolled parser below; the simple-ID classifier above is
@@ -216,6 +224,14 @@ def classify_risk(spdx_id: str) -> RiskLevel:
             return _RISK_OVERRIDES[base]
         for pattern, level in _RISK_PATTERNS:
             if pattern.match(base):
+                # A family prefix can over-match an ID that is not a real SPDX
+                # license (``MIT-NonCommercial``, ``BSD-5-Clause``). PERMISSIVE
+                # is the only "clean" verdict, so a permissive prefix match must
+                # be backed by a recognized SPDX ID — otherwise route to UNKNOWN
+                # (manual review). Copyleft / source-available prefixes need no
+                # such guard: over-matching them only adds scrutiny.
+                if level == RiskLevel.PERMISSIVE and base not in KNOWN_SPDX_IDS:
+                    return RiskLevel.UNKNOWN
                 return level
         return RiskLevel.UNKNOWN
 
@@ -244,13 +260,27 @@ def classify_risk(spdx_id: str) -> RiskLevel:
 def _aggregate(parts: list[str], *, prefer_lower: bool) -> RiskLevel:
     risks = [classify_risk(p) for p in parts]
     known = [r for r in risks if r != RiskLevel.UNKNOWN]
-    if not known:
+
+    # OR: the consumer may elect any single arm, so an unresolvable arm is
+    # harmless — pick the least-restrictive *known* license and drop unknowns.
+    # All-unknown collapses to UNKNOWN (manual review).
+    if prefer_lower:
+        if not known:
+            return RiskLevel.UNKNOWN
+        return min(known, key=lambda r: r.severity)
+
+    # AND: every arm binds simultaneously, so an unresolvable arm cannot be
+    # dropped — it may carry restrictions we can't see. Route the whole
+    # expression to UNKNOWN (manual review) UNLESS a known arm already pins a
+    # copyleft incompatibility (STRONG/NETWORK), which is the more actionable
+    # signal and must not be masked: an UNKNOWN verdict can pass under
+    # ``--no-strict``, but a copyleft violation never does.
+    worst_known = max(known, key=lambda r: r.severity) if known else RiskLevel.UNKNOWN
+    if worst_known.severity >= RiskLevel.STRONG_COPYLEFT.severity:
+        return worst_known
+    if len(known) < len(risks):
         return RiskLevel.UNKNOWN
-    return (
-        min(known, key=lambda r: r.severity)
-        if prefer_lower
-        else max(known, key=lambda r: r.severity)
-    )
+    return worst_known
 
 
 def _strip_outer_parens(expr: str) -> str:
@@ -296,3 +326,48 @@ def _split_top_level(expr: str, sep: str) -> list[str]:
             i += 1
     parts.append("".join(buf).strip())
     return parts
+
+
+def unavoidable_unresolved_licenses(spdx_id: str) -> list[str]:
+    """Unresolved licenses the consumer is bound by however they elect the
+    expression's ``OR`` choices.
+
+    :func:`classify_risk` collapses each sub-expression to a single risk level
+    and can hide an unresolved arm behind a recognized one (``GPL-3.0-only AND
+    <custom>`` → STRONG_COPYLEFT). The compatibility layer uses this walk —
+    where the project license is known — to re-surface an unresolved license the
+    consumer can't escape, without softening a definite incompatibility.
+
+    The walk mirrors :func:`classify_risk`'s parser with bind/elect semantics:
+
+    * **leaf** → the leaf itself when it classifies UNKNOWN, else nothing.
+    * **AND** → the union over arms: every arm binds, so any unresolved arm is
+      unavoidable.
+    * **OR** → nothing when *any* arm is fully resolved (the consumer elects
+      that arm and avoids the rest); otherwise the union over arms, because
+      every electable branch still leaves an unresolved license. This is why
+      ``AGPL-3.0-only OR Proprietary`` (resolved AGPL arm) and ``(LGPL AND
+      <custom>) OR MIT`` (resolved MIT arm) do not escalate, but ``(GPL AND
+      <custom>) OR Proprietary`` (no fully-resolved arm) does.
+
+    Returns ``[]`` when every binding license resolved.
+    """
+    expr = spdx_id.strip()
+    unwrapped = _strip_outer_parens(expr)
+    if unwrapped != expr:
+        return unavoidable_unresolved_licenses(unwrapped)
+
+    or_parts = _split_top_level(expr, " OR ")
+    if len(or_parts) > 1:
+        per_arm = [unavoidable_unresolved_licenses(p) for p in or_parts]
+        if any(not arm for arm in per_arm):
+            return []  # a fully-resolved arm is electable → the rest is avoidable
+        return list(dict.fromkeys(tok for arm in per_arm for tok in arm))
+
+    and_parts = _split_top_level(expr, " AND ")
+    if len(and_parts) > 1:
+        return list(
+            dict.fromkeys(tok for p in and_parts for tok in unavoidable_unresolved_licenses(p))
+        )
+
+    return [expr] if classify_risk(expr) == RiskLevel.UNKNOWN else []

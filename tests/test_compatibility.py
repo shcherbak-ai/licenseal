@@ -224,6 +224,90 @@ class TestCheckCompatibility:
         assert li.effective_license_id == "MIT"
 
 
+class TestAndExpressionWithUnresolvedArm:
+    """A compound license can bind the consumer to an unresolved license that
+    ``classify_risk`` (context-free) hid behind a recognized one — an ``AND``
+    arm always binds, and an ``OR`` only escapes it when some arm is fully
+    resolved. The verdict layer re-surfaces an unavoidable unresolved license
+    (the project license is known here), but must never soften a definite
+    incompatibility that a known arm pins, and must not escalate when a clean
+    arm is electable."""
+
+    def test_compatible_copyleft_arm_does_not_mask_unknown(self):
+        # GPL project + ``GPL-3.0-only AND <custom>``: the GPL arm is compatible
+        # with a GPL project, but the unresolved arm still binds → review, not
+        # a false-clean COMPATIBLE.
+        li = _make_license_info("GPL-3.0-only AND CustomLicense", name="dual")
+        result = check_compatibility("GPL-3.0-only", li)
+        assert result.verdict == CompatibilityVerdict.UNKNOWN
+        assert "CustomLicense" in result.reason
+        assert result.reason.endswith("manual review required")
+
+    def test_network_copyleft_compatible_arm_does_not_mask_unknown(self):
+        li = _make_license_info("AGPL-3.0-only AND CustomLicense", name="dual")
+        result = check_compatibility("AGPL-3.0-only", li)
+        assert result.verdict == CompatibilityVerdict.UNKNOWN
+
+    def test_warning_arm_does_not_mask_unknown(self):
+        # GPL project + ``AGPL-3.0-only AND <custom>``: AGPL is a WARNING for a
+        # GPL project (combinable under §13); the unresolved arm escalates it.
+        li = _make_license_info("AGPL-3.0-only AND CustomLicense", name="dual")
+        result = check_compatibility("GPL-3.0-only", li)
+        assert result.verdict == CompatibilityVerdict.UNKNOWN
+
+    def test_incompatible_copyleft_arm_is_not_softened(self):
+        # Permissive project + ``GPL-3.0-only AND <custom>``: the GPL arm is a
+        # definite incompatibility. The unresolved arm must NOT downgrade that
+        # to UNKNOWN (which could pass under --no-strict) — INCOMPATIBLE stays.
+        li = _make_license_info("GPL-3.0-only AND CustomLicense", name="dual")
+        result = check_compatibility("MIT", li)
+        assert result.verdict == CompatibilityVerdict.INCOMPATIBLE
+
+    def test_all_recognized_and_stays_compatible(self):
+        # No unresolved arm → no escalation; a fully-recognized AND that the
+        # project can absorb stays COMPATIBLE.
+        li = _make_license_info("GPL-3.0-only AND MIT", name="dual")
+        result = check_compatibility("GPL-3.0-only", li)
+        assert result.verdict == CompatibilityVerdict.COMPATIBLE
+
+    def test_or_arm_is_not_treated_as_binding(self):
+        # ``MIT OR <custom>`` is an escapable choice (elect MIT), not an
+        # all-bind AND — it must not escalate to UNKNOWN.
+        li = _make_license_info("CustomLicense OR MIT", name="dual")
+        result = check_compatibility("MIT", li)
+        assert result.verdict == CompatibilityVerdict.COMPATIBLE
+
+    def test_or_of_and_with_unknown_has_no_clean_arm(self):
+        # ``(GPL-3.0-only AND <custom>) OR Proprietary`` for a GPL project:
+        # classify_risk collapses the first OR arm to strong copyleft (hiding
+        # <custom>), and the second arm is proprietary. NEITHER electable branch
+        # is fully resolved, so this must escalate to review rather than report
+        # the GPL-compatible-but-incomplete first arm as COMPATIBLE.
+        li = _make_license_info("(GPL-3.0-only AND CustomLicense) OR Proprietary", name="dual")
+        result = check_compatibility("GPL-3.0-only", li)
+        assert result.verdict == CompatibilityVerdict.UNKNOWN
+        assert "CustomLicense" in result.reason
+
+    def test_or_with_fully_resolved_arm_is_electable(self):
+        # ``(LGPL AND <custom>) OR MIT``: MIT is a fully-resolved, electable
+        # arm, so the unresolved <custom> in the other arm is avoidable — stays
+        # COMPATIBLE, no escalation.
+        li = _make_license_info("(LGPL-3.0-only AND CustomLicense) OR MIT", name="dual")
+        result = check_compatibility("GPL-3.0-only", li)
+        assert result.verdict == CompatibilityVerdict.COMPATIBLE
+
+    def test_copyleft_or_proprietary_dual_license_is_unchanged(self):
+        # The deliberately-preserved ``copyleft OR commercial`` case: the AGPL
+        # arm is fully resolved, so the proprietary arm is avoidable and the
+        # escalation must NOT fire — the verdict stays driven by the copyleft
+        # arm (INCOMPATIBLE for a permissive project).
+        li = _make_license_info("AGPL-3.0-only OR Proprietary", name="dual")
+        assert check_compatibility("MIT", li).verdict == CompatibilityVerdict.INCOMPATIBLE
+        # And a network-copyleft project can elect the AGPL arm cleanly.
+        li2 = _make_license_info("AGPL-3.0-only OR Proprietary", name="dual")
+        assert check_compatibility("AGPL-3.0-only", li2).verdict == CompatibilityVerdict.COMPATIBLE
+
+
 class TestSourceAvailableProjectLicense:
     """When the *project's own* license is source-available (BUSL-1.1,
     SSPL-1.0, Elastic-2.0, ...) it should behave like a permissive license

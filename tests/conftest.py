@@ -41,6 +41,17 @@ def _default_deps_dev_batch_mock(request):
 
 
 @pytest.fixture(autouse=True)
+def _disable_registry_host_rate_limits(monkeypatch):
+    """Keep mocked registry tests fast; limiter behavior is tested directly."""
+    from licenseal.resolvers import http as registry_http
+
+    for limiter in registry_http._HOST_RATE_LIMITERS.values():  # noqa: SLF001
+        monkeypatch.setattr(limiter, "_interval_seconds", 0.0)  # noqa: SLF001
+        monkeypatch.setattr(limiter, "_next_allowed_at", 0.0)  # noqa: SLF001
+    yield
+
+
+@pytest.fixture(autouse=True)
 def _restore_tethered_baseline():
     """Restore the conftest's empty-allow tethered baseline after every test.
 

@@ -215,6 +215,49 @@ class TestUnrecognizedSpdxIdReturnsUnknown:
         assert classify_risk("Bahyph") == RiskLevel.UNKNOWN
 
 
+class TestPrefixOvermatchDoesNotFalseClean:
+    """A family prefix pattern (``^MIT``, ``^BSD``, ``^Apache-``) can match an
+    ID that merely *looks* like a permissive license but is not a real SPDX ID
+    (a registry typo or a custom restrictive license). PERMISSIVE is the only
+    "clean" verdict, so a permissive prefix match is honoured only when the ID
+    is a recognized SPDX ID; otherwise it routes to UNKNOWN (manual review).
+    """
+
+    @pytest.mark.parametrize(
+        "spdx_id",
+        [
+            "MIT-NonCommercial",  # restrictive custom ID sharing the MIT prefix
+            "MIT-Royalty-Required",
+            "BSD-5-Clause",  # not a real SPDX ID
+            "BSD-Protective",
+            "Apache-Custom",
+        ],
+    )
+    def test_unrecognized_permissive_prefix_routes_to_unknown(self, spdx_id: str):
+        assert classify_risk(spdx_id) == RiskLevel.UNKNOWN
+
+    @pytest.mark.parametrize(
+        "spdx_id",
+        [
+            "MIT",
+            "MIT-0",
+            "BSD-3-Clause",
+            "Apache-2.0",
+            "CC-BY-4.0",
+            "X11",
+            "HPND",
+        ],
+    )
+    def test_recognized_permissive_ids_still_classify(self, spdx_id: str):
+        assert classify_risk(spdx_id) == RiskLevel.PERMISSIVE
+
+    def test_copyleft_prefix_overmatch_is_not_gated(self):
+        # Over-matching a copyleft prefix only adds scrutiny, so it is not
+        # gated on the recognized-ID list — a fake ``GPL-Custom`` stays strong
+        # copyleft rather than relaxing to UNKNOWN.
+        assert classify_risk("GPL-Custom") == RiskLevel.STRONG_COPYLEFT
+
+
 class TestWithExpressionRisk:
     def test_with_exception_strips_to_base(self):
         """WITH exception should classify based on the base license."""

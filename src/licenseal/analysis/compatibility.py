@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from licenseal.analysis.risk import classify_risk
+from licenseal.analysis.risk import classify_risk, unavoidable_unresolved_licenses
 from licenseal.analysis.spdx import normalize_license
 from licenseal.models import (
     AnalysisReport,
@@ -160,6 +160,28 @@ def _check_compat(
     if is_dev and verdict == CompatibilityVerdict.INCOMPATIBLE:
         verdict = CompatibilityVerdict.WARNING
 
+    # A compound license can bind the consumer to an unresolved license that
+    # ``classify_risk`` hid behind a recognized one — an ``AND`` arm always
+    # binds, and an ``OR`` only lets you escape it when some arm is fully
+    # resolved (a GPL project consuming ``GPL-3.0-only AND <custom>``, or
+    # ``(GPL AND <custom>) OR Proprietary``: no selectable branch is fully
+    # resolved, so ``<custom>`` still needs review). The project context lives
+    # here, not in the context-free classifier, so re-surface an unavoidable
+    # unresolved license — but never soften the stricter INCOMPATIBLE, which
+    # already flags a definite conflict (e.g. the same dep in a permissive
+    # project).
+    unresolved = unavoidable_unresolved_licenses(dep_license)
+    if unresolved and verdict in (
+        CompatibilityVerdict.COMPATIBLE,
+        CompatibilityVerdict.WARNING,
+    ):
+        return CompatibilityResult(
+            license_info=license_info,
+            risk_level=dep_risk,
+            verdict=CompatibilityVerdict.UNKNOWN,
+            reason=_unresolved_and_reason(license_info, unresolved),
+        )
+
     reason = _build_reason(project_spdx, project_risk, license_info, dep_risk, verdict, is_dev)
 
     return CompatibilityResult(
@@ -167,6 +189,19 @@ def _check_compat(
         risk_level=dep_risk,
         verdict=verdict,
         reason=reason,
+    )
+
+
+def _unresolved_and_reason(license_info: LicenseInfo, unresolved: list[str]) -> str:
+    """Reason for a compound dep whose recognized arm is project-compatible but
+    which still binds the consumer to an unresolved license (no fully-resolved
+    branch can be elected)."""
+    name = license_info.dependency.name
+    dep_license = license_info.effective_license_id
+    arms = ", ".join(unresolved)
+    return (
+        f"{name} uses {dep_license}; the consumer cannot avoid {arms}, which did "
+        f"not resolve to a recognized license — manual review required"
     )
 
 

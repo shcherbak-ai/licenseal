@@ -7,6 +7,7 @@ import random
 import threading
 import time
 from collections.abc import Callable
+from urllib.parse import urlsplit
 
 import httpx
 from defusedxml import ElementTree as DefusedET
@@ -28,12 +29,44 @@ _MAX_RESPONSE_BYTES = 256 * 1024 * 1024
 Fetcher = Callable[[str, httpx.Client], "dict | None"]
 
 
-# Concurrency is controlled by the CLI's ``--max-workers`` (default 16). No
-# per-host caps are layered on top: a hidden host-specific limit would
-# silently override the user-facing flag. If a registry starts throttling
-# bulk scans, the right answer is to surface that and let the user lower
-# ``--max-workers`` (or to expose a per-host knob explicitly), not to bake
-# in an invisible cap here.
+# Most registries are governed by the CLI's ``--max-workers`` (default 16).
+# crates.io is stricter: its published data-access policy asks API clients to
+# identify themselves and keep direct API use to one request per second. Rust
+# scans usually resolve exact pins through deps.dev's CARGO batch path and
+# Cargo.lock, so this limiter only affects the crates.io fallback paths.
+_CRATES_IO_MIN_INTERVAL_SECONDS = 1.0
+
+
+class _HostRateLimiter:
+    """Serialize requests so their start times are at least ``interval`` apart."""
+
+    def __init__(self, interval_seconds: float) -> None:
+        self._interval_seconds = interval_seconds
+        self._next_allowed_at = 0.0
+        self._lock = threading.Lock()
+
+    def acquire(self) -> None:
+        with self._lock:
+            now = time.monotonic()
+            if now < self._next_allowed_at:
+                time.sleep(self._next_allowed_at - now)
+                now = time.monotonic()
+            self._next_allowed_at = now + self._interval_seconds
+
+
+_HOST_RATE_LIMITERS = {
+    "crates.io": _HostRateLimiter(_CRATES_IO_MIN_INTERVAL_SECONDS),
+}
+
+
+def _respect_host_rate_limit(url: str) -> None:
+    """Apply any host-specific registry rate limit before opening a request."""
+    host = urlsplit(url).hostname
+    if host is None:
+        return
+    limiter = _HOST_RATE_LIMITERS.get(host.lower())
+    if limiter is not None:
+        limiter.acquire()
 
 
 # Retries are jittered so the worker pool doesn't re-fire in lockstep. Without
@@ -116,6 +149,7 @@ def fetch_registry_json(url: str, client: httpx.Client) -> dict | None:
     delay = _INITIAL_BACKOFF_SECONDS
     for attempt in range(_MAX_ATTEMPTS):
         try:
+            _respect_host_rate_limit(url)
             with client.stream("GET", url) as response:
                 if response.status_code in _RETRYABLE_STATUS_CODES:
                     if attempt == _MAX_ATTEMPTS - 1:
@@ -157,6 +191,7 @@ def fetch_registry_json_post(url: str, body: dict, client: httpx.Client) -> dict
     delay = _INITIAL_BACKOFF_SECONDS
     for attempt in range(_MAX_ATTEMPTS):
         try:
+            _respect_host_rate_limit(url)
             with client.stream("POST", url, json=body) as response:
                 if response.status_code in _RETRYABLE_STATUS_CODES:
                     if attempt == _MAX_ATTEMPTS - 1:
@@ -221,6 +256,7 @@ def fetch_pep658_metadata(url: str, client: httpx.Client) -> dict[str, str] | No
     headers = {"Accept": "*/*"}
     for attempt in range(_MAX_ATTEMPTS):
         try:
+            _respect_host_rate_limit(url)
             with client.stream("GET", url, headers=headers) as response:
                 if response.status_code in _RETRYABLE_STATUS_CODES:
                     if attempt == _MAX_ATTEMPTS - 1:
@@ -324,6 +360,7 @@ def fetch_registry_text(url: str, client: httpx.Client) -> dict[str, str] | None
     headers = {"Accept": "*/*"}
     for attempt in range(_MAX_ATTEMPTS):
         try:
+            _respect_host_rate_limit(url)
             with client.stream("GET", url, headers=headers) as response:
                 if response.status_code in _RETRYABLE_STATUS_CODES:
                     if attempt == _MAX_ATTEMPTS - 1:

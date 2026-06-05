@@ -34,6 +34,12 @@ repos:
         language: system
         types: [python]
         pass_filenames: false
+      - id: deptry
+        name: deptry
+        entry: uv run deptry .
+        language: system
+        types: [python]
+        pass_filenames: false
       - id: interrogate
         name: interrogate
         entry: uv run interrogate src/

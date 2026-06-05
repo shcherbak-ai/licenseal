@@ -23,6 +23,7 @@ Runs automatically on every commit:
 
 - **ruff** — linting and formatting
 - **ty** — type checking ([Astral's type checker](https://docs.astral.sh/ty/))
+- **deptry** — dependency declaration/import consistency
 - **bandit** — security analysis
 - **markdownlint** — Markdown linting
 - **interrogate** — docstring coverage on `src/`

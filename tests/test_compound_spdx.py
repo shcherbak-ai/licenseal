@@ -36,9 +36,31 @@ class TestCompoundSpdxRisk:
         # MIT is known permissive, custom is unknown — take best known
         assert classify_risk("MIT OR CustomLicense") == RiskLevel.PERMISSIVE
 
-    def test_and_with_one_unknown(self):
-        # MIT is known, custom is unknown — take worst known
-        assert classify_risk("MIT AND CustomLicense") == RiskLevel.PERMISSIVE
+    def test_and_with_one_unknown_routes_to_review(self):
+        # AND binds every arm simultaneously, so an unresolvable arm cannot be
+        # dropped — the permissive arm alone does not vouch for the whole
+        # expression. A `permissive AND <unknown>` dep must route to manual
+        # review, not clear as permissive (which would silently drop a possibly
+        # restrictive arm — e.g. `Apache-2.0 AND LicenseRef-Vendor-Proprietary`).
+        assert classify_risk("MIT AND CustomLicense") == RiskLevel.UNKNOWN
+
+    def test_and_with_unknown_keeps_definite_copyleft_incompatibility(self):
+        # An unknown arm must NOT mask a copyleft arm that already pins a
+        # definite incompatibility — that is the more actionable signal (an
+        # UNKNOWN verdict can pass under --no-strict; a copyleft violation
+        # never does). So at the (context-free) risk layer the known copyleft
+        # arm wins, which is what lets a *permissive* project report the
+        # GPL/AGPL arm as INCOMPATIBLE. The complementary case — a project that
+        # is itself compatible with that copyleft arm — is handled at the
+        # verdict layer (compatibility.check_compatibility, where the project
+        # license is known) so the unresolved arm isn't silently dropped; see
+        # tests/test_compatibility.py::TestAndExpressionWithUnresolvedArm.
+        assert classify_risk("GPL-3.0-only AND CustomLicense") == RiskLevel.STRONG_COPYLEFT
+        assert classify_risk("AGPL-3.0-only AND CustomLicense") == RiskLevel.NETWORK_COPYLEFT
+        # Weak copyleft does not pin a project-independent incompatibility, so a
+        # weak arm + unknown arm still routes to review (the unknown could be
+        # worse than weak).
+        assert classify_risk("LGPL-3.0-only AND CustomLicense") == RiskLevel.UNKNOWN
 
     def test_or_with_proprietary_arm_does_not_clear_copyleft(self):
         # A `copyleft OR commercial` dual license (e.g. Artifex/PyMuPDF's
