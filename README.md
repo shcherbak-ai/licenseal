@@ -134,7 +134,7 @@ The skill runs `licenseal check`, walks through warnings, violations, unknown li
 
 [![Claude Code licenseal review skill asking whether MPL dependencies were modified before marking them reviewed](https://raw.githubusercontent.com/shcherbak-ai/licenseal/main/assets/claude_skill_qa.png)](https://github.com/shcherbak-ai/licenseal/blob/main/assets/claude_skill_qa.png)
 
-## ✨ What It Does
+## ✨ What Licenseal Does
 
 |  |  |  |
 | --- | --- | --- |
