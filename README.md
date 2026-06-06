@@ -1,5 +1,5 @@
 <h1 align="center">
-  <img src="https://raw.githubusercontent.com/shcherbak-ai/licenseal/main/assets/licenseal.png" alt="licenseal mascot" width="220"><br>
+  <img src="https://raw.githubusercontent.com/shcherbak-ai/licenseal/main/assets/licenseal-header-v5.png" alt="licenseal mascot surrounded by license files" width="520"><br>
   licenseal
 </h1>
 
@@ -24,6 +24,7 @@
     <td>
       <a href="https://pypi.org/project/licenseal/"><img src="https://img.shields.io/pypi/v/licenseal?v=2" alt="PyPI"></a>
       <a href="https://pypi.org/project/licenseal/"><img src="https://img.shields.io/pypi/pyversions/licenseal?v=2" alt="Python"></a>
+      <a href="https://pepy.tech/project/licenseal"><img src="https://api.pepy.tech/badge/licenseal/month" alt="Downloads/month"></a>
       <a href="https://github.com/shcherbak-ai/licenseal/blob/main/LICENSE"><img src="https://img.shields.io/badge/license-Apache--2.0-blue.svg" alt="License: Apache-2.0"></a>
     </td>
   </tr>
@@ -120,6 +121,18 @@ Example output:
 ![licenseal terminal output showing a transitive dependency table, one weak-copyleft warning, and a reviewed dependency count](https://raw.githubusercontent.com/shcherbak-ai/licenseal/main/assets/licenseal_cli.png)
 
 The exit code is non-zero when there are unreviewed violations, warnings, unknown licenses, or analysis gaps. See [USAGE.md](https://github.com/shcherbak-ai/licenseal/blob/main/USAGE.md) for every flag and report format.
+
+## 🤖 Claude Code Review Skill
+
+CI can tell you which dependency licenses need attention; the bundled [Claude Code](https://claude.com/claude-code) skill helps turn those findings into documented decisions. Install it in the project being audited, then run `/licenseal-review` in Claude Code:
+
+```bash
+licenseal install-skill
+```
+
+The skill runs `licenseal check`, walks through warnings, violations, unknown licenses, and analysis gaps, and asks verdict-aware questions based on how your project is distributed, hosted, modified, or shipped. It fills `licenseal.review.toml` only when there is a concrete reviewable rationale, keeps genuine incompatibilities flagged, and re-runs the strict scan so the remaining compliance gaps are explicit.
+
+[![Claude Code licenseal review skill asking whether MPL dependencies were modified before marking them reviewed](https://raw.githubusercontent.com/shcherbak-ai/licenseal/main/assets/claude_skill_qa.png)](https://github.com/shcherbak-ai/licenseal/blob/main/assets/claude_skill_qa.png)
 
 ## ✨ What It Does
 
