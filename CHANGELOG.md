@@ -4,6 +4,16 @@ All notable changes to this project will be documented in this file. Each versio
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/), and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.3.0] - 2026-06-10
+
+### Added
+
+- End-of-scan phase timing summary on stderr (`Phase timings: discovery …s, transitive walk …s, batch pre-pass …s, license resolution …s`) — the companion to the per-host traffic summary: the host counts say where the requests went, the phase line says where the wall-clock went. Together they make a slow scan diagnosable at a glance (a long `transitive walk` means a no-lockfile registry walk; a long `license resolution` alongside a large `crates.io` request share means the policy-mandated 1 req/s fallback tail).
+
+### Changed
+
+- The deps.dev batch pre-pass now fans every ecosystem's `versionbatch` chunks through one shared threadpool instead of running up to seven sequential per-ecosystem rounds. Polyglot scans overlap their batch POSTs while the combined in-flight POST count keeps the same ceiling a single-ecosystem scan has, so the endpoint sees no more concurrent load than before. On polyglot stress repos the batch phase median dropped ~40% (npm + Python: 2.2s → 1.3s; Rust + npm + Python: 1.5s → 0.9s). Scan output is unchanged — verified per-dependency on one repo per supported ecosystem (all ten), each in both `--no-dev` and `--dev` modes.
+
 ## [0.2.1] - 2026-06-10
 
 ### Added
