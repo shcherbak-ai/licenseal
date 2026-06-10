@@ -293,6 +293,15 @@ class TestSpdxFromLicenseUrl:
             spdx_from_license_url("http://creativecommons.org/publicdomain/zero/1.0/") == "CC0-1.0"
         )
 
+    def test_aopalliance_url_maps_to_public_domain_sentinel(self):
+        # Must emit the internal permissive sentinel: a bare "Public-Domain"
+        # matches neither the risk overrides nor any family pattern, which
+        # would route a known public-domain artifact to manual review.
+        assert (
+            spdx_from_license_url("http://aopalliance.sourceforge.net/license.html")
+            == "LicenseRef-Public-Domain"
+        )
+
     def test_url_with_query_and_fragment_stripped(self):
         # The matcher strips ``?query`` and ``#fragment`` before matching.
         assert (

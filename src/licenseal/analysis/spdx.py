@@ -541,6 +541,7 @@ _NORMALIZATION_MAP: dict[str, str] = {
     "unlicense": "Unlicense",
     "the unlicense": "Unlicense",
     "public domain": "LicenseRef-Public-Domain",
+    "public-domain": "LicenseRef-Public-Domain",  # hyphenated publisher variant
     "cc0": "CC0-1.0",
     "cc0-1.0": "CC0-1.0",
     "cc0 1.0": "CC0-1.0",
@@ -737,8 +738,11 @@ _LICENSE_URL_PREFIXES: tuple[tuple[str, str], ...] = (
     # MIT-text license under a vendor-specific name (URL on a publisher
     # site that hosts MIT-equivalent terms).
     ("bouncycastle.org/licence", "MIT"),
-    # Public-domain / aopalliance-style URLs.
-    ("aopalliance.sourceforge.net/license", "Public-Domain"),
+    # Public-domain / aopalliance-style URLs. Emit the internal permissive
+    # sentinel directly: a bare "Public-Domain" matches neither the risk
+    # overrides nor any family pattern and would route a known
+    # public-domain artifact to manual review.
+    ("aopalliance.sourceforge.net/license", "LicenseRef-Public-Domain"),
 )
 
 

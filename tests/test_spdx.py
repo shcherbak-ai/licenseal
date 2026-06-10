@@ -184,6 +184,13 @@ class TestNormalizeLicense:
         assert normalize_license("LICENSE.txt") == "Proprietary"
         assert normalize_license("LICENSE.md") == "Proprietary"
 
+    def test_public_domain_hyphenated_variant(self):
+        # The hyphenated publisher spelling must land on the same permissive
+        # sentinel as the spaced form — a bare "Public-Domain" passes the
+        # SPDX shape check unchanged and classifies UNKNOWN.
+        assert normalize_license("Public-Domain") == "LicenseRef-Public-Domain"
+        assert normalize_license("public domain") == "LicenseRef-Public-Domain"
+
     def test_url_input_canonical_apache(self):
         # Python ``setup.py`` / ``pyproject.toml`` sometimes set ``license``
         # to a URL pointing at the license text. Route through the URL-prefix
