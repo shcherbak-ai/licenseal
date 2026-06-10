@@ -478,3 +478,169 @@ class TestAnalyze:
 
         report = analyze("Python Software Foundation License", [])
         assert report.project_license == "PSF-2.0"
+
+
+class TestPairLevelOverrides:
+    """Specific (project, dep) pairs the coarse matrix lands in a too-soft cell for."""
+
+    def test_apache2_dep_in_gplv2_only_project_is_violation(self):
+        li = _make_license_info("Apache-2.0")
+        result = check_compatibility("GPL-2.0-only", li)
+        assert result.verdict == CompatibilityVerdict.INCOMPATIBLE
+        # risk_level stays dep-intrinsic: the dep itself is permissive; the
+        # conflict is pair-specific and lives in the verdict + reason.
+        assert result.risk_level == RiskLevel.PERMISSIVE
+        assert "GPLv2-incompatible" in result.reason
+
+    def test_gplv3_family_dep_in_gplv2_only_project_is_violation(self):
+        for dep_id in (
+            "GPL-3.0-only",
+            "GPL-3.0-or-later",
+            "LGPL-3.0-only",
+            "LGPL-3.0-or-later",
+            "AGPL-3.0-only",
+            "AGPL-3.0-or-later",
+        ):
+            result = check_compatibility("GPL-2.0-only", _make_license_info(dep_id))
+            assert result.verdict == CompatibilityVerdict.INCOMPATIBLE, dep_id
+
+    def test_gplv2_only_dep_in_gplv3_family_project_is_violation(self):
+        for project in ("GPL-3.0-only", "GPL-3.0-or-later", "AGPL-3.0-only", "AGPL-3.0-or-later"):
+            result = check_compatibility(project, _make_license_info("GPL-2.0-only"))
+            assert result.verdict == CompatibilityVerdict.INCOMPATIBLE, project
+            assert "upgrade clause" in result.reason
+
+    def test_gpl_incompatible_weak_copyleft_dep_is_violation(self):
+        for dep_id in ("EPL-1.0", "CDDL-1.0", "CDDL-1.1", "MPL-1.1"):
+            result = check_compatibility("GPL-3.0-only", _make_license_info(dep_id))
+            assert result.verdict == CompatibilityVerdict.INCOMPATIBLE, dep_id
+            assert result.risk_level == RiskLevel.WEAK_COPYLEFT
+        result = check_compatibility("GPL-2.0-or-later", _make_license_info("EPL-1.0"))
+        assert result.verdict == CompatibilityVerdict.INCOMPATIBLE
+
+    def test_epl2_dep_in_gpl_project_warns_for_secondary_license(self):
+        # EPL-2.0 is GPL-compatible only when the contributor designated the
+        # GPL as a secondary license, which metadata can't reveal — so warn
+        # instead of hard-failing.
+        result = check_compatibility("GPL-3.0-only", _make_license_info("EPL-2.0"))
+        assert result.verdict == CompatibilityVerdict.WARNING
+        assert "secondary license" in result.reason
+
+    def test_or_later_forms_are_exempt(self):
+        # An upgrade clause on either side resolves the version conflict.
+        for project, dep_id in (
+            ("GPL-2.0-or-later", "GPL-3.0-only"),
+            ("GPL-2.0-or-later", "Apache-2.0"),
+            ("GPL-3.0-only", "GPL-2.0-or-later"),
+            ("GPL-2.0-only", "GPL-2.0-or-later"),
+        ):
+            result = check_compatibility(project, _make_license_info(dep_id))
+            assert result.verdict == CompatibilityVerdict.COMPATIBLE, (project, dep_id)
+
+    def test_or_arm_election_clears_conflict(self):
+        # The MIT arm is electable, so the GPL-3.0 arm's conflict is avoidable.
+        li = _make_license_info("MIT OR GPL-3.0-only")
+        assert check_compatibility("GPL-2.0-only", li).verdict == CompatibilityVerdict.COMPATIBLE
+
+    def test_or_with_only_unresolved_escape_keeps_conflict(self):
+        # The Proprietary arm classifies UNKNOWN and cannot clear the
+        # expression — matching the dep-side convention that unresolvable
+        # arms never relax a verdict.
+        li = _make_license_info("GPL-3.0-only OR Proprietary")
+        result = check_compatibility("GPL-2.0-only", li)
+        assert result.verdict == CompatibilityVerdict.INCOMPATIBLE
+
+    def test_and_arm_conflict_is_unavoidable(self):
+        # An AND arm always binds; the definite conflict overrides even the
+        # matrix's UNKNOWN verdict (it is the more actionable signal).
+        li = _make_license_info("Apache-2.0 AND LicenseRef-custom")
+        result = check_compatibility("GPL-2.0-only", li)
+        assert result.verdict == CompatibilityVerdict.INCOMPATIBLE
+
+    def test_parenthesized_expression_is_walked(self):
+        li = _make_license_info("(GPL-3.0-only AND MIT)")
+        result = check_compatibility("GPL-2.0-only", li)
+        assert result.verdict == CompatibilityVerdict.INCOMPATIBLE
+
+    def test_dev_pair_violation_downgrades_to_warning(self):
+        li = _make_license_info("Apache-2.0", group=DependencyGroup.DEV)
+        result = check_compatibility("GPL-2.0-only", li)
+        assert result.verdict == CompatibilityVerdict.WARNING
+        assert "dev-only" in result.reason
+
+    def test_pair_warning_does_not_preempt_unknown(self):
+        # EPL-2.0 inside an AND with an unresolved arm: the matrix verdict is
+        # UNKNOWN (manual review), already at least as loud as the pair
+        # WARNING — the override must not soften it.
+        li = _make_license_info("EPL-2.0 AND LicenseRef-custom")
+        result = check_compatibility("GPL-3.0-only", li)
+        assert result.verdict == CompatibilityVerdict.UNKNOWN
+
+    def test_classpath_exception_dep_does_not_pair_conflict(self):
+        # A WITH-bearing leaf must not match the bare GPL-3.0-only conflict
+        # entry: the Classpath exception permits linking independent modules
+        # regardless of their license.
+        li = _make_license_info("GPL-3.0-only WITH Classpath-exception-2.0")
+        result = check_compatibility("GPL-2.0-only", li)
+        assert result.verdict == CompatibilityVerdict.COMPATIBLE
+
+    def test_pair_conflict_checked_per_project_arm(self):
+        # A dual-licensed project distributes under every arm; the GPLv2 arm
+        # cannot consume Apache-2.0 even though the Proprietary arm could.
+        li = _make_license_info("Apache-2.0")
+        result = check_compatibility("GPL-2.0-only OR Proprietary", li)
+        assert result.verdict == CompatibilityVerdict.INCOMPATIBLE
+
+    def test_unrelated_pairs_unaffected(self):
+        assert (
+            check_compatibility("MIT", _make_license_info("Apache-2.0")).verdict
+            == CompatibilityVerdict.COMPATIBLE
+        )
+        assert (
+            check_compatibility("GPL-3.0-only", _make_license_info("MPL-2.0")).verdict
+            == CompatibilityVerdict.COMPATIBLE
+        )
+        assert (
+            check_compatibility("GPL-3.0-only", _make_license_info("LGPL-2.1-only")).verdict
+            == CompatibilityVerdict.COMPATIBLE
+        )
+
+
+class TestDualLicensedProjectRow:
+    """A dual-licensed project picks the strictest consumption row across arms."""
+
+    def test_proprietary_arm_pins_permissive_row(self):
+        # The open-core pattern: the commercial arm cannot absorb copyleft,
+        # so copyleft deps flag even though the AGPL arm alone accepts them.
+        li = _make_license_info("GPL-3.0-only")
+        result = check_compatibility("AGPL-3.0-only OR Proprietary", li)
+        assert result.verdict == CompatibilityVerdict.INCOMPATIBLE
+
+    def test_licenseref_arm_pins_permissive_row(self):
+        li = _make_license_info("GPL-3.0-only")
+        result = check_compatibility("AGPL-3.0-only OR LicenseRef-Commercial", li)
+        assert result.verdict == CompatibilityVerdict.INCOMPATIBLE
+
+    def test_source_available_arm_pins_permissive_row(self):
+        li = _make_license_info("GPL-3.0-only")
+        result = check_compatibility("GPL-3.0-only OR BUSL-1.1", li)
+        assert result.verdict == CompatibilityVerdict.INCOMPATIBLE
+
+    def test_permissive_dep_clears_dual_licensed_project(self):
+        li = _make_license_info("MIT")
+        result = check_compatibility("AGPL-3.0-only OR Proprietary", li)
+        assert result.verdict == CompatibilityVerdict.COMPATIBLE
+
+    def test_all_open_arms_keep_least_severe_row(self):
+        # Two permissive arms → PERMISSIVE row, same as the previous
+        # dep-side aggregation; behavior unchanged for plain dual licensing.
+        li = _make_license_info("LGPL-3.0-only")
+        result = check_compatibility("MIT OR Apache-2.0", li)
+        assert result.verdict == CompatibilityVerdict.WARNING
+
+    def test_unrecognized_arm_does_not_drive_row(self):
+        # An arm that stays UNKNOWN ranks last in the strictest-row min; the
+        # recognized copyleft arm picks the row.
+        li = _make_license_info("GPL-3.0-only")
+        result = check_compatibility("GPL-3.0-only OR SomeWeirdLicense", li)
+        assert result.verdict == CompatibilityVerdict.COMPATIBLE
