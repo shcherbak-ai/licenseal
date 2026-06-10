@@ -79,8 +79,9 @@ _RISK_PATTERNS: list[tuple[re.Pattern[str], RiskLevel]] = [
     # must remain under the same license, but linking from other files is
     # allowed. Note: EPL-1.0, CDDL-*, and MPL-1.1 are weak copyleft but
     # GPL-incompatible by virtue of patent / choice-of-law / additional-
-    # restriction clauses; the coarse matrix doesn't surface those pair-level
-    # incompatibilities (documented in README "Limitations").
+    # restriction clauses; the coarse matrix can't express that, so
+    # ``compatibility._pair_conflict`` surfaces those pairs explicitly when
+    # the project license is GPL-family.
     (re.compile(r"^LGPL-"), RiskLevel.WEAK_COPYLEFT),
     (re.compile(r"^MPL-"), RiskLevel.WEAK_COPYLEFT),
     (re.compile(r"^EPL-"), RiskLevel.WEAK_COPYLEFT),
@@ -142,6 +143,15 @@ _RISK_OVERRIDES: dict[str, RiskLevel] = {
     # Weak copyleft with no family prefix.
     "MS-RL": RiskLevel.WEAK_COPYLEFT,  # Microsoft Reciprocal License
     "IPL-1.0": RiskLevel.WEAK_COPYLEFT,  # IBM Public License
+    # GPL-2.0 + Classpath exception (deprecated SPDX compound ID, still the
+    # canonical form for javax.*/jakarta.* APIs and OpenJDK-derived
+    # artifacts). The exception grants permission to link "independent
+    # modules ... regardless of the license terms of these independent
+    # modules" — LGPL-style linking permission, so weak copyleft, not the
+    # strong copyleft the bare ``^GPL-`` pattern would assign. The modern
+    # ``GPL-X WITH Classpath-exception-Y`` spelling gets the same treatment
+    # in the WITH branch of ``classify_risk``.
+    "GPL-2.0-with-classpath-exception": RiskLevel.WEAK_COPYLEFT,
     # Strong copyleft with no family prefix.
     "RPL-1.1": RiskLevel.STRONG_COPYLEFT,  # Reciprocal Public License
     "RPL-1.5": RiskLevel.STRONG_COPYLEFT,
@@ -251,8 +261,21 @@ def classify_risk(spdx_id: str) -> RiskLevel:
         return _aggregate(and_parts, prefer_lower=False)
 
     if " WITH " in expr:
-        base = expr.split(" WITH ", 1)[0].strip()
-        return classify_risk(base)
+        base, _, exception = expr.partition(" WITH ")
+        base_risk = classify_risk(base.strip())
+        # The Classpath exception grants linking permission to "independent
+        # modules ... regardless of the license terms of these independent
+        # modules" — LGPL-style semantics, so a strong-copyleft base relaxes
+        # to weak copyleft (matching the deprecated
+        # ``GPL-2.0-with-classpath-exception`` override above). Other
+        # exceptions keep the base classification: ignoring an exception can
+        # only add scrutiny, never remove it.
+        if (
+            exception.strip().startswith("Classpath-exception")
+            and base_risk == RiskLevel.STRONG_COPYLEFT
+        ):
+            return RiskLevel.WEAK_COPYLEFT
+        return base_risk
 
     return RiskLevel.UNKNOWN
 

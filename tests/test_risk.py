@@ -263,5 +263,16 @@ class TestWithExpressionRisk:
         """WITH exception should classify based on the base license."""
 
         assert classify_risk("Apache-2.0 WITH LLVM-exception") == RiskLevel.PERMISSIVE
-        result = classify_risk("GPL-2.0-only WITH Classpath-exception-2.0")
-        assert result == RiskLevel.STRONG_COPYLEFT
+        assert classify_risk("GPL-3.0-only WITH Autoconf-exception-3.0") == (
+            RiskLevel.STRONG_COPYLEFT
+        )
+
+    def test_classpath_exception_relaxes_strong_to_weak(self):
+        """The Classpath exception grants LGPL-style linking permission, so a
+        strong-copyleft GPL base relaxes to weak copyleft — both the modern
+        WITH spelling and the deprecated compound ID."""
+
+        assert classify_risk("GPL-2.0-only WITH Classpath-exception-2.0") == (
+            RiskLevel.WEAK_COPYLEFT
+        )
+        assert classify_risk("GPL-2.0-with-classpath-exception") == RiskLevel.WEAK_COPYLEFT

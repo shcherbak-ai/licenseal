@@ -422,9 +422,11 @@ _NORMALIZATION_MAP: dict[str, str] = {
     # Some JVM API artifacts declare a dual license: EPL 2.0 (current) OR
     # GPL-2.0-with-classpath-exception (legacy). Some POMs write "AND"
     # but the legal intent is OR (either license suffices). We keep
-    # the publisher's literal AND to match what the POM said; the
-    # compat engine treats GPL-with-classpath as more permissive than
-    # plain GPL.
+    # the publisher's literal AND to match what the POM said; the risk
+    # engine classifies GPL-with-classpath as weak copyleft (the
+    # exception grants LGPL-style linking permission), so the AND form
+    # still aggregates to weak copyleft rather than a strong-copyleft
+    # violation.
     "epl 2.0 and gpl2 w/ cpe": "EPL-2.0 AND GPL-2.0-with-classpath-exception",
     "cddl 1.1 and gpl2 w/ cpe": "CDDL-1.1 AND GPL-2.0-with-classpath-exception",
     "cddl 1.0 and gpl2 w/ cpe": "CDDL-1.0 AND GPL-2.0-with-classpath-exception",

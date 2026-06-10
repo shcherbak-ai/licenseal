@@ -87,14 +87,25 @@ class TestCompoundSpdxRisk:
         # The exception adds patent-grant clarifications; base stays permissive.
         assert classify_risk("Apache-2.0 WITH LLVM-exception") == RiskLevel.PERMISSIVE
 
-    def test_with_exception_classifies_on_base_copyleft(self):
-        # Conservative design choice: GPL WITH Classpath-exception still classifies
-        # as strong copyleft, even though the exception relaxes linking restrictions.
-        # The exception's effect is consumer-context-dependent (linking only); we'd
-        # rather flag for manual review than under-classify.
-        assert (
-            classify_risk("GPL-3.0-only WITH Classpath-exception-2.0") == RiskLevel.STRONG_COPYLEFT
-        )
+    def test_with_classpath_exception_relaxes_to_weak(self):
+        # The Classpath exception permits linking independent modules
+        # "regardless of the license terms of these independent modules" —
+        # LGPL-style linking permission, so a strong-copyleft GPL base
+        # relaxes to weak copyleft (matching the deprecated
+        # GPL-2.0-with-classpath-exception compound ID).
+        assert classify_risk("GPL-3.0-only WITH Classpath-exception-2.0") == RiskLevel.WEAK_COPYLEFT
+        assert classify_risk("GPL-2.0-only WITH Classpath-exception-2.0") == RiskLevel.WEAK_COPYLEFT
+
+    def test_with_unknown_exception_keeps_base_copyleft(self):
+        # Exceptions other than Classpath keep the base classification —
+        # ignoring an exception can only add scrutiny, never remove it.
+        assert classify_risk("GPL-3.0-only WITH Bison-exception-2.2") == RiskLevel.STRONG_COPYLEFT
+
+    def test_with_classpath_exception_keeps_network_copyleft(self):
+        # The relaxation is deliberately scoped to STRONG bases: an AGPL base
+        # keeps its network-copyleft classification.
+        expr = "AGPL-3.0-only WITH Classpath-exception-2.0"
+        assert classify_risk(expr) == RiskLevel.NETWORK_COPYLEFT
 
     def test_with_exception_inside_or_keeps_or_semantics(self):
         # OR still aggregates least-restrictive across both branches; the WITH-
@@ -103,9 +114,10 @@ class TestCompoundSpdxRisk:
         assert classify_risk(expr) == RiskLevel.PERMISSIVE
 
     def test_with_exception_inside_and_keeps_and_semantics(self):
-        # AND still aggregates most-restrictive; GPL-with-exception base is GPL.
+        # AND still aggregates most-restrictive; the Classpath-relaxed
+        # GPL leaf contributes weak copyleft, which outranks MIT.
         expr = "GPL-3.0-only WITH Classpath-exception-2.0 AND MIT"
-        assert classify_risk(expr) == RiskLevel.STRONG_COPYLEFT
+        assert classify_risk(expr) == RiskLevel.WEAK_COPYLEFT
 
     def test_or_later_plus_suffix_weak_copyleft(self):
         # SPDX `+` suffix means "this version or later". MPL has no `-or-later`
