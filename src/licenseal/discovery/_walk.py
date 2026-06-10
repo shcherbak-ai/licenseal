@@ -171,7 +171,10 @@ def _walk(
                 continue
             kept.append(name)
         dirnames[:] = sorted(kept)
-        for fname in filenames:
+        # readdir order is filesystem-dependent (hash order on ext4, stable on
+        # APFS) — sort so first-match-wins consumers (project-license
+        # detection) and reports are deterministic across filesystems.
+        for fname in sorted(filenames):
             if predicate(fname):
                 results.append(Path(dirpath) / fname)
 
@@ -189,8 +192,10 @@ def walk_project_files(
     Exact-match form. For glob-style matching (e.g. ``requirements*.txt``)
     use :func:`walk_project_files_matching` with a predicate.
 
-    Returns paths in ``os.walk`` order (root first, then depth-first), so the
-    root manifest — if present — sorts ahead of nested ones.
+    Returns paths in ``os.walk`` order (root first, then depth-first, files
+    within each directory sorted by name), so the root manifest — if
+    present — sorts ahead of nested ones and ties resolve deterministically
+    on every filesystem.
     """
     cached = _cached_project_files(project_path, exclude_paths)
     if cached is not None:
