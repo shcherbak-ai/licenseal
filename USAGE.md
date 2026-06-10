@@ -96,7 +96,7 @@ licenseal is a license resolver, not a dependency resolver. It does not evaluate
 | --- | --- | --- | --- |
 | Python | PyPI | `pyproject.toml` (PEP 621, PEP 735, Poetry), `requirements*.txt`, `setup.cfg`, `setup.py`, `Pipfile` | `uv.lock`, `poetry.lock`, `Pipfile.lock` |
 | JavaScript / TypeScript | npm | `package.json` (`dependencies`, `devDependencies`, `peerDependencies`, `optionalDependencies`) | `package-lock.json` (v1/v2/v3), `pnpm-lock.yaml`, `yarn.lock` |
-| Rust | crates.io | `Cargo.toml` (`[dependencies]`, `[dev-dependencies]`, `[build-dependencies]`, `[target.<cfg>.*]`, `[workspace.dependencies]`) | `Cargo.lock` |
+| Rust | crates.io | `Cargo.toml` (`[dependencies]`, `[dev-dependencies]`, `[build-dependencies]`, `[target.<cfg>.*]`, `[workspace.dependencies]` via `workspace = true` references) | `Cargo.lock` |
 | Go | deps.dev (license) + proxy.golang.org (edges) | `go.mod` (`require`, `replace`, `tool` directive) | `go.sum` |
 | Java / JVM | Maven Central + deps.dev; fallback `dl.google.com`, `repo.jenkins-ci.org` | Maven `pom.xml`; Gradle `build.gradle`, `build.gradle.kts` (text heuristic) | `gradle.lockfile` |
 | .NET | NuGet.org `.nuspec` + deps.dev; Paket via `api.nuget.org` | `.csproj` / `.fsproj` / `.vbproj`, `packages.config`, `Directory.Packages.props`, `Directory.Build.props` / `.targets`, `paket.dependencies` | `packages.lock.json`, `project.assets.json`, `paket.lock` |

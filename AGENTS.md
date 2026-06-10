@@ -40,7 +40,7 @@ src/licenseal/
       package_json.py         package.json (recursive, skips node_modules; filters workspace-internal names)
       lockfiles.py            package-lock.json (v1 + v2/v3), pnpm-lock.yaml, yarn.lock parsers (transitive, edge-aware)
     rust/
-      cargo_toml.py           Cargo.toml ([dependencies], target.<cfg>.*, [workspace.dependencies])
+      cargo_toml.py           Cargo.toml ([dependencies], target.<cfg>.*; [workspace.dependencies] is a version catalog — entries emitted only when a member references them via `workspace = true`, CPM-style stitching)
       lockfiles.py            Cargo.lock parser (transitive, edge-aware; registry-sourced crates only)
     go/
       go_mod.py               go.mod parser (require blocks, replace directives incl. local-path drop, // indirect, tool directive for Go 1.24+ DEV attribution, go.work `use` block for workspace-local module discovery)

@@ -115,7 +115,75 @@ class TestDiscoverCargoToml:
         assert groups["winapi"] == DependencyGroup.PROD
         assert groups["mac-helper"] == DependencyGroup.DEV
 
-    def test_workspace_dependencies(self, tmp_path):
+    def test_workspace_dependencies_referenced_by_member(self, tmp_path):
+        # [workspace.dependencies] is a version catalog: an entry becomes a
+        # dependency when a member opts in with `dep = { workspace = true }`,
+        # carrying the catalog's version.
+        _write(
+            tmp_path,
+            """\
+            [workspace]
+            members = ["crate-a"]
+
+            [workspace.dependencies]
+            shared-lib = "1.0"
+            """,
+        )
+        member = tmp_path / "crate-a" / "Cargo.toml"
+        member.parent.mkdir()
+        member.write_text(
+            textwrap.dedent(
+                """\
+                [package]
+                name = "crate-a"
+                version = "0.1.0"
+
+                [dependencies]
+                shared-lib = { workspace = true }
+                """
+            )
+        )
+        deps, _ = discover_cargo_toml_dependencies(tmp_path)
+        assert {d.name for d in deps} == {"shared-lib"}
+        assert deps[0].group == DependencyGroup.PROD
+        assert deps[0].version_constraint == "1.0"
+        assert deps[0].source == "Cargo.toml"  # the catalog declares the version
+
+    def test_unreferenced_workspace_dependencies_dropped(self, tmp_path):
+        # Catalog entries no member references are inert declarations — they
+        # are typically absent from Cargo.lock, and emitting them sends the
+        # transitive resolver on a registry walk of a tree the project never
+        # builds (observed on a large Rust workspace: hundreds of phantom
+        # crates, including spurious GPL violations).
+        _write(
+            tmp_path,
+            """\
+            [workspace]
+            members = ["crate-a"]
+
+            [workspace.dependencies]
+            used-lib = "1.0"
+            unused-lib = "2.0"
+            """,
+        )
+        member = tmp_path / "crate-a" / "Cargo.toml"
+        member.parent.mkdir()
+        member.write_text(
+            textwrap.dedent(
+                """\
+                [package]
+                name = "crate-a"
+                version = "0.1.0"
+
+                [dependencies]
+                used-lib = { workspace = true }
+                """
+            )
+        )
+        deps, _ = discover_cargo_toml_dependencies(tmp_path)
+        assert {d.name for d in deps} == {"used-lib"}
+
+    def test_workspace_dep_referenced_only_from_dev_table_is_dev(self, tmp_path):
         _write(
             tmp_path,
             """\
@@ -123,12 +191,98 @@ class TestDiscoverCargoToml:
             members = ["crate-a", "crate-b"]
 
             [workspace.dependencies]
-            shared-lib = "1.0"
+            test-helper = "0.5"
+            both-lib = "1.0"
+            """,
+        )
+        for crate, body in (
+            ("crate-a", "[dev-dependencies]\ntest-helper = { workspace = true }\n"),
+            (
+                "crate-b",
+                "[dependencies]\nboth-lib = { workspace = true }\n"
+                "[dev-dependencies]\nboth-lib = { workspace = true }\n",
+            ),
+        ):
+            member = tmp_path / crate / "Cargo.toml"
+            member.parent.mkdir()
+            member.write_text(f'[package]\nname = "{crate}"\nversion = "0.1.0"\n{body}')
+        deps, _ = discover_cargo_toml_dependencies(tmp_path)
+        groups = {d.name: d.group for d in deps}
+        assert groups["test-helper"] == DependencyGroup.DEV
+        # Referenced from a prod table anywhere → PROD wins.
+        assert groups["both-lib"] == DependencyGroup.PROD
+
+    def test_workspace_catalog_rename_uses_canonical_name(self, tmp_path):
+        _write(
+            tmp_path,
+            """\
+            [workspace]
+            members = ["crate-a"]
+
+            [workspace.dependencies]
+            local-alias = { package = "real-crate", version = "0.4" }
+            path-entry = { path = "../local" }
+            """,
+        )
+        member = tmp_path / "crate-a" / "Cargo.toml"
+        member.parent.mkdir()
+        member.write_text(
+            textwrap.dedent(
+                """\
+                [package]
+                name = "crate-a"
+                version = "0.1.0"
+
+                [dependencies]
+                local-alias = { workspace = true }
+                path-entry = { workspace = true }
+                """
+            )
+        )
+        deps, _ = discover_cargo_toml_dependencies(tmp_path)
+        # The alias resolves to the published crate name; the path-only
+        # catalog entry is workspace-local and yields nothing.
+        assert {d.name for d in deps} == {"real-crate"}
+
+    def test_workspace_ref_without_catalog_entry_dropped(self, tmp_path):
+        # A `workspace = true` ref with no matching catalog entry (broken
+        # manifest — cargo itself would error) has no version to resolve.
+        _write(
+            tmp_path,
+            """\
+            [package]
+            name = "standalone"
+            version = "0.1.0"
+
+            [dependencies]
+            ghost = { workspace = true }
+            serde = "1.0"
             """,
         )
         deps, _ = discover_cargo_toml_dependencies(tmp_path)
-        assert {d.name for d in deps} == {"shared-lib"}
-        assert deps[0].group == DependencyGroup.PROD
+        assert {d.name for d in deps} == {"serde"}
+
+    def test_workspace_ref_resolves_against_nearest_ancestor_catalog(self, tmp_path):
+        # Two independent workspaces in one tree: each member's ref resolves
+        # against its own workspace root, not a sibling's.
+        for ws, version in (("ws-one", "1.0"), ("ws-two", "2.0")):
+            root = tmp_path / ws / "Cargo.toml"
+            root.parent.mkdir()
+            root.write_text(
+                f'[workspace]\nmembers = ["m"]\n[workspace.dependencies]\nshared = "{version}"\n'
+            )
+            member = tmp_path / ws / "m" / "Cargo.toml"
+            member.parent.mkdir()
+            member.write_text(
+                f'[package]\nname = "m-{ws}"\nversion = "0.1.0"\n'
+                "[dependencies]\nshared = { workspace = true }\n"
+            )
+        deps, _ = discover_cargo_toml_dependencies(tmp_path)
+        constraints = {d.source: d.version_constraint for d in deps if d.name == "shared"}
+        assert constraints == {
+            "ws-one/Cargo.toml": "1.0",
+            "ws-two/Cargo.toml": "2.0",
+        }
 
     def test_skips_non_string_keys_and_invalid_specs(self, tmp_path):
         _write(
