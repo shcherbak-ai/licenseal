@@ -287,12 +287,16 @@ licenseal classifies each dependency license into a risk level and compares that
 | **Strong Copyleft** | OK | OK | OK | Warning |
 | **Network Copyleft** | OK | OK | OK | OK |
 
+**Pair-level overrides** strengthen the matrix where two licenses share a cell but are documented as legally incompatible: GPL-family version conflicts (a GPLv3-family dependency — `GPL-3.0-*`, `LGPL-3.0-*`, `AGPL-3.0-*` — in a `GPL-2.0-only` project, or a `GPL-2.0-only` dependency in a `GPL-3.0-*` / `AGPL-3.0-*` project), `Apache-2.0` in a `GPL-2.0-only` project, and FSF-documented GPL-incompatible weak copyleft (`EPL-1.0`, `CDDL-*`, `MPL-1.1`) in any GPL-family project are all violations; `EPL-2.0` in a GPL-family project is a warning, because its GPL compatibility depends on a secondary-license designation that package metadata cannot reveal. `-or-later` forms are exempt where the upgrade clause resolves the conflict, and an `OR` expression escapes when a conflict-free arm is electable.
+
+A **dual-licensed project** (e.g. `AGPL-3.0-only OR Proprietary`) is checked against the strictest of its arms: dependencies must be compatible with every license the project distributes under, so the commercial arm of an open-core project still flags copyleft dependencies.
+
 When `--dev` is set, copyleft violations on dev dependencies are downgraded to warnings — licenseal treats dev deps as lower risk because they usually do not ship with the project.
 
 | Risk level | Examples | Meaning |
 | --- | --- | --- |
 | Permissive | MIT, BSD, Apache-2.0, ISC | No significant restrictions |
-| Weak Copyleft | LGPL, MPL-2.0, EPL, CDDL | File-scope reciprocity; linking from other files is usually allowed |
+| Weak Copyleft | LGPL, MPL-2.0, EPL, CDDL, GPL with Classpath exception | File-scope reciprocity; linking from other files is usually allowed |
 | Strong Copyleft | GPL, OSL, EUPL, CC-BY-SA | Share-alike obligations can extend to the derivative work |
 | Network Copyleft | AGPL-3.0-only | Strong copyleft with network-use source-offer obligations |
 | Unknown | SSPL, BUSL, Elastic, CC-BY-NC; missing or unrecognized licenses | Cannot be auto-classified; routed to manual review |
