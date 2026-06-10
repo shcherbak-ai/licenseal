@@ -6,7 +6,9 @@ import contextvars
 import hashlib
 import sys
 import time
+from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 from dataclasses import replace
 from importlib.metadata import PackageNotFoundError, version
 from importlib.resources import files
@@ -185,6 +187,37 @@ def _worker_count(dep_count: int, max_workers: int) -> int:
     return max(1, min(dep_count, max_workers))
 
 
+class _PhaseTimings:
+    """Wall-clock per scan phase, for the end-of-scan timing summary.
+
+    Companion to the per-host traffic summary: the host counts say *where*
+    the requests went, this says *which phase* the wall-clock went to
+    (discovery vs. transitive walk vs. batch pre-pass vs. per-dep
+    resolution), so a slow scan explains itself without profiling.
+    """
+
+    def __init__(self) -> None:
+        self.entries: list[tuple[str, float]] = []
+
+    def record(self, name: str, seconds: float) -> None:
+        """Record one completed phase's duration."""
+        self.entries.append((name, seconds))
+
+    @contextmanager
+    def phase(self, name: str) -> Iterator[None]:
+        """Time the enclosed block and record it under ``name``."""
+        started = time.perf_counter()
+        try:
+            yield
+        finally:
+            self.record(name, time.perf_counter() - started)
+
+    def summary_line(self) -> str:
+        """Render the recorded phases as a single stderr summary line."""
+        joined = ", ".join(f"{name} {seconds:.1f}s" for name, seconds in self.entries)
+        return f"Phase timings: {joined}"
+
+
 def _should_fail(report: AnalysisReport, strict: bool, *, had_analysis_gaps: bool = False) -> bool:
     """Return whether the command should exit non-zero.
 
@@ -346,6 +379,7 @@ def _resolve_license_infos(
     max_depth: int = 50,
     all_direct_deps: list[Dependency] | None = None,
     exclude_paths: frozenset[Path] = frozenset(),
+    timings: _PhaseTimings | None = None,
 ) -> list[LicenseInfo]:
     """Resolve dependency licenses from registries.
 
@@ -356,7 +390,12 @@ def _resolve_license_infos(
     reachability and to drop dev-only chains when `include_dev=False`. The
     transitive walk runs inside the same `tethered.scope()` block so its
     registry calls are policy-checked too.
+
+    ``timings`` collects per-phase wall-clock for the caller's end-of-scan
+    summary; when omitted, phases are recorded into a discarded instance.
     """
+    if timings is None:
+        timings = _PhaseTimings()
     if not deps and not (transitive and project_path is not None):
         # No direct deps AND no transitive walk possible → skip the
         # tethered.scope / progress / threadpool setup entirely. When a
@@ -397,13 +436,16 @@ def _resolve_license_infos(
             if transitive and project_path is not None:
                 # Indeterminate progress: BFS frontier is open-ended, total
                 # only known once the walk terminates. Single in-place line.
-                with Progress(
-                    SpinnerColumn(),
-                    TextColumn("[progress.description]{task.description}"),
-                    TimeElapsedColumn(),
-                    console=_STDERR_CONSOLE,
-                    transient=True,
-                ) as walk_progress:
+                with (
+                    timings.phase("transitive walk"),
+                    Progress(
+                        SpinnerColumn(),
+                        TextColumn("[progress.description]{task.description}"),
+                        TimeElapsedColumn(),
+                        console=_STDERR_CONSOLE,
+                        transient=True,
+                    ) as walk_progress,
+                ):
                     walk_task = walk_progress.add_task("Walking dep tree...", total=None)
 
                     def _on_wave(count: int) -> None:
@@ -446,6 +488,7 @@ def _resolve_license_infos(
             # For Python/npm/Rust/NuGet, ``None`` is only advisory: PyPI /
             # npm registry / crates.io / NuGet flatcontainer remain the
             # authoritative sources, and the per-package fallback runs.
+            batch_pre_pass_started = time.perf_counter()
             go_deps = [d for d in deps if d.ecosystem == Ecosystem.GO]
             go_batch_cache = (
                 bulk_resolve_go_licenses(go_deps, client, max_workers=max_workers)
@@ -533,6 +576,10 @@ def _resolve_license_infos(
             cran_index = (
                 fetch_cran_index(client, fetcher=registry_cache.fetch_text) if r_deps else {}
             )
+            # The PHP lockfile map and CRAN index above are the batch-style
+            # pre-passes for ecosystems deps.dev doesn't cover, so they share
+            # the phase with the deps.dev versionbatch POSTs.
+            timings.record("batch pre-pass", time.perf_counter() - batch_pre_pass_started)
 
             def _from_advisory_cache(
                 cache: dict[tuple[str, str], LicenseInfo | None],
@@ -704,6 +751,7 @@ def _resolve_license_infos(
             # multiple threads).
             snapshots = [contextvars.copy_context() for _ in deps]
             with (
+                timings.phase("license resolution"),
                 Progress(
                     SpinnerColumn(),
                     TextColumn("[progress.description]Resolving licenses"),
@@ -864,6 +912,7 @@ def check(
             )
 
     started_at = time.perf_counter()
+    timings = _PhaseTimings()
     project_path = path.resolve()
     exclude_paths = _resolve_excludes(project_path, exclude_dirs)
 
@@ -872,7 +921,7 @@ def check(
     # surfaced rather than silently dropped. ``shared_walk_cache`` wraps only
     # discovery (the transitive layer manages its own walk cache internally).
     with collect_read_diagnostics() as read_diags:
-        with shared_walk_cache():
+        with timings.phase("discovery"), shared_walk_cache():
             detected_license = (
                 detect_project_license(project_path, exclude_paths=exclude_paths) or "Proprietary"
             )
@@ -920,7 +969,12 @@ def check(
             max_depth=max_depth,
             all_direct_deps=all_deps,
             exclude_paths=exclude_paths,
+            timings=timings,
         )
+
+    # Companion line to the per-host traffic summary above it: phases, not
+    # hosts. Always at least the discovery entry, so never an empty line.
+    click.echo(timings.summary_line(), err=True)
 
     diag_view = _read_diagnostics_view(read_diags, project_path)
     gap_count = _echo_read_diagnostics(diag_view)

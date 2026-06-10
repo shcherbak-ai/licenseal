@@ -21,6 +21,7 @@ from licenseal.cli import (
     _http_headers,
     _package_version,
     _parse_installed_skill,
+    _PhaseTimings,
     _project_skill_staleness_hint,
     _read_diagnostics_view,
     _registries_unreachable,
@@ -4541,3 +4542,45 @@ class TestCliMarkdownViolation:
         )
         assert result.exit_code == 1
         assert "# License Analysis Report" in result.output
+
+
+class TestPhaseTimings:
+    """End-of-scan phase timing summary (the `Phase timings:` stderr line)."""
+
+    def test_summary_line_formats_recorded_phases(self):
+        timings = _PhaseTimings()
+        timings.record("discovery", 0.04)
+        timings.record("license resolution", 1.26)
+        assert timings.summary_line() == "Phase timings: discovery 0.0s, license resolution 1.3s"
+
+    def test_phase_context_manager_records_wall_clock(self):
+        timings = _PhaseTimings()
+        with timings.phase("discovery"):
+            pass
+        assert [name for name, _ in timings.entries] == ["discovery"]
+        assert timings.entries[0][1] >= 0.0
+
+    def test_check_prints_phases_in_pipeline_order(self, tmp_path):
+        # Zero-dep project: the resolution pipeline still runs end-to-end (the
+        # transitive layer must consult lockfiles even with no direct deps),
+        # so every phase records without any registry traffic.
+        runner = CliRunner()
+        result = runner.invoke(main, ["check", "--path", str(tmp_path)])
+        assert result.exit_code == 0
+        line = next(ln for ln in result.output.splitlines() if ln.startswith("Phase timings:"))
+        positions = [
+            line.index(name)
+            for name in ("discovery", "transitive walk", "batch pre-pass", "license resolution")
+        ]
+        assert positions == sorted(positions)
+
+    def test_no_transitive_zero_dep_scan_reports_discovery_only(self, tmp_path):
+        # --no-transitive with zero deps short-circuits before the network
+        # phases; the summary still explains where the wall-clock went.
+        runner = CliRunner()
+        result = runner.invoke(main, ["check", "--path", str(tmp_path), "--no-transitive"])
+        assert result.exit_code == 0
+        line = next(ln for ln in result.output.splitlines() if ln.startswith("Phase timings:"))
+        assert "discovery" in line
+        assert "transitive walk" not in line
+        assert "license resolution" not in line
