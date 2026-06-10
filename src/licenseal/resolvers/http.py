@@ -6,6 +6,7 @@ import json
 import random
 import threading
 import time
+from collections import Counter
 from collections.abc import Callable
 from urllib.parse import urlsplit
 
@@ -949,6 +950,13 @@ class RegistryCache:
         # here, so they can't skew the ratio.
         self.fetches_attempted = 0
         self.fetches_succeeded = 0
+        # Per-host breakdown of ``fetches_attempted``, for the end-of-scan
+        # traffic summary: a slow scan should explain itself (a large
+        # crates.io count means the 1 req/s fallback tail dominated; a large
+        # pypi.org count means a no-lockfile transitive walk). deps.dev batch
+        # POSTs bypass the per-URL cache and are not counted here — they are
+        # bounded at ~⌈deps/100⌉ per ecosystem and never dominate wall-clock.
+        self.fetches_by_host: Counter[str] = Counter()
 
     def fetch(self, url: str, client: httpx.Client) -> dict | None:
         """Return cached body for ``url`` or fetch it (deduping in-flight calls).
@@ -1016,6 +1024,7 @@ class RegistryCache:
             raise
         with self._lock:
             self.fetches_attempted += 1
+            self.fetches_by_host[urlsplit(url).hostname or "?"] += 1
             if data is not None:
                 self.fetches_succeeded += 1
             self._results[url] = data

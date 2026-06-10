@@ -738,6 +738,22 @@ def _resolve_license_infos(
                     "registry outage. Refusing to report every dependency as UNKNOWN from "
                     f"a scan that resolved nothing.\n{_TETHERED_HINT}"
                 )
+            # Traffic summary so a slow scan explains itself: a large
+            # crates.io share means the 1 req/s fallback tail dominated
+            # wall-clock; a large PyPI/npm share means a no-lockfile
+            # transitive walk. Covers every per-URL fetch this scan issued
+            # (transitive walk + per-package resolution); deps.dev batch
+            # POSTs are excluded — bounded at ~⌈deps/100⌉, never dominant.
+            if registry_cache.fetches_attempted:
+                by_host = ", ".join(
+                    f"{host}: {count}"
+                    for host, count in registry_cache.fetches_by_host.most_common()
+                )
+                click.echo(
+                    f"Per-package registry requests: "
+                    f"{registry_cache.fetches_attempted} ({by_host})",
+                    err=True,
+                )
             return results
     except tethered.EgressBlocked as exc:
         raise click.ClickException(

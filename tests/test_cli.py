@@ -2632,6 +2632,10 @@ class TestRustEcosystem:
         assert rust_dep["license"] == "Apache-2.0 OR MIT"
         assert rust_dep["package_url"] == "https://crates.io/crates/serde"
         assert rust_dep["source"] == "Cargo.toml"
+        # End-of-scan traffic summary names the host so a slow scan (e.g. a
+        # large rate-limited crates.io fallback tail) explains itself.
+        assert "Per-package registry requests:" in result.output
+        assert "crates.io:" in result.output
 
     @respx.mock
     def test_check_resolves_go_license_from_deps_dev(self, tmp_path):

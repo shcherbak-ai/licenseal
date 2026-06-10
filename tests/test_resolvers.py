@@ -1914,6 +1914,10 @@ class TestRegistryCache:
         assert first == second == third
         # Three calls, one network round-trip.
         assert route.call_count == 1
+        # The per-host traffic tally counts owned fetches only — cache hits
+        # don't inflate the end-of-scan summary.
+        assert cache.fetches_attempted == 1
+        assert dict(cache.fetches_by_host) == {"pypi.org": 1}
 
     @respx.mock
     def test_pypi_response_trimmed_to_used_fields(self):
