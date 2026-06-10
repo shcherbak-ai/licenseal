@@ -34,7 +34,7 @@ shape natively, and ships independent rate budgets per endpoint.
 from __future__ import annotations
 
 import urllib.parse
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from typing import Any, cast
 
 import httpx
@@ -361,294 +361,211 @@ def resolve_via_deps_dev_stable_get(
     return _license_info_from_version_object(dep, pinned_version, data, system=system)
 
 
-def bulk_resolve_licenses(
+def _build_batch_chunks(
     deps: list[Dependency],
-    client: httpx.Client,
     *,
-    system: str,
     version_extractor: Callable[[str], str | None],
-    chunk_size: int = _BATCH_CHUNK_SIZE,
-    max_workers: int,
-) -> dict[tuple[str, str], LicenseInfo | None]:
-    """Pre-resolve licenses for one deps.dev ``system`` in a batched POST.
+    chunk_size: int,
+) -> list[list[tuple[Dependency, str]]]:
+    """Pin, dedup, and chunk one system's deps for the batch endpoint.
 
-    Returns a ``(name, version) -> LicenseInfo | None`` dict where:
-
-    * **present, ``LicenseInfo``** — batch returned a real result. Caller
-      uses it directly.
-    * **present, ``None``** — batch confirmed the version doesn't exist
-      (response had ``request`` but no ``version`` field). Caller skips
-      further fetches and emits UNKNOWN.
-    * **absent** — either the whole batch call failed, or the dep's
-      version couldn't be pinned by ``version_extractor``. Caller falls
-      through to the single-version GET path.
-
-    Each chunk is an independent POST; chunks are fanned out across a
-    threadpool ``min(chunks, max_workers, _BATCH_MAX_WORKERS)`` wide — the
-    batch endpoint is rate-limit-sensitive, so its concurrency is capped
-    below the per-package ceiling even when ``--max-workers`` is higher.
-    A failed chunk leaves its deps absent from the dict.
-
-    ``system`` is the deps.dev system identifier (``"GO"``, ``"NUGET"``,
-    ``"MAVEN"``, ``"NPM"``, ``"CARGO"``, ``"PYPI"`` — see the deps.dev
-    docs). ``version_extractor`` normalizes per-ecosystem version syntax
-    into a concrete pin (Go's ``v0.1.2``, NuGet's ``1.0.0`` or bracket
-    form, etc.); a ``None`` return drops the dep from the batch request.
+    Deps whose constraint can't be pinned by ``version_extractor`` are
+    dropped (they flow through the per-package resolver instead). Dedup is
+    by ``(name, version)`` — the same package can appear multiple times in
+    the flattened dep list; one batch entry suffices, and the resolver-side
+    cache lookup re-binds the result to each dep instance.
     """
-    requests: list[tuple[Dependency, str]] = []
+    seen: set[tuple[str, str]] = set()
+    deduped: list[tuple[Dependency, str]] = []
     for dep in deps:
         pinned = version_extractor(dep.version_constraint)
         if pinned is None:
             continue
-        requests.append((dep, pinned))
-
-    if not requests:
-        return {}
-
-    # Dedup by (name, version) — the same module can appear multiple times
-    # (once per dep instance in the flattened list). One batch entry suffices;
-    # the resolver-side cache lookup handles re-binding to each dep instance.
-    seen: set[tuple[str, str]] = set()
-    deduped: list[tuple[Dependency, str]] = []
-    for dep, pinned in requests:
         key = (dep.name, pinned)
         if key in seen:
             continue
         seen.add(key)
         deduped.append((dep, pinned))
+    return [deduped[i : i + chunk_size] for i in range(0, len(deduped), chunk_size)]
 
-    # ``deduped`` is non-empty (we returned earlier when ``requests`` was empty
-    # and dedup never adds entries), so the chunk list is non-empty too.
-    chunks: list[list[tuple[Dependency, str]]] = [
-        deduped[i : i + chunk_size] for i in range(0, len(deduped), chunk_size)
-    ]
 
-    def _fetch_chunk(
-        chunk: list[tuple[Dependency, str]],
-    ) -> dict[tuple[str, str], LicenseInfo | None]:
-        body = {
-            "requests": [
-                {
-                    "versionKey": {
-                        "system": system,
-                        "name": dep.name,
-                        "version": pinned,
-                    }
+def _fetch_batch_chunk(
+    chunk: list[tuple[Dependency, str]],
+    client: httpx.Client,
+    *,
+    system: str,
+) -> dict[tuple[str, str], LicenseInfo | None]:
+    """POST one chunk to the batch endpoint; index results by ``(name, version)``.
+
+    Returns an empty dict on whole-chunk failure (keys stay absent so each
+    dep falls back to the single-version GET path; the outer merge stays a
+    simple ``dict.update``). Responses are indexed by each entry's
+    ``request.versionKey`` echo so any server-side reordering is tolerated.
+    If ``request`` is missing the entry is dropped; if ``version`` (the
+    response data object) is missing, the ``(name, version)`` is recorded
+    as ``None`` (confirmed-not-found).
+    """
+    body = {
+        "requests": [
+            {
+                "versionKey": {
+                    "system": system,
+                    "name": dep.name,
+                    "version": pinned,
                 }
-                for dep, pinned in chunk
-            ]
-        }
-        out: dict[tuple[str, str], LicenseInfo | None] = {}
-        data = fetch_registry_json_post(_DEPS_DEV_BATCH_URL, body, client)
-        if data is None:
-            # Whole-chunk failure → leave keys absent so each dep falls back
-            # to the single-version GET path. Returning {} (not None) keeps
-            # the outer merge a simple ``dict.update``.
-            return out
-
-        # Index responses by (name, version) drawn from each entry's
-        # ``request.versionKey`` so we tolerate any reordering on the server
-        # side. If ``request`` is missing we drop the entry; if ``version``
-        # (the response data object) is missing, the (name, version) is
-        # recorded as ``None`` (confirmed-not-found).
-        responses = data.get("responses", [])
-        if not isinstance(responses, list):
-            return out
-        for resp in responses:
-            if not isinstance(resp, dict):
-                continue
-            req = resp.get("request")
-            if not isinstance(req, dict):
-                continue
-            version_key = req.get("versionKey")
-            if not isinstance(version_key, dict):
-                continue
-            name = version_key.get("name")
-            ver = version_key.get("version")
-            if not isinstance(name, str) or not isinstance(ver, str):
-                continue
-            key = (name, ver)
-            version_obj = resp.get("version")
-            if isinstance(version_obj, dict):
-                # Find the source Dependency to attach (we don't have it
-                # easily here, so just store a key-only mapping; caller
-                # re-binds to the actual dep). Build a sentinel dep —
-                # the LicenseInfo is rebound at the call site via
-                # ``replace(info, dependency=dep)``.
-                sentinel = next(
-                    (dep for dep, pinned in chunk if dep.name == name and pinned == ver),
-                    None,
-                )
-                if sentinel is None:
-                    continue
-                out[key] = _license_info_from_version_object(
-                    sentinel, ver, version_obj, system=system
-                )
-            else:
-                out[key] = None
+            }
+            for dep, pinned in chunk
+        ]
+    }
+    out: dict[tuple[str, str], LicenseInfo | None] = {}
+    data = fetch_registry_json_post(_DEPS_DEV_BATCH_URL, body, client)
+    if data is None:
         return out
 
-    merged: dict[tuple[str, str], LicenseInfo | None] = {}
-    if len(chunks) == 1:
-        merged.update(_fetch_chunk(chunks[0]))
-        return merged
-    # Propagate the active tethered scope into the batch-POST workers — a bare
-    # pool fetches in an empty context and bypasses the egress policy. The
-    # _BATCH_MAX_WORKERS ceiling on this rate-sensitive endpoint is preserved.
-    for chunk_result in map_with_context(
-        _fetch_chunk, chunks, min(max_workers, _BATCH_MAX_WORKERS)
+    responses = data.get("responses", [])
+    if not isinstance(responses, list):
+        return out
+    for resp in responses:
+        if not isinstance(resp, dict):
+            continue
+        req = resp.get("request")
+        if not isinstance(req, dict):
+            continue
+        version_key = req.get("versionKey")
+        if not isinstance(version_key, dict):
+            continue
+        name = version_key.get("name")
+        ver = version_key.get("version")
+        if not isinstance(name, str) or not isinstance(ver, str):
+            continue
+        key = (name, ver)
+        version_obj = resp.get("version")
+        if isinstance(version_obj, dict):
+            # Re-bind through the chunk's source Dependency — the
+            # LicenseInfo is rebound again at the call site via
+            # ``replace(info, dependency=dep)``.
+            sentinel = next(
+                (dep for dep, pinned in chunk if dep.name == name and pinned == ver),
+                None,
+            )
+            if sentinel is None:
+                continue
+            out[key] = _license_info_from_version_object(sentinel, ver, version_obj, system=system)
+        else:
+            out[key] = None
+    return out
+
+
+def _version_extractor_for(system: str) -> Callable[[str], str | None]:
+    """Return the per-system version normalizer for batch requests.
+
+    Imports are deferred because several resolver modules import from this
+    module (URL constants, ``_license_info_from_version_object``); importing
+    them at module top would be circular. Per-system pinning notes:
+
+    * ``GO`` — versions are always pinned; plausible semver passes through.
+    * ``MAVEN`` — ``group:artifact`` is already the deps.dev ``name`` form,
+      so only the ``version_constraint`` side needs normalizing. The per-dep
+      ``resolve_maven_central_license`` path remains canonical for artifacts
+      whose license lives in a parent POM that deps.dev's ``licensecheck``
+      over the artifact's own LICENSE file doesn't see.
+    * ``CARGO`` — only ``=X.Y.Z`` / ``==X.Y.Z`` exact pins batch; range
+      specs need crates.io's max-stable-version lookup and flow through
+      ``resolve_rust_license``'s per-crate path.
+    * ``NPM`` — package-alias unwrapping (``"npm:<target>@<spec>"``) happens
+      at discovery, so ``dep.name`` is already the target package.
+    * ``RUBYGEMS`` — lockfiles emit ``==X.Y.Z`` pins for every spec;
+      manifest-only range specs return ``None`` and flow through
+      ``resolve_ruby_license`` against the v1 latest-version endpoint.
+    """
+    if system == "GO":
+        return _extract_pinned_version
+    if system == "MAVEN":
+        return _extract_maven_pinned_version
+    if system == "NUGET":
+        from licenseal.resolvers.nuget import _extract_pinned_version_nuget
+
+        return _extract_pinned_version_nuget
+    if system == "PYPI":
+        from licenseal.resolvers.pypi import _extract_pinned_version as _extract_pypi_pin
+
+        return _extract_pypi_pin
+    if system == "NPM":
+        from licenseal.resolvers.npm_registry import _extract_pinned_version as _extract_npm_pin
+
+        return _extract_npm_pin
+    if system == "CARGO":
+        from licenseal.resolvers.crates_io import _extract_pinned_version as _extract_cargo_pin
+
+        return _extract_cargo_pin
+    if system == "RUBYGEMS":
+        from licenseal.resolvers.rubygems import _extract_pinned_version as _extract_ruby_pin
+
+        return _extract_ruby_pin
+    raise ValueError(f"unknown deps.dev system: {system}")
+
+
+def bulk_resolve_licenses(
+    deps_by_system: Mapping[str, list[Dependency]],
+    client: httpx.Client,
+    *,
+    chunk_size: int = _BATCH_CHUNK_SIZE,
+    max_workers: int,
+) -> dict[str, dict[tuple[str, str], LicenseInfo | None]]:
+    """Pre-resolve licenses for every batched ecosystem in one shared fan-out.
+
+    ``deps_by_system`` maps deps.dev system identifiers (``"GO"``,
+    ``"PYPI"``, ``"NPM"``, ``"CARGO"``, ``"MAVEN"``, ``"NUGET"``,
+    ``"RUBYGEMS"``) to that ecosystem's dep list. Returns one
+    ``(name, version) -> LicenseInfo | None`` cache per input system:
+
+    * **present, ``LicenseInfo``** — batch returned a real result. Caller
+      uses it directly.
+    * **present, ``None``** — batch confirmed the version doesn't exist
+      (response had ``request`` but no ``version`` field). Caller skips
+      further fetches and emits UNKNOWN (Go) or falls back (the rest).
+    * **absent** — the chunk's POST failed, or the dep's version couldn't
+      be pinned by the system's extractor. Caller falls through to the
+      per-package official-registry path.
+
+    Every system's chunks fan out through ONE threadpool
+    ``min(chunks, max_workers, _BATCH_MAX_WORKERS)`` wide, so a polyglot
+    scan overlaps its per-ecosystem batch POSTs instead of paying one
+    sequential pool round per ecosystem — while the combined in-flight
+    POST count against this rate-limit-sensitive endpoint keeps the same
+    ceiling a single-ecosystem scan has. ``--max-workers`` still throttles
+    downward; the cap only bounds the ceiling.
+    """
+    tagged_chunks: list[tuple[str, list[tuple[Dependency, str]]]] = []
+    for system, deps in deps_by_system.items():
+        extractor = _version_extractor_for(system)
+        for chunk in _build_batch_chunks(deps, version_extractor=extractor, chunk_size=chunk_size):
+            tagged_chunks.append((system, chunk))
+
+    caches: dict[str, dict[tuple[str, str], LicenseInfo | None]] = {
+        system: {} for system in deps_by_system
+    }
+    if not tagged_chunks:
+        return caches
+    if len(tagged_chunks) == 1:
+        # Single chunk — fetch inline rather than paying pool setup.
+        system, chunk = tagged_chunks[0]
+        caches[system].update(_fetch_batch_chunk(chunk, client, system=system))
+        return caches
+
+    def _fetch_one(
+        tagged: tuple[str, list[tuple[Dependency, str]]],
+    ) -> tuple[str, dict[tuple[str, str], LicenseInfo | None]]:
+        system, chunk = tagged
+        return system, _fetch_batch_chunk(chunk, client, system=system)
+
+    # Propagate the active tethered scope into the batch-POST workers — a
+    # bare pool fetches in an empty context and bypasses the egress policy.
+    for system, chunk_result in map_with_context(
+        _fetch_one, tagged_chunks, min(max_workers, _BATCH_MAX_WORKERS)
     ):
-        merged.update(chunk_result)
-    return merged
-
-
-def bulk_resolve_go_licenses(
-    go_deps: list[Dependency],
-    client: httpx.Client,
-    *,
-    chunk_size: int = _BATCH_CHUNK_SIZE,
-    max_workers: int,
-) -> dict[tuple[str, str], LicenseInfo | None]:
-    """Go-system thin wrapper around :func:`bulk_resolve_licenses`."""
-    return bulk_resolve_licenses(
-        go_deps,
-        client,
-        system="GO",
-        version_extractor=_extract_pinned_version,
-        chunk_size=chunk_size,
-        max_workers=max_workers,
-    )
-
-
-def bulk_resolve_nuget_licenses(
-    nuget_deps: list[Dependency],
-    client: httpx.Client,
-    *,
-    chunk_size: int = _BATCH_CHUNK_SIZE,
-    max_workers: int,
-) -> dict[tuple[str, str], LicenseInfo | None]:
-    """NuGet-system thin wrapper around :func:`bulk_resolve_licenses`.
-
-    The NuGet version extractor is imported lazily to avoid a circular
-    import (``resolvers.nuget`` imports from this module for the v3
-    single-version URL constant + the ``_license_info_from_version_object``
-    helper).
-    """
-    from licenseal.resolvers.nuget import _extract_pinned_version_nuget
-
-    return bulk_resolve_licenses(
-        nuget_deps,
-        client,
-        system="NUGET",
-        version_extractor=_extract_pinned_version_nuget,
-        chunk_size=chunk_size,
-        max_workers=max_workers,
-    )
-
-
-def bulk_resolve_python_licenses(
-    py_deps: list[Dependency],
-    client: httpx.Client,
-    *,
-    chunk_size: int = _BATCH_CHUNK_SIZE,
-    max_workers: int,
-) -> dict[tuple[str, str], LicenseInfo | None]:
-    """PYPI-system thin wrapper around :func:`bulk_resolve_licenses`.
-
-    The PyPI version extractor is imported lazily for the same reason
-    NuGet's is (avoid circular import). Callers do bulk → per-package
-    fallback: any dep whose batch entry is missing OR returned UNKNOWN
-    flows through ``resolve_python_license``, which still treats PyPI
-    as the canonical source.
-    """
-    from licenseal.resolvers.pypi import _extract_pinned_version
-
-    return bulk_resolve_licenses(
-        py_deps,
-        client,
-        system="PYPI",
-        version_extractor=_extract_pinned_version,
-        chunk_size=chunk_size,
-        max_workers=max_workers,
-    )
-
-
-def bulk_resolve_npm_licenses(
-    npm_deps: list[Dependency],
-    client: httpx.Client,
-    *,
-    chunk_size: int = _BATCH_CHUNK_SIZE,
-    max_workers: int,
-) -> dict[tuple[str, str], LicenseInfo | None]:
-    """NPM-system thin wrapper around :func:`bulk_resolve_licenses`.
-
-    npm package-alias unwrapping (``"npm:<target>@<spec>"``) happens at
-    discovery, so by the time we get here ``dep.name`` is already the
-    target package; no alias re-resolution needed in the batch path.
-    """
-    from licenseal.resolvers.npm_registry import _extract_pinned_version
-
-    return bulk_resolve_licenses(
-        npm_deps,
-        client,
-        system="NPM",
-        version_extractor=_extract_pinned_version,
-        chunk_size=chunk_size,
-        max_workers=max_workers,
-    )
-
-
-def bulk_resolve_rust_licenses(
-    rust_deps: list[Dependency],
-    client: httpx.Client,
-    *,
-    chunk_size: int = _BATCH_CHUNK_SIZE,
-    max_workers: int,
-) -> dict[tuple[str, str], LicenseInfo | None]:
-    """CARGO-system thin wrapper around :func:`bulk_resolve_licenses`.
-
-    Only ``=X.Y.Z`` / ``==X.Y.Z`` exact pins go into the batch — range
-    specs (``^1.0``, ``~1.2``, etc.) need crates.io's max-stable-version
-    lookup which the batch can't do, so they flow through
-    ``resolve_rust_license``'s pre-existing per-crate path.
-    """
-    from licenseal.resolvers.crates_io import _extract_pinned_version
-
-    return bulk_resolve_licenses(
-        rust_deps,
-        client,
-        system="CARGO",
-        version_extractor=_extract_pinned_version,
-        chunk_size=chunk_size,
-        max_workers=max_workers,
-    )
-
-
-def bulk_resolve_ruby_licenses(
-    ruby_deps: list[Dependency],
-    client: httpx.Client,
-    *,
-    chunk_size: int = _BATCH_CHUNK_SIZE,
-    max_workers: int,
-) -> dict[tuple[str, str], LicenseInfo | None]:
-    """RUBYGEMS-system thin wrapper around :func:`bulk_resolve_licenses`.
-
-    The Ruby lockfile parser emits ``==X.Y.Z`` pins for every spec; the
-    extractor strips the ``==`` and passes the version straight through
-    (RubyGems versions carry no ``v`` prefix, unlike Packagist). Range
-    specs from manifest-only mode return None and flow through
-    ``resolve_ruby_license`` against the v1 latest-version endpoint.
-    """
-    from licenseal.resolvers.rubygems import _extract_pinned_version
-
-    return bulk_resolve_licenses(
-        ruby_deps,
-        client,
-        system="RUBYGEMS",
-        version_extractor=_extract_pinned_version,
-        chunk_size=chunk_size,
-        max_workers=max_workers,
-    )
+        caches[system].update(chunk_result)
+    return caches
 
 
 def _extract_maven_pinned_version(version_constraint: str) -> str | None:
@@ -673,35 +590,6 @@ def _extract_maven_pinned_version(version_constraint: str) -> str | None:
     if spec[0] in "([":
         return None
     return spec
-
-
-def bulk_resolve_java_licenses(
-    java_deps: list[Dependency],
-    client: httpx.Client,
-    *,
-    chunk_size: int = _BATCH_CHUNK_SIZE,
-    max_workers: int,
-) -> dict[tuple[str, str], LicenseInfo | None]:
-    """MAVEN-system thin wrapper around :func:`bulk_resolve_licenses`.
-
-    Maven coordinates use ``group:artifact`` as the deps.dev ``name``;
-    discovery already emits ``Dependency.name`` in that form so the
-    extractor only needs to handle the ``version_constraint`` side.
-    Falls back to per-dep ``resolve_maven_central_license`` (parent-chain
-    walk + URL-prefix licenseUrl mapping + deps.dev v3 GET) when the
-    batch entry is missing, returns no licenses, or carries
-    ``license_id == "UNKNOWN"`` — the per-dep path remains canonical for
-    artifacts whose license lives in a parent POM that deps.dev's
-    ``licensecheck`` over the artifact's own LICENSE file doesn't see.
-    """
-    return bulk_resolve_licenses(
-        java_deps,
-        client,
-        system="MAVEN",
-        version_extractor=_extract_maven_pinned_version,
-        chunk_size=chunk_size,
-        max_workers=max_workers,
-    )
 
 
 def _fetch_deps_dev_dependencies(

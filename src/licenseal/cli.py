@@ -56,13 +56,7 @@ from licenseal.resolvers.crates_io import (
 from licenseal.resolvers.crates_io import resolve_rust_license
 from licenseal.resolvers.deps_dev import (
     _extract_maven_pinned_version,  # noqa: PLC2701
-    bulk_resolve_go_licenses,
-    bulk_resolve_java_licenses,
-    bulk_resolve_npm_licenses,
-    bulk_resolve_nuget_licenses,
-    bulk_resolve_python_licenses,
-    bulk_resolve_ruby_licenses,
-    bulk_resolve_rust_licenses,
+    bulk_resolve_licenses,
     resolve_go_license,
 )
 from licenseal.resolvers.deps_dev import (
@@ -472,88 +466,55 @@ def _resolve_license_infos(
                             exclude_paths=exclude_paths,
                         )
 
-            # Per-ecosystem batch pre-pass against ``api.deps.dev``'s
+            # Cross-ecosystem batch pre-pass against ``api.deps.dev``'s
             # ``/v3alpha/versionbatch`` endpoint. Each POST returns at
             # most 100 entries (server-side cap, verified empirically —
             # see ``resolvers.deps_dev._BATCH_CHUNK_SIZE``), so a scan of
-            # N deps takes ⌈N/100⌉ POSTs fanned across a small threadpool.
-            # The result is a ``(name, version)``-keyed cache; per-dep
-            # resolution checks it first and falls back to the per-package
-            # official-registry resolver when the batch entry is absent or
-            # came back without licenses ("non-standard" included).
+            # N batchable deps takes ⌈N/100⌉ POSTs; every ecosystem's
+            # chunks fan out through one shared threadpool (capped at
+            # ``_BATCH_MAX_WORKERS``) so polyglot scans overlap their batch
+            # POSTs instead of paying one sequential pool round per
+            # ecosystem. The result is one ``(name, version)``-keyed cache
+            # per ecosystem; per-dep resolution checks it first and falls
+            # back to the per-package official-registry resolver when the
+            # batch entry is absent or came back without licenses
+            # ("non-standard" included).
             #
             # For Go, ``None`` cache entries are authoritative (deps.dev
             # IS the canonical source for Go licenses): "version doesn't
             # exist on deps.dev" → return UNKNOWN without further fetch.
-            # For Python/npm/Rust/NuGet, ``None`` is only advisory: PyPI /
-            # npm registry / crates.io / NuGet flatcontainer remain the
-            # authoritative sources, and the per-package fallback runs.
+            # For Python/npm/Rust/Java/NuGet/Ruby, ``None`` is only
+            # advisory: the official registries remain authoritative and
+            # the per-package fallback runs. (.NET keeps the NuGet
+            # flatcontainer as Tier 1; the batch fills its Tier 2 — see
+            # ``resolve_nuget_license``. Ruby off-registry deps, GIT / PATH
+            # sourced, are filtered out up front: their license can't be
+            # resolved from rubygems.org at all.)
             batch_pre_pass_started = time.perf_counter()
-            go_deps = [d for d in deps if d.ecosystem == Ecosystem.GO]
-            go_batch_cache = (
-                bulk_resolve_go_licenses(go_deps, client, max_workers=max_workers)
-                if go_deps
-                else {}
+            batch_caches = bulk_resolve_licenses(
+                {
+                    "GO": [d for d in deps if d.ecosystem == Ecosystem.GO],
+                    "PYPI": [d for d in deps if d.ecosystem == Ecosystem.PYTHON],
+                    "NPM": [d for d in deps if d.ecosystem == Ecosystem.NPM],
+                    "CARGO": [d for d in deps if d.ecosystem == Ecosystem.RUST],
+                    "MAVEN": [d for d in deps if d.ecosystem == Ecosystem.JAVA],
+                    "NUGET": [d for d in deps if d.ecosystem == Ecosystem.DOTNET],
+                    "RUBYGEMS": [
+                        d
+                        for d in deps
+                        if d.ecosystem == Ecosystem.RUBY and not _ruby_is_off_registry(d.source)
+                    ],
+                },
+                client,
+                max_workers=max_workers,
             )
-
-            python_deps = [d for d in deps if d.ecosystem == Ecosystem.PYTHON]
-            python_batch_cache = (
-                bulk_resolve_python_licenses(python_deps, client, max_workers=max_workers)
-                if python_deps
-                else {}
-            )
-
-            npm_deps = [d for d in deps if d.ecosystem == Ecosystem.NPM]
-            npm_batch_cache = (
-                bulk_resolve_npm_licenses(npm_deps, client, max_workers=max_workers)
-                if npm_deps
-                else {}
-            )
-
-            rust_deps = [d for d in deps if d.ecosystem == Ecosystem.RUST]
-            rust_batch_cache = (
-                bulk_resolve_rust_licenses(rust_deps, client, max_workers=max_workers)
-                if rust_deps
-                else {}
-            )
-
-            java_deps = [d for d in deps if d.ecosystem == Ecosystem.JAVA]
-            java_batch_cache = (
-                bulk_resolve_java_licenses(java_deps, client, max_workers=max_workers)
-                if java_deps
-                else {}
-            )
-
-            # .NET batch pre-pass — same shape as the Go path, system="NUGET".
-            # Populates the Tier 2 cache that ``resolve_nuget_license`` reads
-            # between its NuGet flatcontainer fetch (Tier 1) and the deps.dev
-            # single-version GET fallback (Tier 3). The .NET path keeps the
-            # NuGet flatcontainer as the primary source per the user-locked
-            # plan; the batch fills the gap when nuspec metadata is silent.
-            dotnet_deps = [d for d in deps if d.ecosystem == Ecosystem.DOTNET]
-            dotnet_batch_cache = (
-                bulk_resolve_nuget_licenses(dotnet_deps, client, max_workers=max_workers)
-                if dotnet_deps
-                else {}
-            )
-
-            # Ruby batch pre-pass against the RUBYGEMS system. Same advisory
-            # ``None`` semantics as Python / npm / Rust / Java / NuGet —
-            # RubyGems is canonical, so a deps.dev miss falls through to
-            # the rubygems.org v2 per-version endpoint via the per-package
-            # resolver. Off-registry deps (GIT / PATH sourced) carry the
-            # off-registry marker on ``dep.source`` and are filtered out
-            # of the batch up front (their license can't be resolved at all).
-            ruby_deps = [
-                d
-                for d in deps
-                if d.ecosystem == Ecosystem.RUBY and not _ruby_is_off_registry(d.source)
-            ]
-            ruby_batch_cache = (
-                bulk_resolve_ruby_licenses(ruby_deps, client, max_workers=max_workers)
-                if ruby_deps
-                else {}
-            )
+            go_batch_cache = batch_caches["GO"]
+            python_batch_cache = batch_caches["PYPI"]
+            npm_batch_cache = batch_caches["NPM"]
+            rust_batch_cache = batch_caches["CARGO"]
+            java_batch_cache = batch_caches["MAVEN"]
+            dotnet_batch_cache = batch_caches["NUGET"]
+            ruby_batch_cache = batch_caches["RUBYGEMS"]
 
             # PHP lockfile-license pre-pass. composer.lock is unique among
             # supported lockfiles in embedding a structured SPDX ``license``

@@ -7,6 +7,7 @@ import json
 from unittest.mock import call, patch
 
 import httpx
+import pytest
 import respx
 
 from licenseal.models import Dependency, DependencyGroup, Ecosystem
@@ -21,7 +22,8 @@ from licenseal.resolvers.deps_dev import (
     _license_info_from_version_object,
     _licenses_to_spdx,
     _repo_url_from_links,
-    bulk_resolve_go_licenses,
+    _version_extractor_for,
+    bulk_resolve_licenses,
     fetch_maven_dependencies,
     resolve_go_license,
 )
@@ -3452,13 +3454,18 @@ class TestResolveGoLicenseSingleFallback:
         assert info.repository_url == ""
 
 
+def bulk_resolve_go(go_deps, client, **kwargs):
+    """GO-system shorthand for the combined batch API used by the class below."""
+    return bulk_resolve_licenses({"GO": go_deps}, client, **kwargs)["GO"]
+
+
 class TestBulkResolveGoLicenses:
-    """Batch POST to deps.dev's ``/v3alpha/versionbatch``.
+    """Batch POST to deps.dev's ``/v3alpha/versionbatch``, driven via GO.
 
     This is the primary Go license-resolution path: one or two POSTs per
     scan instead of N single GETs. Tests cover the three-state result
     encoding (present / confirmed-missing / batch-failed), chunking, dedup,
-    and request shape.
+    and request shape of the shared batch machinery.
     """
 
     @respx.mock
@@ -3501,7 +3508,7 @@ class TestBulkResolveGoLicenses:
 
         respx.post("https://api.deps.dev/v3alpha/versionbatch").mock(side_effect=handler)
         with httpx.Client() as client:
-            cache = bulk_resolve_go_licenses([_go_dep()], client, max_workers=4)
+            cache = bulk_resolve_go([_go_dep()], client, max_workers=4)
         assert ("github.com/foo/bar", "v1.0.0") in cache
         info = cache[("github.com/foo/bar", "v1.0.0")]
         assert info is not None
@@ -3546,9 +3553,7 @@ class TestBulkResolveGoLicenses:
             )
         )
         with httpx.Client() as client:
-            cache = bulk_resolve_go_licenses(
-                [_go_dep("github.com/missing/x")], client, max_workers=4
-            )
+            cache = bulk_resolve_go([_go_dep("github.com/missing/x")], client, max_workers=4)
         assert cache[("github.com/missing/x", "v1.0.0")] is None
 
     @respx.mock
@@ -3559,7 +3564,7 @@ class TestBulkResolveGoLicenses:
             return_value=httpx.Response(503)
         )
         with httpx.Client() as client:
-            cache = bulk_resolve_go_licenses([_go_dep()], client, max_workers=4)
+            cache = bulk_resolve_go([_go_dep()], client, max_workers=4)
         assert cache == {}
 
     @respx.mock
@@ -3575,7 +3580,7 @@ class TestBulkResolveGoLicenses:
 
         respx.post("https://api.deps.dev/v3alpha/versionbatch").mock(side_effect=handler)
         with httpx.Client() as client:
-            bulk_resolve_go_licenses(
+            bulk_resolve_go(
                 [_go_dep(version=""), _go_dep("github.com/x/y", version="v1.0.0")],
                 client,
                 max_workers=4,
@@ -3620,7 +3625,7 @@ class TestBulkResolveGoLicenses:
         respx.post("https://api.deps.dev/v3alpha/versionbatch").mock(side_effect=handler)
         deps = [_go_dep(f"github.com/x/m{i}", version=f"v1.0.{i}") for i in range(5)]
         with httpx.Client() as client:
-            cache = bulk_resolve_go_licenses(deps, client, chunk_size=2, max_workers=4)
+            cache = bulk_resolve_go(deps, client, chunk_size=2, max_workers=4)
         assert call_count == 3
         assert len(cache) == 5
         for i in range(5):
@@ -3665,21 +3670,21 @@ class TestBulkResolveGoLicenses:
 
         respx.post("https://api.deps.dev/v3alpha/versionbatch").mock(side_effect=handler)
         with httpx.Client() as client:
-            bulk_resolve_go_licenses([_go_dep(), _go_dep(), _go_dep()], client, max_workers=4)
+            bulk_resolve_go([_go_dep(), _go_dep(), _go_dep()], client, max_workers=4)
         assert len(captured["body"]["requests"]) == 1
 
     def test_empty_input_makes_no_request(self):
         # Nothing armed in respx — if a POST were attempted, the test
         # framework would error.
         with httpx.Client() as client:
-            cache = bulk_resolve_go_licenses([], client, max_workers=4)
+            cache = bulk_resolve_go([], client, max_workers=4)
         assert cache == {}
 
     def test_all_versions_unparseable_returns_empty(self):
         # Every dep has an empty/malformed version → the early-exit after
         # the build-requests loop fires and no POST is made.
         with httpx.Client() as client:
-            cache = bulk_resolve_go_licenses(
+            cache = bulk_resolve_go(
                 [_go_dep(version=""), _go_dep("github.com/x/y", version="bad")],
                 client,
                 max_workers=4,
@@ -3695,7 +3700,7 @@ class TestBulkResolveGoLicenses:
             return_value=httpx.Response(200, json={"responses": "not-a-list"})
         )
         with httpx.Client() as client:
-            cache = bulk_resolve_go_licenses([_go_dep()], client, max_workers=4)
+            cache = bulk_resolve_go([_go_dep()], client, max_workers=4)
         assert cache == {}
 
     @respx.mock
@@ -3738,7 +3743,7 @@ class TestBulkResolveGoLicenses:
             )
         )
         with httpx.Client() as client:
-            cache = bulk_resolve_go_licenses([_go_dep()], client, max_workers=4)
+            cache = bulk_resolve_go([_go_dep()], client, max_workers=4)
         # Only the one valid entry survived.
         assert len(cache) == 1
         info = cache[("github.com/foo/bar", "v1.0.0")]
@@ -3777,7 +3782,7 @@ class TestBulkResolveGoLicenses:
             )
         )
         with httpx.Client() as client:
-            cache = bulk_resolve_go_licenses([_go_dep()], client, max_workers=4)
+            cache = bulk_resolve_go([_go_dep()], client, max_workers=4)
         assert cache == {}
 
     @respx.mock
@@ -3816,7 +3821,7 @@ class TestBulkResolveGoLicenses:
                 patch("licenseal._concurrency.ThreadPoolExecutor", FakeExecutor),
                 httpx.Client() as client,
             ):
-                bulk_resolve_go_licenses(deps, client, chunk_size=1, max_workers=max_workers)
+                bulk_resolve_go(deps, client, chunk_size=1, max_workers=max_workers)
             assert seen == [expected], f"max_workers={max_workers}"
 
 
@@ -4552,12 +4557,10 @@ class TestNuspecWalkerDepthCap:
 
 
 class TestBulkResolveNugetLicenses:
-    """``bulk_resolve_nuget_licenses`` mirrors the Go bulk path with ``system="NUGET"``."""
+    """The combined batch API's NUGET system mirrors the Go bulk path."""
 
     @respx.mock
     def test_batch_returns_license_info_for_resolved_versions(self):
-        from licenseal.resolvers.deps_dev import bulk_resolve_nuget_licenses
-
         respx.post("https://api.deps.dev/v3alpha/versionbatch").mock(
             return_value=httpx.Response(
                 200,
@@ -4592,7 +4595,7 @@ class TestBulkResolveNugetLicenses:
             group=DependencyGroup.PROD,
         )
         with httpx.Client() as client:
-            cache = bulk_resolve_nuget_licenses([dep], client, max_workers=4)
+            cache = bulk_resolve_licenses({"NUGET": [dep]}, client, max_workers=4)["NUGET"]
         key = ("Newtonsoft.Json", "13.0.1")
         assert key in cache
         info = cache[key]
@@ -4601,8 +4604,6 @@ class TestBulkResolveNugetLicenses:
 
     @respx.mock
     def test_unparseable_version_excluded_from_batch(self):
-        from licenseal.resolvers.deps_dev import bulk_resolve_nuget_licenses
-
         # respx will fail loudly if a POST is made when no deps are walkable.
         dep = Dependency(
             name="X",
@@ -4611,7 +4612,7 @@ class TestBulkResolveNugetLicenses:
             group=DependencyGroup.PROD,
         )
         with httpx.Client() as client:
-            cache = bulk_resolve_nuget_licenses([dep], client, max_workers=4)
+            cache = bulk_resolve_licenses({"NUGET": [dep]}, client, max_workers=4)["NUGET"]
         assert cache == {}
 
 
@@ -4803,11 +4804,11 @@ class TestBulkResolveRubyLicenses:
                 },
             )
 
-        from licenseal.resolvers.deps_dev import bulk_resolve_ruby_licenses
-
         respx.post("https://api.deps.dev/v3alpha/versionbatch").mock(side_effect=handler)
         with httpx.Client() as client:
-            cache = bulk_resolve_ruby_licenses([_ruby_dep()], client, max_workers=4)
+            cache = bulk_resolve_licenses({"RUBYGEMS": [_ruby_dep()]}, client, max_workers=4)[
+                "RUBYGEMS"
+            ]
         assert ("rails", "7.1.3") in cache
         info = cache[("rails", "7.1.3")]
         assert info is not None
@@ -4818,21 +4819,17 @@ class TestBulkResolveRubyLicenses:
     def test_unpinned_dep_skipped(self):
         # ``==`` extraction returns None for a range constraint; the dep
         # never enters the batch. Empty input → no POST issued.
-        from licenseal.resolvers.deps_dev import bulk_resolve_ruby_licenses
-
         with httpx.Client() as client:
-            cache = bulk_resolve_ruby_licenses(
-                [_ruby_dep(version="~> 7.0")],
+            cache = bulk_resolve_licenses(
+                {"RUBYGEMS": [_ruby_dep(version="~> 7.0")]},
                 client,
                 max_workers=4,
-            )
+            )["RUBYGEMS"]
         assert cache == {}
 
     def test_empty_input_no_request(self):
-        from licenseal.resolvers.deps_dev import bulk_resolve_ruby_licenses
-
         with httpx.Client() as client:
-            cache = bulk_resolve_ruby_licenses([], client, max_workers=4)
+            cache = bulk_resolve_licenses({"RUBYGEMS": []}, client, max_workers=4)["RUBYGEMS"]
         assert cache == {}
 
 
@@ -4943,3 +4940,81 @@ class TestPyPIExtractRawLicenseGuard:
         assert _extract_raw_license(None) == ""  # type: ignore[arg-type]
         assert _extract_raw_license("not a dict") == ""  # type: ignore[arg-type]
         assert _extract_raw_license([]) == ""  # type: ignore[arg-type]
+
+
+class TestBulkResolveCombinedSystems:
+    """Cross-ecosystem fan-out through one shared batch pool."""
+
+    @respx.mock
+    def test_multiple_systems_fan_out_and_key_per_system(self):
+        # GO + PYPI chunks run through the shared pool; each POST body
+        # carries a single system's versionKeys, and each system's results
+        # land in that system's cache.
+        bodies: list[dict] = []
+
+        def handler(request):
+            body = json.loads(request.content)
+            bodies.append(body)
+            return httpx.Response(
+                200,
+                json={
+                    "responses": [
+                        {
+                            "request": entry,
+                            "version": {"versionKey": entry["versionKey"], "licenses": ["MIT"]},
+                        }
+                        for entry in body["requests"]
+                    ],
+                    "nextPageToken": "",
+                },
+            )
+
+        respx.post("https://api.deps.dev/v3alpha/versionbatch").mock(side_effect=handler)
+        py_dep = Dependency(
+            name="requests",
+            version_constraint="==2.31.0",
+            ecosystem=Ecosystem.PYTHON,
+            group=DependencyGroup.PROD,
+        )
+        with httpx.Client() as client:
+            caches = bulk_resolve_licenses(
+                {"GO": [_go_dep("github.com/x/a")], "PYPI": [py_dep]},
+                client,
+                max_workers=4,
+            )
+        go_info = caches["GO"][("github.com/x/a", "v1.0.0")]
+        assert go_info is not None
+        assert go_info.license_id == "MIT"
+        py_info = caches["PYPI"][("requests", "2.31.0")]
+        assert py_info is not None
+        assert py_info.license_id == "MIT"
+        # Two POSTs total, each carrying exactly one system's requests.
+        systems_per_post = [
+            {entry["versionKey"]["system"] for entry in body["requests"]} for body in bodies
+        ]
+        assert all(len(systems) == 1 for systems in systems_per_post)
+        assert sorted(next(iter(s)) for s in systems_per_post) == ["GO", "PYPI"]
+
+    def test_extractor_branches_cover_every_system(self):
+        # Each supported system resolves to its ecosystem's pin extractor.
+        assert _version_extractor_for("GO")("v1.2.3") == "v1.2.3"
+        assert _version_extractor_for("MAVEN")("==1.2.3") == "1.2.3"
+        assert _version_extractor_for("NUGET")("13.0.1") == "13.0.1"
+        assert _version_extractor_for("PYPI")("==2.31.0") == "2.31.0"
+        assert _version_extractor_for("NPM")("1.0.0") == "1.0.0"
+        assert _version_extractor_for("CARGO")("=1.0.193") == "1.0.193"
+        assert _version_extractor_for("RUBYGEMS")("==7.1.3") == "7.1.3"
+
+    def test_unknown_system_raises(self):
+        with pytest.raises(ValueError, match="unknown deps.dev system"):
+            _version_extractor_for("SWIFT")
+
+    def test_all_empty_systems_make_no_request(self):
+        # Nothing armed in respx — an attempted POST would fail the test.
+        with httpx.Client() as client:
+            caches = bulk_resolve_licenses(
+                {"GO": [], "PYPI": [], "NPM": []},
+                client,
+                max_workers=4,
+            )
+        assert caches == {"GO": {}, "PYPI": {}, "NPM": {}}

@@ -95,7 +95,7 @@ class TestEgressScopeReachesFetchPools:
         ]
         tethered.deactivate()
         with httpx.Client() as client, tethered.scope(allow=[_ALLOWED_RULE], label="probe"):
-            deps_dev.bulk_resolve_go_licenses(deps, client, chunk_size=1, max_workers=4)
+            deps_dev.bulk_resolve_licenses({"GO": deps}, client, chunk_size=1, max_workers=4)
 
         assert observed, "batch pool never invoked the (patched) fetcher"
         assert all(v == "enforced" for v in observed), observed
