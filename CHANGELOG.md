@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file. Each versio
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/), and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.4.1] - 2026-09-25
+
+### Fixed
+
+- `check --output` no longer fails without saying why. The report goes to the file, so CI logs and pre-commit hooks used to show only the exit code; a failing check now also prints to stderr the summary line, each unreviewed finding that failed the check (violations, plus warnings and unknowns under `--strict`), the number of manifests that couldn't be analyzed, and the report's path. Exit codes, the written report, and checks that pass or run without `--output` (which print the full report) are unchanged.
+
 ## [0.4.0] - 2026-09-25
 
 ### Changed

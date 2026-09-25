@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from io import StringIO
+from pathlib import Path
 
 from rich.console import Console
 
@@ -28,6 +29,7 @@ from licenseal.report import (
     _pick_from_parts,
     _pick_url_leaf,
     _source_terminal_url,
+    render_check_failure,
     render_json,
     render_markdown,
     render_table,
@@ -706,6 +708,27 @@ class TestRenderMarkdown:
         slow = _sample_report()
         slow.elapsed_seconds = 83.7
         assert render_markdown(slow) == render_markdown(_sample_report())
+
+    def test_render_check_failure(self):
+        report = _sample_report()
+        failing = report.violations + report.warnings
+        text = render_check_failure(
+            report, failing, gap_count=2, output_file=Path("reports/LICENSES.md")
+        )
+        lines = text.splitlines()
+        assert lines[0] == "License check failed: 1 violation, 1 warning, 1 unknown, 3 ok"
+        assert lines[1] == f"  ✗ {report.violations[0].reason}"
+        assert lines[2] == f"  ⚠ {report.warnings[0].reason}"
+        assert lines[3] == "  2 manifest(s) could not be fully analyzed (see the warnings above)"
+        assert lines[4] == f"Full report: {Path('reports/LICENSES.md')}"
+
+    def test_render_check_failure_without_gaps(self):
+        report = _sample_report()
+        text = render_check_failure(
+            report, report.violations, gap_count=0, output_file=Path("LICENSES.md")
+        )
+        assert "could not be fully analyzed" not in text
+        assert len(text.splitlines()) == 3
 
     def test_markdown_compound_license_links_each_part(self):
         report = AnalysisReport(

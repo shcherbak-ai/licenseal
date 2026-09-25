@@ -957,6 +957,8 @@ class TestCheckCommand:
         assert "**Project license:** MIT" in content
         # LF line endings on every platform (text mode would write CRLF on Windows).
         assert b"\r\n" not in out_file.read_bytes()
+        # A passing check doesn't print a failure explanation.
+        assert "License check failed" not in result.stderr
 
     @respx.mock
     def test_output_flag_writes_table_to_file_without_ansi(self, tmp_path):
@@ -1032,6 +1034,99 @@ class TestCheckCommand:
         assert data["summary"]["violations"] >= 1
         names = {dep["name"] for dep in data["dependencies"]}
         assert "gpl-lib" in names
+
+    @respx.mock
+    def test_output_flag_explains_a_failed_check_on_stderr(self, tmp_path):
+        # With --output nothing else reaches the terminal, so CI logs and
+        # pre-commit output need the reason for the exit code on stderr.
+        (tmp_path / "pyproject.toml").write_text(
+            textwrap.dedent("""\
+            [project]
+            name = "myproject"
+            license = {text = "MIT"}
+            dependencies = ["lgpl-lib", "mit-lib"]
+            """)
+        )
+        _mock_pypi("lgpl-lib", "LGPL-3.0-only")
+        _mock_pypi("mit-lib", "MIT")
+        out_file = tmp_path / "LICENSES.md"
+
+        result = CliRunner().invoke(
+            main, ["check", "--path", str(tmp_path), "-f", "markdown", "-o", str(out_file)]
+        )
+        assert result.exit_code == 1
+        assert "License check failed: 0 violations, 1 warning, 0 unknown, 1 ok" in result.stderr
+        assert "  ⚠ lgpl-lib uses LGPL-3.0-only" in result.stderr
+        assert "mit-lib" not in result.stderr
+        assert f"Full report: {out_file}" in result.stderr
+
+    @respx.mock
+    def test_output_flag_failure_lists_only_what_failed_the_check(self, tmp_path):
+        # --no-strict fails on violations alone, and reviewed findings never
+        # fail the check: only the unreviewed violation is listed.
+        (tmp_path / "pyproject.toml").write_text(
+            textwrap.dedent("""\
+            [project]
+            name = "myproject"
+            license = {text = "MIT"}
+            dependencies = ["gpl-lib", "lgpl-lib", "reviewed-gpl"]
+            """)
+        )
+        (tmp_path / "licenseal.review.toml").write_text(
+            textwrap.dedent("""\
+            [[review]]
+            ecosystem = "python"
+            package = "reviewed-gpl"
+            version = "1.0.0"
+            license = "GPL-3.0-only"
+            note = "internal tool, never distributed"
+            """)
+        )
+        _mock_pypi("gpl-lib", "GPL-3.0-only")
+        _mock_pypi("lgpl-lib", "LGPL-3.0-only")
+        _mock_pypi("reviewed-gpl", "GPL-3.0-only")
+        out_file = tmp_path / "report.json"
+
+        result = CliRunner().invoke(
+            main,
+            ["check", "--path", str(tmp_path), "--no-strict", "-f", "json", "-o", str(out_file)],
+        )
+        assert result.exit_code == 1
+        assert "  ✗ gpl-lib uses GPL-3.0-only" in result.stderr
+        assert "lgpl-lib" not in result.stderr
+        assert "reviewed-gpl" not in result.stderr
+
+    @respx.mock
+    def test_output_flag_failure_mentions_analysis_gaps(self, tmp_path):
+        # A manifest that couldn't be parsed fails --strict with no finding to
+        # list, so the message points at the warnings printed before it.
+        (tmp_path / "package.json").write_text("{ not valid json", encoding="utf-8")
+        out_file = tmp_path / "report.json"
+
+        result = CliRunner().invoke(
+            main, ["check", "--path", str(tmp_path), "-f", "json", "-o", str(out_file)]
+        )
+        assert result.exit_code == 1
+        assert (
+            "  1 manifest(s) could not be fully analyzed (see the warnings above)" in result.stderr
+        )
+
+    @respx.mock
+    def test_failure_is_not_repeated_on_stderr_without_output_flag(self, tmp_path):
+        # Without --output the report, findings included, is already printed.
+        (tmp_path / "pyproject.toml").write_text(
+            textwrap.dedent("""\
+            [project]
+            name = "myproject"
+            license = {text = "MIT"}
+            dependencies = ["lgpl-lib"]
+            """)
+        )
+        _mock_pypi("lgpl-lib", "LGPL-3.0-only")
+
+        result = CliRunner().invoke(main, ["check", "--path", str(tmp_path)])
+        assert result.exit_code == 1
+        assert "License check failed" not in result.stderr
 
     @respx.mock
     def test_output_flag_reports_disk_write_error_cleanly(self, tmp_path):

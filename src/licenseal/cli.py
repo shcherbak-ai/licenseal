@@ -41,6 +41,7 @@ from licenseal.discovery.ruby.lockfiles import (
 )
 from licenseal.models import (
     AnalysisReport,
+    CompatibilityResult,
     CompatibilityVerdict,
     Dependency,
     DependencyGroup,
@@ -48,7 +49,7 @@ from licenseal.models import (
     LicenseInfo,
     ReportDiagnostic,
 )
-from licenseal.report import render_json, render_markdown, render_table
+from licenseal.report import render_check_failure, render_json, render_markdown, render_table
 from licenseal.resolvers.cran import fetch_cran_index, resolve_r_license
 from licenseal.resolvers.crates_io import (
     _extract_pinned_version as _extract_rust_pinned_version,  # noqa: PLC2701
@@ -229,17 +230,19 @@ def _should_fail(report: AnalysisReport, strict: bool, *, had_analysis_gaps: boo
     analysis* — morally an UNKNOWN, since the scan can't vouch for what it
     never saw — so ``--strict`` fails on it just like an unknown license.
     """
+    return bool(_failing_results(report, strict)) or (strict and had_analysis_gaps)
 
-    def _unreviewed(results: list) -> bool:
-        return any(not r.license_info.reviewed for r in results)
 
-    if _unreviewed(report.violations):
-        return True
-    if not strict:
-        return False
-    if had_analysis_gaps:
-        return True
-    return _unreviewed(report.warnings) or _unreviewed(report.unknown)
+def _failing_results(report: AnalysisReport, strict: bool) -> list[CompatibilityResult]:
+    """The unreviewed findings that fail the check.
+
+    Violations always; warnings and unknowns only under ``--strict``. Shared
+    by ``_should_fail`` and the failure message, so the two can't disagree.
+    """
+    buckets = [report.violations]
+    if strict:
+        buckets += [report.warnings, report.unknown]
+    return [r for bucket in buckets for r in bucket if not r.license_info.reviewed]
 
 
 def _registries_unreachable(
@@ -1000,6 +1003,14 @@ def check(
         click.echo(skill_hint, err=True)
 
     if _should_fail(report, strict, had_analysis_gaps=gap_count > 0):
+        if output_file is not None:
+            # The report went to a file, so say on the terminal why the check
+            # failed; CI logs and pre-commit output would only show the exit code.
+            failing = _failing_results(report, strict)
+            click.echo(
+                render_check_failure(report, failing, gap_count=gap_count, output_file=output_file),
+                err=True,
+            )
         sys.exit(1)
 
 

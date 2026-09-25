@@ -239,7 +239,7 @@ Preview:
 
 Use the workflow status badge as the primary signal: it shows that license compatibility is checked in CI and that the latest run passed.
 
-For a PR comment or audit artifact, write Markdown or JSON. The file is saved before the gate runs, so CI can publish it even on a failing check:
+For a PR comment or audit artifact, write Markdown or JSON. The file is saved before the gate runs, so CI can publish it even on a failing check, and a failing check still prints the findings that failed it to stderr:
 
 ```bash
 licenseal check -f markdown -o LICENSES.md   # PR-comment-friendly audit

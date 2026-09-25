@@ -583,6 +583,44 @@ def render_table(
     console.print()
 
 
+def _summary_text(report: AnalysisReport) -> str:
+    """Plain-text verdict counts, e.g. ``0 violations, 2 warnings, 0 unknown, 15 ok``."""
+    n_viol = len(report.violations)
+    n_warn = len(report.warnings)
+    summary = (
+        f"{n_viol} violation{'s' if n_viol != 1 else ''}, "
+        f"{n_warn} warning{'s' if n_warn != 1 else ''}, "
+        f"{len(report.unknown)} unknown, {len(report.ok)} ok"
+    )
+    if report.reviewed:
+        summary += f" (of which {len(report.reviewed)} reviewed)"
+    return summary
+
+
+def render_check_failure(
+    report: AnalysisReport,
+    failing: list[CompatibilityResult],
+    *,
+    gap_count: int,
+    output_file: Path,
+) -> str:
+    """Explain a failed check whose report went to a file (``--output``).
+
+    Nothing else reaches the terminal in that case, so CI logs and pre-commit
+    output would show only the exit code. ``failing`` holds the unreviewed
+    findings that failed the check; ``gap_count`` the manifests that couldn't
+    be analyzed (already listed in the warnings printed before this).
+    """
+    lines = [f"License check failed: {_summary_text(report)}"]
+    lines += [f"  {_VERDICT_MD_ICONS[r.verdict]} {r.reason}" for r in failing]
+    if gap_count:
+        lines.append(
+            f"  {gap_count} manifest(s) could not be fully analyzed (see the warnings above)"
+        )
+    lines.append(f"Full report: {output_file}")
+    return "\n".join(lines)
+
+
 def render_json(report: AnalysisReport) -> str:
     """Render the analysis report as JSON."""
     data = _report_to_dict(report)
@@ -640,21 +678,9 @@ def render_markdown(report: AnalysisReport) -> str:
 
     lines.append("")
 
-    n_ok = len(report.ok)
-    n_warn = len(report.warnings)
-    n_viol = len(report.violations)
-    n_unk = len(report.unknown)
-    n_reviewed = len(report.reviewed)
-    summary = (
-        f"{n_viol} violation{'s' if n_viol != 1 else ''}, "
-        f"{n_warn} warning{'s' if n_warn != 1 else ''}, "
-        f"{n_unk} unknown, {n_ok} ok"
-    )
-    if n_reviewed:
-        summary += f" (of which {n_reviewed} reviewed)"
     # No run time here, unlike the table output: the Markdown report is meant
     # to be checked in (LICENSES.md), so it must depend only on the findings.
-    lines.append(f"**Summary:** {summary}")
+    lines.append(f"**Summary:** {_summary_text(report)}")
 
     detail_results = [r for r in grouped if r.verdict != CompatibilityVerdict.COMPATIBLE]
     if detail_results:

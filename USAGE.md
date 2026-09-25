@@ -56,7 +56,7 @@ licenseal check --exclude-dirs third_party,scratch  # skip subtrees not already 
 - `--no-strict` demotes warnings / unknowns / gaps to advisory. **Violations always fail** — they're definite legal incompatibilities and the flag won't silence them.
 - If **every** registry lookup fails and not one dependency resolves (no network, blocked egress, registry-wide outage), `check` aborts with an error and a non-zero exit rather than reporting an all-UNKNOWN scan; this is not demotable by `--no-strict`.
 
-The `-o / --output FILE` flag writes the rendered report to a file (UTF-8, no ANSI escapes for table format). The file is written **before** the strict-mode gate runs, so CI can publish the artifact even when `check` exits non-zero. JSON is the stable machine-readable format — see [JSON_OUTPUT.md](JSON_OUTPUT.md) for the schema.
+The `-o / --output FILE` flag writes the rendered report to a file (UTF-8, no ANSI escapes for table format). The file is written **before** the strict-mode gate runs, so CI can publish the artifact even when `check` exits non-zero. Since the report itself doesn't reach the terminal, a failing check then also prints the summary and the findings that failed it (plus the number of analysis gaps) to stderr, so CI logs and pre-commit output show why without opening the file. JSON is the stable machine-readable format — see [JSON_OUTPUT.md](JSON_OUTPUT.md) for the schema.
 
 ## Transitive scanning
 
