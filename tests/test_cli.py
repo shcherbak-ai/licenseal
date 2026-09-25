@@ -955,6 +955,8 @@ class TestCheckCommand:
         content = out_file.read_text(encoding="utf-8")
         assert content.startswith("# License Analysis Report")
         assert "**Project license:** MIT" in content
+        # LF line endings on every platform (text mode would write CRLF on Windows).
+        assert b"\r\n" not in out_file.read_bytes()
 
     @respx.mock
     def test_output_flag_writes_table_to_file_without_ansi(self, tmp_path):
@@ -1407,6 +1409,8 @@ class TestCheckCommand:
         assert 'version = "1.0.0"' in content
         assert 'license = ""' in content
         assert 'note = ""' in content
+        # LF line endings on every platform (text mode would write CRLF on Windows).
+        assert b"\r\n" not in (tmp_path / "licenseal.review.toml").read_bytes()
 
     @respx.mock
     def test_init_review_file_skips_non_unknown_dependencies(self, tmp_path):
@@ -1504,6 +1508,8 @@ class TestCheckCommand:
         # New flagged entry appended.
         assert 'package = "lgpl-lib"' in text
         assert "Appended 1 review entry" in result.output
+        # LF line endings on every platform (text mode would write CRLF on Windows).
+        assert b"\r\n" not in review_path.read_bytes()
 
     @respx.mock
     def test_init_review_file_force_no_new_entries(self, tmp_path):
@@ -1718,7 +1724,7 @@ class TestCheckCommand:
         result = runner.invoke(main, ["check", "--path", str(tmp_path), "-f", "markdown"])
         assert result.exit_code == 0
         assert "# License Analysis Report" in result.output
-        assert "**Completed in:** " in result.output
+        assert "Completed in" not in result.output
         assert "|Package|Ecosystem|Group|Source|License|Risk|Status|" in result.output
         assert not result.output.endswith("\n\n")
 
@@ -2241,6 +2247,8 @@ class TestInstallSkill:
         assert "name: licenseal-review" in content
         assert "description:" in content
         assert str(out) in result.output
+        # LF line endings on every platform (text mode would write CRLF on Windows).
+        assert b"\r\n" not in out.read_bytes()
 
     def test_install_skill_creates_missing_dirs(self, tmp_path):
         # A fresh project has no .claude/skills/ tree yet.
@@ -2316,6 +2324,8 @@ class TestInstallSkill:
         stamped_version, _, pristine = _parse_installed_skill(out.read_text(encoding="utf-8"))
         assert stamped_version == _package_version()
         assert pristine is True
+        # LF line endings on every platform (text mode would write CRLF on Windows).
+        assert b"\r\n" not in out.read_bytes()
 
     def test_install_skill_requires_force_for_hand_modified(self, tmp_path):
         # Markers present but the body was edited (hash no longer matches):

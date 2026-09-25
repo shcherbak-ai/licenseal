@@ -27,8 +27,6 @@
 
 **Summary:** 0 violations, 1 warning, 0 unknown, 19 ok (of which 1 reviewed)
 
-**Completed in:** 0.72s
-
 ## Details
 
 - ⚠ certifi uses MPL-2.0 — weak copyleft license — modifications to the licensed files must remain under the same license; linking from other files is allowed. Review whether this is acceptable for your Apache-2.0 project

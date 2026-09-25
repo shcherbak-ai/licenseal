@@ -4,6 +4,17 @@ All notable changes to this project will be documented in this file. Each versio
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/), and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.4.0] - 2026-09-25
+
+### Changed
+
+- The Markdown report no longer includes the scan's run time (`**Completed in:**`), so a checked-in `LICENSES.md` only changes when the scan results do. The table output still shows the run time, and the JSON report keeps `elapsed_seconds`.
+
+### Fixed
+
+- `uv.lock` scans now include packages installed through extras (`django[argon2]` → `argon2-cffi` and everything below it). uv records those edges in `[package.optional-dependencies]`, which the parser didn't read, so every package reachable only through a requested extra was dropped as an orphan — silently, with no analysis gap. Extras requested by the project (in its dependencies, its own extras, or its dependency groups) or by other packages, including extras nested inside extras, are followed; extras nobody requests stay out. This also works for non-package projects (e.g. `tool.uv.package = false`, or a root without a build system), whose lockfile entry is `source = { virtual = "<path>" }`: the parser only recognized `virtual = true` as the project, so the extras requested in such a project's own extras and dependency groups would have been missed.
+- Files written by `check --output`, `init-review-file`, and `install-skill` now use LF line endings on every platform. On Windows they were written with CRLF, so a checked-in report, review file, or installed skill changed line endings depending on the platform that generated it.
+
 ## [0.3.0] - 2026-06-10
 
 ### Added

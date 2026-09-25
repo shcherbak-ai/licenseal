@@ -694,10 +694,18 @@ class TestRenderMarkdown:
         assert "[Apache-2.0](https://spdx.org/licenses/Apache-2.0.html)" in md
         assert "**Summary:**" in md
         assert "\n**Summary:** 1 violation, 1 warning, 1 unknown, 3 ok\n\n" in md
-        assert "**Completed in:** 0.42s" in md
+        assert "Completed in" not in md
         assert "1 violation," in md
         assert f"_{_REPORT_NOTE.replace('licenseal check', '`licenseal check`')}_" in md
         assert not md.endswith("\n")
+
+    def test_markdown_does_not_depend_on_run_time(self):
+        # The Markdown report is meant to be checked in (LICENSES.md): two
+        # scans with the same findings must render identically, however long
+        # each took, or the file changes on every run.
+        slow = _sample_report()
+        slow.elapsed_seconds = 83.7
+        assert render_markdown(slow) == render_markdown(_sample_report())
 
     def test_markdown_compound_license_links_each_part(self):
         report = AnalysisReport(

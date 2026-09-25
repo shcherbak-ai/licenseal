@@ -511,6 +511,256 @@ class TestParseUvLock:
         )
         assert deps == []
 
+    def test_follows_extras_requested_by_the_project(self, tmp_path):
+        # The project asks for `django[argon2]`; argon2-cffi lives only in
+        # django's [package.optional-dependencies] table. Its whole subtree
+        # must be attributed to django instead of dropped as orphans.
+        path = self._write(
+            tmp_path,
+            """\
+            version = 1
+
+            [[package]]
+            name = "myproject"
+            version = "0.1.0"
+            source = { virtual = "." }
+            dependencies = [
+                { name = "django", extra = ["argon2"] },
+            ]
+
+            [[package]]
+            name = "django"
+            version = "6.1.1"
+            dependencies = [
+                { name = "asgiref" },
+            ]
+
+            [package.optional-dependencies]
+            argon2 = [
+                { name = "argon2-cffi" },
+            ]
+            bcrypt = [
+                { name = "bcrypt" },
+            ]
+
+            [[package]]
+            name = "asgiref"
+            version = "3.12.1"
+
+            [[package]]
+            name = "argon2-cffi"
+            version = "25.1.0"
+            dependencies = [
+                { name = "cffi" },
+            ]
+
+            [[package]]
+            name = "cffi"
+            version = "2.1.1"
+
+            [[package]]
+            name = "bcrypt"
+            version = "5.0.0"
+            """,
+        )
+        deps = parse_uv_lock(
+            path, prod_root_names={"django"}, dev_root_names=set(), include_dev=False
+        )
+        by_name = {d.name: d for d in deps}
+        assert set(by_name) == {"django", "asgiref", "argon2-cffi", "cffi"}
+        for name in ("argon2-cffi", "cffi"):
+            assert by_name[name].group == DependencyGroup.PROD
+            assert by_name[name].direct_ancestors == ("django",)
+        # bcrypt is behind an extra nobody requested: not installed.
+        assert "bcrypt" not in by_name
+
+    def test_follows_extras_requested_by_transitive_packages(self, tmp_path):
+        # Extras requested deeper in the graph count too, and an extra's
+        # optional dependencies can request further extras of their own.
+        path = self._write(
+            tmp_path,
+            """\
+            version = 1
+
+            [[package]]
+            name = "app"
+            version = "1.0.0"
+            dependencies = [
+                { name = "client", extra = ["http2"] },
+                { name = "helper" },
+            ]
+
+            [[package]]
+            name = "helper"
+            version = "1.0.0"
+            dependencies = [
+                { name = "client", extra = ["http2"] },
+            ]
+
+            [[package]]
+            name = "client"
+            version = "1.0.0"
+
+            [package.optional-dependencies]
+            http2 = [
+                { name = "codec", extra = ["fast"] },
+            ]
+
+            [[package]]
+            name = "codec"
+            version = "1.0.0"
+
+            [package.optional-dependencies]
+            fast = [
+                { name = "accelerator" },
+            ]
+
+            [[package]]
+            name = "accelerator"
+            version = "1.0.0"
+            """,
+        )
+        deps = parse_uv_lock(path, prod_root_names={"app"}, dev_root_names=set(), include_dev=False)
+        by_name = {d.name: d for d in deps}
+        assert set(by_name) == {"app", "helper", "client", "codec", "accelerator"}
+        assert by_name["accelerator"].direct_ancestors == ("app",)
+
+    @pytest.mark.parametrize(
+        "source",
+        [
+            '{ editable = "." }',
+            # A non-package project (`tool.uv.package = false`): uv records
+            # `virtual` as a path, and the entry must still count as the
+            # project, or the extras its dependency groups request are missed.
+            '{ virtual = "." }',
+        ],
+    )
+    def test_extras_requested_by_a_dependency_group_stay_dev(self, tmp_path, source):
+        # A project's dependency groups are recorded under
+        # [package.dev-dependencies]; extras requested there only install
+        # dev-side packages.
+        path = self._write(
+            tmp_path,
+            """\
+            version = 1
+
+            [[package]]
+            name = "myproject"
+            version = "0.1.0"
+            source = SOURCE
+
+            [package.dev-dependencies]
+            dev = [
+                { name = "server", extra = ["standard"] },
+            ]
+
+            [[package]]
+            name = "server"
+            version = "1.0.0"
+
+            [package.optional-dependencies]
+            standard = [
+                { name = "reloader" },
+            ]
+
+            [[package]]
+            name = "reloader"
+            version = "1.0.0"
+            """.replace("SOURCE", source),
+        )
+        with_dev = parse_uv_lock(
+            path, prod_root_names=set(), dev_root_names={"server"}, include_dev=True
+        )
+        by_name = {d.name: d for d in with_dev}
+        assert by_name["reloader"].group == DependencyGroup.DEV
+        assert by_name["reloader"].direct_ancestors == ("server",)
+        without_dev = parse_uv_lock(
+            path, prod_root_names=set(), dev_root_names={"server"}, include_dev=False
+        )
+        assert without_dev == []
+
+    @pytest.mark.parametrize("source", ['{ editable = "." }', '{ virtual = "." }'])
+    def test_follows_extras_requested_in_the_projects_own_extras(self, tmp_path, source):
+        # `[project.optional-dependencies] server = ["server[standard]"]` is
+        # recorded in the project entry's [package.optional-dependencies];
+        # the extra it requests must be followed like any other.
+        path = self._write(
+            tmp_path,
+            """\
+            version = 1
+
+            [[package]]
+            name = "myproject"
+            version = "0.1.0"
+            source = SOURCE
+
+            [package.optional-dependencies]
+            server = [
+                { name = "server", extra = ["standard"] },
+            ]
+
+            [[package]]
+            name = "server"
+            version = "1.0.0"
+
+            [package.optional-dependencies]
+            standard = [
+                { name = "reloader" },
+            ]
+
+            [[package]]
+            name = "reloader"
+            version = "1.0.0"
+            """.replace("SOURCE", source),
+        )
+        deps = parse_uv_lock(
+            path, prod_root_names={"server"}, dev_root_names=set(), include_dev=False
+        )
+        by_name = {d.name: d for d in deps}
+        assert set(by_name) == {"server", "reloader"}
+        assert by_name["reloader"].direct_ancestors == ("server",)
+
+    def test_ignores_malformed_extras(self, tmp_path):
+        # Non-list `extra` values, non-string extra names and non-table
+        # optional-dependencies are skipped rather than crashing the scan.
+        path = self._write(
+            tmp_path,
+            """\
+            version = 1
+
+            [[package]]
+            name = "myproject"
+            version = "0.1.0"
+            source = { editable = "." }
+            optional-dependencies = "not-a-table"
+            dependencies = [
+                { name = "a", extra = "not-a-list" },
+                { name = "b", extra = [1, "real"] },
+            ]
+
+            [[package]]
+            name = "a"
+            version = "1.0.0"
+
+            [[package]]
+            name = "b"
+            version = "1.0.0"
+
+            [package.optional-dependencies]
+            real = [
+                { name = "c" },
+            ]
+
+            [[package]]
+            name = "c"
+            version = "1.0.0"
+            """,
+        )
+        deps = parse_uv_lock(
+            path, prod_root_names={"a", "b"}, dev_root_names=set(), include_dev=False
+        )
+        assert {d.name for d in deps} == {"a", "b", "c"}
+
 
 class TestParsePoetryLock:
     def _write(self, tmp_path, content):

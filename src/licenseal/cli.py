@@ -984,7 +984,7 @@ def check(
         rendered = _render_report_to_string(report, output_format, project_path)
         try:
             output_file.parent.mkdir(parents=True, exist_ok=True)
-            output_file.write_text(rendered, encoding="utf-8")
+            output_file.write_text(rendered, encoding="utf-8", newline="\n")
         except OSError as exc:
             raise click.ClickException(f"Failed to write report to {output_file}: {exc}") from exc
         click.echo(f"Wrote {output_format} report to {output_file}", err=True)
@@ -1137,11 +1137,11 @@ def init_review_file(
             click.echo("No new flagged dependencies to add.", err=True)
             _warn_unscaffoldable(unscaffoldable)
             return
-        review_file.write_text(merged_text, encoding="utf-8")
+        review_file.write_text(merged_text, encoding="utf-8", newline="\n")
         suffix = "y" if appended == 1 else "ies"
         click.echo(f"Appended {appended} review entr{suffix} to {REVIEW_FILE_NAME}.")
     else:
-        review_file.write_text(render_review_template(flagged), encoding="utf-8")
+        review_file.write_text(render_review_template(flagged), encoding="utf-8", newline="\n")
         suffix = "y" if len(flagged) == 1 else "ies"
         click.echo(f"Wrote {REVIEW_FILE_NAME} with {len(flagged)} review entr{suffix}.")
     _warn_unscaffoldable(unscaffoldable)
@@ -1298,7 +1298,7 @@ def install_skill(path: Path, force: bool) -> None:
             click.echo(f"licenseal skill already up to date ({current_version}).")
             return
         if pristine or force:
-            target_file.write_text(rendered, encoding="utf-8")
+            target_file.write_text(rendered, encoding="utf-8", newline="\n")
             if stamped_version and stamped_version != current_version:
                 click.echo(
                     f"Refreshed licenseal skill {stamped_version} → {current_version} "
@@ -1312,7 +1312,7 @@ def install_skill(path: Path, force: bool) -> None:
             "(or predates version stamping). Use --force to overwrite."
         )
 
-    target_file.write_text(rendered, encoding="utf-8")
+    target_file.write_text(rendered, encoding="utf-8", newline="\n")
     click.echo(f"Installed licenseal skill {current_version} at {target_file}")
 
 

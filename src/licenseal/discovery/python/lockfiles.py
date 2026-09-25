@@ -11,6 +11,12 @@ from a `prod` direct dep, otherwise `dev` if reachable from a `dev` direct
 dep. Anything reachable from neither is dropped — these are typically
 dev-tool chains that no longer have a live root, or stale lockfile entries.
 
+uv.lock keeps the dependencies behind an extra (``django[argon2]`` →
+``argon2-cffi``) in a separate ``[package.optional-dependencies]`` table.
+Those edges count for every extra that is requested somewhere in the lock,
+by the project or by another package; without them, packages reachable only
+through an extra would be dropped as orphans.
+
 Pipfile.lock has no per-package dependency graph (each entry only carries
 ``version`` / ``hashes`` / ``markers``), so its attribution falls back to
 the section the entry lives in: ``default`` is PROD, ``develop`` is DEV.
@@ -145,6 +151,40 @@ def _attribute(
     return group_by_name, ancestors_by_name
 
 
+_Entry = tuple[str, tuple[str, ...]]  # (canonical name, requested extras)
+
+
+def _entries(field: object) -> list[_Entry]:
+    """Parse a uv.lock dependency list such as ``[{ name = "django", extra = ["argon2"] }]``.
+
+    Malformed entries are skipped.
+    """
+    if not isinstance(field, list):
+        return []
+    out: list[_Entry] = []
+    for raw in field:
+        if not isinstance(raw, dict):
+            continue
+        entry = cast("dict[str, Any]", raw)
+        name = entry.get("name")
+        if not isinstance(name, str):
+            continue
+        extras = entry.get("extra")
+        requested = (
+            tuple(e for e in extras if isinstance(e, str)) if isinstance(extras, list) else ()
+        )
+        out.append((_canon_name(name), requested))
+    return out
+
+
+def _entries_by_key(field: object) -> dict[str, list[_Entry]]:
+    """``_entries`` for each key of an extras or dependency-groups table."""
+    if not isinstance(field, dict):
+        return {}
+    table = cast("dict[str, Any]", field)
+    return {key: _entries(value) for key, value in table.items()}
+
+
 def parse_uv_lock(
     path: Path,
     prod_root_names: set[str],
@@ -154,10 +194,12 @@ def parse_uv_lock(
     """Parse a `uv.lock` file into a flat dependency list.
 
     uv.lock encodes parent → child edges as
-    `dependencies = [{ name = "..." }, ...]` per `[[package]]` block; we
-    harvest those, then run reverse-BFS from prod and dev root sets to
-    determine each package's group and direct ancestors. Packages reachable
-    from neither root set are dropped (orphans / stale).
+    `dependencies = [{ name = "..." }, ...]` per `[[package]]` block, plus
+    `[package.optional-dependencies]` for the children behind each extra; we
+    harvest those (the latter only for extras requested somewhere in the
+    lock), then run reverse-BFS from prod and dev root sets to determine each
+    package's group and direct ancestors. Packages reachable from neither root
+    set are dropped (orphans / stale).
     """
     prod_root_names = {_canon_name(n) for n in prod_root_names}
     dev_root_names = {_canon_name(n) for n in dev_root_names}
@@ -169,22 +211,32 @@ def parse_uv_lock(
     raw_pkgs: list[tuple[str, str]] = []  # (name, version)
     name_case: dict[str, str] = {}
     edges: dict[str, set[str]] = {}
+    optional: dict[str, dict[str, list[_Entry]]] = {}  # package → extra → entries
+    requested: list[tuple[str, str]] = []  # (package, extra) pairs the lock installs
     seen: set[tuple[str, str]] = set()
     for raw in packages:
         if not isinstance(raw, dict):
             continue
         pkg = cast("dict[str, Any]", raw)
+        entries = _entries(pkg.get("dependencies"))
+
+        # uv.lock includes the project being scanned as a [[package]] entry
+        # itself: source = { editable = "." } for an installable project,
+        # source = { virtual = "." } for a non-package project, and the same
+        # with the member's path for workspace members. They are not external
+        # deps to license-check, but their dependency tables (including extras
+        # and dependency groups) say which extras of their deps get installed.
+        source = pkg.get("source", {})
+        if isinstance(source, dict) and ("virtual" in source or "editable" in source):
+            for table in ("optional-dependencies", "dev-dependencies"):
+                for group_entries in _entries_by_key(pkg.get(table)).values():
+                    entries += group_entries
+            requested += [(child, extra) for child, extras in entries for extra in extras]
+            continue
+
         name = pkg.get("name")
         version = pkg.get("version")
         if not isinstance(name, str) or not isinstance(version, str):
-            continue
-
-        # uv.lock includes the project being scanned as a [[package]] entry
-        # itself: source = { editable = "..." } for the project root, or
-        # source = { virtual = true } for workspace members. Skip both —
-        # they are not external deps to license-check.
-        source = pkg.get("source", {})
-        if isinstance(source, dict) and (source.get("virtual") is True or "editable" in source):
             continue
 
         normalized = _canon_name(name)
@@ -192,18 +244,25 @@ def parse_uv_lock(
             continue
         seen.add((normalized, version))
 
-        deps_field = pkg.get("dependencies", [])
-        children: list[str] = []
-        if isinstance(deps_field, list):
-            for entry in deps_field:
-                if isinstance(entry, dict):
-                    child_name = entry.get("name")
-                    if isinstance(child_name, str):
-                        children.append(_canon_name(child_name))
+        requested += [(child, extra) for child, extras in entries for extra in extras]
+        for extra, extra_entries in _entries_by_key(pkg.get("optional-dependencies")).items():
+            optional.setdefault(normalized, {}).setdefault(extra, []).extend(extra_entries)
 
         name_case[normalized] = name
-        edges.setdefault(normalized, set()).update(children)
+        edges.setdefault(normalized, set()).update(child for child, _ in entries)
         raw_pkgs.append((name, version))
+
+    # Follow each requested extra into the package's optional dependencies,
+    # which can request further extras of their own.
+    expanded: set[tuple[str, str]] = set()
+    while requested:
+        package, extra = requested.pop()
+        if (package, extra) in expanded:
+            continue
+        expanded.add((package, extra))
+        for child, extras in optional.get(package, {}).get(extra, []):
+            edges.setdefault(package, set()).add(child)
+            requested += [(child, e) for e in extras]
 
     group_by_name, ancestors_by_name = _attribute(edges, name_case, prod_root_names, dev_root_names)
 
