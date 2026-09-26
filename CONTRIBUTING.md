@@ -38,6 +38,33 @@ Manual run:
 uv run pre-commit run --all-files
 ```
 
+## README links and images
+
+Use relative paths for repository files in `README.md`, and keep images under `assets/`:
+
+```markdown
+[Security](SECURITY.md)
+[Manual review](USAGE.md#manual-review-file)
+![Description of the image](assets/example.svg)
+```
+
+For HTML images, use `src="assets/example.png"`. These paths work in local previews
+and follow the branch being viewed on GitHub. External links, badges, and GitHub
+service pages such as Actions, issues, and security advisories keep absolute URLs.
+
+Give images descriptive alt text and check them at their README display size on light
+and dark backgrounds. Label fictional examples as illustrative. Render CLI excerpts
+with licenseal, and keep diagrams and captions consistent with the current verdicts,
+strict-mode behavior, and transitive-dependency attribution.
+
+The package description comes from [PYPI.md](PYPI.md), selected by `project.readme`
+in `pyproject.toml`. Keep it short, with absolute HTTPS links to the current public
+documentation. The full README remains the home for screenshots and detailed guidance.
+
+Local builds and the [publish workflow](.github/workflows/publish.yml) both use plain
+`uv build`. There is no link conversion or generated README. Update `PYPI.md` when its
+brief product description, supported ecosystems, or installation instructions change.
+
 ## Vendored SPDX license list
 
 `src/licenseal/data/spdx-license-ids.json` is a vendored copy of the canonical SPDX identifier list (from [jslicense/spdx-license-ids](https://github.com/jslicense/spdx-license-ids), CC0-1.0). It backs the `validate-spdx-ids` hook and the runtime "is this a recognized SPDX ID?" check.

@@ -2,7 +2,7 @@
 name = "licenseal"
 version = "0.4.1"
 description = "License compatibility checker for Python, JS/TS, Rust, Go, Java/JVM, .NET, PHP, Ruby, Elixir/Erlang, and R dependencies"
-readme = "README.md"
+readme = "PYPI.md"
 authors = [
     { name = "SergiiShcherbak", email = "sergii@shcherbak.ai" }
 ]

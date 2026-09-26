@@ -1,5 +1,5 @@
 <h1 align="center">
-  <img src="https://raw.githubusercontent.com/shcherbak-ai/licenseal/main/assets/licenseal-header-v5.png" alt="licenseal mascot surrounded by license files" width="520"><br>
+  <img src="assets/licenseal-header-v7.png" alt="licenseal traces a dependency tree, compares dependency licenses against the project license, and reports compatible packages, warnings, violations, and unknowns in CI" width="850"><br>
   licenseal
 </h1>
 
@@ -25,7 +25,7 @@
       <a href="https://pypi.org/project/licenseal/"><img src="https://img.shields.io/pypi/v/licenseal?v=2" alt="PyPI"></a>
       <a href="https://pypi.org/project/licenseal/"><img src="https://img.shields.io/pypi/pyversions/licenseal?v=2" alt="Python"></a>
       <a href="https://pepy.tech/project/licenseal"><img src="https://api.pepy.tech/badge/licenseal/month" alt="Downloads/month"></a>
-      <a href="https://github.com/shcherbak-ai/licenseal/blob/main/LICENSE"><img src="https://img.shields.io/badge/license-Apache--2.0-blue.svg" alt="License: Apache-2.0"></a>
+      <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache--2.0-blue.svg" alt="License: Apache-2.0"></a>
     </td>
   </tr>
   <tr>
@@ -57,6 +57,10 @@
 uvx licenseal check
 ```
 
+![Illustrative licenseal report for an Apache-2.0 project: client pulls in certs under MPL-2.0, producing one warning alongside three compatible dependencies](assets/licenseal-cli-example.svg)
+
+*Illustrative packages, rendered with licenseal. Report excerpt showing transitive dependencies and the compatibility summary.*
+
 > **Not legal advice.** licenseal automates dependency-license discovery and compatibility classification. It is a CI/audit aid, not a substitute for legal review.
 
 ## 🧭 Why This Matters
@@ -73,6 +77,8 @@ License non-compliance is a quiet delivery risk: it usually does not break the b
 | Audit trail | Review decisions need to be explicit and checked in, not buried in a spreadsheet or chat thread. |
 
 licenseal turns that hidden risk into fast CI feedback: it scans the transitive dependency tree, flags compatibility issues, and records reviewed decisions for cases that need human judgment. It is designed for PR gates, using manifests, lockfiles, and registries without install or build steps.
+
+![Illustrative dependency tree: an Apache-2.0 app depends on MIT client, which pulls in MIT transport and then MPL-2.0 certs. The path to certs is highlighted because it receives a warning; unreviewed warnings fail strict checks](assets/licenseal-transitive-path.svg)
 
 > [!IMPORTANT]
 > In a benchmark of 50 widely used open-source repositories across ten ecosystems, licenseal flagged 485 license-compatibility issues at default settings — 405 warnings and 80 outright violations, spanning 9 of the 10 ecosystems — each a dependency whose license needed compatibility review against the project's own declared license. Inventory-only license tools surface none of these.
@@ -116,11 +122,7 @@ uv add --dev licenseal
 pip install licenseal
 ```
 
-Example output:
-
-![licenseal terminal output showing a transitive dependency table, one weak-copyleft warning, and a reviewed dependency count](https://raw.githubusercontent.com/shcherbak-ai/licenseal/main/assets/licenseal_cli.png)
-
-The exit code is non-zero when there are unreviewed violations, warnings, unknown licenses, or analysis gaps. See [USAGE.md](https://github.com/shcherbak-ai/licenseal/blob/main/USAGE.md) for every flag and report format.
+The exit code is non-zero when there are unreviewed violations, warnings, unknown licenses, or analysis gaps. See [USAGE.md](USAGE.md) for every flag and report format.
 
 ## 🤖 Claude Code Review Skill
 
@@ -132,7 +134,7 @@ licenseal install-skill
 
 The skill runs `licenseal check`, walks through warnings, violations, unknown licenses, and analysis gaps, and asks verdict-aware questions based on how your project is distributed, hosted, modified, or shipped. It fills `licenseal.review.toml` only when there is a concrete reviewable rationale, keeps genuine incompatibilities flagged, and re-runs the strict scan so the remaining compliance gaps are explicit.
 
-[![Claude Code licenseal review skill asking whether MPL dependencies were modified before marking them reviewed](https://raw.githubusercontent.com/shcherbak-ai/licenseal/main/assets/claude_skill_qa.png)](https://github.com/shcherbak-ai/licenseal/blob/main/assets/claude_skill_qa.png)
+[![Claude Code licenseal review skill asking whether MPL dependencies were modified before marking them reviewed](assets/claude_skill_qa.png)](assets/claude_skill_qa.png)
 
 ## ✨ What Licenseal Does
 
@@ -154,7 +156,7 @@ The skill runs `licenseal check`, walks through warnings, violations, unknown li
 ![Elixir/Erlang](https://img.shields.io/badge/Elixir%20%2F%20Erlang-4B275F?logo=elixir&logoColor=white)
 ![R](https://img.shields.io/badge/R-276DC3?logo=r&logoColor=white)
 
-Supported registries include PyPI, npm, crates.io, deps.dev, proxy.golang.org, Maven Central, NuGet.org, Packagist, RubyGems, Hex, and CRAN. See [USAGE.md](https://github.com/shcherbak-ai/licenseal/blob/main/USAGE.md#supported-ecosystems) for manifest and lockfile details.
+Supported registries include PyPI, npm, crates.io, deps.dev, proxy.golang.org, Maven Central, NuGet.org, Packagist, RubyGems, Hex, and CRAN. See [USAGE.md](USAGE.md#supported-ecosystems) for manifest and lockfile details.
 
 ## 📊 How It Compares
 
@@ -208,7 +210,7 @@ licenseal is intentionally narrow:
 - It produces Markdown/JSON dependency license reports, but not standards-compliant CycloneDX or SPDX SBOMs; use a dedicated SBOM tool when you need that artifact.
 - Manual review can override flagged findings when a maintainer has better information, but the review file is an audit record, not hidden legal sign-off.
 
-The full trust boundary and network allowlist are documented in [SECURITY.md](https://github.com/shcherbak-ai/licenseal/blob/main/SECURITY.md).
+The full trust boundary and network allowlist are documented in [SECURITY.md](SECURITY.md).
 
 ## ✅ CI Integration
 
@@ -246,9 +248,9 @@ licenseal check -f markdown -o LICENSES.md   # PR-comment-friendly audit
 licenseal check -f json -o report.json       # stable machine-readable schema
 ```
 
-For projects that want a checked-in audit trail, commit the generated Markdown report as `LICENSES.md`. This repository follows that convention in [LICENSES.md](https://github.com/shcherbak-ai/licenseal/blob/main/LICENSES.md).
+For projects that want a checked-in audit trail, commit the generated Markdown report as `LICENSES.md`. This repository follows that convention in [LICENSES.md](LICENSES.md).
 
-The JSON schema is documented in [JSON_OUTPUT.md](https://github.com/shcherbak-ai/licenseal/blob/main/JSON_OUTPUT.md).
+The JSON schema is documented in [JSON_OUTPUT.md](JSON_OUTPUT.md).
 
 ## 🧾 Manual Review Overrides
 
@@ -274,7 +276,7 @@ licenseal check                                              # 4. overrides appl
 
 Reviews can only override flagged dependencies, never compatible ones. A reviewed dependency passes strict mode while staying visible in its warning, violation, or unknown bucket with both the detected and reviewed licenses shown.
 
-licenseal also ships a [Claude Code](https://claude.com/claude-code) skill (`licenseal install-skill`, then `/licenseal-review`) that walks through unknowns, warnings, and violations interactively. It can inspect package links, license links, and project context, then ask the questions that matter for how your software is distributed, hosted, or modified. Full review rules are in [USAGE.md](https://github.com/shcherbak-ai/licenseal/blob/main/USAGE.md#manual-review-file).
+licenseal also ships a [Claude Code](https://claude.com/claude-code) skill (`licenseal install-skill`, then `/licenseal-review`) that walks through unknowns, warnings, and violations interactively. It can inspect package links, license links, and project context, then ask the questions that matter for how your software is distributed, hosted, or modified. Full review rules are in [USAGE.md](USAGE.md#manual-review-file).
 
 ## 🧩 How Licenseal Decides
 
@@ -301,23 +303,23 @@ When `--dev` is set, copyleft violations on dev dependencies are downgraded to w
 | Network Copyleft | AGPL-3.0-only | Strong copyleft with network-use source-offer obligations |
 | Unknown | SSPL, BUSL, Elastic, CC-BY-NC; missing or unrecognized licenses | Cannot be auto-classified; routed to manual review |
 
-A dependency is **Unknown** when the registry returns no license, a non-SPDX string, or a source-available / use-restricted license (`SSPL`, `BUSL`, `Elastic`, `FSL`, `Parity`, `PolyForm`, `CC-BY-NC*` / `CC-BY-ND*`) whose custom terms are not auto-evaluated. The full matrix rationale is in [USAGE.md](https://github.com/shcherbak-ai/licenseal/blob/main/USAGE.md).
+A dependency is **Unknown** when the registry returns no license, a non-SPDX string, or a source-available / use-restricted license (`SSPL`, `BUSL`, `Elastic`, `FSL`, `Parity`, `PolyForm`, `CC-BY-NC*` / `CC-BY-ND*`) whose custom terms are not auto-evaluated. The full matrix rationale is in [USAGE.md](USAGE.md).
 
 ## Learn More
 
-- **[USAGE.md](https://github.com/shcherbak-ai/licenseal/blob/main/USAGE.md)** - full CLI reference, transitive-resolution behavior, per-ecosystem detail, review-file rules, and the Claude Code skill
-- **[SECURITY.md](https://github.com/shcherbak-ai/licenseal/blob/main/SECURITY.md)** - the manifest-and-registry trust boundary and exact network-egress allowlist
-- **[JSON_OUTPUT.md](https://github.com/shcherbak-ai/licenseal/blob/main/JSON_OUTPUT.md)** - stable machine-readable schema
+- **[USAGE.md](USAGE.md)** - full CLI reference, transitive-resolution behavior, per-ecosystem detail, review-file rules, and the Claude Code skill
+- **[SECURITY.md](SECURITY.md)** - the manifest-and-registry trust boundary and exact network-egress allowlist
+- **[JSON_OUTPUT.md](JSON_OUTPUT.md)** - stable machine-readable schema
 
 ## Contributing
 
-See [CONTRIBUTING.md](https://github.com/shcherbak-ai/licenseal/blob/main/CONTRIBUTING.md) for development setup and guidelines.
+See [CONTRIBUTING.md](CONTRIBUTING.md) for development setup and guidelines.
 
 If licenseal helps your project, star ⭐ this repo to help other teams find it too.
 
 ## License
 
-[Apache-2.0](https://github.com/shcherbak-ai/licenseal/blob/main/LICENSE). See [`LICENSE`](https://github.com/shcherbak-ai/licenseal/blob/main/LICENSE) for the full text and [`NOTICE`](https://github.com/shcherbak-ai/licenseal/blob/main/NOTICE) for attribution.
+[Apache-2.0](LICENSE). See [`LICENSE`](LICENSE) for the full text and [`NOTICE`](NOTICE) for attribution.
 
 ## More from shcherbak_ai
 

@@ -208,6 +208,12 @@ Same untrusted-code rules apply: manifests and lockfiles only — never install,
 - When stress-testing licenseal against external repositories, treat them as untrusted code. Read their manifest and lockfile contents only; never install their dependencies, run their setup or build scripts, execute their code, or import their packages. licenseal is metadata-only — there's no legitimate development reason to execute code from a scan target, and doing so opens an arbitrary-code-execution surface from third-party projects on local disk.
 - Branch from `dev`, PR to `dev`. `main` is releases only.
 
+## Documentation and package description
+
+- `README.md` contains the full documentation and visuals. Use relative links for repository files and images under `assets/`; keep external and GitHub service URLs absolute.
+- `PYPI.md` is the short package description selected by `project.readme` in `pyproject.toml`. Keep its summary, supported ecosystems, and commands aligned with the CLI, and use absolute HTTPS links to public documentation. Builds use it directly; do not introduce README link rewriting during release.
+- Follow [CONTRIBUTING.md](CONTRIBUTING.md#readme-links-and-images) when updating documentation or visuals, including example accuracy and preview checks.
+
 ## Verification
 
 Run the full pre-commit suite and the tests before submitting changes:
