@@ -4,6 +4,15 @@ All notable changes to this project will be documented in this file. Each versio
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/), and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.4.2] - 2026-09-26
+
+Documentation and package metadata only; CLI behavior is unchanged.
+
+### Changed
+
+- Refreshed the README with a workflow header, an illustrative CLI report, and a transitive-dependency diagram. Repository documentation and image links now use relative paths for local and branch previews.
+- The PyPI description now comes from a concise, standalone `PYPI.md` with absolute documentation links. Builds use it directly without rewriting README URLs.
+
 ## [0.4.1] - 2026-09-25
 
 ### Fixed
