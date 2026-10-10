@@ -849,6 +849,58 @@ class TestCheckCommand:
             assert dep["verdict"] == "unknown"
             assert dep["license_raw"] == license_url
 
+    @pytest.mark.parametrize(
+        "spdx_id",
+        [
+            "BSD-3-Clause-No-Military-License",
+            "BSD-3-Clause-No-Nuclear-License",
+            "BSD-3-Clause-No-Nuclear-License-2014",
+            "BSD-Protection",
+            "Unicode-TOU",
+        ],
+    )
+    @respx.mock
+    def test_use_restricted_spdx_id_fails_strict_as_unknown(self, tmp_path, spdx_id):
+        # A real SPDX ID that shares a permissive family prefix but carries a
+        # use restriction is routed to manual review, not reported compatible.
+        (tmp_path / "package.json").write_text(
+            json.dumps(
+                {
+                    "name": "myproject",
+                    "license": "MIT",
+                    "dependencies": {"restricted-lib": "1.0.0"},
+                }
+            )
+        )
+        _mock_npm("restricted-lib", spdx_id)
+
+        runner = CliRunner()
+        result = runner.invoke(main, ["check", "--path", str(tmp_path), "-f", "json"])
+        assert result.exit_code == 1
+        data = json.loads(result.output[result.output.index("{") :])
+        (dep,) = data["dependencies"]
+        assert dep["license"] == spdx_id
+        assert dep["risk"] == "unknown"
+        assert dep["verdict"] == "unknown"
+        assert data["summary"]["unknown"] == 1
+
+    @respx.mock
+    def test_warranty_disclaimer_bsd_variant_passes_strict(self, tmp_path):
+        (tmp_path / "package.json").write_text(
+            json.dumps(
+                {
+                    "name": "myproject",
+                    "license": "MIT",
+                    "dependencies": {"disclaimer-lib": "1.0.0"},
+                }
+            )
+        )
+        _mock_npm("disclaimer-lib", "BSD-3-Clause-No-Nuclear-Warranty")
+
+        runner = CliRunner()
+        result = runner.invoke(main, ["check", "--path", str(tmp_path)])
+        assert result.exit_code == 0
+
     @respx.mock
     def test_warning_exits_nonzero_in_strict_mode(self, tmp_path):
         (tmp_path / "pyproject.toml").write_text(

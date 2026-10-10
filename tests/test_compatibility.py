@@ -139,6 +139,28 @@ class TestCheckCompatibility:
             "custom-pkg uses SomeCustomLicense — could not determine compatibility with MIT"
         )
 
+    def test_use_restricted_dep_requires_review_under_every_project_license(self):
+        # SPDX IDs that share a permissive prefix but carry a use restriction
+        # must not come back compatible — under any project license.
+        for dep_id in (
+            "BSD-3-Clause-No-Military-License",
+            "BSD-3-Clause-No-Nuclear-License",
+            "BSD-3-Clause-No-Nuclear-License-2014",
+            "BSD-Protection",
+            "Unicode-TOU",
+        ):
+            for project in ("MIT", "Apache-2.0", "GPL-3.0-only", "Proprietary"):
+                result = check_compatibility(project, _make_license_info(dep_id, name="dep"))
+                assert result.verdict == CompatibilityVerdict.UNKNOWN, (project, dep_id)
+                assert result.risk_level == RiskLevel.UNKNOWN
+                assert result.reason == (
+                    f"dep uses {dep_id} — could not determine compatibility with {project}"
+                )
+
+    def test_warranty_disclaimer_bsd_variant_stays_compatible(self):
+        result = check_compatibility("MIT", _make_license_info("BSD-3-Clause-No-Nuclear-Warranty"))
+        assert result.verdict == CompatibilityVerdict.COMPATIBLE
+
     def test_proprietary_dep_with_permissive_project_requires_review(self):
         """A proprietary DEP always requires manual review regardless of the
         project's license — its custom commercial terms cannot be auto-

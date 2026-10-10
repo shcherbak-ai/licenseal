@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from licenseal.analysis.risk import classify_risk
+from licenseal.analysis.risk import KNOWN_SPDX_IDS, classify_risk
 from licenseal.models import RiskLevel
 
 
@@ -199,6 +199,46 @@ class TestCCRestrictiveVariants:
     )
     def test_restrictive_cc_variants_route_to_unknown(self, spdx_id: str):
         assert classify_risk(spdx_id) == RiskLevel.UNKNOWN
+
+
+class TestUseRestrictedPermissivePrefixIds:
+    """Real SPDX IDs that share a permissive family prefix (``^BSD``,
+    ``^Unicode-``) but carry a use restriction route to UNKNOWN, the same way
+    the restrictive CC variants do. They are in the recognized-ID list, so the
+    prefix-overmatch gate alone would leave them permissive."""
+
+    @pytest.mark.parametrize(
+        "spdx_id",
+        [
+            "BSD-3-Clause-No-Military-License",
+            "BSD-3-Clause-No-Nuclear-License",
+            "BSD-3-Clause-No-Nuclear-License-2014",
+            "BSD-Protection",
+            "Unicode-TOU",
+        ],
+    )
+    def test_use_restricted_ids_route_to_unknown(self, spdx_id: str):
+        assert spdx_id in KNOWN_SPDX_IDS
+        assert classify_risk(spdx_id) == RiskLevel.UNKNOWN
+        # An AND binds every arm, so the restriction is not droppable; an OR
+        # still lets the consumer elect the plain permissive arm.
+        assert classify_risk(f"MIT AND {spdx_id}") == RiskLevel.UNKNOWN
+        assert classify_risk(f"MIT OR {spdx_id}") == RiskLevel.PERMISSIVE
+
+    @pytest.mark.parametrize(
+        "spdx_id",
+        [
+            # A warranty disclaimer, not a use restriction.
+            "BSD-3-Clause-No-Nuclear-Warranty",
+            # Unrestricted members of the same families.
+            "BSD-3-Clause",
+            "BSD-3-Clause-Clear",
+            "Unicode-3.0",
+            "Unicode-DFS-2016",
+        ],
+    )
+    def test_unrestricted_family_members_stay_permissive(self, spdx_id: str):
+        assert classify_risk(spdx_id) == RiskLevel.PERMISSIVE
 
 
 class TestUnrecognizedSpdxIdReturnsUnknown:

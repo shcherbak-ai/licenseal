@@ -301,9 +301,9 @@ When `--dev` is set, copyleft violations on dev dependencies are downgraded to w
 | Weak Copyleft | LGPL, MPL-2.0, EPL, CDDL, GPL with Classpath exception | File-scope reciprocity; linking from other files is usually allowed |
 | Strong Copyleft | GPL, OSL, EUPL, CC-BY-SA | Share-alike obligations can extend to the derivative work |
 | Network Copyleft | AGPL-3.0-only | Strong copyleft with network-use source-offer obligations |
-| Unknown | SSPL, BUSL, Elastic, CC-BY-NC; missing or unrecognized licenses | Cannot be auto-classified; routed to manual review |
+| Unknown | SSPL, BUSL, Elastic, CC-BY-NC, BSD-3-Clause-No-Military-License, Unicode-TOU; missing or unrecognized licenses | Cannot be auto-classified; routed to manual review |
 
-A dependency is **Unknown** when the registry returns no license, a non-SPDX string, or a source-available / use-restricted license (`SSPL`, `BUSL`, `Elastic`, `FSL`, `Parity`, `PolyForm`, `CC-BY-NC*` / `CC-BY-ND*`) whose custom terms are not auto-evaluated. The full matrix rationale is in [USAGE.md](USAGE.md).
+A dependency is **Unknown** when the registry returns no license, a non-SPDX string, or a source-available / use-restricted license (`SSPL`, `BUSL`, `Elastic`, `FSL`, `Parity`, `PolyForm`, `CC-BY-NC*` / `CC-BY-ND*`, `BSD-3-Clause-No-Military-License`, `BSD-3-Clause-No-Nuclear-License`, `BSD-3-Clause-No-Nuclear-License-2014`, `BSD-Protection`, `Unicode-TOU`) whose custom terms are not auto-evaluated. `BSD-3-Clause-No-Nuclear-Warranty` is a warranty disclaimer rather than a use restriction and stays Permissive. The full matrix rationale is in [USAGE.md](USAGE.md).
 
 ## Learn More
 

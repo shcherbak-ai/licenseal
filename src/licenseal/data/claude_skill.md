@@ -150,6 +150,11 @@ Frame the per-dep question by combining verdict, risk, and project context. The 
   - `context.commercial` = yes **and** `context.competing` = yes → real incompatibility. Recommend removal / alternative.
   - `context.competing` unknown for this dep → ask explicitly per dep: *"{license} restricts use that competes with {dep vendor}. Does your product compete with their commercial offering?"*
 
+- **UNKNOWN — use-restricted SPDX ID (`CC-BY-NC-*`, `CC-BY-ND-*`, `BSD-3-Clause-No-Military-License`, `BSD-3-Clause-No-Nuclear-License`, `BSD-3-Clause-No-Nuclear-License-2014`, `BSD-Protection`, `Unicode-TOU`)** (`license` is one of these IDs, `risk` reads `unknown`):
+  - The license **is** identified — do not ask *"what's the actual license?"*. Its terms limit a kind of use (non-commercial only, no derivatives, an excluded field of use, or conditions on modified or redistributed copies) that licenseal does not evaluate. Point the user at `actionability.investigate_url` and ask: *"{license} restricts how the software may be used or redistributed. Have you read the restriction, and does your project's use stay inside it?"*
+  - User confirms the use stays inside the restriction → reviewable as `license = "{license}"` with `note` recording why (e.g. `"non-commercial research project"`, `"used unmodified, not redistributed"`). The restriction applies, or the user is unsure → leave unreviewed.
+  - `BSD-3-Clause-No-Nuclear-Warranty` is not in this group: it is a warranty disclaimer, classifies as permissive, and is not flagged.
+
 - **UNKNOWN / WARNING — proprietary dep** (`license == "Proprietary"`, `reason` mentions "custom commercial terms cannot be auto-classified"):
   - This is *not* the "detection found nothing" case — the license **is** known to be proprietary. The right question is about **terms**, not identity. Do not ask *"what's the actual license?"*; ask about permitted use, redistribution, royalties, and field-of-use limits.
   - **Dev-only dep** (licenseal downgrades to WARNING): ask *"Is this a paid dev tool covered by your team's existing license or subscription?"* If yes → reviewable as `license = "Proprietary"` with `note` recording the licensing arrangement.

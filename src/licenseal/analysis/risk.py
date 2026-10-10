@@ -4,9 +4,10 @@ Classification is driven by:
 * An **override map** (tried first) — explicit per-ID risk for the cases
   family patterns get wrong or don't cover: non-OSI source-available
   licenses (Elastic, SSPL, BUSL), the no-commercial-use CC variants
-  (CC-BY-NC-*, CC-BY-ND-*), permissive licenses with no family prefix
-  (Zlib, ISC, PostgreSQL, Beerware…), and ``Proprietary`` (project-side
-  permissive sentinel).
+  (CC-BY-NC-*, CC-BY-ND-*), use-restricted IDs that share a permissive
+  family prefix (BSD-3-Clause-No-Military-License, Unicode-TOU…), permissive
+  licenses with no family prefix (Zlib, ISC, PostgreSQL, Beerware…), and
+  ``Proprietary`` (project-side permissive sentinel).
 * A small set of family **patterns** that map SPDX-ID name prefixes to
   risk levels (e.g. ``^GPL-`` → STRONG_COPYLEFT). The conventions are
   consistent enough across the SPDX namespace that patterns cover the
@@ -197,6 +198,20 @@ _RISK_OVERRIDES: dict[str, RiskLevel] = {
     "CC-BY-ND-2.5": RiskLevel.UNKNOWN,
     "CC-BY-ND-3.0": RiskLevel.UNKNOWN,
     "CC-BY-ND-4.0": RiskLevel.UNKNOWN,
+    # Real SPDX IDs that share a permissive family prefix but carry a use
+    # restriction: a field-of-use exclusion (military / nuclear facilities),
+    # conditions on distributing modified versions, or website terms of use
+    # rather than a software license. The ``^BSD`` / ``^Unicode-`` patterns
+    # would otherwise grab them as permissive, and the recognized-ID gate
+    # can't help because they are in the SPDX list. Manual review, like the
+    # restrictive CC variants above. ``BSD-3-Clause-No-Nuclear-Warranty`` is
+    # deliberately absent: it disclaims fitness for that use rather than
+    # withholding the license, so it stays permissive.
+    "BSD-3-Clause-No-Military-License": RiskLevel.UNKNOWN,
+    "BSD-3-Clause-No-Nuclear-License": RiskLevel.UNKNOWN,
+    "BSD-3-Clause-No-Nuclear-License-2014": RiskLevel.UNKNOWN,
+    "BSD-Protection": RiskLevel.UNKNOWN,
+    "Unicode-TOU": RiskLevel.UNKNOWN,
     # Proprietary — the custom-commercial-terms sentinel. Its risk is
     # genuinely UNKNOWN: licenseal can't reason about paid-use / no-redist /
     # field-of-use clauses. On the *dep* side, `_check_compat` short-circuits
