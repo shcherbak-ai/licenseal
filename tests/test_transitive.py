@@ -105,6 +105,101 @@ class TestLockfileFirstPath:
         assert names == {"click", "colorama"}
         # No registry calls were needed — lockfile was the source.
 
+    @respx.mock
+    def test_yarn_classic_optional_only_subtree_resolved_from_lockfile(self, tmp_path):
+        # From files on disk: the direct dependency reaches its platform
+        # build only through `optionalDependencies:`, and that build has a
+        # dependency of its own. The lockfile covers the root, so nothing is
+        # fetched; the optional subtree must come out of the lockfile.
+        (tmp_path / "package.json").write_text(
+            json.dumps({"name": "app", "dependencies": {"bundler": "^1.0.0"}})
+        )
+        (tmp_path / "yarn.lock").write_text(
+            textwrap.dedent(
+                """\
+                # yarn lockfile v1
+
+                bundler@^1.0.0:
+                  version "1.0.0"
+                  optionalDependencies:
+                    bundler-native "1.0.0"
+
+                bundler-native@1.0.0:
+                  version "1.0.0"
+                  dependencies:
+                    native-helper "^2.0.0"
+
+                native-helper@^2.0.0:
+                  version "2.3.0"
+                """
+            )
+        )
+        direct, _ = discover_all_dependencies(tmp_path)
+        with httpx.Client() as client:
+            deps = resolve_transitive(
+                direct, tmp_path, include_dev=False, max_depth=50, client=client
+            )
+        assert {(d.name, d.version_constraint, d.depth) for d in deps} == {
+            ("bundler", "==1.0.0", 0),
+            ("bundler-native", "==1.0.0", 1),
+            ("native-helper", "==2.3.0", 1),
+        }
+        assert {d.direct_ancestors for d in deps if d.depth} == {("bundler",)}
+
+    @respx.mock
+    def test_pnpm_alias_target_resolved_from_lockfile(self, tmp_path):
+        # From files on disk, in the v9 and v6 layouts: a transitive is
+        # installed under an alias, so the dependency map names it by value.
+        (tmp_path / "package.json").write_text(
+            json.dumps({"name": "app", "dependencies": {"parent": "^1.0.0"}})
+        )
+        layouts = {
+            "v9": """\
+                lockfileVersion: '9.0'
+                packages:
+                  parent@1.0.0:
+                    resolution: {integrity: sha512-fake==}
+                  realchild@1.0.0:
+                    resolution: {integrity: sha512-fake==}
+                  '@scope/real@2.0.0':
+                    resolution: {integrity: sha512-fake==}
+                snapshots:
+                  parent@1.0.0:
+                    dependencies:
+                      aliaschild: realchild@1.0.0
+                  realchild@1.0.0:
+                    dependencies:
+                      scopedalias: '@scope/real@2.0.0'
+                  '@scope/real@2.0.0': {}
+                """,
+            "v6": """\
+                lockfileVersion: '6.0'
+                packages:
+                  /parent@1.0.0:
+                    resolution: {integrity: sha512-fake==}
+                    dependencies:
+                      aliaschild: /realchild@1.0.0
+                  /realchild@1.0.0:
+                    resolution: {integrity: sha512-fake==}
+                    dependencies:
+                      scopedalias: /@scope/real@2.0.0
+                  /@scope/real@2.0.0:
+                    resolution: {integrity: sha512-fake==}
+                """,
+        }
+        for layout in layouts.values():
+            (tmp_path / "pnpm-lock.yaml").write_text(textwrap.dedent(layout))
+            direct, _ = discover_all_dependencies(tmp_path)
+            with httpx.Client() as client:
+                deps = resolve_transitive(
+                    direct, tmp_path, include_dev=False, max_depth=50, client=client
+                )
+            assert {(d.name, d.version_constraint, d.depth) for d in deps} == {
+                ("parent", "==1.0.0", 0),
+                ("realchild", "==1.0.0", 1),
+                ("@scope/real", "==2.0.0", 1),
+            }
+
     def test_uses_php_lockfile_when_present(self, tmp_path):
         # composer.lock embeds the full edge graph + explicit dev flag —
         # the PHP transitive path uses it without any registry calls.

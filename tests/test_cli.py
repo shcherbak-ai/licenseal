@@ -4672,6 +4672,75 @@ class TestTransitiveFlag:
         assert colorama_dep["direct_ancestors"] == ["click"]
 
     @respx.mock
+    def test_yarn_classic_optional_only_package_is_scanned(self, tmp_path):
+        # A copyleft package reachable only through an `optionalDependencies:`
+        # block in a Yarn Classic lockfile is part of the scan: in an MIT
+        # project it is a violation, not a clean exit.
+        (tmp_path / "package.json").write_text(
+            json.dumps({"name": "app", "license": "MIT", "dependencies": {"bundler": "^1.0.0"}})
+        )
+        (tmp_path / "yarn.lock").write_text(
+            textwrap.dedent("""\
+            # yarn lockfile v1
+
+            bundler@^1.0.0:
+              version "1.0.0"
+              optionalDependencies:
+                bundler-native "1.0.0"
+
+            bundler-native@1.0.0:
+              version "1.0.0"
+            """)
+        )
+        _mock_npm("bundler", "MIT")
+        _mock_npm("bundler-native", "GPL-3.0-only")
+
+        runner = CliRunner()
+        result = runner.invoke(main, ["check", "--path", str(tmp_path), "-f", "json"])
+        assert result.exit_code == 1
+        data = json.loads(result.output[result.output.index("{") :])
+        assert data["summary"]["total"] == 2
+        assert data["summary"]["violations"] == 1
+        native = next(d for d in data["dependencies"] if d["name"] == "bundler-native")
+        assert native["license"] == "GPL-3.0-only"
+        assert native["direct_ancestors"] == ["bundler"]
+
+    @respx.mock
+    def test_pnpm_alias_target_is_scanned(self, tmp_path):
+        # A copyleft package installed under an alias (so the lockfile's
+        # dependency map names it by value) is part of the scan.
+        (tmp_path / "package.json").write_text(
+            json.dumps({"name": "app", "license": "MIT", "dependencies": {"parent": "^1.0.0"}})
+        )
+        (tmp_path / "pnpm-lock.yaml").write_text(
+            textwrap.dedent("""\
+            lockfileVersion: '9.0'
+            packages:
+              parent@1.0.0:
+                resolution: {integrity: sha512-fake==}
+              realchild@1.0.0:
+                resolution: {integrity: sha512-fake==}
+            snapshots:
+              parent@1.0.0:
+                dependencies:
+                  aliaschild: realchild@1.0.0
+              realchild@1.0.0: {}
+            """)
+        )
+        _mock_npm("parent", "MIT")
+        _mock_npm("realchild", "GPL-3.0-only")
+
+        runner = CliRunner()
+        result = runner.invoke(main, ["check", "--path", str(tmp_path), "-f", "json"])
+        assert result.exit_code == 1
+        data = json.loads(result.output[result.output.index("{") :])
+        assert {d["name"] for d in data["dependencies"]} == {"parent", "realchild"}
+        assert data["summary"]["violations"] == 1
+        real = next(d for d in data["dependencies"] if d["name"] == "realchild")
+        assert real["license"] == "GPL-3.0-only"
+        assert real["direct_ancestors"] == ["parent"]
+
+    @respx.mock
     def test_transitive_falls_back_to_registry_when_no_lockfile(self, tmp_path):
         (tmp_path / "pyproject.toml").write_text(
             textwrap.dedent("""\

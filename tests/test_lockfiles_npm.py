@@ -10,6 +10,7 @@ import pytest
 from licenseal.discovery.npm.lockfiles import (
     _is_in_test_dir,
     _parse_bun_resolved_id,
+    _pnpm_edge_target,
     _yarn_alias_descriptor_name,
     _yarn_alias_target,
     _yarn_name_from_descriptor,
@@ -478,6 +479,33 @@ class TestParsePackageLockJson:
         # Reachability survived alias rewriting: glob → string-width.
         assert names["string-width"].direct_ancestors == ("glob",)
 
+    def test_npm_alias_with_exact_pin_still_resolved_through_name_field(self, tmp_path):
+        # A package-lock dependency value can look like `npm:target@1.2.3`.
+        # It is a declared spec, not a lockfile reference: the alias is
+        # resolved through the entry's `name` field, as for a ranged spec.
+        path = tmp_path / "package-lock.json"
+        path.write_text(
+            json.dumps(
+                {
+                    "lockfileVersion": 3,
+                    "packages": {
+                        "": {"name": "root"},
+                        "node_modules/parent": {
+                            "version": "1.0.0",
+                            "dependencies": {"aliaschild": "npm:realchild@1.0.0"},
+                        },
+                        "node_modules/aliaschild": {"name": "realchild", "version": "1.0.0"},
+                    },
+                }
+            )
+        )
+        deps = parse_package_lock_json(
+            path, prod_root_names={"parent"}, dev_root_names=set(), include_dev=False
+        )
+        by_name = {d.name: d for d in deps}
+        assert set(by_name) == {"parent", "realchild"}
+        assert by_name["realchild"].direct_ancestors == ("parent",)
+
     def test_normal_name_field_does_not_rename(self, tmp_path):
         # When meta["name"] equals the key-derived name, behavior is unchanged
         # — this is the non-alias common case.
@@ -849,6 +877,271 @@ class TestParsePnpmLock:
         assert "good" in by_name
         assert by_name["child"].direct_ancestors == ("good",)
 
+    # An npm alias in a dependency map: the key is the alias, the value names
+    # the real package. Only the real package has a `packages` entry, and it is
+    # reachable only through the alias here, so the edge must follow the value.
+
+    def test_v9_alias_edge_points_at_real_package(self, tmp_path):
+        path = self._write(
+            tmp_path,
+            """\
+            lockfileVersion: '9.0'
+            packages:
+              parent@1.0.0:
+                resolution: {integrity: sha512-fake==}
+              realchild@1.0.0:
+                resolution: {integrity: sha512-fake==}
+              grandchild@3.0.0:
+                resolution: {integrity: sha512-fake==}
+            snapshots:
+              parent@1.0.0:
+                dependencies:
+                  aliaschild: realchild@1.0.0
+              realchild@1.0.0:
+                dependencies:
+                  grandchild: 3.0.0
+              grandchild@3.0.0: {}
+            """,
+        )
+        deps = parse_pnpm_lock(
+            path, prod_root_names={"parent"}, dev_root_names=set(), include_dev=False
+        )
+        by_name = {d.name: d for d in deps}
+        assert set(by_name) == {"parent", "realchild", "grandchild"}
+        assert by_name["realchild"].version_constraint == "==1.0.0"
+        assert by_name["realchild"].direct_ancestors == ("parent",)
+        assert by_name["grandchild"].direct_ancestors == ("parent",)
+
+    def test_v6_alias_edge_points_at_real_package(self, tmp_path):
+        # v6 writes the reference as a dependency path with a leading slash,
+        # and keeps edges inside `packages:`.
+        path = self._write(
+            tmp_path,
+            """\
+            lockfileVersion: '6.0'
+            packages:
+              /parent@1.0.0:
+                resolution: {integrity: sha512-fake==}
+                dependencies:
+                  aliaschild: /realchild@1.0.0
+              /realchild@1.0.0:
+                resolution: {integrity: sha512-fake==}
+                dependencies:
+                  grandchild: 3.0.0
+              /grandchild@3.0.0:
+                resolution: {integrity: sha512-fake==}
+            """,
+        )
+        deps = parse_pnpm_lock(
+            path, prod_root_names={"parent"}, dev_root_names=set(), include_dev=False
+        )
+        by_name = {d.name: d for d in deps}
+        assert set(by_name) == {"parent", "realchild", "grandchild"}
+        assert by_name["realchild"].direct_ancestors == ("parent",)
+        assert by_name["grandchild"].direct_ancestors == ("parent",)
+
+    def test_alias_edge_to_scoped_target(self, tmp_path):
+        path = self._write(
+            tmp_path,
+            """\
+            lockfileVersion: '9.0'
+            packages:
+              parent@1.0.0:
+                resolution: {integrity: sha512-fake==}
+              '@scope/real@2.0.0':
+                resolution: {integrity: sha512-fake==}
+              legacy-parent@1.0.0:
+                resolution: {integrity: sha512-fake==}
+              '@scope/other@4.0.0':
+                resolution: {integrity: sha512-fake==}
+            snapshots:
+              parent@1.0.0:
+                dependencies:
+                  aliaschild: '@scope/real@2.0.0'
+              '@scope/real@2.0.0': {}
+              legacy-parent@1.0.0:
+                dependencies:
+                  '@alias/other': /@scope/other@4.0.0
+              '@scope/other@4.0.0': {}
+            """,
+        )
+        deps = parse_pnpm_lock(
+            path,
+            prod_root_names={"parent", "legacy-parent"},
+            dev_root_names=set(),
+            include_dev=False,
+        )
+        by_name = {d.name: d for d in deps}
+        assert set(by_name) == {"parent", "legacy-parent", "@scope/real", "@scope/other"}
+        assert by_name["@scope/real"].direct_ancestors == ("parent",)
+        assert by_name["@scope/other"].direct_ancestors == ("legacy-parent",)
+
+    def test_alias_edge_with_peer_suffix(self, tmp_path):
+        path = self._write(
+            tmp_path,
+            """\
+            lockfileVersion: '9.0'
+            packages:
+              parent@1.0.0:
+                resolution: {integrity: sha512-fake==}
+              realchild@1.0.0:
+                resolution: {integrity: sha512-fake==}
+              '@scope/real@2.0.0':
+                resolution: {integrity: sha512-fake==}
+              peer@3.0.0:
+                resolution: {integrity: sha512-fake==}
+            snapshots:
+              parent@1.0.0:
+                dependencies:
+                  aliaschild: realchild@1.0.0(peer@3.0.0)
+                  scopedalias: '@scope/real@2.0.0(peer@3.0.0)(@types/node@20.0.0)'
+              realchild@1.0.0(peer@3.0.0):
+                dependencies:
+                  peer: 3.0.0
+              '@scope/real@2.0.0(peer@3.0.0)(@types/node@20.0.0)': {}
+              peer@3.0.0: {}
+            """,
+        )
+        deps = parse_pnpm_lock(
+            path, prod_root_names={"parent"}, dev_root_names=set(), include_dev=False
+        )
+        by_name = {d.name: d for d in deps}
+        assert set(by_name) == {"parent", "realchild", "@scope/real", "peer"}
+        assert by_name["realchild"].direct_ancestors == ("parent",)
+        assert by_name["@scope/real"].direct_ancestors == ("parent",)
+        assert by_name["peer"].direct_ancestors == ("parent",)
+
+    def test_alias_edge_in_optional_dependencies(self, tmp_path):
+        path = self._write(
+            tmp_path,
+            """\
+            lockfileVersion: '9.0'
+            packages:
+              parent@1.0.0:
+                resolution: {integrity: sha512-fake==}
+              realchild@1.0.0:
+                resolution: {integrity: sha512-fake==}
+            snapshots:
+              parent@1.0.0:
+                optionalDependencies:
+                  aliaschild: realchild@1.0.0
+              realchild@1.0.0: {}
+            """,
+        )
+        deps = parse_pnpm_lock(
+            path, prod_root_names={"parent"}, dev_root_names=set(), include_dev=False
+        )
+        assert {d.name for d in deps} == {"parent", "realchild"}
+
+    def test_non_reference_values_keep_pointing_at_the_key(self, tmp_path):
+        # Plain versions (with and without a peer suffix), link:, workspace:,
+        # file: and URL values are not references: the edge stays on the key.
+        path = self._write(
+            tmp_path,
+            """\
+            lockfileVersion: '9.0'
+            packages:
+              parent@1.0.0:
+                resolution: {integrity: sha512-fake==}
+              plain@2.0.0:
+                resolution: {integrity: sha512-fake==}
+              peered@3.0.0:
+                resolution: {integrity: sha512-fake==}
+              linked@4.0.0:
+                resolution: {integrity: sha512-fake==}
+              worked@5.0.0:
+                resolution: {integrity: sha512-fake==}
+              tarred@6.0.0:
+                resolution: {integrity: sha512-fake==}
+              hosted@7.0.0:
+                resolution: {integrity: sha512-fake==}
+              cloned@8.0.0:
+                resolution: {integrity: sha512-fake==}
+            snapshots:
+              parent@1.0.0:
+                dependencies:
+                  plain: 2.0.0
+                  peered: 3.0.0(plain@2.0.0)
+                  linked: link:../linked
+                  worked: workspace:*
+                  tarred: file:vendor@6.0.0.tgz
+                  hosted: https://codeload.example.invalid/org/repo/tar.gz/abc123
+                  cloned: git+ssh://git@example.invalid/org/repo.git#abc123
+            """,
+        )
+        deps = parse_pnpm_lock(
+            path, prod_root_names={"parent"}, dev_root_names=set(), include_dev=False
+        )
+        by_name = {d.name: d for d in deps}
+        assert set(by_name) == {
+            "parent",
+            "plain",
+            "peered",
+            "linked",
+            "worked",
+            "tarred",
+            "hosted",
+            "cloned",
+        }
+        for name in set(by_name) - {"parent"}:
+            assert by_name[name].direct_ancestors == ("parent",)
+
+
+class TestPnpmEdgeTarget:
+    @pytest.mark.parametrize(
+        ("value", "target"),
+        [
+            ("real@1.0.0", "real"),
+            ("/real@1.0.0", "real"),
+            ("@scope/real@2.0.0", "@scope/real"),
+            ("/@scope/real@2.0.0", "@scope/real"),
+            ("real@1.0.0(peer@3.0.0)", "real"),
+            ("/real@1.0.0(peer@3.0.0)", "real"),
+            ("@scope/real@2.0.0(@types/node@20.0.0)(peer@3.0.0)", "@scope/real"),
+            ("3d-real@1.0.0", "3d-real"),
+            ("real@1.0.0-beta.1", "real"),
+        ],
+    )
+    def test_reference_value_resolves_to_real_package(self, value, target):
+        assert _pnpm_edge_target("alias", value) == target
+
+    @pytest.mark.parametrize(
+        "value",
+        [
+            "1.0.0",
+            "1.0.0-beta.1",
+            "1.0.0(peer@3.0.0)",
+            "1.0.0(@types/node@20.0.0)(peer@3.0.0)",
+            # Peer suffix in the older underscore style.
+            "1.0.0_peer@3.0.0",
+            "link:../sibling",
+            "link:packages/@scope/sibling",
+            "workspace:*",
+            "workspace:^1.0.0",
+            "file:../local",
+            "file:vendor@1.0.0.tgz",
+            "https://codeload.example.invalid/org/repo/tar.gz/abc123",
+            "http://example.invalid/pkg@1.0.0.tgz",
+            "git+ssh://git@example.invalid/org/repo.git#abc123",
+            "git+https://example.invalid/org/repo.git#abc123",
+            "github:org/repo#abc123",
+            "example.invalid/org/repo/abc123",
+            # scp-style remote: has an `@`, but what follows is not a version.
+            "git@example.invalid:org/repo.git",
+            "",
+            # YAML scalars that are not strings.
+            None,
+            1,
+            1.5,
+            {"version": "1.0.0"},
+        ],
+    )
+    def test_non_reference_value_keeps_the_key(self, value):
+        assert _pnpm_edge_target("alias", value) == "alias"
+
+    def test_reference_naming_the_key_itself(self):
+        assert _pnpm_edge_target("real", "real@1.0.0") == "real"
+
 
 class TestParseYarnLock:
     def test_empty_or_comments_only_file_routes_to_v1(self, tmp_path):
@@ -1198,9 +1491,10 @@ class TestParseYarnLock:
         assert {d.name for d in deps} == {"react"}
 
     def test_v1_exits_deps_block_on_unmatched_line(self, tmp_path):
-        # After a `dependencies:` block, the next 2-space-indented section
-        # (e.g. another resolved/integrity line) doesn't match the dep regex;
-        # the parser must exit the deps block cleanly.
+        # After a `dependencies:` block, the next 2-space-indented field that
+        # is not an edge block (here an integrity line) doesn't match the dep
+        # regex; the parser must exit the deps block cleanly, so a 4-space
+        # line below it is not read as an edge.
         path = tmp_path / "yarn.lock"
         path.write_text(
             textwrap.dedent(
@@ -1209,11 +1503,14 @@ class TestParseYarnLock:
                   version "18.2.0"
                   dependencies:
                     loose-envify "^1.1.0"
-                  optionalDependencies:
+                  integrity sha512-fake==
                     object-assign "^4.0.0"
 
                 loose-envify@^1.1.0:
                   version "1.4.0"
+
+                object-assign@^4.0.0:
+                  version "4.1.1"
                 """
             )
         )
@@ -1221,10 +1518,110 @@ class TestParseYarnLock:
             path, prod_root_names={"react"}, dev_root_names=set(), include_dev=False
         )
         by_name = {d.name: d for d in deps}
-        # Only `loose-envify` (under `dependencies:`) is captured as an edge.
-        # `object-assign` falls under optionalDependencies which we don't track
-        # as graph edges in v1 (only `dependencies:` is parsed).
         assert by_name["loose-envify"].direct_ancestors == ("react",)
+        assert "object-assign" not in by_name
+
+    def test_v1_optional_dependencies_block_is_an_edge_block(self, tmp_path):
+        # An entry with both blocks: children of each are edges.
+        path = tmp_path / "yarn.lock"
+        path.write_text(
+            textwrap.dedent(
+                """\
+                # yarn lockfile v1
+
+                react@^18.0:
+                  version "18.2.0"
+                  resolved "https://registry.yarnpkg.com/react/-/react-18.2.0.tgz"
+                  integrity sha512-fake==
+                  dependencies:
+                    loose-envify "^1.1.0"
+                  optionalDependencies:
+                    object-assign "^4.0.0"
+
+                loose-envify@^1.1.0:
+                  version "1.4.0"
+
+                object-assign@^4.0.0:
+                  version "4.1.1"
+                """
+            )
+        )
+        deps = parse_yarn_lock(
+            path, prod_root_names={"react"}, dev_root_names=set(), include_dev=False
+        )
+        by_name = {d.name: d for d in deps}
+        assert set(by_name) == {"react", "loose-envify", "object-assign"}
+        assert by_name["object-assign"].direct_ancestors == ("react",)
+        assert by_name["object-assign"].group == DependencyGroup.PROD
+
+    def test_v1_descendants_of_an_optional_only_package_survive(self, tmp_path):
+        # The platform-specific build is reachable only through an
+        # `optionalDependencies:` block, and it has dependencies of its own.
+        # The whole subtree must be kept, not only the direct optional child.
+        path = tmp_path / "yarn.lock"
+        path.write_text(
+            textwrap.dedent(
+                """\
+                # yarn lockfile v1
+
+                bundler@^1.0.0:
+                  version "1.0.0"
+                  optionalDependencies:
+                    bundler-native "1.0.0"
+
+                bundler-native@1.0.0:
+                  version "1.0.0"
+                  dependencies:
+                    native-helper "^2.0.0"
+
+                native-helper@^2.0.0:
+                  version "2.3.0"
+                  optionalDependencies:
+                    deep-optional "^0.1.0"
+
+                deep-optional@^0.1.0:
+                  version "0.1.4"
+
+                unrelated@^9.0.0:
+                  version "9.0.0"
+                """
+            )
+        )
+        deps = parse_yarn_lock(
+            path, prod_root_names={"bundler"}, dev_root_names=set(), include_dev=False
+        )
+        by_name = {d.name: d for d in deps}
+        assert set(by_name) == {"bundler", "bundler-native", "native-helper", "deep-optional"}
+        for name in ("bundler-native", "native-helper", "deep-optional"):
+            assert by_name[name].direct_ancestors == ("bundler",)
+            assert by_name[name].group == DependencyGroup.PROD
+
+    def test_v1_optional_only_chain_from_dev_root_is_dev(self, tmp_path):
+        path = tmp_path / "yarn.lock"
+        path.write_text(
+            textwrap.dedent(
+                """\
+                watcher@^3.0.0:
+                  version "3.5.0"
+                  optionalDependencies:
+                    watcher-native "~2.3.0"
+
+                watcher-native@~2.3.0:
+                  version "2.3.3"
+                """
+            )
+        )
+        with_dev = parse_yarn_lock(
+            path, prod_root_names=set(), dev_root_names={"watcher"}, include_dev=True
+        )
+        assert {d.name: d.group for d in with_dev} == {
+            "watcher": DependencyGroup.DEV,
+            "watcher-native": DependencyGroup.DEV,
+        }
+        without_dev = parse_yarn_lock(
+            path, prod_root_names=set(), dev_root_names={"watcher"}, include_dev=False
+        )
+        assert without_dev == []
 
     def test_berry_handles_non_dict_dependencies_field(self, tmp_path):
         path = tmp_path / "yarn.lock"

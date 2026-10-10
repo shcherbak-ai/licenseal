@@ -165,20 +165,25 @@ def _finalize(
     return out
 
 
-def _collect_npm_edge_children(meta: dict[str, Any]) -> list[str]:
+def _collect_npm_edge_children(meta: dict[str, Any], *, pnpm_references: bool = False) -> list[str]:
     """Union dependencies + peerDependencies + optionalDependencies (lowercased names).
 
     Also captures ``transitivePeerDependencies`` (pnpm-lock v9 ``snapshots:``
     convention — peers consumed deeper in the tree that propagate to the
     consumer's resolution closure). This field is shaped as a ``list[str]``
     rather than a name-keyed dict like the other three.
+
+    ``pnpm_references`` is set for pnpm-lock maps, whose values can name the
+    real package behind an alias key — see :func:`_pnpm_edge_target`.
     """
     children: list[str] = []
     for field_name in ("dependencies", "peerDependencies", "optionalDependencies"):
         deps_dict = meta.get(field_name)
         if isinstance(deps_dict, dict):
-            for child_name in deps_dict:
+            for child_name, value in deps_dict.items():
                 if isinstance(child_name, str):
+                    if pnpm_references:
+                        child_name = _pnpm_edge_target(child_name, value)
                     children.append(child_name.lower())
     tpd = meta.get("transitivePeerDependencies")
     if isinstance(tpd, list):
@@ -396,7 +401,9 @@ def parse_pnpm_lock(
 
         meta = cast("dict[str, Any]", raw)
         normalized = name.lower()
-        edges.setdefault(normalized, set()).update(_collect_npm_edge_children(meta))
+        edges.setdefault(normalized, set()).update(
+            _collect_npm_edge_children(meta, pnpm_references=True)
+        )
         name_case.setdefault(normalized, name)
 
         if (normalized, version) in seen:
@@ -427,7 +434,9 @@ def parse_pnpm_lock(
             snap_name, _ = _parse_pnpm_package_key(snap_key)
             if not snap_name:
                 continue
-            edges.setdefault(snap_name.lower(), set()).update(_collect_npm_edge_children(snap_raw))
+            edges.setdefault(snap_name.lower(), set()).update(
+                _collect_npm_edge_children(snap_raw, pnpm_references=True)
+            )
 
     return _finalize(deps, edges, name_case, prod_root_names, dev_root_names, include_dev)
 
@@ -485,6 +494,37 @@ def _parse_pnpm_package_key(key: str) -> tuple[str, str]:
     if not m:
         return "", ""
     return m.group("name"), m.group("version")
+
+
+# A dependency-map value that is the resolved version itself, with or without
+# a peer suffix.
+_PNPM_PLAIN_VERSION_RE = re.compile(r"\d+\.\d+\.\d+")
+
+
+def _pnpm_edge_target(child_name: str, value: object) -> str:
+    """Return the package a pnpm dependency-map entry points at.
+
+    The value is normally the resolved version (``1.0.0``, possibly with a
+    ``(peer@version)`` suffix) and the entry points at its key. For an npm
+    alias the key is the alias, which has no ``packages`` entry of its own,
+    and the value references the real package: ``real@1.0.0`` (v9),
+    ``/real@1.0.0`` (v6), ``@scope/real@2.0.0``, each optionally peer-suffixed.
+    The edge must then point at the real package or it is dropped as an
+    orphan.
+
+    Anything that is not such a reference keeps pointing at the key: plain
+    versions, ``link:`` / ``file:`` / ``workspace:`` specs, and URLs.
+    """
+    if (
+        not isinstance(value, str)
+        or value.startswith(_PNPM_NON_REGISTRY_PREFIXES)
+        or _PNPM_PLAIN_VERSION_RE.match(value)
+    ):
+        return child_name
+    name, version = _parse_pnpm_package_key(value.split("(", 1)[0])
+    if name and version[:1].isdigit():
+        return name
+    return child_name
 
 
 # ---------------------------------------------------------------- yarn
@@ -662,7 +702,9 @@ def _parse_yarn_v1(
                 current_version = m.group(1)
             in_deps_block = False
             continue
-        if line.startswith("  dependencies:"):
+        # Optional dependencies are installed too (platform-specific builds
+        # are usually declared this way), so both blocks are edges.
+        if line.startswith(("  dependencies:", "  optionalDependencies:")):
             in_deps_block = True
             continue
         if in_deps_block:
