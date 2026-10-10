@@ -254,3 +254,115 @@ class TestRowCardinality:
         # The child follows its own ecosystem's root, not the same-named npm one.
         assert [row.split("|")[2] for row in rows] == ["npm", "python", "python"]
         assert "python-child" in rows[2]
+
+
+def _mock_npm_registry(packages: dict[str, dict[str, object]]) -> None:
+    """Serve npm metadata for ``packages`` (name -> fields of version 1.0.0).
+
+    One route for the whole host, answered from the decoded request path, so a
+    name that is not a clean URL path segment can be served like any other.
+    """
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        name = max((n for n in packages if path.startswith(f"/{n}")), key=len)
+        document = {"name": name, "version": "1.0.0", **packages[name]}
+        # ``/{name}`` is the packument; ``/{name}/{version}`` one version's document.
+        body = {"versions": {"1.0.0": document}} if path == f"/{name}" else document
+        return httpx.Response(200, json=body)
+
+    respx.route(method="GET", host="registry.npmjs.org").mock(side_effect=respond)
+
+
+class TestUntrustedStrings:
+    """Markup, link syntax and control characters from manifests and registries."""
+
+    LINK_NAME = "a](https://evil.example)[b"
+
+    def _project(self, project: Path) -> None:
+        # One direct dependency is a manifest key with a ``[`` in it; another
+        # pulls in a registry-declared child whose name is Markdown link syntax
+        # and whose license string carries terminal escape sequences.
+        (project / "package.json").write_text(
+            json.dumps(
+                {
+                    "name": "app",
+                    "license": "MIT",
+                    "dependencies": {"brack[et": "1.0.0", "parent": "1.0.0"},
+                }
+            )
+        )
+        _mock_npm_registry(
+            {
+                "brack[et": {"license": "MIT"},
+                "parent": {"license": "MIT", "dependencies": {self.LINK_NAME: "1.0.0"}},
+                self.LINK_NAME: {"license": "\x1b[2JEvil\x9b31m<b>|`x`"},
+            }
+        )
+
+    @respx.mock
+    def test_table_renders_and_writes_file(self, tmp_path, monkeypatch):
+        # Wide enough for one line per row on stdout, whatever the host's width.
+        monkeypatch.setenv("COLUMNS", "300")
+        self._project(tmp_path)
+
+        exit_code, stdout = _check(tmp_path, "--no-strict")
+        file_exit_code, saved = _check_to_file(tmp_path, "table", "--no-strict")
+
+        # The unresolved license is advisory under --no-strict; nothing crashes.
+        assert exit_code == file_exit_code == 0
+        for table in (stdout, saved):
+            assert "\x1b" not in table
+            assert "\x9b" not in table
+            assert "brack[et (1.0.0)" in table
+            assert "Summary: 1 unknown, 2 ok" in table
+        assert f"└─ {self.LINK_NAME} (1.0.0)" in stdout
+        assert "\\x1b[2JEvil\\x9b31m<b>|`x`" in stdout
+
+    @respx.mock
+    def test_strict_fails_on_the_finding_not_on_rendering(self, tmp_path):
+        self._project(tmp_path)
+        exit_code, saved = _check_to_file(tmp_path, "table")
+        assert exit_code == 1
+        assert "brack[et (1.0.0)" in saved
+
+    @respx.mock
+    def test_markdown_escapes_names_and_license_strings(self, tmp_path):
+        self._project(tmp_path)
+        exit_code, stdout = _check(tmp_path, "-f", "markdown", "--no-strict")
+        file_exit_code, saved = _check_to_file(tmp_path, "markdown", "--no-strict")
+
+        assert exit_code == file_exit_code == 0
+        assert saved == stdout
+        rows = _markdown_rows(saved)
+        assert rows == [
+            "|[brack\\[et (1.0.0)](https://www.npmjs.com/package/brack%5Bet)|npm|prod|"
+            "[package.json](package.json)|[MIT](https://spdx.org/licenses/MIT.html)|permissive|✓|",
+            "|[parent (1.0.0)](https://www.npmjs.com/package/parent)|npm|prod|"
+            "[package.json](package.json)|[MIT](https://spdx.org/licenses/MIT.html)|permissive|✓|",
+            "|  └─ [a\\](https://evil.example)\\[b (1.0.0)]"
+            "(https://www.npmjs.com/package/a%5D%28https%3A//evil.example%29%5Bb)|npm|prod||"
+            "\\\\x1b\\[2JEvil\\\\x9b31m\\<b\\>\\|\\`x\\`|unknown|?|",
+        ]
+        assert (
+            "- ? a\\](https://evil.example)\\[b uses \\\\x1b\\[2JEvil\\\\x9b31m\\<b\\>\\|\\`x\\` "
+            "— could not determine compatibility with MIT"
+        ) in saved.splitlines()
+        assert "\x1b" not in saved
+
+    @respx.mock
+    def test_json_keeps_identity_and_raw_strings(self, tmp_path):
+        self._project(tmp_path)
+        _, raw_json = _check_to_file(tmp_path, "json", "--no-strict")
+        deps = {d["name"]: d for d in json.loads(raw_json)["dependencies"]}
+
+        assert set(deps) == {"brack[et", "parent", self.LINK_NAME}
+        child = deps[self.LINK_NAME]
+        assert child["direct_ancestors"] == ["parent"]
+        assert child["license"] == child["license_raw"] == "\x1b[2JEvil\x9b31m<b>|`x`"
+        assert child["package_url"] == (
+            "https://www.npmjs.com/package/a%5D%28https%3A//evil.example%29%5Bb"
+        )
+        assert deps["brack[et"]["package_url"] == "https://www.npmjs.com/package/brack%5Bet"
+        # The file itself is ASCII: JSON escapes the control characters.
+        assert "\\u001b[2JEvil" in raw_json

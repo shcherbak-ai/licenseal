@@ -3,13 +3,16 @@
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlsplit
+from urllib.parse import quote, urlsplit
 
 from rich.console import Console
 from rich.markup import escape as _escape_markup
+from rich.style import Style
 from rich.table import Table
+from rich.text import Text
 
 from licenseal.analysis.risk import (
     KNOWN_SPDX_IDS,
@@ -27,10 +30,55 @@ from licenseal.models import (
 
 _SPDX_OPERATORS = {"AND", "OR", "WITH"}
 
+_LINE_BREAKS_AND_TABS = re.compile(r"\r\n|[\n\r\t]")
+_CONTROL_CHARS = re.compile(r"[\x00-\x1f\x7f-\x9f]")
+_MARKDOWN_SPECIALS = re.compile(r"[\\`\[\]<>|]")
+
+
+def _printable(value: str) -> str:
+    """Make a registry- or manifest-derived string safe to print.
+
+    Names, versions, license strings, reasons and paths come from registries
+    and scanned files. A C0 or C1 control character in one (an escape sequence,
+    a carriage return) would otherwise act on the terminal or on whatever
+    displays a saved report. Line breaks and tabs become a space; every other
+    control character is shown as a ``\\xNN`` escape.
+
+    Presentation only: the data model and the JSON report keep the original
+    string, so a dependency's identity is never rewritten.
+    """
+    value = _LINE_BREAKS_AND_TABS.sub(" ", value)
+    return _CONTROL_CHARS.sub(lambda match: f"\\x{ord(match.group()):02x}", value)
+
 
 def _escape_md(value: str) -> str:
-    """Escape characters that break markdown table formatting."""
-    return value.replace("\r\n", " ").replace("\n", " ").replace("\r", " ").replace("|", "\\|")
+    """Escape a string for a Markdown table cell, link label, or list item.
+
+    Backslash-escapes what would end the cell (``|``) or start markup the
+    string must not introduce: a link or an image (``[``, ``]``), a code span
+    (a backtick), raw HTML or an autolink (``<``, ``>``), and the backslash
+    itself. Parentheses only act as link syntax directly after a closing
+    bracket, which is escaped, so they are left alone.
+    """
+    return _MARKDOWN_SPECIALS.sub(r"\\\g<0>", _printable(value))
+
+
+def _rich_escape(value: str) -> str:
+    """Escape a string for interpolation into Rich console markup."""
+    return _escape_markup(_printable(value))
+
+
+def _url_quote(value: str) -> str:
+    """Percent-encode a name, version, or path for use inside a URL.
+
+    ``/``, ``@`` and ``+`` stay literal: scoped package names, module paths and
+    versions with build metadata are written with them in registry URLs, so
+    the URL of a well-formed name is unchanged. Everything else outside the
+    unreserved set is encoded, so a name cannot add a query or fragment, close
+    a Markdown link target or a console markup tag, or carry control characters
+    into a link.
+    """
+    return quote(value, safe="/@+")
 
 
 def _license_url(license_id: str) -> str:
@@ -129,9 +177,14 @@ def _license_tokens(license_id: str) -> list[str]:
 
 
 def _package_url(result: CompatibilityResult) -> str:
-    """Return the registry page for the resolved package."""
+    """Return the registry page for the resolved package.
+
+    The name and version are percent-encoded (see :func:`_url_quote`), so the
+    result is a well-formed URL on the registry's host whatever the name holds.
+    """
     dep = result.license_info.dependency
-    name = dep.name
+    name = _url_quote(dep.name)
+    version = _url_quote(result.license_info.resolved_version)
     if dep.ecosystem == Ecosystem.PYTHON:
         return f"https://pypi.org/project/{name}/"
     if dep.ecosystem == Ecosystem.RUST:
@@ -139,7 +192,6 @@ def _package_url(result: CompatibilityResult) -> str:
     if dep.ecosystem == Ecosystem.GO:
         # ``name`` is the full module path (e.g. ``github.com/foo/bar``);
         # pkg.go.dev's URL convention is ``pkg.go.dev/{module_path}``.
-        version = result.license_info.resolved_version
         suffix = f"@{version}" if version else ""
         return f"https://pkg.go.dev/{name}{suffix}"
     if dep.ecosystem == Ecosystem.JAVA:
@@ -148,16 +200,17 @@ def _package_url(result: CompatibilityResult) -> str:
         # path uses ``/`` between group and artifact. Resolved version
         # is appended when known so users land on the exact version
         # licenseal scanned.
-        group_id, _, artifact_id = name.partition(":")
+        group_id, _, artifact_id = dep.name.partition(":")
         if not group_id or not artifact_id:
             return ""
-        version = result.license_info.resolved_version
         suffix = f"/{version}" if version else ""
-        return f"https://central.sonatype.com/artifact/{group_id}/{artifact_id}{suffix}"
+        return (
+            "https://central.sonatype.com/artifact/"
+            f"{_url_quote(group_id)}/{_url_quote(artifact_id)}{suffix}"
+        )
     if dep.ecosystem == Ecosystem.DOTNET:
         # NuGet.org is the canonical .NET package UI. Package ID is flat
         # (no group separator); resolved version is appended via ``/``.
-        version = result.license_info.resolved_version
         suffix = f"/{version}" if version else ""
         return f"https://www.nuget.org/packages/{name}{suffix}"
     if dep.ecosystem == Ecosystem.PHP:
@@ -171,7 +224,6 @@ def _package_url(result: CompatibilityResult) -> str:
         # sensitive and used verbatim. Resolved version is appended via
         # ``/versions/{version}`` so users land on the exact version
         # licenseal scanned.
-        version = result.license_info.resolved_version
         suffix = f"/versions/{version}" if version else ""
         return f"https://rubygems.org/gems/{name}{suffix}"
     if dep.ecosystem == Ecosystem.HEX:
@@ -179,9 +231,8 @@ def _package_url(result: CompatibilityResult) -> str:
         # lowercase; the resolved version is appended via ``/{version}`` so
         # users land on the exact version licenseal scanned. A `hex:`-renamed
         # dep links to its real hex.pm package, not the local app-name alias.
-        version = result.license_info.resolved_version
         suffix = f"/{version}" if version else ""
-        return f"https://hex.pm/packages/{dep.effective_registry_name}{suffix}"
+        return f"https://hex.pm/packages/{_url_quote(dep.effective_registry_name)}{suffix}"
     if dep.ecosystem == Ecosystem.R:
         # CRAN's canonical package page. CRAN serves only the current version's
         # page (no per-version web URL), so no version suffix is appended.
@@ -304,16 +355,22 @@ def _package_label(result: CompatibilityResult) -> str:
     return f"{name} ({resolved_version})"
 
 
-def _rich_link(label: str, url: str) -> str:
-    """Render a rich hyperlink when a URL is available."""
-    escaped = _escape_markup(label)
-    if not url:
-        return escaped
-    return f"[link={_escape_markup(url)}]{escaped}[/link]"
+def _rich_link(label: str, url: str) -> Text:
+    """Render a rich hyperlink when a URL is available.
+
+    Built as ``Text`` with a link style, not as markup: neither the label nor
+    the URL is parsed for console markup tags, so a ``[`` in a dependency name
+    is just a character.
+    """
+    return Text(_printable(label), style=Style(link=url) if url else "")
 
 
 def _markdown_link(label: str, url: str) -> str:
-    """Render a markdown link when a URL is available."""
+    """Render a markdown link when a URL is available.
+
+    ``url`` must already be percent-encoded (see :func:`_url_quote`): a space
+    or an unbalanced parenthesis in it would end the link target early.
+    """
     escaped = _escape_md(label)
     if not url:
         return escaped
@@ -325,12 +382,11 @@ def _markdown_row(values: list[str]) -> str:
     return f"|{'|'.join(values)}|"
 
 
-def _rich_license_label(license_id: str) -> str:
+def _rich_license_label(license_id: str) -> Text:
     """Render a license string with links for individual SPDX identifiers."""
-    parts = []
-    for token in _license_tokens(license_id):
-        parts.append(_rich_link(token, _license_url(token)))
-    return " ".join(parts)
+    return Text(" ").join(
+        _rich_link(token, _license_url(token)) for token in _license_tokens(license_id)
+    )
 
 
 def _markdown_license_label(license_id: str) -> str:
@@ -479,8 +535,7 @@ def render_table(
 
     console.print()
     console.print(
-        f"  Project license: [bold]{_escape_markup(report.project_license)}[/bold]",
-        highlight=False,
+        Text.assemble("  Project license: ", (_printable(report.project_license), "bold"))
     )
     console.print()
 
@@ -497,13 +552,12 @@ def render_table(
 
     for result in grouped:
         dep = result.license_info.dependency
-        link = _rich_link(_package_label(result), _package_url(result))
-        suffix = _escape_markup(_other_ancestors_suffix(result))
-        package_cell = (
-            f"{_TRANSITIVE_PREFIX}{link}{suffix}" if dep.is_transitive else f"{link}{suffix}"
-        )
         table.add_row(
-            package_cell,
+            Text.assemble(
+                _TRANSITIVE_PREFIX if dep.is_transitive else "",
+                _rich_link(_package_label(result), _package_url(result)),
+                _printable(_other_ancestors_suffix(result)),
+            ),
             dep.ecosystem.value,
             dep.group.value,
             _rich_link(dep.source, _source_terminal_url(result, project_path))
@@ -549,7 +603,7 @@ def render_table(
         console.print("  [bold]Details:[/bold]")
         for result in detail_results:
             icon = _VERDICT_ICONS[result.verdict]
-            console.print(f"    {icon} {_escape_markup(result.reason)}")
+            console.print(f"    {icon} {_rich_escape(result.reason)}")
         console.print()
 
     reviewed_results = _reviewed_results(grouped)
@@ -563,9 +617,9 @@ def render_table(
         for result in reviewed_results:
             review_table.add_row(
                 _rich_link(_package_label(result), _package_url(result)),
-                _escape_markup(_detected_license_label(result)),
+                Text(_printable(_detected_license_label(result))),
                 _rich_license_label(result.license_info.reviewed_license_id),
-                _escape_markup(result.license_info.review_note),
+                Text(_printable(result.license_info.review_note)),
             )
         console.print(review_table)
         console.print()
@@ -603,7 +657,7 @@ def render_check_failure(
     be analyzed (already listed in the warnings printed before this).
     """
     lines = [f"License check failed: {_summary_text(report)}"]
-    lines += [f"  {_VERDICT_MD_ICONS[r.verdict]} {r.reason}" for r in failing]
+    lines += [f"  {_VERDICT_MD_ICONS[r.verdict]} {_printable(r.reason)}" for r in failing]
     if gap_count:
         lines.append(
             f"  {gap_count} manifest(s) could not be fully analyzed (see the warnings above)"
@@ -628,7 +682,7 @@ def render_markdown(report: AnalysisReport) -> str:
     lines: list[str] = []
     lines.append("# License Analysis Report")
     lines.append("")
-    lines.append(f"**Project license:** {report.project_license}")
+    lines.append(f"**Project license:** {_escape_md(report.project_license)}")
     lines.append("")
 
     headers = ["Package", "Ecosystem", "Group", "Source", "License", "Risk", "Status"]
@@ -659,7 +713,7 @@ def render_markdown(report: AnalysisReport) -> str:
                     package_cell,
                     dep.ecosystem.value,
                     dep.group.value,
-                    _markdown_link(dep.source, _source_url(result)),
+                    _markdown_link(dep.source, _url_quote(_source_url(result))),
                     _markdown_license_label(result.license_info.effective_license_id),
                     result.risk_level.value,
                     icon,
@@ -680,7 +734,7 @@ def render_markdown(report: AnalysisReport) -> str:
         lines.append("")
         for result in detail_results:
             icon = _VERDICT_MD_ICONS[result.verdict]
-            lines.append(f"- {icon} {result.reason}")
+            lines.append(f"- {icon} {_escape_md(result.reason)}")
 
     reviewed_results = _reviewed_results(grouped)
     if reviewed_results:

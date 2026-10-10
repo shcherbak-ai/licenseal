@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import json
+import re
 from io import StringIO
 from pathlib import Path
 
+import pytest
 from rich.console import Console
 
 from licenseal.models import (
@@ -28,6 +30,7 @@ from licenseal.report import (
     _other_ancestors_suffix,
     _pick_from_parts,
     _pick_url_leaf,
+    _printable,
     _source_terminal_url,
     render_check_failure,
     render_json,
@@ -140,10 +143,69 @@ def _sample_report() -> AnalysisReport:
     )
 
 
-def _make_console() -> tuple[Console, StringIO]:
+def _make_console(width: int = 120) -> tuple[Console, StringIO]:
     buf = StringIO()
-    console = Console(file=buf, force_terminal=False, no_color=True, width=120)
+    console = Console(file=buf, force_terminal=False, no_color=True, width=width)
     return console, buf
+
+
+def _make_terminal_console(width: int = 200) -> tuple[Console, StringIO]:
+    """A console that emits styles and hyperlinks, whatever the host terminal is.
+
+    The colour system and an empty environment are passed explicitly: left to
+    detection, ``TERM=dumb`` or ``NO_COLOR`` in the host environment would turn
+    the escape sequences off and ``COLUMNS`` would override the width.
+    """
+    buf = StringIO()
+    console = Console(
+        file=buf,
+        force_terminal=True,
+        color_system="standard",
+        width=width,
+        legacy_windows=False,
+        _environ={},
+    )
+    return console, buf
+
+
+# Everything in C0 and C1 plus DEL, except the line feed that ends a line.
+_RAW_CONTROL = re.compile(r"[\x00-\x09\x0b-\x1f\x7f-\x9f]")
+
+
+def _hostile_report() -> AnalysisReport:
+    """A report whose registry- and manifest-derived strings carry control characters."""
+    return AnalysisReport(
+        project_license="MIT\x1b]0;title\x07",
+        results=[
+            _make_result(
+                "pkg\x1b[31m",
+                "Evil\x1b[2J\x9b31m",
+                RiskLevel.UNKNOWN,
+                CompatibilityVerdict.UNKNOWN,
+                reason="pkg declares 'Evil\x1b[2J' which did not resolve\rSummary: 0 violations",
+                resolved_version="1.0\x00",
+                source="dir\x1b[1m/requirements.txt",
+            ),
+            _make_result(
+                "child",
+                "MIT",
+                RiskLevel.PERMISSIVE,
+                CompatibilityVerdict.COMPATIBLE,
+                depth=1,
+                direct_ancestors=("pkg\x1b[31m", "other\x08"),
+            ),
+            _make_result(
+                "reviewed",
+                "UNKNOWN",
+                RiskLevel.PERMISSIVE,
+                CompatibilityVerdict.COMPATIBLE,
+                resolved_version="2.0.0",
+                license_raw="raw\x1b[5m",
+                reviewed_license_id="MIT",
+                review_note="line one\nline two\ttabbed\x1b[0m\x7f",
+            ),
+        ],
+    )
 
 
 class TestRenderTable:
@@ -1705,3 +1767,273 @@ class TestActionabilityWarning:
         steps = action["next_steps"]
         assert all("Verify license terms" not in s for s in steps)
         assert any("Confirm license text" in s for s in steps)
+
+
+class TestUntrustedStrings:
+    """Registry- and manifest-derived strings are escaped for display only."""
+
+    def test_printable_shows_control_characters(self):
+        assert _printable("a\x1b[2Jb\x9bc\x7fd\x00") == "a\\x1b[2Jb\\x9bc\\x7fd\\x00"
+        # Line breaks and tabs fold to a space, a CRLF pair to a single one.
+        assert _printable("one\r\ntwo\nthree\rfour\tfive") == "one two three four five"
+        assert _printable("plain (text) — ✓") == "plain (text) — ✓"
+
+    def test_table_file_output_has_no_control_characters(self):
+        console, buf = _make_console(width=300)
+        render_table(_hostile_report(), console)
+        output = buf.getvalue()
+        assert not _RAW_CONTROL.search(output)
+        assert "Project license: MIT\\x1b]0;title\\x07" in output
+        assert "pkg\\x1b[31m (1.0\\x00)" in output
+        assert "Evil\\x1b[2J\\x9b31m" in output
+        assert "dir\\x1b[1m/requirements.txt" in output
+        assert "(also: other\\x08)" in output
+        # A carriage return can't move the cursor back to forge a line.
+        assert "which did not resolve Summary: 0 violations" in output
+        assert "UNKNOWN (raw: raw\\x1b[5m)" in output
+        assert "line one line two tabbed\\x1b[0m\\x7f" in output
+
+    def test_table_terminal_output_carries_only_its_own_escape_sequences(self):
+        console, buf = _make_terminal_console()
+        render_table(_hostile_report(), console)
+        output = buf.getvalue()
+        # The console's own styling is there; none of the hostile sequences is.
+        assert "\x1b[" in output
+        for raw in ("\x1b[2J", "\x1b[5m", "\x1b]0;", "\x9b", "\x07", "\x08", "\x00", "\x7f", "\r"):
+            assert raw not in output
+        assert "Evil\\x1b[2J\\x9b31m" in output
+        # The hyperlink target is percent-encoded, so it can't end the sequence.
+        assert "https://pypi.org/project/pkg%1B%5B31m/" in output
+
+    def test_markdown_has_no_control_characters(self):
+        md = render_markdown(_hostile_report())
+        assert not _RAW_CONTROL.search(md)
+        assert "**Project license:** MIT\\\\x1b\\]0;title\\\\x07" in md
+        assert (
+            "|[pkg\\\\x1b\\[31m (1.0\\\\x00)](https://pypi.org/project/pkg%1B%5B31m/)|python|prod|"
+            "[dir\\\\x1b\\[1m/requirements.txt](dir%1B%5B1m/requirements.txt)|"
+            "Evil\\\\x1b\\[2J\\\\x9b31m|unknown|?|"
+        ) in md
+        assert (
+            "- ? pkg declares 'Evil\\\\x1b\\[2J' which did not resolve Summary: 0 violations"
+        ) in md
+        assert "|line one line two tabbed\\\\x1b\\[0m\\\\x7f|" in md
+
+    def test_check_failure_message_has_no_control_characters(self):
+        report = _hostile_report()
+        text = render_check_failure(
+            report, report.unknown, gap_count=0, output_file=Path("LICENSES.md")
+        )
+        assert not _RAW_CONTROL.search(text)
+        assert "  ? pkg declares 'Evil\\x1b[2J' which did not resolve Summary: 0 violations" in text
+
+    def test_json_keeps_strings_verbatim(self):
+        data = json.loads(render_json(_hostile_report()))
+        dep = next(d for d in data["dependencies"] if d["name"] == "pkg\x1b[31m")
+        assert dep["license"] == dep["license_raw"] == "Evil\x1b[2J\x9b31m"
+        assert dep["resolved_version"] == "1.0\x00"
+        assert dep["source"] == dep["source_url"] == "dir\x1b[1m/requirements.txt"
+        assert dep["reason"].endswith("which did not resolve\rSummary: 0 violations")
+        assert dep["package_url"] == "https://pypi.org/project/pkg%1B%5B31m/"
+        assert data["project_license"] == "MIT\x1b]0;title\x07"
+
+    @pytest.mark.parametrize("name", ["brack[et", "tag[bold]x[/bold]", "close]d", "[/link]", "\\"])
+    def test_table_renders_console_markup_in_names_literally(self, name):
+        # A ``[`` in a name used to raise a markup error after the whole scan.
+        report = AnalysisReport(
+            project_license="[red]MIT[/red]",
+            results=[
+                _make_result(
+                    name,
+                    "[bold]Custom[/bold]",
+                    RiskLevel.UNKNOWN,
+                    CompatibilityVerdict.UNKNOWN,
+                    ecosystem=Ecosystem.NPM,
+                    reason=f"{name} declares '[bold]Custom[/bold]' [/dim]",
+                    resolved_version="1.0.0[/cyan]",
+                    source=f"{name}/package.json",
+                ),
+                _make_result(
+                    "child",
+                    "MIT",
+                    RiskLevel.PERMISSIVE,
+                    CompatibilityVerdict.COMPATIBLE,
+                    ecosystem=Ecosystem.NPM,
+                    depth=1,
+                    direct_ancestors=(name, "[i]other[/i]"),
+                    resolved_version="2.0.0",
+                    reviewed_license_id="MIT",
+                    review_note="see [link=https://example.invalid]the notes[/link]",
+                ),
+            ],
+        )
+        console, buf = _make_console(width=300)
+        render_table(report, console)
+        output = buf.getvalue()
+        assert f"{name} (1.0.0[/cyan])" in output
+        assert "Project license: [red]MIT[/red]" in output
+        assert "[bold]Custom[/bold]" in output
+        assert f"{name} declares '[bold]Custom[/bold]' [/dim]" in output
+        assert "(also: [i]other[/i])" in output
+        assert "see [link=https://example.invalid]the notes[/link]" in output
+
+        # Styled output goes through the same code without a markup error.
+        terminal, _ = _make_terminal_console()
+        render_table(report, terminal)
+
+    def test_table_link_targets_are_percent_encoded(self):
+        report = AnalysisReport(
+            project_license="MIT",
+            results=[
+                _make_result(
+                    "brack[et]",
+                    "MIT",
+                    RiskLevel.PERMISSIVE,
+                    CompatibilityVerdict.COMPATIBLE,
+                    ecosystem=Ecosystem.NPM,
+                    resolved_version="1.0.0",
+                ),
+            ],
+        )
+        console, buf = _make_terminal_console()
+        render_table(report, console)
+        output = buf.getvalue()
+        assert "https://www.npmjs.com/package/brack%5Bet%5D" in output
+        assert "brack[et] (1.0.0)" in output
+
+    def test_markdown_escapes_link_cell_and_bullet_syntax(self):
+        name = "a](https://evil.example)[b"
+        license_id = "![x](https://evil.example/p.png)<img/src=x>|`code`\\"
+        report = AnalysisReport(
+            project_license="<b>MIT</b>",
+            results=[
+                _make_result(
+                    name,
+                    license_id,
+                    RiskLevel.UNKNOWN,
+                    CompatibilityVerdict.UNKNOWN,
+                    ecosystem=Ecosystem.NPM,
+                    reason=f"{name} declares '{license_id}' which did not resolve",
+                    resolved_version="1.0.0",
+                    source="my dir/(group)/package.json",
+                ),
+                _make_result(
+                    "child",
+                    "UNKNOWN",
+                    RiskLevel.PERMISSIVE,
+                    CompatibilityVerdict.COMPATIBLE,
+                    ecosystem=Ecosystem.NPM,
+                    depth=1,
+                    direct_ancestors=(name, "[other](https://evil.example)"),
+                    resolved_version="2.0.0",
+                    license_raw="<script>|raw",
+                    reviewed_license_id="MIT",
+                    review_note="see [the notes](https://evil.example) | `x` <b>",
+                ),
+            ],
+        )
+        md = render_markdown(report)
+        lines = md.splitlines()
+
+        assert "**Project license:** \\<b\\>MIT\\</b\\>" in lines
+        row = next(line for line in lines if line.startswith("|[a"))
+        assert row == (
+            "|[a\\](https://evil.example)\\[b (1.0.0)]"
+            "(https://www.npmjs.com/package/a%5D%28https%3A//evil.example%29%5Bb)"
+            "|npm|prod|[my dir/(group)/package.json](my%20dir/%28group%29/package.json)"
+            "|!\\[x\\](https://evil.example/p.png)\\<img/src=x\\>\\|\\`code\\`\\\\"
+            "|unknown|?|"
+        )
+        child = next(line for line in lines if "└─ [child (2.0.0)]" in line)
+        assert "(also: \\[other\\](https://evil.example))|npm|" in child
+        assert (
+            "- ? a\\](https://evil.example)\\[b declares "
+            "'!\\[x\\](https://evil.example/p.png)\\<img/src=x\\>\\|\\`code\\`\\\\' "
+            "which did not resolve"
+        ) in lines
+        assert (
+            "|[child (2.0.0)](https://www.npmjs.com/package/child)"
+            "|UNKNOWN (raw: \\<script\\>\\|raw)|[MIT](https://spdx.org/licenses/MIT.html)"
+            "|see \\[the notes\\](https://evil.example) \\| \\`x\\` \\<b\\>|"
+        ) in lines
+        # No cell can add or remove a column: with escaped pipes set aside,
+        # each dependency row still has its eight delimiters.
+        for line in lines:
+            if "|npm|" in line:
+                assert len(re.sub(r"\\.", "", line).split("|")) == 9
+
+    def test_markdown_of_well_formed_strings_is_not_escaped(self):
+        # Parentheses, underscores, asterisks and ampersands are common in
+        # names, versions and notes and need no escaping.
+        report = AnalysisReport(
+            project_license="Apache-2.0",
+            results=[
+                _make_result(
+                    "@scope/typing_extensions",
+                    "Apache-2.0 OR MIT",
+                    RiskLevel.WEAK_COPYLEFT,
+                    CompatibilityVerdict.WARNING,
+                    ecosystem=Ecosystem.NPM,
+                    reason="uses MPL-2.0 (weak copyleft) — review *this* & that; ok?",
+                    resolved_version="1.0.0+build.5",
+                    source="packages/@scope/web_app/package.json",
+                    reviewed_license_id="MIT",
+                    review_note="Unmodified dep (transitive via x); see #12 & docs/notes_v2.md!",
+                ),
+            ],
+        )
+        md = render_markdown(report)
+        assert "\\" not in md
+        assert "%" not in md
+        assert (
+            "|[@scope/typing_extensions (1.0.0+build.5)]"
+            "(https://www.npmjs.com/package/@scope/typing_extensions)|npm|prod|"
+            "[packages/@scope/web_app/package.json](packages/@scope/web_app/package.json)|"
+        ) in md
+        assert "- ⚠ uses MPL-2.0 (weak copyleft) — review *this* & that; ok?" in md
+
+    def test_package_url_percent_encodes_names_and_versions(self):
+        def url(name: str, ecosystem: Ecosystem, version: str = "", registry_name: str = "") -> str:
+            report = AnalysisReport(
+                project_license="MIT",
+                results=[
+                    _make_result(
+                        name,
+                        "MIT",
+                        RiskLevel.PERMISSIVE,
+                        CompatibilityVerdict.COMPATIBLE,
+                        ecosystem=ecosystem,
+                        resolved_version=version,
+                        registry_name=registry_name,
+                    )
+                ],
+            )
+            dep = json.loads(render_json(report))["dependencies"][0]
+            # Identity is never rewritten; only the derived link is encoded.
+            assert dep["name"] == name
+            assert dep["resolved_version"] == version
+            return dep["package_url"]
+
+        # Well-formed names and versions are written as before.
+        assert url("@scope/pkg", Ecosystem.NPM) == "https://www.npmjs.com/package/@scope/pkg"
+        assert url("github.com/Foo/bar.v2", Ecosystem.GO, "v2.0.0+incompatible") == (
+            "https://pkg.go.dev/github.com/Foo/bar.v2@v2.0.0+incompatible"
+        )
+        assert url("vendor/pkg~x", Ecosystem.PHP) == "https://packagist.org/packages/vendor/pkg~x"
+        # Anything else is encoded: no query, fragment, or stray delimiter.
+        assert url("a b?c#d", Ecosystem.PYTHON) == "https://pypi.org/project/a%20b%3Fc%23d/"
+        assert url("a%2Fb", Ecosystem.RUST) == "https://crates.io/crates/a%252Fb"
+        assert url("g<r>:a(b)", Ecosystem.JAVA, "1 0") == (
+            "https://central.sonatype.com/artifact/g%3Cr%3E/a%28b%29/1%200"
+        )
+        assert url("Pkg|x", Ecosystem.DOTNET, "1.0`") == (
+            "https://www.nuget.org/packages/Pkg%7Cx/1.0%60"
+        )
+        assert url('gem"x', Ecosystem.RUBY, "1]") == (
+            "https://rubygems.org/gems/gem%22x/versions/1%5D"
+        )
+        assert url("app", Ecosystem.HEX, "1[0", registry_name="real pkg") == (
+            "https://hex.pm/packages/real%20pkg/1%5B0"
+        )
+        assert url("pkg x", Ecosystem.R) == "https://cran.r-project.org/package=pkg%20x"
+        assert url("é", Ecosystem.NPM) == "https://www.npmjs.com/package/%C3%A9"

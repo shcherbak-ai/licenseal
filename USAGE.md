@@ -58,6 +58,8 @@ licenseal check --exclude-dirs third_party,scratch  # skip subtrees not already 
 
 The `-o / --output FILE` flag writes the rendered report to a file (UTF-8, no ANSI escapes for table format). The file is written **before** the strict-mode gate runs, so CI can publish the artifact even when `check` exits non-zero. Since the report itself doesn't reach the terminal, a failing check then also prints the summary and the findings that failed it (plus the number of analysis gaps) to stderr, so CI logs and pre-commit output show why without opening the file. JSON is the stable machine-readable format — see [JSON_OUTPUT.md](JSON_OUTPUT.md) for the schema.
 
+The table and Markdown formats escape the strings that come from registries and scanned files (package names, versions, license strings, manifest paths, review notes) for display. Control characters are shown as `\xNN`; line breaks and tabs become a space. Markdown reports backslash-escape `\`, `` ` ``, `[`, `]`, `<`, `>`, and `|`, so a string cannot add a link, an image, HTML, or a table column. Link URLs carry the name percent-encoded. JSON reports the original strings.
+
 ## Transitive scanning
 
 Transitive is the default. `--no-transitive` audits only the manifests you declared directly. The walk uses a **lockfile-first** strategy:

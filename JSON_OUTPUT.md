@@ -100,7 +100,7 @@ Each entry is a manifest/lockfile read or parse anomaly surfaced during the scan
 
 | Field | Type | Description |
 | --- | --- | --- |
-| `name` | string | Package name as published on the registry. |
+| `name` | string | Package name as published on the registry. Reported verbatim, like every other string field: the table and Markdown formats escape control characters and markup for display, JSON does not rewrite them (a control character appears as a JSON `\uXXXX` escape). |
 | `ecosystem` | `"python"` \| `"npm"` \| `"rust"` \| `"go"` \| `"java"` \| `"dotnet"` \| `"php"` \| `"ruby"` \| `"hex"` \| `"r"` | Origin ecosystem. |
 | `group` | `"prod"` \| `"dev"` | Production or development. Reachability-based for transitives. |
 | `depth` | int | `0` for direct deps, `1` for transitives. A binary direct/transitive signal, not a tree level. |
@@ -118,7 +118,7 @@ Each entry is a manifest/lockfile read or parse anomaly surfaced during the scan
 | `resolved_version` | string | Concrete version checked (e.g. `"2026.4.22"`). |
 | `repository_url` | string | Source-repo URL from the registry's structured field (e.g. PyPI `project_urls`, npm `repository`, crates.io `repository`, and the equivalent field per registry). Empty when the registry didn't expose one. See _URL fields and trust_ below. |
 | `homepage_url` | string | Package-author-supplied homepage (e.g. PyPI `home_page`, npm `homepage`, crates.io `homepage`, and the equivalent field per registry). Empty when the registry didn't expose one. See _URL fields and trust_ below. |
-| `package_url` | string | Registry / docs page for the dependency's ecosystem (e.g. `https://pypi.org/project/{name}/`, `https://www.npmjs.com/package/{name}`, `https://crates.io/crates/{name}`, `https://pkg.go.dev/{module}`, `https://www.nuget.org/packages/{name}`, `https://packagist.org/packages/{name}`, `https://rubygems.org/gems/{name}`, `https://hex.pm/packages/{name}`, `https://cran.r-project.org/package={name}`). |
+| `package_url` | string | Registry / docs page for the dependency's ecosystem (e.g. `https://pypi.org/project/{name}/`, `https://www.npmjs.com/package/{name}`, `https://crates.io/crates/{name}`, `https://pkg.go.dev/{module}`, `https://www.nuget.org/packages/{name}`, `https://packagist.org/packages/{name}`, `https://rubygems.org/gems/{name}`, `https://hex.pm/packages/{name}`, `https://cran.r-project.org/package={name}`). The name and version are percent-encoded into the URL (`/`, `@`, and `+` are kept), so the URL of a well-formed name reads as shown and any other character cannot change the host or add a query or fragment. |
 | `license_url` | string | `https://spdx.org/licenses/{id}.html`. For compound SPDX expressions (`OR` / `AND` / `WITH`), resolves to a representative component: lowest-risk for `OR`, highest-risk for `AND`, base for `WITH`. Empty when no component is a known SPDX ID. |
 | `risk` | `"permissive"` \| `"weak-copyleft"` \| `"strong-copyleft"` \| `"network-copyleft"` \| `"unknown"` | Risk tier. |
 | `verdict` | `"compatible"` \| `"warning"` \| `"incompatible"` \| `"unknown"` | Compatibility verdict. |
@@ -129,7 +129,7 @@ Each entry is a manifest/lockfile read or parse anomaly surfaced during the scan
 
 For agents and tooling that follow URLs from the report, the four URL fields fall into two trust tiers:
 
-- **Safe to trust** — `package_url` and `license_url`. Both are deterministically constructed by licenseal from a known ID + canonical host (registry or spdx.org). They never carry attacker-supplied content.
+- **Safe to trust** — `package_url` and `license_url`. Both are deterministically constructed by licenseal from a known ID + canonical host (registry or spdx.org). `license_url` is emitted only for IDs in the SPDX list; `package_url` carries the package name and version percent-encoded in its path, so neither can point at another host.
 - **Registry-provenance, treat as untrusted content** — `repository_url` and `homepage_url`. The registry passes through whatever the package author wrote. A compromised package can point either field at any URL. Agents that fetch these URLs should sandbox the request and validate response content before acting on it. Stricter agents may prefer `repository_url` over `homepage_url` (structured VCS data is usually a tighter signal than a homepage), but neither is validated.
 
 ## Actionability block
