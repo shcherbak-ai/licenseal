@@ -11,7 +11,11 @@ import pytest
 import respx
 from click.testing import CliRunner
 
-from licenseal.analysis.compatibility import analyze, check_compatibility
+from licenseal.analysis.compatibility import (
+    analyze,
+    check_compatibility,
+    is_recognised_project_license,
+)
 from licenseal.analysis.spdx import and_join_licenses, normalize_license
 from licenseal.cli import main
 from licenseal.models import (
@@ -1368,3 +1372,40 @@ class TestDualLicensedProjectRow:
         report = analyze("((AGPL-3.0-only OR Proprietary))", [_make_license_info("GPL-3.0-only")])
         assert report.project_license == "AGPL-3.0-only OR Proprietary"
         assert len(report.violations) == 1
+
+
+class TestRecognisedProjectLicense:
+    """A project license is recognised when the check has a row to judge
+    against, and not when every dependency would come out UNKNOWN under it."""
+
+    @pytest.mark.parametrize(
+        "project_license",
+        [
+            "MIT",
+            "MIT License",
+            "GPL-3.0",
+            "Apache-2.0 WITH LLVM-exception",
+            # The project's own restrictive choice still has a row.
+            "Proprietary",
+            "UNLICENSED",
+            "LicenseRef-Internal",
+            "BUSL-1.1",
+            "AGPL-3.0-only OR Proprietary",
+            # One arm the check can place is enough for an ``OR``.
+            "MIT OR Custom",
+        ],
+    )
+    def test_recognised(self, project_license):
+        assert is_recognised_project_license(project_license) is True
+        verdict = check_compatibility(project_license, _make_license_info("MIT")).verdict
+        assert verdict == CompatibilityVerdict.COMPATIBLE
+
+    @pytest.mark.parametrize(
+        "project_license",
+        ["-", "UNKNOWN", "NOASSERTION", "see the LICENSE file", "Unheard-Of", "MIT AND Custom", ""],
+    )
+    def test_not_recognised(self, project_license):
+        assert is_recognised_project_license(project_license) is False
+        # What judging against it would give: nothing can be decided.
+        verdict = check_compatibility(project_license, _make_license_info("MIT")).verdict
+        assert verdict == CompatibilityVerdict.UNKNOWN

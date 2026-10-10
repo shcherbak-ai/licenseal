@@ -335,15 +335,7 @@ def discover_setup_py_dependencies(
     return deps
 
 
-def detect_project_license_setup_py(
-    project_path: Path,
-    *,
-    exclude_paths: frozenset[Path] = frozenset(),
-) -> str:
-    """Detect the project's own license from setup.py's ``setup(license=...)``."""
-    for setup_py in walk_project_files(project_path, "setup.py", exclude_paths=exclude_paths):
-        source = setup_py.relative_to(project_path).as_posix()
-        _, license_str = _extract_setup_py(setup_py, source)
-        if license_str:
-            return license_str
-    return ""
+def detect_project_license_setup_py(setup_py: Path) -> str:
+    """Return the license one ``setup.py`` gives its ``setup(...)`` call, or ``""``."""
+    _, license_str = _extract_setup_py(setup_py, setup_py.name)
+    return license_str

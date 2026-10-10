@@ -75,17 +75,13 @@ def discover_setup_cfg_dependencies(
     return deps
 
 
-def detect_project_license_setup_cfg(project_path: Path) -> str:
-    """Detect the project's own license from the root setup.cfg.
+def detect_project_license_setup_cfg(setup_cfg: Path) -> str:
+    """Return the license one ``setup.cfg`` declares for its project, or ``""``.
 
     Reads ``[metadata] license`` (a raw SPDX-ish string) and falls back to
     the first ``License :: OSI Approved :: *`` trove classifier in
     ``[metadata] classifiers`` if the bare license field is empty.
     """
-    setup_cfg = project_path / "setup.cfg"
-    if not setup_cfg.exists():
-        return ""
-
     text = decode_text(setup_cfg)
     if text is None:
         return ""

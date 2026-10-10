@@ -196,7 +196,7 @@ No tool clears every row. The discovery rows are about source-tree analysis: man
 | `--no-dev` | Dev dependencies are excluded unless `--dev` is set. |
 | `--strict` | Warnings, unknowns, and analysis gaps fail CI in addition to violations. |
 | Violations always fail | `--no-strict` demotes warnings, unknowns, and gaps only; definite incompatibilities still fail. |
-| Missing project license -> `Proprietary` | If no project license is detected, licenseal labels the project `Proprietary` and checks dependencies as if it were permissively licensed — copyleft dependencies are still flagged, so the default errs strict, not lenient. |
+| Project license from the scanned directory, else `Proprietary` | The project's own license is read from a manifest in the scanned directory itself (`pyproject.toml`, `package.json`, `Cargo.toml`, …), never from a nested package, and the scan prints which file supplied it. If none declares a recognised license, licenseal labels the project `Proprietary` and checks dependencies as if it were permissively licensed — copyleft dependencies are still flagged, so the default errs strict, not lenient. Scan a subproject with `--path` to check it against its own license. See [USAGE.md](USAGE.md#project-license). |
 | Registry-only resolution | No installs, builds, package archive downloads, or source-prose license extraction. |
 
 ## 🎯 Scope
@@ -280,7 +280,7 @@ licenseal also ships a [Claude Code](https://claude.com/claude-code) skill (`lic
 
 ## 🧩 How Licenseal Decides
 
-licenseal classifies each dependency license into a risk level and compares that risk against the detected project license.
+licenseal classifies each dependency license into a risk level and compares that risk against the project license, which it reads from a manifest in the scanned directory.
 
 | Project \ Dependency | Permissive | Weak Copyleft | Strong Copyleft | Network Copyleft |
 | --- | --- | --- | --- | --- |

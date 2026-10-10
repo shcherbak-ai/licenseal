@@ -313,36 +313,30 @@ def _collect_local_rust_names(parsed: list[tuple[Path, dict[str, Any]]]) -> set[
     return names
 
 
-def detect_project_license_cargo_toml(
-    project_path: Path,
-    *,
-    exclude_paths: frozenset[Path] = frozenset(),
-) -> str:
-    """Detect the project's own license from a Cargo.toml.
+def detect_project_license_cargo_toml(cargo_toml: Path) -> str:
+    """Return the license one ``Cargo.toml`` declares, or ``""``.
 
     Reads ``[package].license`` (per-crate declaration) and falls back to
-    ``[workspace.package].license`` (Cargo workspace inheritance — root
-    Cargo.toml declares the canonical license and member crates set
-    ``license.workspace = true`` to inherit). Walks the tree for workspace
-    layouts; returns the first non-empty license in walk order (root first).
+    ``[workspace.package].license`` (Cargo workspace inheritance — the
+    workspace's ``Cargo.toml`` declares the canonical license and member
+    crates set ``license.workspace = true`` to inherit).
     """
-    for ct in walk_project_files(project_path, "Cargo.toml", exclude_paths=exclude_paths):
-        data = load_toml(ct)
-        if data is None:
-            continue
-        package = data.get("package")
-        if isinstance(package, dict):
-            license_val = cast("dict[str, Any]", package).get("license")
-            if isinstance(license_val, str) and license_val:
-                return license_val
-        # Cargo workspace inheritance: the root Cargo.toml of a workspace
-        # may declare the license under [workspace.package] (no [package]
-        # of its own), with member crates inheriting via license.workspace.
-        workspace = data.get("workspace")
-        if isinstance(workspace, dict):
-            ws_package = cast("dict[str, Any]", workspace).get("package")
-            if isinstance(ws_package, dict):
-                ws_license = cast("dict[str, Any]", ws_package).get("license")
-                if isinstance(ws_license, str) and ws_license:
-                    return ws_license
+    data = load_toml(cargo_toml)
+    if data is None:
+        return ""
+    package = data.get("package")
+    if isinstance(package, dict):
+        license_val = cast("dict[str, Any]", package).get("license")
+        if isinstance(license_val, str) and license_val:
+            return license_val
+    # Cargo workspace inheritance: the root Cargo.toml of a workspace
+    # may declare the license under [workspace.package] (no [package]
+    # of its own), with member crates inheriting via license.workspace.
+    workspace = data.get("workspace")
+    if isinstance(workspace, dict):
+        ws_package = cast("dict[str, Any]", workspace).get("package")
+        if isinstance(ws_package, dict):
+            ws_license = cast("dict[str, Any]", ws_package).get("license")
+            if isinstance(ws_license, str):
+                return ws_license
     return ""

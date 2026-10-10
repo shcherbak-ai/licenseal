@@ -6,7 +6,8 @@ from pathlib import Path
 
 import pytest
 
-from licenseal.discovery import discover_all_dependencies
+from licenseal.discovery import ProjectLicense, detect_project_license, discover_all_dependencies
+from licenseal.discovery._read import collect_read_diagnostics
 from licenseal.discovery.dotnet import (
     detect_project_license_csproj,
     discover_csproj_dependencies,
@@ -894,65 +895,62 @@ class TestDiscoverWorkspaceLocalProjectIds:
 
 
 class TestDetectProjectLicenseCsproj:
-    def test_modern_expression_returned_as_spdx(self, tmp_path):
+    @staticmethod
+    def _project(*properties: str) -> str:
+        body = "".join(f"    {line}\n" for line in properties)
+        return f"""<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+{body}  </PropertyGroup>
+</Project>"""
+
+    def test_modern_expression_returned_as_declared(self, tmp_path):
         _write(
             tmp_path / "Lib.csproj",
-            """<Project Sdk="Microsoft.NET.Sdk">
-  <PropertyGroup>
-    <PackageLicenseExpression>MIT</PackageLicenseExpression>
-  </PropertyGroup>
-</Project>""",
+            self._project("<PackageLicenseExpression>MIT</PackageLicenseExpression>"),
         )
-        assert detect_project_license_csproj(tmp_path) == "MIT"
+        assert detect_project_license_csproj(tmp_path / "Lib.csproj") == "MIT"
+        assert detect_project_license(tmp_path) == ProjectLicense(
+            license="MIT", source="Lib.csproj", declared=(("Lib.csproj", "MIT"),)
+        )
 
     def test_legacy_url_mapped_via_known_pattern(self, tmp_path):
-        # Apache 2.0 URL is in spdx_from_license_url's pattern map.
+        # The probe returns the URL as declared; the license normalizer maps
+        # the Apache 2.0 URL to its SPDX ID.
+        url = "https://www.apache.org/licenses/LICENSE-2.0"
         _write(
-            tmp_path / "Lib.csproj",
-            """<Project Sdk="Microsoft.NET.Sdk">
-  <PropertyGroup>
-    <PackageLicenseUrl>https://www.apache.org/licenses/LICENSE-2.0</PackageLicenseUrl>
-  </PropertyGroup>
-</Project>""",
+            tmp_path / "Lib.csproj", self._project(f"<PackageLicenseUrl>{url}</PackageLicenseUrl>")
         )
-        result = detect_project_license_csproj(tmp_path)
-        assert "Apache" in result.upper() or result == "Apache-2.0"
+        assert detect_project_license_csproj(tmp_path / "Lib.csproj") == url
+        assert detect_project_license(tmp_path) == ProjectLicense(
+            license="Apache-2.0", source="Lib.csproj", declared=(("Lib.csproj", url),)
+        )
 
     def test_no_license_metadata_returns_empty(self, tmp_path):
         _write(tmp_path / "App.csproj", """<Project Sdk="Microsoft.NET.Sdk" />""")
-        assert detect_project_license_csproj(tmp_path) == ""
-
-    def test_no_csproj_files_returns_empty(self, tmp_path):
-        assert detect_project_license_csproj(tmp_path) == ""
+        assert detect_project_license_csproj(tmp_path / "App.csproj") == ""
 
     def test_malformed_csproj_skipped(self, tmp_path):
         _write(tmp_path / "Bad.csproj", "<not closed")
         _write(
             tmp_path / "Good.csproj",
-            """<Project Sdk="Microsoft.NET.Sdk">
-  <PropertyGroup>
-    <PackageLicenseExpression>BSD-3-Clause</PackageLicenseExpression>
-  </PropertyGroup>
-</Project>""",
+            self._project("<PackageLicenseExpression>BSD-3-Clause</PackageLicenseExpression>"),
         )
-        assert detect_project_license_csproj(tmp_path) == "BSD-3-Clause"
+        with collect_read_diagnostics() as diags:
+            assert detect_project_license_csproj(tmp_path / "Bad.csproj") == ""
+            detected = detect_project_license(tmp_path)
+        assert (detected.license, detected.source) == ("BSD-3-Clause", "Good.csproj")
+        assert {(d.path, d.reason, d.is_gap) for d in diags} == {
+            (tmp_path / "Bad.csproj", "is not valid XML; skipped", True)
+        }
 
     def test_unreadable_csproj_skipped(self, tmp_path, monkeypatch):
         _write(
             tmp_path / "Bad.csproj",
-            """<Project Sdk="Microsoft.NET.Sdk">
-  <PropertyGroup>
-    <PackageLicenseExpression>MIT</PackageLicenseExpression>
-  </PropertyGroup>
-</Project>""",
+            self._project("<PackageLicenseExpression>MIT</PackageLicenseExpression>"),
         )
         _write(
             tmp_path / "Good.csproj",
-            """<Project Sdk="Microsoft.NET.Sdk">
-  <PropertyGroup>
-    <PackageLicenseExpression>Apache-2.0</PackageLicenseExpression>
-  </PropertyGroup>
-</Project>""",
+            self._project("<PackageLicenseExpression>Apache-2.0</PackageLicenseExpression>"),
         )
         original = Path.read_bytes
 
@@ -962,89 +960,69 @@ class TestDetectProjectLicenseCsproj:
             return original(self, *args, **kwargs)
 
         monkeypatch.setattr(Path, "read_bytes", explode)
-        # Good.csproj still resolves cleanly.
-        result = detect_project_license_csproj(tmp_path)
-        assert result in {"MIT", "Apache-2.0"}
+        # Bad.csproj cannot be read, so Good.csproj is the one that declares.
+        assert detect_project_license_csproj(tmp_path / "Bad.csproj") == ""
+        assert detect_project_license(tmp_path) == ProjectLicense(
+            license="Apache-2.0", source="Good.csproj", declared=(("Good.csproj", "Apache-2.0"),)
+        )
 
-    def test_unknown_license_falls_through(self, tmp_path):
-        # If normalize_license returns UNKNOWN, the function should keep
-        # looking (returns empty in this case since there's no other source).
+    def test_expression_that_is_not_a_license_is_not_recognised(self, tmp_path):
+        # The declaration is kept for the warning; nothing is detected from it.
         _write(
             tmp_path / "Lib.csproj",
-            """<Project Sdk="Microsoft.NET.Sdk">
-  <PropertyGroup>
-    <PackageLicenseExpression>SomethingTotallyMadeUp</PackageLicenseExpression>
-  </PropertyGroup>
-</Project>""",
+            self._project(
+                "<PackageLicenseExpression>SomethingTotallyMadeUp</PackageLicenseExpression>"
+            ),
         )
-        # Either returns empty (UNKNOWN treated as no-hit) or returns the
-        # normalized form. Both behaviours are acceptable; just confirm we
-        # don't crash.
-        result = detect_project_license_csproj(tmp_path)
-        assert isinstance(result, str)
+        assert detect_project_license(tmp_path) == ProjectLicense(
+            declared=(("Lib.csproj", "SomethingTotallyMadeUp"),)
+        )
 
-    def test_unknown_expression_falls_through_to_license_url(self, tmp_path):
-        # When PackageLicenseExpression normalizes to UNKNOWN but a
-        # PackageLicenseUrl is also present and mappable, fall through.
-        # The literal string ``UNKNOWN`` is the canonical input that
-        # normalize_license maps to UNKNOWN (everything else maps to a
-        # concrete SPDX ID or echoes the input).
+    def test_expression_is_read_ahead_of_license_url(self, tmp_path):
+        # A project file with both declares its license by the expression.
         _write(
             tmp_path / "Lib.csproj",
-            """<Project Sdk="Microsoft.NET.Sdk">
-  <PropertyGroup>
-    <PackageLicenseExpression>UNKNOWN</PackageLicenseExpression>
-    <PackageLicenseUrl>https://www.apache.org/licenses/LICENSE-2.0</PackageLicenseUrl>
-  </PropertyGroup>
-</Project>""",
+            self._project(
+                "<PackageLicenseExpression>MIT</PackageLicenseExpression>",
+                "<PackageLicenseUrl>https://www.apache.org/licenses/LICENSE-2.0</PackageLicenseUrl>",
+            ),
         )
-        result = detect_project_license_csproj(tmp_path)
-        # Expression normalizes to UNKNOWN → falls through to URL mapping.
-        assert "Apache" in result.upper() or result == "Apache-2.0"
+        assert detect_project_license_csproj(tmp_path / "Lib.csproj") == "MIT"
 
-    def test_unmappable_license_url_continues_scan(self, tmp_path):
-        # First project has an unmappable URL; second has a mappable one.
-        # The loop must continue past the first to find the second.
+    def test_unmappable_license_url_is_not_recognised(self, tmp_path):
+        # The first project file in the scanned directory declares a URL of
+        # no canonical license page. It decides, and the project file after
+        # it is reported as declaring something else.
+        url = "https://invented-domain.example/license"
         _write(
             tmp_path / "First.csproj",
-            """<Project Sdk="Microsoft.NET.Sdk">
-  <PropertyGroup>
-    <PackageLicenseUrl>https://invented-domain.example/license</PackageLicenseUrl>
-  </PropertyGroup>
-</Project>""",
+            self._project(f"<PackageLicenseUrl>{url}</PackageLicenseUrl>"),
         )
         _write(
             tmp_path / "Second.csproj",
-            """<Project Sdk="Microsoft.NET.Sdk">
-  <PropertyGroup>
-    <PackageLicenseExpression>BSD-3-Clause</PackageLicenseExpression>
-  </PropertyGroup>
-</Project>""",
+            self._project("<PackageLicenseExpression>BSD-3-Clause</PackageLicenseExpression>"),
         )
-        result = detect_project_license_csproj(tmp_path)
-        assert result == "BSD-3-Clause"
+        assert detect_project_license(tmp_path) == ProjectLicense(
+            declared=(("First.csproj", url), ("Second.csproj", "BSD-3-Clause"))
+        )
 
-    def test_license_url_naming_a_canonical_host_elsewhere_is_not_mapped(self, tmp_path):
+    @pytest.mark.parametrize(
+        "url",
+        [
+            "https://not-unlicense.org/commercial",
+            "https://unlicense.org@evil.example/terms",
+            "https://example.org/apache.org/licenses/LICENSE-2.0",
+            "https://example.org/spdx.org/licenses/MIT",
+        ],
+    )
+    def test_license_url_naming_a_canonical_host_elsewhere_is_not_mapped(self, tmp_path, url):
         # The project's own ``PackageLicenseUrl`` only mentions a canonical
         # license host — in a lookalike domain, the user-info, or another
         # site's path. No project license is detected from it.
-        for index, url in enumerate(
-            (
-                "https://not-unlicense.org/commercial",
-                "https://unlicense.org@evil.example/terms",
-                "https://example.org/apache.org/licenses/LICENSE-2.0",
-                "https://example.org/spdx.org/licenses/MIT",
-            )
-        ):
-            _write(
-                tmp_path / f"Lib{index}.csproj",
-                f"""<Project Sdk="Microsoft.NET.Sdk">
-  <PropertyGroup>
-    <PackageLicenseUrl>{url}</PackageLicenseUrl>
-  </PropertyGroup>
-</Project>""",
-            )
-        assert detect_project_license_csproj(tmp_path) == ""
+        _write(
+            tmp_path / "Lib.csproj", self._project(f"<PackageLicenseUrl>{url}</PackageLicenseUrl>")
+        )
+        assert detect_project_license(tmp_path) == ProjectLicense(declared=(("Lib.csproj", url),))
 
 
 # ---------------------------------------------------------------------------

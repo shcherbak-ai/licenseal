@@ -15,7 +15,7 @@ from pathlib import Path
 import pytest
 import respx
 
-from licenseal.discovery import detect_project_license, discover_all_dependencies
+from licenseal.discovery import ProjectLicense, detect_project_license, discover_all_dependencies
 from licenseal.discovery._read import ReadDiagnostic, collect_read_diagnostics
 from licenseal.models import Dependency, DependencyGroup
 from tests._helpers import (
@@ -100,7 +100,7 @@ class TestPackageJson:
         manifest.write_text(json.dumps(root))
 
         with collect_read_diagnostics() as diags:
-            assert detect_project_license(project) == ""
+            assert detect_project_license(project / "svc") == ProjectLicense()
             deps, _ = discover_all_dependencies(project)
 
         assert _found(deps) == {_HEALTHY}
@@ -344,7 +344,7 @@ class TestPyproject:
         manifest = _write(project / "svc" / "pyproject.toml", content)
 
         with collect_read_diagnostics() as diags:
-            detect_project_license(project)
+            detect_project_license(project / "svc")
             deps, _ = discover_all_dependencies(project)
 
         assert _found(deps) == found | {_HEALTHY}
@@ -404,7 +404,7 @@ class TestPyproject:
         _write(project / "svc" / "pyproject.toml", content)
 
         with collect_read_diagnostics() as diags:
-            assert detect_project_license(project) == ""
+            assert detect_project_license(project / "svc") == ProjectLicense()
             deps, _ = discover_all_dependencies(project)
 
         assert _found(deps) == {("flask", ""), _HEALTHY}
@@ -418,7 +418,9 @@ class TestPyproject:
             classifiers = [3, "License :: OSI Approved :: MIT License"]
             """,
         )
-        assert detect_project_license(project) == "MIT License"
+        assert detect_project_license(project / "svc") == ProjectLicense(
+            license="MIT", source="pyproject.toml", declared=(("pyproject.toml", "MIT License"),)
+        )
 
     def test_name_is_read_from_poetry_when_the_project_table_is_not_a_table(self, project: Path):
         # ``other`` depends on ``svc`` by name. ``svc`` is still recognised as
@@ -520,7 +522,7 @@ class TestComposerJson:
         manifest.write_text(json.dumps(document))
 
         with collect_read_diagnostics() as diags:
-            assert detect_project_license(project) == ""
+            assert detect_project_license(project / "svc") == ProjectLicense()
             deps, _ = discover_all_dependencies(project)
 
         assert _found(deps) == found | {_HEALTHY}

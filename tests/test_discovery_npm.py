@@ -368,51 +368,28 @@ class TestWorkspaceFiltering:
 class TestProjectLicensePackageJson:
     def test_string_license(self, tmp_path):
         (tmp_path / "package.json").write_text(json.dumps({"name": "mylib", "license": "MIT"}))
-        assert detect_project_license_package_json(tmp_path) == "MIT"
+        assert detect_project_license_package_json(tmp_path / "package.json") == "MIT"
 
     def test_dict_license(self, tmp_path):
         (tmp_path / "package.json").write_text(
             json.dumps({"name": "mylib", "license": {"type": "Apache-2.0"}})
         )
-        assert detect_project_license_package_json(tmp_path) == "Apache-2.0"
+        assert detect_project_license_package_json(tmp_path / "package.json") == "Apache-2.0"
 
     def test_no_license(self, tmp_path):
         (tmp_path / "package.json").write_text(json.dumps({"name": "mylib"}))
-        assert detect_project_license_package_json(tmp_path) == ""
-
-    def test_no_package_json(self, tmp_path):
-        assert detect_project_license_package_json(tmp_path) == ""
+        assert detect_project_license_package_json(tmp_path / "package.json") == ""
 
     def test_non_string_non_dict_license(self, tmp_path):
         (tmp_path / "package.json").write_text(json.dumps({"name": "mylib", "license": 42}))
-        assert detect_project_license_package_json(tmp_path) == ""
+        assert detect_project_license_package_json(tmp_path / "package.json") == ""
 
-    def test_nested_package_json_license_when_no_root(self, tmp_path):
-        # Monorepo with no root package.json — license declared in a nested
-        # workspace package must still be picked up (mirrors pyproject/cargo
-        # walk-the-tree behavior).
-        nested = tmp_path / "packages" / "core"
-        nested.mkdir(parents=True)
-        (nested / "package.json").write_text(json.dumps({"name": "core", "license": "ISC"}))
-        assert detect_project_license_package_json(tmp_path) == "ISC"
-
-    def test_root_license_wins_over_nested(self, tmp_path):
-        # Walk order is root-first, so a root license takes precedence over
-        # nested ones (same convention as pyproject discovery).
-        (tmp_path / "package.json").write_text(json.dumps({"name": "root", "license": "MIT"}))
-        nested = tmp_path / "packages" / "core"
-        nested.mkdir(parents=True)
-        (nested / "package.json").write_text(json.dumps({"name": "core", "license": "Apache-2.0"}))
-        assert detect_project_license_package_json(tmp_path) == "MIT"
-
-    def test_dict_license_missing_type_falls_through_to_next(self, tmp_path):
-        # Walker keeps going when a package.json has license={} (or a dict
-        # without a usable `type`) — next manifest in walk order wins.
-        (tmp_path / "package.json").write_text(json.dumps({"name": "root", "license": {}}))
-        nested = tmp_path / "packages" / "core"
-        nested.mkdir(parents=True)
-        (nested / "package.json").write_text(json.dumps({"name": "core", "license": "ISC"}))
-        assert detect_project_license_package_json(tmp_path) == "ISC"
+    def test_dict_license_without_a_usable_type(self, tmp_path):
+        for license_object in ({}, {"type": 7}, {"url": "https://example.org"}):
+            (tmp_path / "package.json").write_text(
+                json.dumps({"name": "root", "license": license_object})
+            )
+            assert detect_project_license_package_json(tmp_path / "package.json") == ""
 
 
 class TestWorkspaceLocalDevAndPeerDepsSkipped:
@@ -459,5 +436,5 @@ class TestMalformedPackageJson:
         deps, _ = discover_npm_dependencies(tmp_path)
         assert deps == []
 
-        license_str = detect_project_license_package_json(tmp_path)
+        license_str = detect_project_license_package_json(tmp_path / "package.json")
         assert license_str == ""

@@ -8,6 +8,8 @@ Elixir/Erlang, and R projects with one CLI.
 uvx licenseal check
 ```
 
+- Reads the project's license from a manifest in the scanned directory, reports which
+  file supplied it, and assumes `Proprietary` when none declares one.
 - Scans transitive dependencies by default, using lockfiles when available.
 - Reads manifests and public registry metadata without installing dependencies,
   running builds, or downloading package archives.

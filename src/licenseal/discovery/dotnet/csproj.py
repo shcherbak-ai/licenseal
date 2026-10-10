@@ -468,46 +468,25 @@ def discover_csproj_dependencies(
     return out, filtered
 
 
-def detect_project_license_csproj(
-    project_path: Path,
-    *,
-    exclude_paths: frozenset[Path] = frozenset(),
-) -> str:
-    """Return the scanned project's own license declaration, if any.
+def detect_project_license_csproj(project_file: Path) -> str:
+    """Return the license one project file declares for its package, or ``""``.
 
     Authored-package projects (NuGet packages that ARE the project, not
-    consuming applications) carry license metadata in their root
-    ``.csproj``:
+    consuming applications) carry license metadata in their project file:
 
     * ``<PackageLicenseExpression>MIT</PackageLicenseExpression>`` — modern
-      SPDX expression. Direct hit.
-    * ``<PackageLicenseUrl>https://…</PackageLicenseUrl>`` — legacy URL.
-      Mapped via the shared ``analysis/spdx.spdx_from_license_url``
-      pattern table; unmapped URLs return the empty string.
-    * Neither present → return empty string. Application projects (not
-      packages) fall through to other detection paths (e.g., the LICENSE
-      file probe).
-
-    Walks all project files in the tree and uses the first one with a
-    non-empty license declaration. Authored-package projects typically
-    have exactly one such file at the repo root or under ``src/``.
+      SPDX expression, returned as declared.
+    * ``<PackageLicenseUrl>https://…</PackageLicenseUrl>`` — legacy URL,
+      returned as declared when there is no expression. The license
+      normalizer maps a URL of a canonical license page to its SPDX ID and
+      recognises no other URL.
+    * Neither present → the empty string (an application project).
     """
-    from licenseal.analysis.spdx import normalize_license, spdx_from_license_url
-
-    for project_file in _walk_project_files(project_path, exclude_paths=exclude_paths):
-        raw = read_xml_bytes(project_file)
-        if raw is None:
-            continue
-        data = _parse_csproj(raw, source_path=project_file)
-        if data is None:
-            record_parse_failure(project_file, "XML")
-            continue
-        if data.license_expression:
-            normalized = normalize_license(data.license_expression)
-            if normalized and normalized != "UNKNOWN":
-                return normalized
-        if data.license_url:
-            mapped = spdx_from_license_url(data.license_url)
-            if mapped:
-                return mapped
-    return ""
+    raw = read_xml_bytes(project_file)
+    if raw is None:
+        return ""
+    data = _parse_csproj(raw, source_path=project_file)
+    if data is None:
+        record_parse_failure(project_file, "XML")
+        return ""
+    return data.license_expression or data.license_url

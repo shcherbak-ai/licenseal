@@ -639,41 +639,20 @@ def discover_pom_xml_dependencies(
     return out, filtered
 
 
-def detect_project_license_pom_xml(
-    project_path: Path,
-    *,
-    exclude_paths: frozenset[Path] = frozenset(),
-) -> str:
-    """Return the project's own license name from the root ``pom.xml``.
+def detect_project_license_pom_xml(pom_xml: Path) -> str:
+    """Return the license one ``pom.xml`` declares for its project, or ``""``.
 
-    Reads the shallowest ``pom.xml`` (the project root) and returns the
-    first declared ``<licenses><license><name>…</name></license>``. Multi-
-    license POMs join names with " AND " (conservative — all licenses
-    apply simultaneously, matching the SPDX-expression ``AND`` semantics
-    used elsewhere in licenseal).
-
-    Returns "" if no pom.xml is found or no ``<licenses>`` block is
-    declared. Caller (``discover.__init__.detect_project_license``) falls
-    back to the next ecosystem's detector or to "Proprietary".
+    Reads ``<licenses><license><name>…</name></license>``. Multi-license
+    POMs join names with " AND " (conservative — all licenses apply
+    simultaneously, matching the SPDX-expression ``AND`` semantics used
+    elsewhere in licenseal). A parent POM's ``<licenses>`` is not followed.
     """
-    root_pom = project_path / "pom.xml"
-    if not root_pom.is_file():
-        # Fall back to shallowest pom.xml found by the walker (handles
-        # repos whose Maven module isn't at the repo root).
-        candidates = sorted(
-            walk_project_files(project_path, "pom.xml", exclude_paths=exclude_paths),
-            key=lambda p: len(p.parts),
-        )
-        if not candidates:
-            return ""
-        root_pom = candidates[0]
-
-    data = read_xml_bytes(root_pom)
+    data = read_xml_bytes(pom_xml)
     if data is None:
         return ""
     pom = _parse_pom(data)
     if pom is None:
-        record_parse_failure(root_pom, "XML")
+        record_parse_failure(pom_xml, "XML")
         return ""
     if not pom.licenses:
         return ""

@@ -641,9 +641,12 @@ def render_table(
     console = console or Console()
 
     console.print()
-    console.print(
-        Text.assemble("  Project license: ", (_printable(report.project_license), "bold"))
+    project_license = Text.assemble(
+        "  Project license: ", (_printable(report.project_license), "bold")
     )
+    if report.project_license_source:
+        project_license.append(f" (from {_printable(report.project_license_source)})")
+    console.print(project_license)
     console.print()
 
     # Every column folds rather than truncates. The fixed-vocabulary columns
@@ -807,7 +810,15 @@ def render_markdown(report: AnalysisReport, *, encoding: str = "utf-8") -> str:
     lines: list[str] = []
     lines.append("# License Analysis Report")
     lines.append("")
-    lines.append(f"**Project license:** {_escape_md(report.project_license)}")
+    project_license = f"**Project license:** {_escape_md(report.project_license)}"
+    if report.project_license_source:
+        # A file of the scanned directory, like the Source column: it depends
+        # on the project alone, not on where or when the scan ran.
+        source = _markdown_link(
+            report.project_license_source, _url_quote(report.project_license_source)
+        )
+        project_license += f" (from {source})"
+    lines.append(project_license)
     lines.append("")
 
     headers = ["Package", "Ecosystem", "Group", "Source", "License", "Risk", "Status"]
@@ -912,6 +923,7 @@ def _report_to_dict(report: AnalysisReport) -> dict[str, Any]:
     """
     return {
         "project_license": report.project_license,
+        "project_license_source": report.project_license_source,
         "elapsed_seconds": report.elapsed_seconds,
         "summary": {
             "total": len(report.results),

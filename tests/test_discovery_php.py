@@ -178,24 +178,20 @@ class TestDiscoverComposerDependencies:
 
 class TestDetectProjectLicenseComposerJson:
     def test_simple_fixture(self):
-        assert detect_project_license_composer_json(_FIXTURES / "simple") == "MIT"
+        assert detect_project_license_composer_json(_FIXTURES / "simple" / "composer.json") == "MIT"
 
     def test_array_license_joined_with_or(self):
-        assert (
-            detect_project_license_composer_json(_FIXTURES / "manifest_only") == "MIT OR Apache-2.0"
-        )
+        manifest = _FIXTURES / "manifest_only" / "composer.json"
+        assert detect_project_license_composer_json(manifest) == "MIT OR Apache-2.0"
 
     def test_missing_license_returns_empty(self, tmp_path):
         (tmp_path / "composer.json").write_text(json.dumps({"require": {}}))
-        assert detect_project_license_composer_json(tmp_path) == ""
+        assert detect_project_license_composer_json(tmp_path / "composer.json") == ""
 
     def test_malformed_json_returns_empty(self, tmp_path):
         (tmp_path / "composer.json").write_text("not json")
-        assert detect_project_license_composer_json(tmp_path) == ""
+        assert detect_project_license_composer_json(tmp_path / "composer.json") == ""
 
     def test_non_dict_root_returns_empty(self, tmp_path):
         (tmp_path / "composer.json").write_text(json.dumps([1, 2, 3]))
-        assert detect_project_license_composer_json(tmp_path) == ""
-
-    def test_no_composer_json_returns_empty(self, tmp_path):
-        assert detect_project_license_composer_json(tmp_path) == ""
+        assert detect_project_license_composer_json(tmp_path / "composer.json") == ""

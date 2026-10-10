@@ -219,22 +219,13 @@ def _license_array_body_to_raw(body: str) -> str:
     return " OR ".join(items)
 
 
-def detect_project_license_mix_exs(
-    project_path: Path,
-    *,
-    exclude_paths: frozenset[Path] = frozenset(),
-) -> str:
-    """Return the first ``package``'s ``licenses: [...]`` value from a mix.exs."""
-    for mix_exs in walk_project_files(project_path, "mix.exs", exclude_paths=exclude_paths):
-        text = decode_text(mix_exs)
-        if text is None:
-            continue
-        m = _LICENSES_RE.search(_strip_comments(text))
-        if m is not None:
-            raw = _license_array_body_to_raw(m.group("body"))
-            if raw:
-                return raw
-    return ""
+def detect_project_license_mix_exs(mix_exs: Path) -> str:
+    """Return the ``package`` ``licenses: [...]`` value of one mix.exs, or ``""``."""
+    text = decode_text(mix_exs)
+    if text is None:
+        return ""
+    m = _LICENSES_RE.search(_strip_comments(text))
+    return "" if m is None else _license_array_body_to_raw(m.group("body"))
 
 
 def workspace_mix_names(

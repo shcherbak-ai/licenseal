@@ -29,7 +29,7 @@ from rich.progress import (
 )
 
 from licenseal.analysis.compatibility import analyze, check_compatibility
-from licenseal.discovery import detect_project_license, discover_all_dependencies
+from licenseal.discovery import ProjectLicense, detect_project_license, discover_all_dependencies
 from licenseal.discovery._read import ReadDiagnostic, collect_read_diagnostics
 from licenseal.discovery._walk import shared_walk_cache
 from licenseal.discovery.php.lockfiles import (
@@ -50,7 +50,13 @@ from licenseal.models import (
     LicenseInfo,
     ReportDiagnostic,
 )
-from licenseal.report import render_check_failure, render_json, render_markdown, render_table
+from licenseal.report import (
+    _printable,  # noqa: PLC2701
+    render_check_failure,
+    render_json,
+    render_markdown,
+    render_table,
+)
 from licenseal.resolvers.cran import fetch_cran_index, resolve_r_license
 from licenseal.resolvers.crates_io import (
     _extract_pinned_version as _extract_rust_pinned_version,  # noqa: PLC2701
@@ -304,6 +310,68 @@ def _resolve_excludes(project_path: Path, exclude_dirs: tuple[str, ...]) -> froz
                 candidate = project_path / candidate
             resolved.add(candidate.resolve())
     return frozenset(resolved)
+
+
+# Longest declared license value echoed in full; a manifest can hold a whole
+# license text where an identifier belongs.
+_MAX_SHOWN_LICENSE_CHARS = 80
+
+
+def _shown_license(declared: str) -> str:
+    """A declared license value for a one-line message: one line, capped, quoted."""
+    text = " ".join(_printable(declared).split())
+    if len(text) > _MAX_SHOWN_LICENSE_CHARS:
+        text = text[: _MAX_SHOWN_LICENSE_CHARS - 3] + "..."
+    return f"'{text}'"
+
+
+def _detect_project_license(project_path: Path, exclude_paths: frozenset[Path]) -> ProjectLicense:
+    """Detect the project's own license and say on stderr where it came from.
+
+    Every verdict depends on this value, so the scan names the file that
+    supplied it, or says that ``Proprietary`` is assumed. A declared value
+    that is not a recognised license, and manifests that disagree, are warned
+    about: either one means the license the scan judges against may not be
+    the one the project has.
+    """
+    detected = detect_project_license(project_path, exclude_paths=exclude_paths)
+    declared = [
+        (_printable(manifest), _shown_license(value)) for manifest, value in detected.declared
+    ]
+    if declared and not detected.source:
+        manifest, value = declared[0]
+        click.echo(
+            f"Warning: {manifest} declares the license {value}, which is not a recognised "
+            "license; dependencies are checked against Proprietary.",
+            err=True,
+        )
+    if len(declared) > 1:
+        each = ", ".join(f"{manifest} declares {value}" for manifest, value in declared)
+        click.echo(
+            f"Warning: manifests in the scanned directory declare different licenses: {each}; "
+            f"the first, {declared[0][0]}, decides.",
+            err=True,
+        )
+    if detected.source:
+        click.echo(
+            f"Project license: {_printable(detected.license)} "
+            f"(from {_printable(detected.source)}).",
+            err=True,
+        )
+    elif declared:
+        click.echo(
+            f"Project license: Proprietary (assumed: {declared[0][0]} declares no recognised "
+            "license).",
+            err=True,
+        )
+    else:
+        click.echo(
+            "Project license: Proprietary (assumed: no manifest in the scanned directory "
+            "declares a license). Scanning a subproject with --path uses that subproject's "
+            "license.",
+            err=True,
+        )
+    return detected
 
 
 def _discover_dependencies(
@@ -921,9 +989,8 @@ def check(
     # discovery (the transitive layer manages its own walk cache internally).
     with collect_read_diagnostics() as read_diags:
         with timings.phase("discovery"), shared_walk_cache():
-            detected_license = (
-                detect_project_license(project_path, exclude_paths=exclude_paths) or "Proprietary"
-            )
+            project_license = _detect_project_license(project_path, exclude_paths)
+            detected_license = project_license.license
             all_deps, local_filter_counts = discover_all_dependencies(
                 project_path, exclude_paths=exclude_paths
             )
@@ -1019,6 +1086,7 @@ def check(
 
     report.elapsed_seconds = time.perf_counter() - started_at
     report.read_diagnostics = diag_view
+    report.project_license_source = project_license.source
 
     if output_file is not None:
         rendered = _render_report_to_string(report, output_format, project_path)
@@ -1170,6 +1238,7 @@ def init_review_file(
         flagged, unscaffoldable = flagged_entries_from_json_report(from_report)
     else:
         with collect_read_diagnostics() as read_diags:
+            project_license = _detect_project_license(project_path, exclude_paths)
             deps = _discover_dependencies(project_path, include_dev, exclude_paths=exclude_paths)
             if deps:
                 click.echo(f"Found {len(deps)} dependencies. Resolving licenses...", err=True)
@@ -1178,10 +1247,7 @@ def init_review_file(
                 # below fires with the proper "nothing to review" message.
                 click.echo("No dependencies to resolve.", err=True)
             license_infos = _resolve_license_infos(deps, max_workers, "init-review-file")
-            report = analyze(
-                detect_project_license(project_path, exclude_paths=exclude_paths) or "Proprietary",
-                license_infos,
-            )
+            report = analyze(project_license.license, license_infos)
             flagged, unscaffoldable = flagged_entries_from_results(report.results)
         _echo_read_diagnostics(_read_diagnostics_view(read_diags, project_path))
 

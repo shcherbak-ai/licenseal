@@ -154,27 +154,16 @@ def _collect_local_names(paths: list[Path]) -> set[str]:
     return names
 
 
-def detect_project_license_package_json(
-    project_path: Path,
-    *,
-    exclude_paths: frozenset[Path] = frozenset(),
-) -> str:
-    """Detect the project's own license from package.json files in the tree.
+def detect_project_license_package_json(package_json: Path) -> str:
+    """Return the license one ``package.json`` declares for its package, or ``""``.
 
-    Walks the tree (mirroring pyproject and cargo discovery) so monorepo
-    layouts without a root package.json still surface a declared license.
-    Returns the first non-empty ``license`` field in walk order — root first
-    when present, then nested packages depth-first.
+    Reads the ``license`` string, or the ``type`` of the legacy
+    ``{"type": ..., "url": ...}`` object form.
     """
-    for pj in walk_project_files(project_path, "package.json", exclude_paths=exclude_paths):
-        data = root_table(pj, load_json(pj))
-        if data is None:
-            continue
-        license_val = data.get("license", "")
-        if isinstance(license_val, str) and license_val:
-            return license_val
-        if isinstance(license_val, dict):
-            license_type = license_val.get("type", "")
-            if isinstance(license_type, str) and license_type:
-                return license_type
-    return ""
+    data = root_table(package_json, load_json(package_json))
+    if data is None:
+        return ""
+    license_val = data.get("license", "")
+    if isinstance(license_val, dict):
+        license_val = license_val.get("type", "")
+    return license_val if isinstance(license_val, str) else ""

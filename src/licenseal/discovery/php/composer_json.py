@@ -130,24 +130,14 @@ def discover_composer_dependencies(
     return deps, 0
 
 
-def detect_project_license_composer_json(
-    project_path: Path,
-    *,
-    exclude_paths: frozenset[Path] = frozenset(),
-) -> str:
-    """Detect the project's own license from composer.json files in the tree.
+def detect_project_license_composer_json(composer_json: Path) -> str:
+    """Return the license one ``composer.json`` declares for its package, or ``""``.
 
-    Walks the tree so monorepo layouts without a root composer.json still
-    surface a declared license. Returns the first non-empty ``license`` value
-    in walk order. Array values are joined with ``OR`` per Composer's
-    disjunctive-array convention; a downstream normalizer maps that through
-    SPDX canonicalization.
+    Array values are joined with ``OR`` per Composer's disjunctive-array
+    convention; a downstream normalizer maps that through SPDX
+    canonicalization.
     """
-    for cj in walk_project_files(project_path, "composer.json", exclude_paths=exclude_paths):
-        data = root_table(cj, load_json(cj))
-        if data is None:
-            continue
-        raw = _license_field_to_raw(data.get("license", ""))
-        if raw:
-            return raw
-    return ""
+    data = root_table(composer_json, load_json(composer_json))
+    if data is None:
+        return ""
+    return _license_field_to_raw(data.get("license", ""))

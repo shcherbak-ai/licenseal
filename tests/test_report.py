@@ -179,6 +179,7 @@ def _hostile_report() -> AnalysisReport:
     """A report whose registry- and manifest-derived strings carry control characters."""
     return AnalysisReport(
         project_license="MIT\x1b]0;title\x07",
+        project_license_source="app\x1b[1m.csproj",
         results=[
             _make_result(
                 "pkg\x1b[31m",
@@ -275,6 +276,18 @@ class TestRenderTable:
         render_table(report, console)
         output = buf.getvalue()
         assert "Proprietary" in output
+        # Nothing supplied the license, so no file is named beside it.
+        assert "  Project license: Proprietary\n" in output
+
+    def test_names_the_manifest_that_supplied_the_project_license(self):
+        report = AnalysisReport(project_license="MIT", project_license_source="pyproject.toml")
+        console, buf = _make_console()
+        render_table(report, console)
+        assert "  Project license: MIT (from pyproject.toml)\n" in buf.getvalue()
+
+        md = render_markdown(report)
+        assert "**Project license:** MIT (from [pyproject.toml](pyproject.toml))" in md.splitlines()
+        assert json.loads(render_json(report))["project_license_source"] == "pyproject.toml"
 
     def test_renders_all_ok(self):
         report = AnalysisReport(
@@ -401,6 +414,8 @@ class TestRenderJson:
         output = render_json(report)
         data = json.loads(output)
         assert data["project_license"] == "MIT"
+        # No manifest supplied it: the field is present and empty.
+        assert data["project_license_source"] == ""
         assert data["elapsed_seconds"] == 0.42
         assert data["summary"]["total"] == 6
         assert data["summary"]["ok"] == 3
@@ -1826,7 +1841,7 @@ class TestUntrustedStrings:
         render_table(_hostile_report(), console)
         output = buf.getvalue()
         assert not _RAW_CONTROL.search(output)
-        assert "Project license: MIT\\x1b]0;title\\x07" in output
+        assert "Project license: MIT\\x1b]0;title\\x07 (from app\\x1b[1m.csproj)" in output
         assert "pkg\\x1b[31m (1.0\\x00)" in output
         assert "Evil\\x1b[2J\\x9b31m" in output
         assert "dir\\x1b[1m/requirements.txt" in output
@@ -1851,7 +1866,10 @@ class TestUntrustedStrings:
     def test_markdown_has_no_control_characters(self):
         md = render_markdown(_hostile_report())
         assert not _RAW_CONTROL.search(md)
-        assert "**Project license:** MIT\\\\x1b\\]0;title\\\\x07" in md
+        assert (
+            "**Project license:** MIT\\\\x1b\\]0;title\\\\x07 "
+            "(from [app\\\\x1b\\[1m.csproj](app%1B%5B1m.csproj))"
+        ) in md.splitlines()
         assert (
             "|[pkg\\\\x1b\\[31m (1.0\\\\x00)](https://pypi.org/project/pkg%1B%5B31m/)|python|prod|"
             "[dir\\\\x1b\\[1m/requirements.txt](dir%1B%5B1m/requirements.txt)|"
@@ -1879,6 +1897,7 @@ class TestUntrustedStrings:
         assert dep["reason"].endswith("which did not resolve\rSummary: 0 violations")
         assert dep["package_url"] == "https://pypi.org/project/pkg%1B%5B31m/"
         assert data["project_license"] == "MIT\x1b]0;title\x07"
+        assert data["project_license_source"] == "app\x1b[1m.csproj"
 
     def test_printable_shows_lone_surrogates(self):
         assert _printable("a\ud800b\udfffc") == "a\\ud800b\\udfffc"

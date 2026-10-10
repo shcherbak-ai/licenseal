@@ -208,22 +208,10 @@ def discover_gemspec_dependencies(
     return out, filtered
 
 
-def detect_project_license_gemspec(
-    project_path: Path,
-    *,
-    exclude_paths: frozenset[Path] = frozenset(),
-) -> str:
-    """Return the first non-empty ``license`` / ``licenses`` value from a gemspec.
+def detect_project_license_gemspec(gemspec: Path) -> str:
+    """Return the ``license`` / ``licenses`` value of one gemspec, or ``""``.
 
-    Walks the tree so monorepos without a root-level gemspec still surface
-    a declared license. Plural form preferred (modern convention); array
-    values OR-joined.
+    Plural form preferred (modern convention); array values OR-joined.
     """
-    for gemspec in _walk_gemspecs(project_path, exclude_paths=exclude_paths):
-        text = decode_text(gemspec)
-        if text is None:
-            continue
-        raw = _extract_license_from_text(text)
-        if raw:
-            return raw
-    return ""
+    text = decode_text(gemspec)
+    return "" if text is None else _extract_license_from_text(text)

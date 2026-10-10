@@ -1,0 +1,403 @@
+"""The project's own license comes from a manifest in the scanned directory.
+
+Only files directly in the directory given to ``--path`` are consulted, in a
+fixed order across ecosystems. A manifest further down belongs to a
+sub-package: its license is that package's, and it never decides what every
+dependency of the project is judged against. With no declaration in the
+scanned directory the project is ``Proprietary``, and the scan says which of
+the two it was.
+"""
+
+from __future__ import annotations
+
+import json
+from pathlib import Path
+
+import pytest
+import respx
+from click.testing import CliRunner
+
+from licenseal.cli import main
+from licenseal.discovery import ProjectLicense, detect_project_license
+from licenseal.discovery._read import collect_read_diagnostics
+from tests._helpers import _check_json, _mock_npm
+
+_MIX_EXS = """\
+defmodule App.MixProject do
+  use Mix.Project
+
+  def project do
+    [app: :app, version: "0.1.0", package: [licenses: ["EPL-2.0"]]]
+  end
+end
+"""
+
+# Every manifest that can declare the project's license, in the order they are
+# consulted: file name, content, the value as declared, and its SPDX form. No
+# two declare the same license.
+_MANIFESTS = [
+    ("pyproject.toml", '[project]\nname = "app"\nlicense = "MIT"\n', "MIT", "MIT"),
+    ("setup.cfg", "[metadata]\nlicense = BSD-3-Clause\n", "BSD-3-Clause", "BSD-3-Clause"),
+    (
+        "setup.py",
+        'from setuptools import setup\n\nsetup(name="app", license="BSD-2-Clause")\n',
+        "BSD-2-Clause",
+        "BSD-2-Clause",
+    ),
+    ("package.json", '{"name": "app", "license": "ISC"}', "ISC", "ISC"),
+    ("Cargo.toml", '[package]\nname = "app"\nlicense = "MPL-2.0"\n', "MPL-2.0", "MPL-2.0"),
+    (
+        "pom.xml",
+        "<project><licenses><license><name>Apache License 2.0</name></license>"
+        "</licenses></project>",
+        "Apache License 2.0",
+        "Apache-2.0",
+    ),
+    (
+        "App.csproj",
+        '<Project Sdk="Microsoft.NET.Sdk"><PropertyGroup>'
+        "<PackageLicenseExpression>LGPL-3.0-only</PackageLicenseExpression>"
+        "</PropertyGroup></Project>",
+        "LGPL-3.0-only",
+        "LGPL-3.0-only",
+    ),
+    (
+        "composer.json",
+        '{"name": "vendor/app", "license": ["MIT", "GPL-2.0-only"]}',
+        "MIT OR GPL-2.0-only",
+        "GPL-2.0-only OR MIT",
+    ),
+    (
+        "app.gemspec",
+        'Gem::Specification.new do |s|\n  s.name = "app"\n  s.license = "0BSD"\nend\n',
+        "0BSD",
+        "0BSD",
+    ),
+    ("mix.exs", _MIX_EXS, "EPL-2.0", "EPL-2.0"),
+    ("DESCRIPTION", "Package: app\nLicense: GPL (>= 2)\n", "GPL (>= 2)", "GPL-2.0-or-later"),
+]
+_MANIFEST_IDS = [name for name, *_ in _MANIFESTS]
+
+
+def _write(path: Path, content: str) -> Path:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(content, encoding="utf-8", newline="\n")
+    return path
+
+
+class TestDetectProjectLicense:
+    @pytest.mark.parametrize(("name", "content", "declared", "spdx"), _MANIFESTS, ids=_MANIFEST_IDS)
+    def test_manifest_in_the_scanned_directory_supplies_the_license(
+        self, tmp_path: Path, name, content, declared, spdx
+    ):
+        _write(tmp_path / name, content)
+        assert detect_project_license(tmp_path) == ProjectLicense(
+            license=spdx, source=name, declared=((name, declared),)
+        )
+
+    @pytest.mark.parametrize(("name", "content", "declared", "spdx"), _MANIFESTS, ids=_MANIFEST_IDS)
+    def test_nested_manifest_never_supplies_the_license(
+        self, tmp_path: Path, name, content, declared, spdx
+    ):
+        # One level down and several: neither is the scanned directory.
+        _write(tmp_path / "pkg" / name, content)
+        _write(tmp_path / "libs" / "deep" / "core" / name, content)
+        assert detect_project_license(tmp_path) == ProjectLicense(
+            license="Proprietary", source="", declared=()
+        )
+        # Scanned on its own, the sub-package has its license.
+        assert detect_project_license(tmp_path / "pkg").license == spdx
+
+    def test_manifests_are_consulted_in_a_fixed_order(self, tmp_path: Path):
+        # All of them declare a different license. Removing the one that
+        # decides hands the decision to the next in the order.
+        for name, content, _, _ in _MANIFESTS:
+            _write(tmp_path / name, content)
+        for index, (name, _, _, spdx) in enumerate(_MANIFESTS):
+            detected = detect_project_license(tmp_path)
+            assert (detected.license, detected.source) == (spdx, name)
+            # The deciding manifest first, then each one that disagrees.
+            assert detected.declared == tuple(
+                (later, value) for later, _, value, _ in _MANIFESTS[index:]
+            )
+            (tmp_path / name).unlink()
+        assert detect_project_license(tmp_path) == ProjectLicense()
+
+    def test_no_manifest_at_all_is_proprietary(self, tmp_path: Path):
+        assert detect_project_license(tmp_path) == ProjectLicense(
+            license="Proprietary", source="", declared=()
+        )
+
+    def test_manifest_that_declares_no_license_is_passed_over(self, tmp_path: Path):
+        _write(tmp_path / "pyproject.toml", '[project]\nname = "app"\n')
+        _write(tmp_path / "package.json", '{"name": "app", "license": "ISC"}')
+        assert detect_project_license(tmp_path) == ProjectLicense(
+            license="ISC", source="package.json", declared=(("package.json", "ISC"),)
+        )
+
+    def test_manifests_that_agree_are_not_reported_as_different(self, tmp_path: Path):
+        # Three spellings of one license, and one manifest that disagrees.
+        _write(tmp_path / "pyproject.toml", '[project]\nname = "app"\nlicense = "MIT"\n')
+        _write(tmp_path / "setup.cfg", "[metadata]\nlicense = MIT License\n")
+        _write(tmp_path / "package.json", '{"name": "app", "license": "mit"}')
+        _write(tmp_path / "composer.json", '{"name": "vendor/app", "license": "GPL-3.0-only"}')
+        assert detect_project_license(tmp_path) == ProjectLicense(
+            license="MIT",
+            source="pyproject.toml",
+            declared=(("pyproject.toml", "MIT"), ("composer.json", "GPL-3.0-only")),
+        )
+
+    @pytest.mark.parametrize(
+        ("name", "content", "declared"),
+        [
+            ("package.json", '{"name": "app", "license": "-"}', "-"),
+            ("pyproject.toml", '[project]\nlicense = {text = "see the LICENSE file"}\n', None),
+            ("Cargo.toml", '[package]\nname = "app"\nlicense = "MIT AND Custom"\n', None),
+            ("DESCRIPTION", "Package: app\nLicense: file LICENSE\n", "file LICENSE"),
+            (
+                "App.csproj",
+                '<Project Sdk="Microsoft.NET.Sdk"><PropertyGroup><PackageLicenseUrl>'
+                "https://example.org/spdx.org/licenses/MIT</PackageLicenseUrl>"
+                "</PropertyGroup></Project>",
+                "https://example.org/spdx.org/licenses/MIT",
+            ),
+        ],
+        ids=["dash", "prose", "unknown-operand", "r-file-reference", "lookalike-license-url"],
+    )
+    def test_declared_value_that_is_not_recognised_leaves_proprietary(
+        self, tmp_path: Path, name, content, declared
+    ):
+        _write(tmp_path / name, content)
+        detected = detect_project_license(tmp_path)
+        assert (detected.license, detected.source) == ("Proprietary", "")
+        assert [manifest for manifest, _ in detected.declared] == [name]
+        if declared is not None:
+            assert detected.declared == ((name, declared),)
+
+    def test_unrecognised_first_value_decides_over_a_recognised_later_one(self, tmp_path: Path):
+        # The first declaration in the order decides even when it cannot be
+        # used: falling through to another ecosystem's manifest would pick a
+        # license the first one may contradict.
+        _write(tmp_path / "package.json", '{"name": "app", "license": "-"}')
+        _write(tmp_path / "composer.json", '{"name": "vendor/app", "license": "MIT"}')
+        assert detect_project_license(tmp_path) == ProjectLicense(
+            license="Proprietary",
+            source="",
+            declared=(("package.json", "-"), ("composer.json", "MIT")),
+        )
+
+    @pytest.mark.parametrize(
+        "declared",
+        ["Proprietary", "UNLICENSED", "BUSL-1.1", "AGPL-3.0-only OR LicenseRef-Commercial"],
+    )
+    def test_restrictive_project_license_is_recognised(self, tmp_path: Path, declared):
+        # A project's own restrictive choice is a license the check knows how
+        # to judge against, not an unrecognised value.
+        _write(tmp_path / "package.json", json.dumps({"name": "app", "license": declared}))
+        detected = detect_project_license(tmp_path)
+        assert detected.source == "package.json"
+        assert detected.declared == (("package.json", declared),)
+
+    def test_several_project_files_in_the_scanned_directory(self, tmp_path: Path):
+        project = '<Project Sdk="Microsoft.NET.Sdk"><PropertyGroup>{}</PropertyGroup></Project>'
+        expression = "<PackageLicenseExpression>{}</PackageLicenseExpression>"
+        _write(tmp_path / "App.csproj", project.format(""))
+        _write(tmp_path / "Lib.fsproj", project.format(expression.format("MIT")))
+        _write(tmp_path / "Tool.vbproj", project.format(expression.format("Apache-2.0")))
+        assert detect_project_license(tmp_path) == ProjectLicense(
+            license="MIT",
+            source="Lib.fsproj",
+            declared=(("Lib.fsproj", "MIT"), ("Tool.vbproj", "Apache-2.0")),
+        )
+
+    def test_several_gemspecs_in_the_scanned_directory(self, tmp_path: Path):
+        gemspec = "Gem::Specification.new do |s|\n  s.licenses = [{}]\nend\n"
+        _write(tmp_path / "a.gemspec", gemspec.format(""))
+        _write(tmp_path / "b.gemspec", gemspec.format('"MIT"'))
+        assert detect_project_license(tmp_path) == ProjectLicense(
+            license="MIT", source="b.gemspec", declared=(("b.gemspec", "MIT"),)
+        )
+
+    def test_unreadable_manifest_is_a_gap_and_the_next_one_decides(self, tmp_path: Path):
+        broken = _write(tmp_path / "pyproject.toml", "this is = = not toml")
+        _write(tmp_path / "package.json", '{"name": "app", "license": "ISC"}')
+        with collect_read_diagnostics() as diags:
+            detected = detect_project_license(tmp_path)
+        assert (detected.license, detected.source) == ("ISC", "package.json")
+        assert [(d.path, d.reason, d.is_gap) for d in diags] == [
+            (broken, "is not valid TOML; skipped", True)
+        ]
+
+    def test_excluded_subdirectory_does_not_change_what_is_read(self, tmp_path: Path):
+        _write(tmp_path / "package.json", '{"name": "app", "license": "ISC"}')
+        _write(tmp_path / "vendored" / "package.json", '{"name": "v", "license": "MIT"}')
+        detected = detect_project_license(
+            tmp_path, exclude_paths=frozenset({(tmp_path / "vendored").resolve()})
+        )
+        assert (detected.license, detected.source) == ("ISC", "package.json")
+
+
+def _package_json(path: Path, license_value: str | None, **dependencies: str) -> None:
+    manifest: dict = {"name": path.parent.name, "dependencies": dependencies}
+    if license_value is not None:
+        manifest["license"] = license_value
+    _write(path, json.dumps(manifest))
+
+
+def _verdicts(data: dict) -> dict[str, str]:
+    return {dep["name"]: dep["verdict"] for dep in data["dependencies"]}
+
+
+_ASSUMED = (
+    "Project license: Proprietary (assumed: no manifest in the scanned directory declares a "
+    "license). Scanning a subproject with --path uses that subproject's license."
+)
+
+
+class TestCheckProjectLicense:
+    """What the scan judges against, and what it says about where that came from."""
+
+    @respx.mock
+    def test_nested_manifests_do_not_decide_the_verdicts(self, tmp_path: Path):
+        # A monorepo with no license at its root. One sub-package declares a
+        # value that is not a license, another declares GPL. Neither is the
+        # project's: it is judged as Proprietary, so the MIT dependency passes
+        # and the GPL one is a violation.
+        _package_json(tmp_path / "web" / "package.json", "-", **{"left-pad": "1.0.0"})
+        _package_json(tmp_path / "tools" / "package.json", "GPL-3.0-only", **{"gpl-lib": "1.0.0"})
+        _mock_npm("left-pad", "MIT")
+        _mock_npm("gpl-lib", "GPL-3.0-only")
+
+        result, data = _check_json(tmp_path)
+        assert result.exit_code == 1
+        assert (data["project_license"], data["project_license_source"]) == ("Proprietary", "")
+        assert _verdicts(data) == {"left-pad": "compatible", "gpl-lib": "incompatible"}
+        assert _ASSUMED in result.stderr.splitlines()
+        assert "declares the license" not in result.stderr
+        assert "declare different licenses" not in result.stderr
+
+        # Scanned on its own, each sub-package is judged by its own manifest.
+        result, data = _check_json(tmp_path / "tools")
+        assert result.exit_code == 0
+        assert (data["project_license"], data["project_license_source"]) == (
+            "GPL-3.0-only",
+            "package.json",
+        )
+        assert _verdicts(data) == {"gpl-lib": "compatible"}
+        assert "Project license: GPL-3.0-only (from package.json)." in result.stderr.splitlines()
+
+    @respx.mock
+    def test_root_value_that_is_not_a_license_warns_and_judges_as_proprietary(self, tmp_path: Path):
+        # Judged against the declared value, every dependency would come out
+        # UNKNOWN. The value is reported and the project is judged as
+        # Proprietary: the MIT dependency passes, the GPL one is a violation.
+        _package_json(tmp_path / "package.json", "-", **{"left-pad": "1.0.0", "gpl-lib": "1.0.0"})
+        _mock_npm("left-pad", "MIT")
+        _mock_npm("gpl-lib", "GPL-3.0-only")
+
+        result, data = _check_json(tmp_path)
+        assert result.exit_code == 1
+        assert (data["project_license"], data["project_license_source"]) == ("Proprietary", "")
+        assert _verdicts(data) == {"left-pad": "compatible", "gpl-lib": "incompatible"}
+        lines = result.stderr.splitlines()
+        assert (
+            "Warning: package.json declares the license '-', which is not a recognised license; "
+            "dependencies are checked against Proprietary."
+        ) in lines
+        assert (
+            "Project license: Proprietary (assumed: package.json declares no recognised license)."
+        ) in lines
+
+    @respx.mock
+    def test_root_manifests_that_disagree_keep_the_first_and_warn(self, tmp_path: Path):
+        # pyproject.toml is consulted first and decides. Cargo.toml agrees
+        # with it, so only package.json is named beside it.
+        _write(tmp_path / "pyproject.toml", '[project]\nname = "app"\nlicense = "MIT"\n')
+        _package_json(tmp_path / "package.json", "GPL-3.0-only", **{"gpl-lib": "1.0.0"})
+        _write(tmp_path / "Cargo.toml", '[package]\nname = "app"\nlicense = "MIT"\n')
+        _mock_npm("gpl-lib", "GPL-3.0-only")
+
+        result, data = _check_json(tmp_path)
+        assert result.exit_code == 1
+        assert (data["project_license"], data["project_license_source"]) == (
+            "MIT",
+            "pyproject.toml",
+        )
+        assert _verdicts(data) == {"gpl-lib": "incompatible"}
+        lines = result.stderr.splitlines()
+        assert (
+            "Warning: manifests in the scanned directory declare different licenses: "
+            "pyproject.toml declares 'MIT', package.json declares 'GPL-3.0-only'; "
+            "the first, pyproject.toml, decides."
+        ) in lines
+        assert "Project license: MIT (from pyproject.toml)." in lines
+
+    @respx.mock
+    def test_source_is_shown_in_the_table_and_markdown_reports(self, tmp_path: Path):
+        _write(tmp_path / "pyproject.toml", '[project]\nname = "app"\nlicense = "MIT"\n')
+        _package_json(tmp_path / "web" / "package.json", "GPL-3.0-only", **{"left-pad": "1.0.0"})
+        _mock_npm("left-pad", "MIT")
+
+        table = CliRunner().invoke(main, ["check", "--path", str(tmp_path)])
+        assert table.exit_code == 0
+        assert "Project license: MIT (from pyproject.toml)" in table.stdout
+
+        markdown = CliRunner().invoke(main, ["check", "--path", str(tmp_path), "-f", "markdown"])
+        assert markdown.exit_code == 0
+        assert (
+            "**Project license:** MIT (from [pyproject.toml](pyproject.toml))"
+            in markdown.stdout.splitlines()
+        )
+
+    @respx.mock
+    def test_assumed_license_shows_no_source_in_the_reports(self, tmp_path: Path):
+        _package_json(tmp_path / "web" / "package.json", "MIT", **{"left-pad": "1.0.0"})
+        _mock_npm("left-pad", "MIT")
+
+        table = CliRunner().invoke(main, ["check", "--path", str(tmp_path)])
+        assert "Project license: Proprietary\n" in table.stdout
+        markdown = CliRunner().invoke(main, ["check", "--path", str(tmp_path), "-f", "markdown"])
+        assert "**Project license:** Proprietary" in markdown.stdout.splitlines()
+
+    @respx.mock
+    def test_declared_value_is_shown_on_one_line_and_capped(self, tmp_path: Path):
+        # A manifest can hold a whole license text, or control characters,
+        # where an identifier belongs. The warning stays one printable line.
+        text = "Permission is hereby granted,\nfree of charge\x1b[2J, " + "to any person " * 20
+        _package_json(tmp_path / "package.json", text, **{"left-pad": "1.0.0"})
+        _mock_npm("left-pad", "MIT")
+
+        result, _ = _check_json(tmp_path)
+        assert result.exit_code == 0
+        assert "\x1b" not in result.stderr
+        warning = next(
+            line for line in result.stderr.splitlines() if "declares the license" in line
+        )
+        shown = warning.split("'")[1]
+        assert shown.startswith("Permission is hereby granted, free of charge\\x1b[2J, to any")
+        assert shown.endswith("...")
+        assert len(shown) == 80
+
+
+class TestInitReviewFileProjectLicense:
+    @respx.mock
+    def test_same_detection_as_check(self, tmp_path: Path):
+        # The only license declared is a sub-package's GPL. Judged against
+        # it, the GPL dependency would be compatible and nothing would be
+        # scaffolded; judged as Proprietary it is flagged.
+        _package_json(tmp_path / "tools" / "package.json", "GPL-3.0-only", **{"gpl-lib": "1.0.0"})
+        _mock_npm("gpl-lib", "GPL-3.0-only")
+
+        result = CliRunner().invoke(main, ["init-review-file", "--path", str(tmp_path)])
+        assert result.exit_code == 0
+        assert _ASSUMED in result.stderr.splitlines()
+        review = (tmp_path / "licenseal.review.toml").read_text(encoding="utf-8")
+        assert 'package = "gpl-lib"' in review
+
+        # Control: with the license declared in the scanned directory itself,
+        # the same dependency is compatible and there is nothing to review.
+        result = CliRunner().invoke(main, ["init-review-file", "--path", str(tmp_path / "tools")])
+        assert result.exit_code == 0
+        assert "Project license: GPL-3.0-only (from package.json)." in result.stderr.splitlines()
+        assert "No reviewable flagged dependencies found." in result.stderr
+        assert not (tmp_path / "tools" / "licenseal.review.toml").exists()

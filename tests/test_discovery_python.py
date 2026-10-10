@@ -6,7 +6,7 @@ import textwrap
 from pathlib import Path
 from unittest.mock import patch
 
-from licenseal.discovery import detect_project_license, discover_all_dependencies
+from licenseal.discovery import ProjectLicense, detect_project_license, discover_all_dependencies
 from licenseal.discovery._read import collect_read_diagnostics
 from licenseal.discovery._walk import walk_project_files
 from licenseal.discovery.python import parse_pep508_dep
@@ -247,7 +247,7 @@ class TestProjectLicenseDetection:
             license = "MIT"
             """)
         )
-        assert detect_project_license_pyproject(tmp_path) == "MIT"
+        assert detect_project_license_pyproject(tmp_path / "pyproject.toml") == "MIT"
 
     def test_pep639_dict_license(self, tmp_path):
         (tmp_path / "pyproject.toml").write_text(
@@ -257,7 +257,7 @@ class TestProjectLicenseDetection:
             license = {text = "Apache-2.0"}
             """)
         )
-        assert detect_project_license_pyproject(tmp_path) == "Apache-2.0"
+        assert detect_project_license_pyproject(tmp_path / "pyproject.toml") == "Apache-2.0"
 
     def test_classifier_fallback(self, tmp_path):
         (tmp_path / "pyproject.toml").write_text(
@@ -269,7 +269,7 @@ class TestProjectLicenseDetection:
             ]
             """)
         )
-        result = detect_project_license_pyproject(tmp_path)
+        result = detect_project_license_pyproject(tmp_path / "pyproject.toml")
         assert result == "MIT License"
 
     def test_no_license(self, tmp_path):
@@ -279,10 +279,7 @@ class TestProjectLicenseDetection:
             name = "myproject"
             """)
         )
-        assert detect_project_license_pyproject(tmp_path) == ""
-
-    def test_no_pyproject(self, tmp_path):
-        assert detect_project_license_pyproject(tmp_path) == ""
+        assert detect_project_license_pyproject(tmp_path / "pyproject.toml") == ""
 
     def test_legacy_poetry_license(self, tmp_path):
         # Pre-PEP-621 Poetry projects keep license under [tool.poetry].
@@ -293,11 +290,11 @@ class TestProjectLicenseDetection:
             license = "GPL-3.0"
             """)
         )
-        assert detect_project_license_pyproject(tmp_path) == "GPL-3.0"
+        assert detect_project_license_pyproject(tmp_path / "pyproject.toml") == "GPL-3.0"
 
-    def test_monorepo_picks_root_license_first(self, tmp_path):
-        # Root pyproject declares the canonical license; nested ones inherit
-        # conceptually. Walk order returns root first.
+    def test_monorepo_root_license_is_the_project_license(self, tmp_path):
+        # The root pyproject declares the license; a sub-package's own
+        # declaration does not change it.
         (tmp_path / "pyproject.toml").write_text(
             textwrap.dedent("""\
             [project]
@@ -313,11 +310,15 @@ class TestProjectLicenseDetection:
             license = "MIT"
             """)
         )
-        assert detect_project_license_pyproject(tmp_path) == "Apache-2.0"
+        assert detect_project_license(tmp_path) == ProjectLicense(
+            license="Apache-2.0",
+            source="pyproject.toml",
+            declared=(("pyproject.toml", "Apache-2.0"),),
+        )
 
-    def test_monorepo_falls_through_to_first_subpackage_when_root_lacks_license(self, tmp_path):
-        # Monorepo layout: no root pyproject.toml, but every sub-package has
-        # a `license = {text = "MIT"}` entry. First sub-package wins.
+    def test_monorepo_without_a_root_license_is_proprietary(self, tmp_path):
+        # Monorepo layout: no root pyproject.toml, and every sub-package
+        # declares a license. None of them is the project's.
         (tmp_path / "libs" / "core").mkdir(parents=True)
         (tmp_path / "libs" / "core" / "pyproject.toml").write_text(
             textwrap.dedent("""\
@@ -334,11 +335,11 @@ class TestProjectLicenseDetection:
             license = "BSD-3-Clause"
             """)
         )
-        assert detect_project_license_pyproject(tmp_path) == "MIT"
+        assert detect_project_license(tmp_path) == ProjectLicense()
 
-    def test_monorepo_malformed_toml_is_skipped(self, tmp_path):
-        # Defensive: an unreadable pyproject (bad TOML) must not abort the
-        # walk; we just skip it and continue.
+    def test_malformed_root_toml_does_not_hand_the_decision_to_a_subpackage(self, tmp_path):
+        # A root pyproject that cannot be parsed declares nothing, and the
+        # sub-package below it still does not supply the project license.
         (tmp_path / "pyproject.toml").write_text("this is = not [ valid toml")
         (tmp_path / "sub").mkdir()
         (tmp_path / "sub" / "pyproject.toml").write_text(
@@ -348,7 +349,8 @@ class TestProjectLicenseDetection:
             license = "MIT"
             """)
         )
-        assert detect_project_license_pyproject(tmp_path) == "MIT"
+        assert detect_project_license_pyproject(tmp_path / "pyproject.toml") == ""
+        assert detect_project_license(tmp_path) == ProjectLicense()
 
 
 class TestPythonMonorepoDiscovery:
@@ -565,9 +567,11 @@ class TestSetupCfgLicenseDetection:
             license = BSD-3-Clause
             """)
         )
-        assert detect_project_license_setup_cfg(tmp_path) == "BSD-3-Clause"
-        # And the top-level walker chains setup.cfg after pyproject.toml.
-        assert detect_project_license(tmp_path) == "BSD-3-Clause"
+        assert detect_project_license_setup_cfg(tmp_path / "setup.cfg") == "BSD-3-Clause"
+        # And the project-license detection consults setup.cfg after pyproject.toml.
+        assert detect_project_license(tmp_path) == ProjectLicense(
+            license="BSD-3-Clause", source="setup.cfg", declared=(("setup.cfg", "BSD-3-Clause"),)
+        )
 
     def test_classifier_fallback(self, tmp_path):
         (tmp_path / "setup.cfg").write_text(
@@ -579,7 +583,7 @@ class TestSetupCfgLicenseDetection:
                 Programming Language :: Python :: 3
             """)
         )
-        assert detect_project_license_setup_cfg(tmp_path) == "MIT License"
+        assert detect_project_license_setup_cfg(tmp_path / "setup.cfg") == "MIT License"
 
     def test_pyproject_wins_over_setup_cfg(self, tmp_path):
         """When both files exist, pyproject's PEP 621 license takes
@@ -597,10 +601,10 @@ class TestSetupCfgLicenseDetection:
             license = Apache-2.0
             """)
         )
-        assert detect_project_license(tmp_path) == "MIT"
-
-    def test_missing_setup_cfg(self, tmp_path):
-        assert detect_project_license_setup_cfg(tmp_path) == ""
+        detected = detect_project_license(tmp_path)
+        assert (detected.license, detected.source) == ("MIT", "pyproject.toml")
+        # The two files disagree, and both declarations are reported.
+        assert detected.declared == (("pyproject.toml", "MIT"), ("setup.cfg", "Apache-2.0"))
 
     def test_malformed_setup_cfg_returns_empty(self, tmp_path):
         # Duplicate option triggers configparser.DuplicateOptionError; the
@@ -612,7 +616,7 @@ class TestSetupCfgLicenseDetection:
             license = Apache-2.0
             """)
         )
-        assert detect_project_license_setup_cfg(tmp_path) == ""
+        assert detect_project_license_setup_cfg(tmp_path / "setup.cfg") == ""
 
     def test_neither_license_nor_recognized_classifier(self, tmp_path):
         # [metadata] exists but has no license field and no
@@ -625,7 +629,7 @@ class TestSetupCfgLicenseDetection:
                 Programming Language :: Python :: 3
             """)
         )
-        assert detect_project_license_setup_cfg(tmp_path) == ""
+        assert detect_project_license_setup_cfg(tmp_path / "setup.cfg") == ""
 
 
 class TestRequirementsDiscovery:
@@ -1050,7 +1054,7 @@ class TestSetupCfgNestedDiscovery:
     def test_project_license_detection_stays_root_only(self, tmp_path):
         (tmp_path / "pkg").mkdir()
         (tmp_path / "pkg" / "setup.cfg").write_text("[metadata]\nlicense = GPL-3.0-only\n")
-        assert detect_project_license(tmp_path) == ""
+        assert detect_project_license(tmp_path) == ProjectLicense()
 
 
 class TestExtrasCapture:
@@ -1331,7 +1335,7 @@ class TestPyprojectEdgeCases:
             ]
             """)
         )
-        result = detect_project_license_pyproject(tmp_path)
+        result = detect_project_license_pyproject(tmp_path / "pyproject.toml")
         assert result == "MIT License"
 
     def test_no_matching_classifier(self, tmp_path):
@@ -1345,7 +1349,7 @@ class TestPyprojectEdgeCases:
             ]
             """)
         )
-        result = detect_project_license_pyproject(tmp_path)
+        result = detect_project_license_pyproject(tmp_path / "pyproject.toml")
         assert result == ""
 
 

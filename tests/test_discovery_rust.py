@@ -5,6 +5,7 @@ from __future__ import annotations
 import textwrap
 from unittest.mock import patch
 
+from licenseal.discovery import ProjectLicense, detect_project_license
 from licenseal.discovery._walk import walk_project_files
 from licenseal.discovery.rust.cargo_toml import (
     cargo_off_registry_root_names,
@@ -510,9 +511,6 @@ class TestCargoOffRegistryRootNames:
 
 
 class TestDetectProjectLicenseCargoToml:
-    def test_returns_empty_when_no_cargo_toml(self, tmp_path):
-        assert detect_project_license_cargo_toml(tmp_path) == ""
-
     def test_reads_package_license(self, tmp_path):
         _write(
             tmp_path,
@@ -523,7 +521,7 @@ class TestDetectProjectLicenseCargoToml:
             license = "MIT OR Apache-2.0"
             """,
         )
-        assert detect_project_license_cargo_toml(tmp_path) == "MIT OR Apache-2.0"
+        assert detect_project_license_cargo_toml(tmp_path / "Cargo.toml") == "MIT OR Apache-2.0"
 
     def test_returns_empty_when_no_license_field(self, tmp_path):
         _write(
@@ -534,7 +532,7 @@ class TestDetectProjectLicenseCargoToml:
             version = "0.1.0"
             """,
         )
-        assert detect_project_license_cargo_toml(tmp_path) == ""
+        assert detect_project_license_cargo_toml(tmp_path / "Cargo.toml") == ""
 
     def test_returns_empty_when_no_package_table(self, tmp_path):
         _write(
@@ -544,7 +542,7 @@ class TestDetectProjectLicenseCargoToml:
             members = ["a", "b"]
             """,
         )
-        assert detect_project_license_cargo_toml(tmp_path) == ""
+        assert detect_project_license_cargo_toml(tmp_path / "Cargo.toml") == ""
 
     def test_returns_empty_for_non_string_license(self, tmp_path):
         _write(
@@ -556,7 +554,7 @@ class TestDetectProjectLicenseCargoToml:
             license = { text = "Custom" }
             """,
         )
-        assert detect_project_license_cargo_toml(tmp_path) == ""
+        assert detect_project_license_cargo_toml(tmp_path / "Cargo.toml") == ""
 
 
 class TestRustWorkspaceDiscovery:
@@ -725,9 +723,9 @@ class TestRustWorkspaceDiscovery:
         deps, _ = discover_cargo_toml_dependencies(tmp_path)
         assert {d.name for d in deps} == {"anyhow"}
 
-    def test_license_detection_walks_members(self, tmp_path):
-        # Root has no [package], so no license — must fall through to the
-        # first member with a license declared.
+    def test_license_detection_does_not_walk_members(self, tmp_path):
+        # The workspace root declares no license. A member crate's license is
+        # that crate's, not the workspace's.
         self._write(
             tmp_path / "Cargo.toml",
             """\
@@ -744,7 +742,10 @@ class TestRustWorkspaceDiscovery:
             license = "Apache-2.0"
             """,
         )
-        assert detect_project_license_cargo_toml(tmp_path) == "Apache-2.0"
+        assert detect_project_license_cargo_toml(tmp_path / "Cargo.toml") == ""
+        assert detect_project_license(tmp_path) == ProjectLicense()
+        # Scanned on its own, the member crate has its license.
+        assert detect_project_license(tmp_path / "crate-a").license == "Apache-2.0"
 
     def test_oserror_on_walk_returns_empty(self, tmp_path):
         with patch("licenseal.discovery._walk.os.walk", side_effect=OSError("denied")):
@@ -761,9 +762,9 @@ class TestRustWorkspaceDiscovery:
         with patch("licenseal.discovery._walk.os.walk", return_value=BrokenWalk()):
             assert walk_project_files(tmp_path, "Cargo.toml") == []
 
-    def test_license_detection_skips_malformed_toml(self, tmp_path):
-        # First-found file is broken TOML; license-detection walk must skip
-        # past it and try the next one rather than crash.
+    def test_license_detection_survives_malformed_toml(self, tmp_path):
+        # The root file is broken TOML: it declares nothing, and detection
+        # returns rather than crash.
         self._write(tmp_path / "Cargo.toml", "[package] this = not [ valid")
         self._write(
             tmp_path / "sub" / "Cargo.toml",
@@ -774,7 +775,8 @@ class TestRustWorkspaceDiscovery:
             license = "Apache-2.0"
             """,
         )
-        assert detect_project_license_cargo_toml(tmp_path) == "Apache-2.0"
+        assert detect_project_license_cargo_toml(tmp_path / "Cargo.toml") == ""
+        assert detect_project_license(tmp_path) == ProjectLicense()
 
     def test_workspace_package_license_inheritance(self, tmp_path):
         # Cargo workspaces frequently declare the license once under
@@ -801,11 +803,11 @@ class TestRustWorkspaceDiscovery:
             version = "0.1.0"
             """,
         )
-        assert detect_project_license_cargo_toml(tmp_path) == "MIT"
+        assert detect_project_license_cargo_toml(tmp_path / "Cargo.toml") == "MIT"
 
-    def test_workspace_package_without_license_falls_through(self, tmp_path):
-        # `[workspace.package]` exists but has no `license` field — must
-        # fall through to subsequent member crates rather than return early.
+    def test_workspace_package_without_license_declares_nothing(self, tmp_path):
+        # `[workspace.package]` exists but has no `license` field. The
+        # workspace declares no license, whatever a member crate declares.
         self._write(
             tmp_path / "Cargo.toml",
             """\
@@ -825,7 +827,8 @@ class TestRustWorkspaceDiscovery:
             license = "Apache-2.0"
             """,
         )
-        assert detect_project_license_cargo_toml(tmp_path) == "Apache-2.0"
+        assert detect_project_license_cargo_toml(tmp_path / "Cargo.toml") == ""
+        assert detect_project_license(tmp_path) == ProjectLicense()
 
     def test_local_names_ignores_package_without_name(self, tmp_path):
         # A `[package]` table with no `name` field (rare but valid TOML) must

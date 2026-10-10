@@ -215,6 +215,10 @@ class AnalysisReport:
     # like ``elapsed_seconds``). Emitted in the JSON report's ``diagnostics``;
     # the gaps among them are also listed in the table and Markdown reports.
     read_diagnostics: list[ReportDiagnostic] = field(default_factory=list)
+    # File name of the manifest in the scanned directory that supplied
+    # ``project_license`` (set by the CLI, like ``elapsed_seconds``). Empty
+    # when none declares a recognised license and ``Proprietary`` is assumed.
+    project_license_source: str = ""
 
     @property
     def violations(self) -> list[CompatibilityResult]:

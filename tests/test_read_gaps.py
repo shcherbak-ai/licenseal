@@ -15,7 +15,7 @@ from pathlib import Path
 import pytest
 import respx
 
-from licenseal.discovery import detect_project_license, discover_all_dependencies
+from licenseal.discovery import ProjectLicense, detect_project_license, discover_all_dependencies
 from licenseal.discovery._read import ReadDiagnostic, collect_read_diagnostics
 from licenseal.discovery.dotnet.lockfiles import parse_nuget_lockfile
 from licenseal.discovery.hex.rebar_lock import parse_rebar_lock
@@ -296,7 +296,7 @@ class TestBadManifestBesideAHealthyOne:
         pom = tmp_path / "pom.xml"
         pom.write_bytes(b'<?xml version="1.0" encoding="EUC-JP"?>\n<project/>\n')
         with collect_read_diagnostics() as diags:
-            assert detect_project_license(tmp_path) == ""
+            assert detect_project_license(tmp_path) == ProjectLicense()
         assert {(d.path, d.reason, d.is_gap) for d in diags} == {
             (pom, "is not valid XML; skipped", True)
         }
@@ -309,7 +309,7 @@ class TestPomGaps:
         (tmp_path / "pom.xml").write_text("<project><dependencies", encoding="utf-8")
         with collect_read_diagnostics() as diags:
             deps, _ = discover_pom_xml_dependencies(tmp_path)
-            lic = detect_project_license_pom_xml(tmp_path)
+            lic = detect_project_license_pom_xml(tmp_path / "pom.xml")
         assert deps == []
         assert lic == ""
         assert any(d.is_gap and "not valid XML" in d.reason for d in diags)
@@ -487,14 +487,14 @@ class TestSetupCfgGaps:
     def test_malformed_setup_cfg_detect_recorded(self, tmp_path: Path):
         (tmp_path / "setup.cfg").write_text(self._MALFORMED, encoding="utf-8")
         with collect_read_diagnostics() as diags:
-            assert detect_project_license_setup_cfg(tmp_path) == ""
+            assert detect_project_license_setup_cfg(tmp_path / "setup.cfg") == ""
         assert any(d.is_gap and "not valid INI" in d.reason for d in diags)
 
     def test_unreadable_setup_cfg_skipped(self, tmp_path: Path, monkeypatch):
         (tmp_path / "setup.cfg").write_text("[metadata]\nlicense = MIT\n", encoding="utf-8")
         monkeypatch.setattr(Path, "read_bytes", _raise_oserror)
         assert discover_setup_cfg_dependencies(tmp_path) == []
-        assert detect_project_license_setup_cfg(tmp_path) == ""
+        assert detect_project_license_setup_cfg(tmp_path / "setup.cfg") == ""
 
 
 class TestCargoLockGaps:

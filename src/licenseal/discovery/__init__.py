@@ -3,9 +3,13 @@
 from __future__ import annotations
 
 import re
+from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path
 
-from licenseal.discovery._walk import shared_walk_cache
+from licenseal.analysis.compatibility import is_recognised_project_license
+from licenseal.analysis.spdx import normalize_license, normalize_r_license
+from licenseal.discovery._walk import shared_walk_cache, walk_project_files_matching
 from licenseal.discovery.dotnet import (
     closest_build_props,
     detect_project_license_csproj,
@@ -17,6 +21,7 @@ from licenseal.discovery.dotnet import (
     find_directory_packages_props,
     lookup_version,
 )
+from licenseal.discovery.dotnet.csproj import _PROJECT_EXTENSIONS
 from licenseal.discovery.dotnet.directory_packages_props import _PROPS_FILENAME
 from licenseal.discovery.go.go_mod import discover_go_mod_dependencies
 from licenseal.discovery.hex import (
@@ -77,54 +82,104 @@ from licenseal.models import Dependency, DependencyGroup, Ecosystem
 _MSBUILD_PROPERTY_RE = re.compile(r"\$\(([^)]+)\)")
 
 
+@dataclass(frozen=True)
+class ProjectLicense:
+    """The license the scanned project's dependencies are judged against.
+
+    ``license`` is the SPDX form of what a manifest in the scanned directory
+    declares, and ``source`` that manifest's file name. When no such manifest
+    declares a license the compatibility check recognises, ``license`` is
+    ``"Proprietary"`` and ``source`` is empty.
+
+    ``declared`` holds ``(manifest, value as declared)`` for the manifest that
+    decides, followed by every other manifest in the scanned directory whose
+    license differs from it. It is empty when nothing is declared, has more
+    than one entry when manifests disagree, and has entries beside an empty
+    ``source`` when the deciding value is not a recognised license.
+    """
+
+    license: str = "Proprietary"
+    source: str = ""
+    declared: tuple[tuple[str, str], ...] = ()
+
+
+def _named(filename: str) -> Callable[[str], bool]:
+    """Name test for a manifest that has one fixed file name."""
+    return lambda name: name == filename
+
+
+# The manifests that can declare the project's own license, in the order they
+# are consulted: a test for the file name, the probe that reads the declared
+# value from one such file, and what turns that value into SPDX. pyproject.toml
+# comes first as the modern canonical source, and setup.py ahead of the other
+# ecosystems so legacy Python projects still surface their license. Only R's
+# license grammar needs a normalizer of its own.
+_PROJECT_LICENSE_MANIFESTS: tuple[
+    tuple[Callable[[str], bool], Callable[[Path], str], Callable[[str], str]], ...
+] = (
+    (_named("pyproject.toml"), detect_project_license_pyproject, normalize_license),
+    (_named("setup.cfg"), detect_project_license_setup_cfg, normalize_license),
+    (_named("setup.py"), detect_project_license_setup_py, normalize_license),
+    (_named("package.json"), detect_project_license_package_json, normalize_license),
+    (_named("Cargo.toml"), detect_project_license_cargo_toml, normalize_license),
+    (_named("pom.xml"), detect_project_license_pom_xml, normalize_license),
+    (
+        lambda name: name.endswith(_PROJECT_EXTENSIONS),
+        detect_project_license_csproj,
+        normalize_license,
+    ),
+    (_named("composer.json"), detect_project_license_composer_json, normalize_license),
+    (lambda name: name.endswith(".gemspec"), detect_project_license_gemspec, normalize_license),
+    (_named("mix.exs"), detect_project_license_mix_exs, normalize_license),
+    (_named("DESCRIPTION"), detect_project_license_description, normalize_r_license),
+)
+
+
 def detect_project_license(
     project_path: Path,
     *,
     exclude_paths: frozenset[Path] = frozenset(),
-) -> str:
-    """Detect the project's own license from available sources.
+) -> ProjectLicense:
+    """Detect the project's own license from the manifests in ``project_path`` itself.
 
-    The per-source ``detect_*`` probes below each walk the project tree for
-    their manifest; wrapping them in :func:`shared_walk_cache` collapses those
-    into a single walk.
+    Only files directly in the scanned directory are read. A manifest further
+    down belongs to a sub-package and its license is that package's: letting
+    it decide would judge every dependency of the project against whichever
+    nested package the walk reached first.
+
+    The first manifest in ``_PROJECT_LICENSE_MANIFESTS`` order that declares a
+    license decides. A value the compatibility check does not recognise is
+    not used: the project is then judged as ``Proprietary``, the strictest
+    row, like a project that declares nothing.
     """
+    # The walk is the one dependency discovery shares, which is what
+    # ``exclude_paths`` is for here: an excluded directory holds no file of
+    # the scanned directory itself.
     with shared_walk_cache():
-        return _detect_project_license(project_path, exclude_paths=exclude_paths)
-
-
-def _detect_project_license(
-    project_path: Path,
-    *,
-    exclude_paths: frozenset[Path] = frozenset(),
-) -> str:
-    # Resolution order: pyproject.toml (PEP 621) → setup.cfg → setup.py
-    # → package.json → Cargo.toml. pyproject takes priority because it's the
-    # modern canonical source; setup.py runs ahead of npm/cargo so legacy
-    # Python projects still surface their license.
-    license_str = detect_project_license_pyproject(project_path, exclude_paths=exclude_paths)
-    if not license_str:
-        license_str = detect_project_license_setup_cfg(project_path)
-    if not license_str:
-        license_str = detect_project_license_setup_py(project_path, exclude_paths=exclude_paths)
-    if not license_str:
-        license_str = detect_project_license_package_json(project_path, exclude_paths=exclude_paths)
-    if not license_str:
-        license_str = detect_project_license_cargo_toml(project_path, exclude_paths=exclude_paths)
-    if not license_str:
-        license_str = detect_project_license_pom_xml(project_path, exclude_paths=exclude_paths)
-    if not license_str:
-        license_str = detect_project_license_csproj(project_path, exclude_paths=exclude_paths)
-    if not license_str:
-        license_str = detect_project_license_composer_json(
-            project_path, exclude_paths=exclude_paths
-        )
-    if not license_str:
-        license_str = detect_project_license_gemspec(project_path, exclude_paths=exclude_paths)
-    if not license_str:
-        license_str = detect_project_license_mix_exs(project_path, exclude_paths=exclude_paths)
-    if not license_str:
-        license_str = detect_project_license_description(project_path, exclude_paths=exclude_paths)
-    return license_str
+        root_files = [
+            path
+            for path in walk_project_files_matching(
+                project_path, lambda _name: True, exclude_paths=exclude_paths
+            )
+            if path.parent == project_path
+        ]
+    declarations: list[tuple[str, str, str]] = []
+    for is_manifest, probe, normalize in _PROJECT_LICENSE_MANIFESTS:
+        for path in root_files:
+            if is_manifest(path.name):
+                declared = probe(path)
+                if declared:
+                    declarations.append((path.name, declared, normalize(declared)))
+    if not declarations:
+        return ProjectLicense()
+    manifest, declared, spdx = declarations[0]
+    reported = (
+        (manifest, declared),
+        *((name, value) for name, value, other in declarations[1:] if other != spdx),
+    )
+    if is_recognised_project_license(spdx):
+        return ProjectLicense(license=spdx, source=manifest, declared=reported)
+    return ProjectLicense(declared=reported)
 
 
 def discover_all_dependencies(

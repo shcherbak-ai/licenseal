@@ -413,7 +413,7 @@ class TestDotnetIntegration:
   </PropertyGroup>
 </Project>""",
         )
-        assert detect_project_license(tmp_path) == "MIT"
+        assert detect_project_license(tmp_path).license == "MIT"
 
     def test_dotnet_filter_count_in_local_filter_counts(self, tmp_path):
         # Even a project with no .NET files has the ``dotnet`` key in

@@ -265,24 +265,10 @@ def _collect_local_python_names(paths: list[Path]) -> set[str]:
     return names
 
 
-def detect_project_license_pyproject(
-    project_path: Path,
-    *,
-    exclude_paths: frozenset[Path] = frozenset(),
-) -> str:
-    """Detect the project's own license from pyproject.toml.
-
-    Walks the tree for monorepo layouts; returns the first non-empty license
-    found in walk order (root first, then sub-packages depth-first).
-    """
-    for pj in walk_project_files(project_path, "pyproject.toml", exclude_paths=exclude_paths):
-        data = load_toml(pj)
-        if data is None:
-            continue
-        license_str = _detect_license_in_data(pj, data)
-        if license_str:
-            return license_str
-    return ""
+def detect_project_license_pyproject(pyproject: Path) -> str:
+    """Return the license one ``pyproject.toml`` declares for its project, or ``""``."""
+    data = load_toml(pyproject)
+    return "" if data is None else _detect_license_in_data(pyproject, data)
 
 
 def _detect_license_in_data(filepath: Path, data: dict) -> str:

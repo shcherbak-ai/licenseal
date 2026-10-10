@@ -223,23 +223,25 @@ class TestLicenseArrayBodyToRaw:
 
 class TestDetectProjectLicenseMixExs:
     def test_simple_array_or_joined(self):
-        assert detect_project_license_mix_exs(_FIXTURES / "simple") == "MIT OR Apache-2.0"
+        assert (
+            detect_project_license_mix_exs(_FIXTURES / "simple" / "mix.exs") == "MIT OR Apache-2.0"
+        )
 
     def test_single_license(self, tmp_path):
         (tmp_path / "mix.exs").write_text(
             'defmodule X do\n  defp package, do: [licenses: ["MIT"]]\nend\n'
         )
-        assert detect_project_license_mix_exs(tmp_path) == "MIT"
+        assert detect_project_license_mix_exs(tmp_path / "mix.exs") == "MIT"
 
     def test_no_license_returns_empty(self, tmp_path):
         (tmp_path / "mix.exs").write_text("defmodule X do\n  def project, do: []\nend\n")
-        assert detect_project_license_mix_exs(tmp_path) == ""
+        assert detect_project_license_mix_exs(tmp_path / "mix.exs") == ""
 
     def test_empty_license_array_skipped(self, tmp_path):
         (tmp_path / "mix.exs").write_text(
             "defmodule X do\n  defp package, do: [licenses: []]\nend\n"
         )
-        assert detect_project_license_mix_exs(tmp_path) == ""
+        assert detect_project_license_mix_exs(tmp_path / "mix.exs") == ""
 
     def test_read_error_swallowed(self, tmp_path, monkeypatch):
         (tmp_path / "mix.exs").write_text(
@@ -250,7 +252,7 @@ class TestDetectProjectLicenseMixExs:
             raise OSError("simulated")
 
         monkeypatch.setattr(Path, "read_bytes", _raise)
-        assert detect_project_license_mix_exs(tmp_path) == ""
+        assert detect_project_license_mix_exs(tmp_path / "mix.exs") == ""
 
 
 class TestWorkspaceMixNames:

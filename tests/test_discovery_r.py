@@ -5,7 +5,7 @@ from __future__ import annotations
 import textwrap
 from pathlib import Path
 
-from licenseal.discovery import detect_project_license, discover_all_dependencies
+from licenseal.discovery import ProjectLicense, detect_project_license, discover_all_dependencies
 from licenseal.discovery.r._dcf import parse_dcf, parse_package_list
 from licenseal.discovery.r.description import (
     collect_dev_direct_names,
@@ -175,26 +175,41 @@ class TestCollectDevDirectNames:
 
 
 class TestDetectProjectLicense:
-    def test_normalized_license(self, tmp_path):
+    def test_license_field_is_returned_as_declared(self, tmp_path):
+        # The probe returns R's own grammar; the aggregator translates it.
         _write(tmp_path / "DESCRIPTION", _DESCRIPTION)
-        assert detect_project_license_description(tmp_path) == "GPL-2.0-or-later"
+        assert detect_project_license_description(tmp_path / "DESCRIPTION") == "GPL (>= 2)"
+        assert detect_project_license(tmp_path) == ProjectLicense(
+            license="GPL-2.0-or-later",
+            source="DESCRIPTION",
+            declared=(("DESCRIPTION", "GPL (>= 2)"),),
+        )
 
     def test_mit_plus_file(self, tmp_path):
         _write(tmp_path / "DESCRIPTION", "Package: x\nLicense: MIT + file LICENSE\n")
-        assert detect_project_license_description(tmp_path) == "MIT"
+        assert detect_project_license(tmp_path).license == "MIT"
 
-    def test_unknown_license_returns_empty(self, tmp_path):
-        # A bare file-reference can't be resolved → empty (caller defaults).
+    def test_unknown_license_is_not_recognised(self, tmp_path):
+        # A bare file-reference can't be resolved: the project is judged as
+        # Proprietary, and the declaration is kept for the warning.
         _write(tmp_path / "DESCRIPTION", "Package: x\nLicense: file LICENSE\n")
-        assert detect_project_license_description(tmp_path) == ""
+        assert detect_project_license(tmp_path) == ProjectLicense(
+            declared=(("DESCRIPTION", "file LICENSE"),)
+        )
+
+    def test_r_grammar_is_not_read_by_the_generic_normalizer(self, tmp_path):
+        # ``GPL-2`` is GPL-2.0-only in R's grammar, whatever the generic
+        # normalizer would make of the token.
+        _write(tmp_path / "DESCRIPTION", "Package: x\nLicense: GPL-2 | file LICENSE\n")
+        assert detect_project_license(tmp_path).license == "GPL-2.0-only"
 
     def test_no_license_field(self, tmp_path):
         _write(tmp_path / "DESCRIPTION", "Package: x\nVersion: 1.0\n")
-        assert detect_project_license_description(tmp_path) == ""
+        assert detect_project_license_description(tmp_path / "DESCRIPTION") == ""
 
     def test_non_r_description_skipped(self, tmp_path):
         _write(tmp_path / "DESCRIPTION", "License: MIT\nFoo: bar\n")
-        assert detect_project_license_description(tmp_path) == ""
+        assert detect_project_license_description(tmp_path / "DESCRIPTION") == ""
 
     def test_read_error_skipped(self, tmp_path, monkeypatch):
         _write(tmp_path / "DESCRIPTION", _DESCRIPTION)
@@ -203,7 +218,7 @@ class TestDetectProjectLicense:
             raise OSError("simulated")
 
         monkeypatch.setattr(Path, "read_bytes", _raise)
-        assert detect_project_license_description(tmp_path) == ""
+        assert detect_project_license_description(tmp_path / "DESCRIPTION") == ""
 
 
 class TestWorkspaceRNames:
@@ -246,4 +261,6 @@ class TestDiscoveryAggregator:
 
     def test_detect_project_license_falls_through_to_r(self, tmp_path):
         _write(tmp_path / "DESCRIPTION", "Package: x\nLicense: MIT + file LICENSE\n")
-        assert detect_project_license(tmp_path) == "MIT"
+        assert detect_project_license(tmp_path) == ProjectLicense(
+            license="MIT", source="DESCRIPTION", declared=(("DESCRIPTION", "MIT + file LICENSE"),)
+        )

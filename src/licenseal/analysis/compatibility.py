@@ -419,6 +419,17 @@ _RISK_LABELS = {
 }
 
 
+def is_recognised_project_license(project_license: str) -> bool:
+    """Whether ``project_license`` gives the compatibility check a row to judge against.
+
+    False for a declared value that does not normalize to a license the
+    matrix can place (``"-"``, a sentence, a name with no SPDX mapping). Every
+    dependency of a project judged against such a value comes out UNKNOWN.
+    """
+    project_spdx = normalize_license(project_license)
+    return _project_compat_risk(project_spdx, classify_risk(project_spdx)) != RiskLevel.UNKNOWN
+
+
 def check_compatibility(
     project_license_raw: str,
     license_info: LicenseInfo,

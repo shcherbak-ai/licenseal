@@ -63,7 +63,7 @@ For projects whose dev dependencies also matter to the audit, use `--dev` instea
 
 Parse `$SCAN_FILE`. The full top-level schema is described in the licenseal repo's `JSON_OUTPUT.md` (that file isn't shipped with this skill — don't try to open it locally; every field used below is named inline). Report concisely to the user:
 
-- `project_license`
+- `project_license`, and `project_license_source`: the manifest in the scanned directory that declared it. An empty `project_license_source` means no manifest there declares a license licenseal recognises, and the project was checked as `Proprietary` — say so explicitly.
 - `summary.total` deps scanned
 - `summary.warnings + summary.violations + summary.unknown` flagged
 - `summary.gaps` — manifests licenseal couldn't read or parse (the top-level `diagnostics[]` array names each one with a `reason`). A gap is an *incomplete* analysis, not a license finding: under the default `--strict` it fails CI on its own, and the review file **cannot** silence it.
@@ -78,7 +78,7 @@ License compatibility is rarely "license A vs license B" in isolation — the ob
 
 Before asking the user, gather signals already in the repo:
 
-- **Project's own license** — already in the scan JSON as `project_license`. No need to re-derive.
+- **Project's own license** — already in the scan JSON as `project_license`, read from the manifest named in `project_license_source`. No need to re-derive. licenseal reads it only from a manifest in the scanned directory, never from a nested package: to audit one package of a monorepo against its own license, scan that package with `--path`.
 - **Library vs application**:
   - Python: `[project.scripts]` / `[project.entry-points]` in `pyproject.toml` → CLI / app. A `[project] name` with no scripts and a `src/<name>/` layout → library. Both possible.
   - npm: `bin` field in `package.json` → CLI / app. `main` / `exports` only → library. No `main` and a server framework dep → app / SaaS.
@@ -106,7 +106,7 @@ A flagged dep has `verdict` in `{"warning", "incompatible", "unknown"}`. Group t
 - `verdict`, `risk`, and `reason`
 - `actionability.investigate_url` (the canonical link to investigate)
 
-**Precondition — project license must be classifiable.** If `project_license` is `"UNKNOWN"` or an SPDX identifier licenseal doesn't recognize (rare — licenseal defaults to `"Proprietary"` when detection fails), the matrix returns UNKNOWN for every dep and the flagged-dep list reflects the missing project signal rather than real conflicts. Stop the walkthrough, point the user at their project's manifest (`pyproject.toml` / `package.json` / `Cargo.toml`) or `LICENSE` file, and ask them to declare or correct the project's own license before continuing.
+**Precondition — the project license must be the right one.** Every verdict is relative to `project_license`. If `project_license_source` is `""`, no manifest in the scanned directory declares a license licenseal recognises, and the project was checked as `Proprietary`: permissive dependencies pass and every copyleft dependency is flagged. That is right for a closed-source project. It is wrong for an open-source project whose license is declared only in a nested package or a `LICENSE` file, or with a value licenseal did not recognise (the scan's stderr then has a `Warning:` naming the file and the value). Before walking findings, confirm with the user that the project really is proprietary. If it is not, stop the walkthrough and ask them to declare the license in a manifest of the scanned directory (`pyproject.toml` / `package.json` / `Cargo.toml` / …), or to scan the sub-package with `--path`, then re-scan. A `Warning:` that manifests declare different licenses gets the same treatment: ask which is right and have the others corrected first.
 
 **`OR` dependencies.** When `license` is an `OR` expression, the verdict is that of the single choice that suits the project best, and each choice is checked as a whole: risk level, pair-level conflict, and any operand that did not resolve. `risk` still reads the least restrictive choice, so `reason` can name a stricter license class than `risk` does. That means the lower-risk choice is not open to this project: it has a pair-level conflict with the project license, or it carries an unresolved operand. Use the pattern below that matches the class or conflict named in `reason`, and ask about the arm it describes. Example: `AGPL-3.0-only OR EPL-1.0` in a `GPL-3.0-only` project is a WARNING whose `reason` says network copyleft while `risk` reads `weak-copyleft` — `EPL-1.0` is a pair-level violation there, so walk it as the network-copyleft warning for the AGPL arm.
 
@@ -294,5 +294,5 @@ If none resolve, navigate the repository file tree from the bare `repository_url
 | Dep declares `Proprietary`; no formal agreement, but the user can describe what permits the use | ✅ `license = "Proprietary"` with `note = "bundled EULA permits free internal use for projects under 50 seats; ours is 12"` (or similar concise factual description naming the operative clause) | Audit-trail content is what matters, not paperwork format; the note has to be checkable, not formal |
 | Dep declares `Proprietary`; user says *"we use it"* / *"should be fine"* / *"we have a contract somewhere"* | ❌ no entry | Not recordable terms — a future reviewer can't verify the use without going back to the engineer who wrote the note |
 | Dep is `GPL-2.0-only WITH Classpath-exception-2.0` in an MIT project (e.g. an OpenJDK module pulled transitively) | ✅ `license = "GPL-2.0-only WITH Classpath-exception-2.0"` with `note = "Classpath exception permits linking from non-GPL code; linked unmodified"` | Classifies as weak copyleft (warning, not violation): the exception permits linking from differently-licensed projects. Confirm the user links rather than modifies the GPL portion |
-| `project_license` resolves to `UNKNOWN` or an SPDX identifier licenseal can't classify | ❌ no entries (yet) | Fix the project's own license declaration first; most flagged verdicts in this state reflect the missing project signal, not real conflicts |
+| `project_license_source` is `""` (the project was checked as `Proprietary`) on a project that is not proprietary | ❌ no entries (yet) | Fix the project's own license declaration first, or scan the right sub-package with `--path`; flagged verdicts in this state reflect the missing project signal, not real conflicts |
 | User says "I just want this to pass CI, the license is genuinely incompatible" | ❌ no entry | This is a policy decision (accept the risk) made *outside* the review file, not a detection override |

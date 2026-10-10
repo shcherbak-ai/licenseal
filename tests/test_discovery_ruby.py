@@ -6,7 +6,7 @@ from pathlib import Path  # noqa: F401 - used by monkeypatch in tests
 
 import pytest
 
-from licenseal.discovery import discover_all_dependencies
+from licenseal.discovery import ProjectLicense, detect_project_license, discover_all_dependencies
 from licenseal.discovery.ruby.gemfile import (
     collect_dev_direct_names,
     discover_gemfile_dependencies,
@@ -569,13 +569,14 @@ class TestWorkspaceGemspecNames:
 
 class TestDetectProjectLicenseGemspec:
     def test_plural_array_joined(self):
-        assert detect_project_license_gemspec(_FIXTURES / "gemspec_only") == "MIT OR Apache-2.0"
+        gemspec = _FIXTURES / "gemspec_only" / "mygem.gemspec"
+        assert detect_project_license_gemspec(gemspec) == "MIT OR Apache-2.0"
 
     def test_singular_string(self, tmp_path):
         (tmp_path / "a.gemspec").write_text(
             'Gem::Specification.new do |s|\n  s.license = "MIT"\nend\n'
         )
-        assert detect_project_license_gemspec(tmp_path) == "MIT"
+        assert detect_project_license_gemspec(tmp_path / "a.gemspec") == "MIT"
 
     def test_plural_overrides_singular(self, tmp_path):
         # Plural form preferred when both present.
@@ -585,20 +586,19 @@ class TestDetectProjectLicenseGemspec:
             '  s.licenses = ["Apache-2.0"]\n'
             "end\n"
         )
-        assert detect_project_license_gemspec(tmp_path) == "Apache-2.0"
-
-    def test_no_gemspec_returns_empty(self, tmp_path):
-        assert detect_project_license_gemspec(tmp_path) == ""
+        assert detect_project_license_gemspec(tmp_path / "a.gemspec") == "Apache-2.0"
 
     def test_non_literal_license_returns_empty(self, tmp_path):
         (tmp_path / "a.gemspec").write_text(
             "Gem::Specification.new do |s|\n  s.license = MY_CONST\nend\n"
         )
-        assert detect_project_license_gemspec(tmp_path) == ""
+        assert detect_project_license_gemspec(tmp_path / "a.gemspec") == ""
 
-    def test_unreadable_gemspec_skipped(self, tmp_path):
+    def test_gemspec_that_is_a_directory_is_not_read(self, tmp_path):
+        # The walk lists files only, so a directory with a gemspec's name is
+        # never handed to the probe.
         (tmp_path / "x.gemspec").mkdir()
-        assert detect_project_license_gemspec(tmp_path) == ""
+        assert detect_project_license(tmp_path) == ProjectLicense()
 
     def test_multiple_gemspecs_pick_first(self, tmp_path):
         (tmp_path / "a.gemspec").write_text(
@@ -607,8 +607,11 @@ class TestDetectProjectLicenseGemspec:
         (tmp_path / "b.gemspec").write_text(
             'Gem::Specification.new do |s|\n  s.license = "BSD-3-Clause"\nend\n'
         )
-        # Plural empty in a.gemspec → skipped; b.gemspec singular wins.
-        assert detect_project_license_gemspec(tmp_path) == "BSD-3-Clause"
+        # Plural empty in a.gemspec declares nothing; b.gemspec singular wins.
+        assert detect_project_license_gemspec(tmp_path / "a.gemspec") == ""
+        assert detect_project_license(tmp_path) == ProjectLicense(
+            license="BSD-3-Clause", source="b.gemspec", declared=(("b.gemspec", "BSD-3-Clause"),)
+        )
 
     def test_read_error_swallowed(self, tmp_path, monkeypatch):
         (tmp_path / "a.gemspec").write_text(
@@ -619,7 +622,7 @@ class TestDetectProjectLicenseGemspec:
             raise OSError("simulated")
 
         monkeypatch.setattr(Path, "read_bytes", _raise)
-        assert detect_project_license_gemspec(tmp_path) == ""
+        assert detect_project_license_gemspec(tmp_path / "a.gemspec") == ""
 
 
 class TestLicenseArrayBodyToRaw:

@@ -16,7 +16,6 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from licenseal.analysis.spdx import normalize_r_license
 from licenseal.discovery._read import decode_text
 from licenseal.discovery._walk import walk_project_files
 from licenseal.discovery.r._dcf import parse_dcf, parse_package_list
@@ -158,33 +157,21 @@ def collect_dev_direct_names(deps: list[Dependency]) -> set[str]:
     return dev_names - prod_names
 
 
-def detect_project_license_description(
-    project_path: Path,
-    *,
-    exclude_paths: frozenset[Path] = frozenset(),
-) -> str:
-    """Return the first DESCRIPTION's ``License:`` field, SPDX-normalized.
+def detect_project_license_description(description: Path) -> str:
+    """Return the ``License:`` field of one R ``DESCRIPTION``, or ``""``.
 
-    The raw value uses R's license grammar (``GPL (>= 2)``, ``MIT + file
-    LICENSE``), so it's translated here via :func:`normalize_r_license` — the
-    downstream generic normalizer would mis-handle ``GPL-2``-style tokens.
-    An undeterminable license (bare ``file LICENSE``, ``Unlimited``) returns
-    ``""`` so the caller's "no license → Proprietary" default applies.
+    The value is returned as declared, in R's license grammar (``GPL (>= 2)``,
+    ``MIT + file LICENSE``). ``analysis.spdx.normalize_r_license`` is what
+    turns it into SPDX: the generic normalizer would mis-handle ``GPL-2``-style
+    tokens.
     """
-    for desc in walk_project_files(project_path, "DESCRIPTION", exclude_paths=exclude_paths):
-        text = decode_text(desc)
-        if text is None:
-            continue
-        records = parse_dcf(text)
-        if not records or not _is_r_description(records[0]):
-            continue
-        raw = records[0].get("License", "").strip()
-        if not raw:
-            continue
-        normalized = normalize_r_license(raw)
-        if normalized != "UNKNOWN":
-            return normalized
-    return ""
+    text = decode_text(description)
+    if text is None:
+        return ""
+    records = parse_dcf(text)
+    if not records or not _is_r_description(records[0]):
+        return ""
+    return records[0].get("License", "").strip()
 
 
 def workspace_r_names(

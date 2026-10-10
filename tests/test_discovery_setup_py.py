@@ -13,7 +13,7 @@ from unittest.mock import patch
 
 import pytest
 
-from licenseal.discovery import detect_project_license, discover_all_dependencies
+from licenseal.discovery import ProjectLicense, detect_project_license, discover_all_dependencies
 from licenseal.discovery._read import collect_read_diagnostics
 from licenseal.discovery._walk import walk_project_files
 from licenseal.discovery.python.setup_py import (
@@ -37,7 +37,7 @@ class TestSetupPyLicense:
             setup(name="mypkg", license="Apache 2.0 License", install_requires=[])
             """,
         )
-        assert detect_project_license_setup_py(tmp_path) == "Apache 2.0 License"
+        assert detect_project_license_setup_py(tmp_path / "setup.py") == "Apache 2.0 License"
 
     def test_license_via_name_reference(self, tmp_path):
         # Common pattern: `__license__ = "MIT"` then `setup(license=__license__)`.
@@ -49,10 +49,7 @@ class TestSetupPyLicense:
             setup(name="mypkg", license=__license__, install_requires=[])
             """,
         )
-        assert detect_project_license_setup_py(tmp_path) == "MIT"
-
-    def test_returns_empty_when_no_setup_py(self, tmp_path):
-        assert detect_project_license_setup_py(tmp_path) == ""
+        assert detect_project_license_setup_py(tmp_path / "setup.py") == "MIT"
 
     def test_setuptools_attribute_form(self, tmp_path):
         # `import setuptools; setuptools.setup(...)` rather than the
@@ -64,7 +61,7 @@ class TestSetupPyLicense:
             setuptools.setup(name="mypkg", license="BSD-3-Clause")
             """,
         )
-        assert detect_project_license_setup_py(tmp_path) == "BSD-3-Clause"
+        assert detect_project_license_setup_py(tmp_path / "setup.py") == "BSD-3-Clause"
 
     def test_dynamic_license_skipped(self, tmp_path):
         # Computed license (function call) is unresolvable — skip.
@@ -77,7 +74,7 @@ class TestSetupPyLicense:
             setup(name="mypkg", license=_get_license())
             """,
         )
-        assert detect_project_license_setup_py(tmp_path) == ""
+        assert detect_project_license_setup_py(tmp_path / "setup.py") == ""
 
     def test_classifier_fallback_when_no_license_kwarg(self, tmp_path):
         # Legacy setuptools pattern: license declared only via the trove
@@ -98,7 +95,7 @@ class TestSetupPyLicense:
             )
             """,
         )
-        assert detect_project_license_setup_py(tmp_path) == "Apache Software License"
+        assert detect_project_license_setup_py(tmp_path / "setup.py") == "Apache Software License"
 
     def test_license_kwarg_takes_precedence_over_classifier(self, tmp_path):
         # When both are present, the explicit `license=` kwarg wins —
@@ -114,7 +111,7 @@ class TestSetupPyLicense:
             )
             """,
         )
-        assert detect_project_license_setup_py(tmp_path) == "BSD-3-Clause"
+        assert detect_project_license_setup_py(tmp_path / "setup.py") == "BSD-3-Clause"
 
     def test_classifier_fallback_via_name_reference(self, tmp_path):
         # Classifiers can also live in a module-level constant referenced by
@@ -129,7 +126,7 @@ class TestSetupPyLicense:
             setup(name="mypkg", classifiers=CLASSIFIERS)
             """,
         )
-        assert detect_project_license_setup_py(tmp_path) == "MIT License"
+        assert detect_project_license_setup_py(tmp_path / "setup.py") == "MIT License"
 
     def test_classifier_without_license_entry_yields_empty(self, tmp_path):
         # No `License ::` entry → empty (caller falls through to other
@@ -147,7 +144,7 @@ class TestSetupPyLicense:
             )
             """,
         )
-        assert detect_project_license_setup_py(tmp_path) == ""
+        assert detect_project_license_setup_py(tmp_path / "setup.py") == ""
 
 
 class TestSetupPyInstallRequires:
@@ -378,7 +375,7 @@ class TestSetupPyEdgeCases:
             """,
         )
         assert discover_setup_py_dependencies(tmp_path) == []
-        assert detect_project_license_setup_py(tmp_path) == ""
+        assert detect_project_license_setup_py(tmp_path / "setup.py") == ""
 
     def test_walks_nested_setup_pys(self, tmp_path):
         # Monorepo with two sub-packages, each with its own setup.py.
@@ -440,7 +437,7 @@ class TestSetupPyEdgeCases:
             # `_parse_ast` returns None, so discover / detect both gracefully
             # return their empty result.
             assert discover_setup_py_dependencies(tmp_path) == []
-            assert detect_project_license_setup_py(tmp_path) == ""
+            assert detect_project_license_setup_py(tmp_path / "setup.py") == ""
 
     def test_oserror_on_walk_returns_empty(self, tmp_path):
         with patch("licenseal.discovery._walk.os.walk", side_effect=OSError("denied")):
@@ -563,7 +560,7 @@ class TestSetupPyEdgeCases:
             setup(name="x", license=undefined_license)
             """,
         )
-        assert detect_project_license_setup_py(tmp_path) == ""
+        assert detect_project_license_setup_py(tmp_path / "setup.py") == ""
 
     def test_subscript_non_string_key_skipped(self, tmp_path):
         # `deps[some_var]` — slice is a Name, not a Constant string.
@@ -739,7 +736,7 @@ class TestSetupPyParseGaps:
     def test_project_license_probe_records_the_same_gap(self, tmp_path):
         (tmp_path / "setup.py").write_text('print "python 2 only"\n', encoding="utf-8")
         with collect_read_diagnostics() as diags:
-            assert detect_project_license(tmp_path) == ""
+            assert detect_project_license(tmp_path) == ProjectLicense()
         assert [d.path for d in _setup_py_gaps(diags)] == [tmp_path / "setup.py"]
 
     def test_unparseable_sibling_deps_table_is_not_a_gap(self, tmp_path):
@@ -828,4 +825,7 @@ class TestSetupPyTopLevelIntegration:
             setup(name="x", license="Apache 2.0 License")
             """,
         )
-        assert detect_project_license(tmp_path) == "Apache 2.0 License"
+        # The declared value is kept beside its SPDX form.
+        assert detect_project_license(tmp_path) == ProjectLicense(
+            license="Apache-2.0", source="setup.py", declared=(("setup.py", "Apache 2.0 License"),)
+        )

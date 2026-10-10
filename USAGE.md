@@ -48,6 +48,17 @@ licenseal check -f markdown -o LICENSES.md   # PR-comment-friendly Markdown audi
 licenseal check --exclude-dirs third_party,scratch  # skip subtrees not already in the default skip set
 ```
 
+## Project license
+
+Every verdict compares a dependency's license with the project's own. licenseal reads the project license from the manifests in the scanned directory itself (the `--path` root) and never from a subdirectory: a nested package's license is that package's.
+
+- The manifests are consulted in this order, and the first one that declares a license decides: `pyproject.toml`, `setup.cfg`, `setup.py`, `package.json`, `Cargo.toml` (`[package]`, then `[workspace.package]`), `pom.xml`, `.csproj` / `.fsproj` / `.vbproj`, `composer.json`, `*.gemspec`, `mix.exs`, `DESCRIPTION`.
+- `check` and `init-review-file` print one stderr line with the value and the file it came from: `Project license: MIT (from pyproject.toml).`
+- When no manifest in the scanned directory declares a license, the project is checked as `Proprietary` (a closed-source project can use permissive dependencies but not copyleft ones), and the line says so: `Project license: Proprietary (assumed: no manifest in the scanned directory declares a license). Scanning a subproject with --path uses that subproject's license.` To check one package of a monorepo against its own license, scan it with `--path`.
+- A declared value that is not a recognised license (`"license": "-"`, a sentence, a name with no SPDX mapping) is not used. A `Warning:` names the file and the value, and the project is checked as `Proprietary`.
+- When manifests in the scanned directory declare different licenses, the first in the order above decides and a `Warning:` names each file and its value.
+- The JSON report carries the file as `project_license_source` (`""` when `Proprietary` is assumed). The table and Markdown reports show it beside the project license.
+
 ## Output & the CI gate
 
 `licenseal check` exits non-zero when there are violations, warnings, unresolved licenses, or analysis gaps — that's the CI gate.

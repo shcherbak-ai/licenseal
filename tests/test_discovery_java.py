@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from licenseal.discovery import discover_all_dependencies
+from licenseal.discovery import ProjectLicense, detect_project_license, discover_all_dependencies
 from licenseal.discovery._read import collect_read_diagnostics
 from licenseal.discovery.java.build_gradle import (
     _extract_coord_from_rest,
@@ -1270,7 +1270,7 @@ class TestDetectProjectLicensePomXml:
             </licenses>
             </project>""",
         )
-        assert detect_project_license_pom_xml(tmp_path) == "Apache License 2.0"
+        assert detect_project_license_pom_xml(tmp_path / "pom.xml") == "Apache License 2.0"
 
     def test_multi_license_joined_with_and(self, tmp_path):
         _write_pom(
@@ -1282,21 +1282,18 @@ class TestDetectProjectLicensePomXml:
             </licenses>
             </project>""",
         )
-        assert detect_project_license_pom_xml(tmp_path) == "Apache-2.0 AND MIT"
-
-    def test_no_pom_returns_empty(self, tmp_path):
-        assert detect_project_license_pom_xml(tmp_path) == ""
+        assert detect_project_license_pom_xml(tmp_path / "pom.xml") == "Apache-2.0 AND MIT"
 
     def test_pom_without_licenses_returns_empty(self, tmp_path):
         _write_pom(
             tmp_path / "pom.xml",
             "<project><groupId>g</groupId><artifactId>a</artifactId></project>",
         )
-        assert detect_project_license_pom_xml(tmp_path) == ""
+        assert detect_project_license_pom_xml(tmp_path / "pom.xml") == ""
 
-    def test_nested_pom_used_when_root_missing(self, tmp_path):
-        # If the repo root has no pom.xml but a nested module does, the
-        # shallowest one is the project pom.
+    def test_nested_pom_is_not_used_when_root_missing(self, tmp_path):
+        # The scanned directory has no pom.xml. A nested module's license is
+        # that module's, however shallow it sits.
         (tmp_path / "submodule").mkdir()
         _write_pom(
             tmp_path / "submodule" / "pom.xml",
@@ -1306,7 +1303,8 @@ class TestDetectProjectLicensePomXml:
             </licenses>
             </project>""",
         )
-        assert detect_project_license_pom_xml(tmp_path) == "BSD-3-Clause"
+        assert detect_project_license(tmp_path) == ProjectLicense()
+        assert detect_project_license(tmp_path / "submodule").license == "BSD-3-Clause"
 
     def test_unreadable_root_pom_returns_empty(self, tmp_path, monkeypatch):
         _write_pom(
@@ -1318,7 +1316,7 @@ class TestDetectProjectLicensePomXml:
             raise OSError("nope")
 
         monkeypatch.setattr(Path, "read_bytes", failing_read_bytes)
-        assert detect_project_license_pom_xml(tmp_path) == ""
+        assert detect_project_license_pom_xml(tmp_path / "pom.xml") == ""
 
 
 # ============================================================================
