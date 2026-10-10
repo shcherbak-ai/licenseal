@@ -4052,6 +4052,147 @@ class TestRubyEcosystem:
         # Off-registry short-circuits to unknown; no rubygems.org fetch on edge.
         assert edge_route.call_count == 0
 
+    # A database adapter in a custom group, a runtime gem in a mixed
+    # production + test list, and a test-only tool.
+    _GROUPED_GEMFILE = (
+        'source "https://rubygems.org"\n'
+        "group :database do\n"
+        '  gem "db-adapter"\n'
+        "end\n"
+        "group :production, :test do\n"
+        '  gem "runtime-gem"\n'
+        "end\n"
+        "group :test, optional: true do\n"
+        '  gem "test-tool"\n'
+        "end\n"
+    )
+    _MIT_PYPROJECT = '[project]\nname = "myproject"\nlicense = {text = "MIT"}\n'
+
+    @staticmethod
+    def _mock_gem(name: str, version: str, license_id: str, runtime: tuple[str, ...] = ()):
+        """Mock the latest-version and per-version rubygems.org endpoints."""
+        payload = {
+            "name": name,
+            "version": version,
+            "number": version,
+            "licenses": [license_id],
+            "dependencies": {
+                "runtime": [{"name": child, "requirements": ">= 0"} for child in runtime],
+                "development": [],
+            },
+        }
+        latest = respx.get(f"https://rubygems.org/api/v1/gems/{name}.json").mock(
+            return_value=httpx.Response(200, json=payload)
+        )
+        pinned = respx.get(
+            f"https://rubygems.org/api/v2/rubygems/{name}/versions/{version}.json"
+        ).mock(return_value=httpx.Response(200, json=payload))
+        return latest, pinned
+
+    def _mock_grouped_gems(self):
+        self._mock_gem("db-adapter", "2.0.0", "GPL-3.0-only", runtime=("adapter-native",))
+        self._mock_gem("adapter-native", "3.0.0", "MIT")
+        self._mock_gem("runtime-gem", "4.0.0", "MIT", runtime=("runtime-child",))
+        self._mock_gem("runtime-child", "5.0.0", "MIT")
+        return [
+            *self._mock_gem("test-tool", "7.0.0", "MIT", runtime=("test-child",)),
+            *self._mock_gem("test-child", "8.0.0", "MIT"),
+        ]
+
+    _PROD_GEMS = {"db-adapter", "adapter-native", "runtime-gem", "runtime-child"}
+
+    @respx.mock
+    def test_non_dev_groups_are_checked_by_default_with_lockfile(self, tmp_path):
+        # Default flags (--no-dev) with a Gemfile.lock: gems in a custom or
+        # mixed group are production roots, so they and their exclusive
+        # transitives are reported and can fail the check. Only the gem whose
+        # sole group is :test is left out.
+        (tmp_path / "pyproject.toml").write_text(self._MIT_PYPROJECT)
+        (tmp_path / "Gemfile").write_text(self._GROUPED_GEMFILE)
+        (tmp_path / "Gemfile.lock").write_text(
+            "GEM\n"
+            "  remote: https://rubygems.org/\n"
+            "  specs:\n"
+            "    adapter-native (3.0.0)\n"
+            "    db-adapter (2.0.0)\n"
+            "      adapter-native (>= 0)\n"
+            "    runtime-child (5.0.0)\n"
+            "    runtime-gem (4.0.0)\n"
+            "      runtime-child (>= 0)\n"
+            "    test-child (8.0.0)\n"
+            "    test-tool (7.0.0)\n"
+            "      test-child (>= 0)\n"
+            "\n"
+            "DEPENDENCIES\n"
+            "  db-adapter\n"
+            "  runtime-gem\n"
+            "  test-tool\n"
+            "\n"
+        )
+        dev_routes = self._mock_grouped_gems()
+        out = tmp_path / "report.json"
+
+        result = CliRunner().invoke(
+            main, ["check", "--path", str(tmp_path), "-f", "json", "-o", str(out)]
+        )
+        assert result.exit_code == 1
+        data = json.loads(out.read_text(encoding="utf-8"))
+        by_name = {d["name"]: d for d in data["dependencies"]}
+        assert set(by_name) == self._PROD_GEMS
+        assert {d["group"] for d in by_name.values()} == {"prod"}
+        assert by_name["db-adapter"]["verdict"] == "incompatible"
+        assert by_name["adapter-native"]["direct_ancestors"] == ["db-adapter"]
+        assert not any(route.called for route in dev_routes)
+
+    @respx.mock
+    def test_non_dev_groups_are_checked_by_default_without_lockfile(self, tmp_path):
+        # Same Gemfile, no Gemfile.lock: the registry walk starts from the
+        # same production roots.
+        (tmp_path / "pyproject.toml").write_text(self._MIT_PYPROJECT)
+        (tmp_path / "Gemfile").write_text(self._GROUPED_GEMFILE)
+        dev_routes = self._mock_grouped_gems()
+        out = tmp_path / "report.json"
+
+        result = CliRunner().invoke(
+            main, ["check", "--path", str(tmp_path), "-f", "json", "-o", str(out)]
+        )
+        assert result.exit_code == 1
+        data = json.loads(out.read_text(encoding="utf-8"))
+        by_name = {d["name"]: d for d in data["dependencies"]}
+        assert set(by_name) == self._PROD_GEMS
+        assert by_name["db-adapter"]["verdict"] == "incompatible"
+        assert not any(route.called for route in dev_routes)
+
+    @respx.mock
+    def test_dev_flag_adds_the_test_only_gem(self, tmp_path):
+        (tmp_path / "pyproject.toml").write_text(self._MIT_PYPROJECT)
+        (tmp_path / "Gemfile").write_text(self._GROUPED_GEMFILE)
+        self._mock_grouped_gems()
+        out = tmp_path / "report.json"
+
+        result = CliRunner().invoke(
+            main,
+            [
+                "check",
+                "--path",
+                str(tmp_path),
+                "--dev",
+                "--no-strict",
+                "-f",
+                "json",
+                "-o",
+                str(out),
+            ],
+        )
+        assert result.exit_code == 1
+        data = json.loads(out.read_text(encoding="utf-8"))
+        groups = {d["name"]: d["group"] for d in data["dependencies"]}
+        assert groups == {
+            **dict.fromkeys(self._PROD_GEMS, "prod"),
+            "test-tool": "dev",
+            "test-child": "dev",
+        }
+
 
 class TestHexEcosystem:
     @respx.mock

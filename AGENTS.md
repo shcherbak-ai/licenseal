@@ -60,7 +60,7 @@ src/licenseal/
       composer_json.py        composer.json parser (require + require-dev; platform pseudo-packages — names without a `/` — filtered; license-field array → OR-joined disjunction)
       lockfiles.py            composer.lock parser (packages + packages-dev; trusts explicit `dev` flag; extracts embedded SPDX license map for lockfile-first resolver)
     ruby/
-      gemfile.py              Static Gemfile parser (line-oriented regex + block-nesting state machine; never executes Ruby; git/path/github sources flagged off-registry; dev attribution from :development/:test groups)
+      gemfile.py              Static Gemfile parser (line-oriented regex + block-nesting state machine; never executes Ruby; git/path/github sources flagged off-registry; a gem is dev only when every group it is in — enclosing blocks plus per-line `group:`/`groups:` — is :development/:test, so custom, production, and mixed group lists are prod)
       gemspec.py              Static *.gemspec parser (regex-only; `license` / `licenses` extraction; runtime vs development add_*_dependency split; workspace-internal name filter for multi-gemspec monorepos)
       lockfiles.py            Gemfile.lock parser (2/4/6-space indent contract per Bundler's grammar; platform suffix stripped; off-registry marker on GIT/PATH/PLUGIN SOURCE specs)
     hex/

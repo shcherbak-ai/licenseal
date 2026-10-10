@@ -4,6 +4,9 @@ from __future__ import annotations
 
 from pathlib import Path  # noqa: F401 - used by monkeypatch in tests
 
+import pytest
+
+from licenseal.discovery import discover_all_dependencies
 from licenseal.discovery.ruby.gemfile import (
     collect_dev_direct_names,
     discover_gemfile_dependencies,
@@ -221,6 +224,159 @@ class TestDiscoverGemfileDependencies:
         deps, filtered = discover_gemfile_dependencies(tmp_path)
         assert deps == []
         assert filtered == 0
+
+
+def _gemfile_groups(tmp_path, body: str) -> dict[str, DependencyGroup]:
+    """Write ``body`` as the project's Gemfile and return ``{gem: group}``."""
+    (tmp_path / "Gemfile").write_text('source "https://rubygems.org"\n' + body, encoding="utf-8")
+    deps, _ = discover_all_dependencies(tmp_path)
+    return {d.name: d.group for d in deps}
+
+
+class TestGemfileGroupClassification:
+    """A gem is DEV only when it is in at least one group and every one of
+    them is ``development`` or ``test``; any other group ships."""
+
+    @pytest.mark.parametrize(
+        ("header", "expected"),
+        [
+            ("group :development do", DependencyGroup.DEV),
+            ("group :test do", DependencyGroup.DEV),
+            ("group :development, :test do", DependencyGroup.DEV),
+            ("group(:development, :test) do", DependencyGroup.DEV),
+            # Keyword options are not group names.
+            ("group :test, optional: true do", DependencyGroup.DEV),
+            ("group :development, :test, :optional => true do", DependencyGroup.DEV),
+            # Custom groups ship with a deployed bundle.
+            ("group :assets do", DependencyGroup.PROD),
+            ("group :database do", DependencyGroup.PROD),
+            ("group :jobs, optional: true do", DependencyGroup.PROD),
+            ("group :docs do", DependencyGroup.PROD),
+            ("group :default do", DependencyGroup.PROD),
+            ("group :production do", DependencyGroup.PROD),
+            ("group :staging do", DependencyGroup.PROD),
+            # One non-dev group in the list is enough.
+            ("group :production, :test do", DependencyGroup.PROD),
+            ("group :development, :staging do", DependencyGroup.PROD),
+            ("group :test, :web do", DependencyGroup.PROD),
+            # A name the parser can't read as a symbol is never assumed dev.
+            ('group "test" do', DependencyGroup.PROD),
+            ('group :test, "ci" do', DependencyGroup.PROD),
+            ("group :test, EXTRA_GROUP do", DependencyGroup.PROD),
+            # No names at all: Bundler's implicit default group.
+            ("group do", DependencyGroup.PROD),
+        ],
+    )
+    def test_block_form(self, tmp_path, header, expected):
+        groups = _gemfile_groups(tmp_path, f'{header}\n  gem "in-block"\nend\ngem "after-block"\n')
+        assert groups == {"in-block": expected, "after-block": DependencyGroup.PROD}
+
+    @pytest.mark.parametrize(
+        ("options", "expected"),
+        [
+            ("group: :test", DependencyGroup.DEV),
+            ("group: :development", DependencyGroup.DEV),
+            ("groups: [:development, :test]", DependencyGroup.DEV),
+            ("group: [:development, :test]", DependencyGroup.DEV),
+            (":group => :test", DependencyGroup.DEV),
+            (":groups => [:development, :test]", DependencyGroup.DEV),
+            (":groups=>[:test]", DependencyGroup.DEV),
+            # Other options on the line are not groups.
+            ('"~> 1.0", require: false, group: :test, platforms: :mri', DependencyGroup.DEV),
+            (":require => false, :group => :development", DependencyGroup.DEV),
+            # Custom and mixed lists ship.
+            ("group: :database", DependencyGroup.PROD),
+            ("group: :production", DependencyGroup.PROD),
+            ("groups: [:production, :test]", DependencyGroup.PROD),
+            ("groups: [:development, :assets]", DependencyGroup.PROD),
+            (":group => :web", DependencyGroup.PROD),
+            (":groups => [:staging, :development]", DependencyGroup.PROD),
+            # Values the parser can't read as symbols are never assumed dev.
+            ('group: "test"', DependencyGroup.PROD),
+            ("groups: %i[development test]", DependencyGroup.PROD),
+            ('groups: [:test, "ci"]', DependencyGroup.PROD),
+            ("groups: []", DependencyGroup.PROD),
+            # A different option whose name merely ends in "group".
+            ("subgroup: :test", DependencyGroup.PROD),
+            ("require: false", DependencyGroup.PROD),
+        ],
+    )
+    def test_inline_form(self, tmp_path, options, expected):
+        groups = _gemfile_groups(tmp_path, f'gem "inline-gem", {options}\n')
+        assert groups == {"inline-gem": expected}
+
+    def test_nested_groups_accumulate(self, tmp_path):
+        groups = _gemfile_groups(
+            tmp_path,
+            "group :development do\n"
+            '  gem "dev-only"\n'
+            "  group :test do\n"
+            '    gem "dev-and-test"\n'
+            "  end\n"
+            "  group :assets do\n"
+            '    gem "dev-and-custom"\n'
+            "  end\n"
+            '  gem "dev-again"\n'
+            "end\n"
+            "group :production do\n"
+            "  group :test do\n"
+            '    gem "prod-and-test"\n'
+            "  end\n"
+            "end\n",
+        )
+        assert groups == {
+            "dev-only": DependencyGroup.DEV,
+            "dev-and-test": DependencyGroup.DEV,
+            "dev-and-custom": DependencyGroup.PROD,
+            "dev-again": DependencyGroup.DEV,
+            "prod-and-test": DependencyGroup.PROD,
+        }
+
+    def test_inline_groups_add_to_the_enclosing_block(self, tmp_path):
+        groups = _gemfile_groups(
+            tmp_path,
+            "group :development do\n"
+            '  gem "block-dev-inline-test", group: :test\n'
+            '  gem "block-dev-inline-custom", group: :database\n'
+            '  gem "block-dev-inline-unreadable", groups: [\n'
+            "end\n"
+            "group :production do\n"
+            '  gem "block-prod-inline-test", group: :test\n'
+            "end\n",
+        )
+        assert groups == {
+            "block-dev-inline-test": DependencyGroup.DEV,
+            "block-dev-inline-custom": DependencyGroup.PROD,
+            "block-dev-inline-unreadable": DependencyGroup.PROD,
+            "block-prod-inline-test": DependencyGroup.PROD,
+        }
+
+    def test_dev_roots_exclude_custom_and_mixed_groups(self, tmp_path):
+        # The Gemfile.lock parser propagates DEV from these roots, so a gem in
+        # a custom or mixed group must not be among them.
+        (tmp_path / "Gemfile").write_text(
+            'source "https://rubygems.org"\n'
+            'gem "runtime-gem"\n'
+            "group :database do\n"
+            '  gem "db-adapter"\n'
+            "end\n"
+            "group :production, :test do\n"
+            '  gem "mixed-gem"\n'
+            "end\n"
+            "group :development, :test do\n"
+            '  gem "test-tool"\n'
+            "end\n"
+            'gem "inline-dev", group: :development\n'
+            'gem "inline-custom", groups: [:jobs, :development]\n'
+            # Declared dev-only on one line and in a custom group on another:
+            # the non-dev declaration wins.
+            'gem "twice", group: :test\n'
+            'gem "twice", group: :assets\n',
+            encoding="utf-8",
+        )
+        deps, _ = discover_all_dependencies(tmp_path)
+        assert collect_dev_direct_names(deps) == {"test-tool", "inline-dev"}
+        assert next(d for d in deps if d.name == "twice").group == DependencyGroup.PROD
 
 
 class TestCollectDevDirectNames:

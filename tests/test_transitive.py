@@ -5518,6 +5518,68 @@ class TestRubyLockfileFirstPath:
             )
         assert "acme-dev" not in {d.name for d in prod_only}
 
+    def test_custom_and_mixed_group_gems_are_prod_roots(self, tmp_path):
+        # Only gems whose every group is development / test seed the DEV
+        # roots. A gem in a custom group or a mixed list is a PROD root, so
+        # it and its exclusive transitives survive the default dev filter.
+        (tmp_path / "Gemfile").write_text(
+            'source "https://rubygems.org"\n'
+            'gem "web-framework"\n'
+            "group :database do\n"
+            '  gem "db-adapter"\n'
+            "end\n"
+            "group :production, :test do\n"
+            '  gem "runtime-gem"\n'
+            "end\n"
+            "group :development, :test do\n"
+            '  gem "test-tool"\n'
+            "end\n"
+        )
+        (tmp_path / "Gemfile.lock").write_text(
+            "GEM\n"
+            "  remote: https://rubygems.org/\n"
+            "  specs:\n"
+            "    adapter-native (3.0.0)\n"
+            "    db-adapter (2.0.0)\n"
+            "      adapter-native (>= 3.0)\n"
+            "    runtime-child (5.0.0)\n"
+            "    runtime-gem (4.0.0)\n"
+            "      runtime-child (~> 5.0)\n"
+            "    test-child (8.0.0)\n"
+            "    test-tool (7.0.0)\n"
+            "      test-child (>= 8)\n"
+            "    web-framework (1.0.0)\n"
+            "\n"
+            "DEPENDENCIES\n"
+            "  db-adapter\n"
+            "  runtime-gem\n"
+            "  test-tool\n"
+            "  web-framework\n"
+            "\n"
+        )
+        from licenseal.discovery import discover_all_dependencies
+
+        direct_deps, _ = discover_all_dependencies(tmp_path)
+        with httpx.Client() as client:
+            prod_only = resolve_transitive(
+                direct_deps, tmp_path, include_dev=False, max_depth=50, client=client
+            )
+        assert {d.name: d.group for d in prod_only} == dict.fromkeys(
+            ("web-framework", "db-adapter", "adapter-native", "runtime-gem", "runtime-child"),
+            DependencyGroup.PROD,
+        )
+        native = next(d for d in prod_only if d.name == "adapter-native")
+        assert native.direct_ancestors == ("db-adapter",)
+
+        with httpx.Client() as client:
+            with_dev = resolve_transitive(
+                direct_deps, tmp_path, include_dev=True, max_depth=50, client=client
+            )
+        assert {d.name for d in with_dev if d.group == DependencyGroup.DEV} == {
+            "test-tool",
+            "test-child",
+        }
+
     @respx.mock
     def test_ruby_manifest_only_falls_back_to_rubygems(self, tmp_path):
         # No Gemfile.lock — walker hits rubygems.org per direct dep.

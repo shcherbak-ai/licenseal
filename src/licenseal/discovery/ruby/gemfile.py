@@ -17,8 +17,10 @@ exists.
 Group attribution is the load-bearing reason to parse the Gemfile at all —
 ``Gemfile.lock`` carries no dev/prod marker, only the Gemfile does (via
 ``group :development`` / ``group :test`` blocks or per-line ``group:`` kwargs).
-The lockfile parser uses the dev-name set emitted here as roots for
-reverse-BFS group propagation.
+A gem is DEV only when every group it belongs to is ``development`` or
+``test``; any other group (``production``, ``staging``, a custom one) puts it
+in a deployed bundle, so it is PROD. The lockfile parser uses the dev-name set
+emitted here as roots for reverse-BFS group propagation.
 """
 
 from __future__ import annotations
@@ -48,16 +50,20 @@ _GEM_LINE_RE = re.compile(
 # ``gem "mygem", "~> 7.1.0", ">= 7.1.2"``.
 _VERSION_ARG_RE = re.compile(r"""^\s*,\s*(['"])([^'"]+)\1""")
 
-# Block-form group header: ``group :development, :test do``.
-_GROUP_BLOCK_RE = re.compile(
-    r"""^\s*group\s+(?P<syms>:[\w_]+(?:\s*,\s*:[\w_]+)*)\s+do\b""",
+# Block-form group header: ``group :development, :test do``, optionally
+# parenthesized and with trailing options (``group :test, optional: true do``).
+_GROUP_BLOCK_RE = re.compile(r"^group\b\s*\(?(?P<args>.*?)\)?\s*\bdo\b\s*(?:\|[^|]*\|)?\s*$")
+
+# Per-line group option, keyword or hash-rocket form: ``group: :test``,
+# ``groups: [:development, :test]``, ``:group => :test``, ``:groups => [...]``.
+# The value is a bracketed list or a single comma-free token.
+_INLINE_GROUP_RE = re.compile(
+    r"(?<![\w:])(?:groups?:|:groups?\s*=>)\s*(?P<value>\[[^\]]*\]|[^,\s]*)"
 )
 
-# Per-line group kwarg: ``group: :test`` or ``groups: [:development, :test]``.
-_INLINE_GROUP_RE = re.compile(
-    r"""groups?\s*:\s*(?::([\w_]+)|\[([^\]]+)\])""",
-)
-_INLINE_SYMBOL_RE = re.compile(r":([\w_]+)")
+# One argument of a ``group`` call or one element of a ``groups`` list.
+_SYMBOL_RE = re.compile(r":(\w+)")
+_KEYWORD_OPTION_RE = re.compile(r"\w+:(?!:)|:\w+\s*=>")
 
 # Off-registry source kwargs — gems carrying one are emitted with the
 # off-registry marker (the lockfile parser is the authority for what
@@ -80,10 +86,10 @@ def _opens_block(line: str) -> bool:
     return bool(_BLOCK_OPEN_DO_RE.search(line) or _BLOCK_OPEN_KEYWORD_RE.match(line))
 
 
-# Groups that are non-dev by convention. Anything not in this set that
-# appears in the dev/test bucket counts as DEV. ``staging`` / ``production``
-# are PROD by convention; ``default`` is implicit PROD.
-_NON_DEV_GROUPS: frozenset[str] = frozenset({"default", "production", "staging"})
+# The only groups that keep a gem out of a deployed bundle. Every other group
+# — ``default``, ``production``, ``staging``, or a custom one for a database
+# adapter, app server, or asset pipeline — ships.
+_DEV_GROUPS: frozenset[str] = frozenset({"development", "test"})
 
 
 def _strip_comment(line: str) -> str:
@@ -95,30 +101,47 @@ def _strip_comment(line: str) -> str:
 
 
 def _is_dev_group(groups: tuple[str, ...]) -> bool:
-    """Return True when any group in the current context implies DEV."""
-    return any(g not in _NON_DEV_GROUPS for g in groups)
+    """Return True when the gem is in a group and every group is dev/test.
+
+    A gem in no group is in Bundler's implicit ``default`` group (PROD), and
+    one non-dev group in a mixed list is enough to install it outside
+    development.
+    """
+    return bool(groups) and all(g in _DEV_GROUPS for g in groups)
 
 
-def _split_block_syms(syms_text: str) -> tuple[str, ...]:
-    """Parse ``:a, :b, :c`` into ``("a", "b", "c")``."""
-    return tuple(re.findall(r":(\w+)", syms_text))
+def _group_names(args: str) -> tuple[str, ...]:
+    """Parse comma-separated ``group`` arguments into group names.
+
+    A ``:symbol`` is a group name. A keyword option (``optional: true``,
+    ``:optional => true``) is not a group and is skipped. Any other argument
+    is kept verbatim: it names a group this parser can't read, which keeps
+    the gem out of the dev-only bucket.
+    """
+    names: list[str] = []
+    for raw in args.split(","):
+        arg = raw.strip()
+        if not arg or _KEYWORD_OPTION_RE.match(arg):
+            continue
+        symbol = _SYMBOL_RE.fullmatch(arg)
+        names.append(symbol.group(1) if symbol else arg)
+    return tuple(names)
 
 
-def _parse_inline_groups(rest: str) -> tuple[str, ...] | None:
-    """Extract per-line ``group:`` / ``groups:`` kwarg symbols.
+def _parse_inline_groups(rest: str) -> tuple[str, ...]:
+    """Extract the gem line's own ``group`` / ``groups`` option.
 
-    Returns ``None`` when the kwarg isn't present; an empty tuple when
-    present but malformed (rare).
+    Returns an empty tuple when the option isn't present. An option that is
+    present but names no readable group (an empty or unterminated list)
+    yields its raw value, so the gem is not classified from the enclosing
+    block alone.
     """
     m = _INLINE_GROUP_RE.search(rest)
     if m is None:
-        return None
-    single, multi = m.group(1), m.group(2)
-    if single:
-        return (single,)
-    if multi:
-        return tuple(_INLINE_SYMBOL_RE.findall(multi))
-    return ()  # pragma: no cover - regex requires content in one alternative
+        return ()
+    value = m.group("value")
+    inner = value[1:-1] if value.startswith("[") and value.endswith("]") else value
+    return _group_names(inner) or (value,)
 
 
 def _has_off_registry_source(rest: str) -> bool:
@@ -176,7 +199,7 @@ def _parse_gemfile_text(text: str, source: str) -> list[Dependency]:
         # ``group :x do`` — push a group frame at the current nesting depth.
         block = _GROUP_BLOCK_RE.match(stripped)
         if block is not None:
-            group_frames.append((block_depth, _split_block_syms(block.group("syms"))))
+            group_frames.append((block_depth, _group_names(block.group("args"))))
             block_depth += 1
             continue
         # ``end`` — close the innermost block; drop any group frame it closed.
@@ -214,15 +237,10 @@ def _parse_gemfile_text(text: str, source: str) -> list[Dependency]:
             remaining = remaining[v.end() :]
         version_constraint = ", ".join(constraints)
 
-        # Per-line group kwarg overrides the block context; otherwise the
-        # nearest enclosing ``group`` frame applies.
-        inline = _parse_inline_groups(rest)
-        if inline is not None:
-            current = inline
-        elif group_frames:
-            current = group_frames[-1][1]
-        else:
-            current = ()
+        # Bundler adds the gem to every enclosing ``group`` block plus its
+        # own per-line groups, so the whole list decides.
+        current = tuple(name for _depth, names in group_frames for name in names)
+        current += _parse_inline_groups(rest)
         group = DependencyGroup.DEV if _is_dev_group(current) else DependencyGroup.PROD
 
         # Git / path / github gems can't be resolved against rubygems.org;
