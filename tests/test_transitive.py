@@ -1549,6 +1549,144 @@ class TestProductionPrecedence:
             ("example.org/lint-dep", ("example.org/lint-tool",)),
         }
 
+    @respx.mock
+    def test_maven_walk_test_scoped_direct_reached_from_compile_is_prod(self, tmp_path):
+        # No lockfile: the graph comes from deps.dev. shared-lib is declared
+        # with test scope and is also a dependency of the compile-scope
+        # runtime-lib; test-tool is test scope only.
+        (tmp_path / "pom.xml").write_text(
+            textwrap.dedent("""\
+            <?xml version="1.0" encoding="UTF-8"?>
+            <project xmlns="http://maven.apache.org/POM/4.0.0">
+                <groupId>com.example</groupId>
+                <artifactId>myapp</artifactId>
+                <version>1.0.0</version>
+                <dependencies>
+                    <dependency>
+                        <groupId>org.example</groupId>
+                        <artifactId>runtime-lib</artifactId>
+                        <version>1.0</version>
+                    </dependency>
+                    <dependency>
+                        <groupId>org.example</groupId>
+                        <artifactId>shared-lib</artifactId>
+                        <version>1.0</version>
+                        <scope>test</scope>
+                    </dependency>
+                    <dependency>
+                        <groupId>org.example</groupId>
+                        <artifactId>test-tool</artifactId>
+                        <version>1.0</version>
+                        <scope>test</scope>
+                    </dependency>
+                </dependencies>
+            </project>
+            """),
+            encoding="utf-8",
+        )
+        # Each direct's resolved subgraph, root first.
+        subgraphs = {
+            "runtime-lib": ["runtime-lib", "shared-lib", "shared-child"],
+            "shared-lib": ["shared-lib", "shared-child"],
+            "test-tool": ["test-tool", "test-child"],
+        }
+        for root, chain in subgraphs.items():
+            respx.get(
+                "https://api.deps.dev/v3/systems/MAVEN/packages/"
+                f"org.example%3A{root}/versions/1.0:dependencies"
+            ).mock(
+                return_value=httpx.Response(
+                    200,
+                    json={
+                        "nodes": [
+                            {
+                                "versionKey": {
+                                    "system": "MAVEN",
+                                    "name": f"org.example:{name}",
+                                    "version": "1.0",
+                                },
+                                "relation": "SELF" if index == 0 else "INDIRECT",
+                            }
+                            for index, name in enumerate(chain)
+                        ],
+                        "edges": [
+                            {"fromNode": index, "toNode": index + 1}
+                            for index in range(len(chain) - 1)
+                        ],
+                    },
+                )
+            )
+
+        prod_only = self._resolve(tmp_path, include_dev=False)
+        assert {(d.name, d.group, d.depth) for d in prod_only} == {
+            ("org.example:runtime-lib", DependencyGroup.PROD, 0),
+            ("org.example:shared-lib", DependencyGroup.PROD, 1),
+            ("org.example:shared-child", DependencyGroup.PROD, 1),
+        }
+
+        with_dev = {d.name: d for d in self._resolve(tmp_path, include_dev=True)}
+        shared = with_dev["org.example:shared-lib"]
+        assert (shared.group, shared.depth, shared.source) == (DependencyGroup.PROD, 0, "pom.xml")
+        assert with_dev["org.example:shared-child"].group == DependencyGroup.PROD
+        assert _prod_names(prod_only) <= _prod_names(list(with_dev.values()))
+        # Control: nothing compile-scope reaches test-tool, so its chain stays DEV.
+        assert with_dev["org.example:test-tool"].group == DependencyGroup.DEV
+        assert with_dev["org.example:test-child"].group == DependencyGroup.DEV
+
+    @respx.mock
+    def test_nuget_walk_dev_direct_reached_from_prod_is_prod(self, tmp_path):
+        # No lockfile: the graph comes from the packages' .nuspec files.
+        # SharedLib is a PrivateAssets="all" reference and also a dependency
+        # of the production ProdLib; DevTool is a dev reference only.
+        _write(
+            tmp_path / "App.csproj",
+            _csproj(
+                ("ProdLib", "1.0.0", False),
+                ("SharedLib", "1.0.0", True),
+                ("DevTool", "1.0.0", True),
+            ),
+        )
+        children = {
+            "ProdLib": "SharedLib",
+            "SharedLib": "SharedChild",
+            "SharedChild": None,
+            "DevTool": "DevChild",
+            "DevChild": None,
+        }
+        for name, child in children.items():
+            dependency = f'<dependency id="{child}" version="1.0.0" />' if child else ""
+            lower = name.lower()
+            respx.get(f"https://api.nuget.org/v3-flatcontainer/{lower}/1.0.0/{lower}.nuspec").mock(
+                return_value=httpx.Response(
+                    200,
+                    text=(
+                        '<package xmlns="http://schemas.microsoft.com/packaging/2013/05/nuspec.xsd">'
+                        f"<metadata><id>{name}</id><version>1.0.0</version>"
+                        f"<dependencies>{dependency}</dependencies></metadata></package>"
+                    ),
+                )
+            )
+
+        prod_only = self._resolve(tmp_path, include_dev=False)
+        assert {(d.name, d.group, d.depth) for d in prod_only} == {
+            ("ProdLib", DependencyGroup.PROD, 0),
+            ("SharedLib", DependencyGroup.PROD, 1),
+            ("SharedChild", DependencyGroup.PROD, 1),
+        }
+
+        with_dev = {d.name: d for d in self._resolve(tmp_path, include_dev=True)}
+        shared = with_dev["SharedLib"]
+        assert (shared.group, shared.depth, shared.source) == (
+            DependencyGroup.PROD,
+            0,
+            "App.csproj",
+        )
+        assert with_dev["SharedChild"].group == DependencyGroup.PROD
+        assert _prod_names(prod_only) <= _prod_names(list(with_dev.values()))
+        # Control: nothing production reaches DevTool, so its chain stays DEV.
+        assert with_dev["DevTool"].group == DependencyGroup.DEV
+        assert with_dev["DevChild"].group == DependencyGroup.DEV
+
 
 class TestRegistrySeedFiltering:
     def test_skips_ecosystem_when_only_dev_seeds_and_no_dev(self, tmp_path):

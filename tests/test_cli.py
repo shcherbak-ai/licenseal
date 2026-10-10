@@ -4038,11 +4038,12 @@ class TestDotnetEcosystem:
             assert rows["SharedChild"]["direct_ancestors"] == ["ProdLib"]
 
         # Control: the same graph without the lockfile, read from the
-        # registry, gives the same answer.
+        # registry, gives the same answer in both modes.
         (tmp_path / "packages.lock.json").unlink()
-        exit_code, rows = self._check(tmp_path)
-        assert exit_code == 1
-        assert {name: (d["group"], d["verdict"]) for name, d in rows.items()} == expected
+        for flags in ((), ("--dev", "--no-strict")):
+            exit_code, rows = self._check(tmp_path, *flags)
+            assert exit_code == 1
+            assert {name: (d["group"], d["verdict"]) for name, d in rows.items()} == expected
 
 
 class TestPhpEcosystem:
@@ -5394,6 +5395,91 @@ class TestProductionPrecedence:
             "example.org/runtime-lib": ("prod", "compatible"),
             "example.org/gen-tool": ("prod", "incompatible"),
             "example.org/lint-tool": ("dev", "warning"),
+        }
+
+    @respx.mock
+    def test_maven_test_scoped_direct_reached_from_compile(self, tmp_path):
+        # No lockfile: the graph comes from deps.dev. shared-gpl is declared
+        # with test scope and is also a dependency of the compile-scope
+        # runtime-lib; test-gpl is test scope only.
+        dependencies = "".join(
+            "<dependency><groupId>org.example</groupId>"
+            f"<artifactId>{artifact}</artifactId><version>1.0</version>{scope}</dependency>"
+            for artifact, scope in (
+                ("runtime-lib", ""),
+                ("shared-gpl", "<scope>test</scope>"),
+                ("test-gpl", "<scope>test</scope>"),
+            )
+        )
+        (tmp_path / "pom.xml").write_text(
+            '<?xml version="1.0" encoding="UTF-8"?>\n'
+            '<project xmlns="http://maven.apache.org/POM/4.0.0">'
+            "<groupId>com.example</groupId><artifactId>myapp</artifactId><version>1.0.0</version>"
+            "<licenses><license><name>MIT</name></license></licenses>"
+            f"<dependencies>{dependencies}</dependencies></project>\n",
+            encoding="utf-8",
+        )
+        # Each direct's resolved subgraph (root first) and each artifact's license.
+        subgraphs = {
+            "runtime-lib": ["runtime-lib", "shared-gpl"],
+            "shared-gpl": ["shared-gpl"],
+            "test-gpl": ["test-gpl"],
+        }
+        licenses = {"runtime-lib": "MIT", "shared-gpl": "GPL-3.0-only", "test-gpl": "GPL-3.0-only"}
+        for root, chain in subgraphs.items():
+            respx.get(
+                "https://api.deps.dev/v3/systems/MAVEN/packages/"
+                f"org.example%3A{root}/versions/1.0:dependencies"
+            ).mock(
+                return_value=httpx.Response(
+                    200,
+                    json={
+                        "nodes": [
+                            {
+                                "versionKey": {
+                                    "system": "MAVEN",
+                                    "name": f"org.example:{name}",
+                                    "version": "1.0",
+                                },
+                                "relation": "SELF" if index == 0 else "DIRECT",
+                            }
+                            for index, name in enumerate(chain)
+                        ],
+                        "edges": [
+                            {"fromNode": index, "toNode": index + 1}
+                            for index in range(len(chain) - 1)
+                        ],
+                    },
+                )
+            )
+            respx.get(
+                f"https://repo.maven.apache.org/maven2/org/example/{root}/1.0/{root}-1.0.pom"
+            ).mock(
+                return_value=httpx.Response(
+                    200,
+                    text=(
+                        '<project xmlns="http://maven.apache.org/POM/4.0.0">'
+                        f"<groupId>org.example</groupId><artifactId>{root}</artifactId>"
+                        "<version>1.0</version><licenses><license>"
+                        f"<name>{licenses[root]}</name></license></licenses></project>"
+                    ),
+                )
+            )
+
+        exit_code, rows = self._check(tmp_path, "--no-dev", "--no-strict")
+        assert exit_code == 1
+        assert rows == {
+            "org.example:runtime-lib": ("prod", "compatible"),
+            "org.example:shared-gpl": ("prod", "incompatible"),
+        }
+
+        exit_code, rows = self._check(tmp_path, "--dev", "--no-strict")
+        assert exit_code == 1
+        assert rows == {
+            "org.example:runtime-lib": ("prod", "compatible"),
+            "org.example:shared-gpl": ("prod", "incompatible"),
+            # Control: a copyleft artifact only the tests use is a warning.
+            "org.example:test-gpl": ("dev", "warning"),
         }
 
 

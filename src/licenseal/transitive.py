@@ -847,6 +847,23 @@ _TransitiveDepsFetcher = Callable[
 ]
 
 
+def _promote_directs_reached_from_prod(
+    out: list[Dependency],
+    start: int,
+    prod_anc: dict[str, tuple[str, ...]],
+) -> None:
+    """Make the direct deps in ``out[start:]`` PROD when a PROD direct reaches them.
+
+    The Maven and NuGet edge walks emit every direct with its declared group
+    before the graph is fetched, and skip a graph node that is also a direct.
+    A DEV direct that a PROD direct pulls in ships, so production wins — the
+    same rule the lockfile parsers apply.
+    """
+    for index in range(start, len(out)):
+        if out[index].name.lower() in prod_anc:
+            out[index] = replace(out[index], group=DependencyGroup.PROD)
+
+
 def _resolve_dotnet_transitive(
     *,
     direct_dotnet_deps: list[Dependency],
@@ -963,6 +980,7 @@ def _resolve_dotnet_transitive(
     # walked; ones that don't (unresolved $() tokens, floating versions)
     # still surface in the output so the license resolver sees them.
     walkable: list[tuple[Dependency, str]] = []
+    first_direct = len(out)
     for d in direct_uncovered:
         pinned = _extract_pinned_version_nuget(d.version_constraint)
         if pinned is None:
@@ -1009,6 +1027,7 @@ def _resolve_dotnet_transitive(
     dev_roots = {n: name_case[n] for n in dev_root_names if n in name_case}
     prod_anc = compute_direct_ancestors(edges, prod_roots)
     dev_anc = compute_direct_ancestors(edges, dev_roots)
+    _promote_directs_reached_from_prod(out, first_direct, prod_anc)
 
     direct_lower = {d.name.lower() for d, _ in walkable}
     for node_name, node_version in merged_nodes:
@@ -1543,6 +1562,7 @@ def _resolve_java_transitive(
     # walked; ones that don't (range syntax, unresolved ``${…}``) still
     # surface in the output so the license resolver sees them.
     walkable: list[tuple[Dependency, str]] = []
+    first_direct = len(out)
     for d in direct_uncovered:
         pinned = _extract_pinned_version_maven(d.version_constraint)
         if pinned is None:
@@ -1586,6 +1606,7 @@ def _resolve_java_transitive(
     dev_roots = {n: name_case[n] for n in dev_root_names if n in name_case}
     prod_anc = compute_direct_ancestors(edges, prod_roots)
     dev_anc = compute_direct_ancestors(edges, dev_roots)
+    _promote_directs_reached_from_prod(out, first_direct, prod_anc)
 
     direct_lower = {d.name.lower() for d, _ in walkable}
     for node_name, node_version in merged_nodes:
