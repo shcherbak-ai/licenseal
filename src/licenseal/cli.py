@@ -1283,7 +1283,8 @@ def _project_skill_staleness_hint(project_path: Path) -> str | None:
             return None  # unstamped / hand-written: not ours to manage
         if installed_body == _bundled_skill_body():
             return None  # content already current
-    except OSError:
+    except (OSError, UnicodeDecodeError):
+        # Unreadable, or not UTF-8: not a file licenseal wrote.
         return None
     return (
         f"Installed Claude skill (from licenseal {stamped_version}) is out of date; "
@@ -1328,7 +1329,12 @@ def install_skill(path: Path, force: bool) -> None:
     target_file.parent.mkdir(parents=True, exist_ok=True)
 
     if target_file.exists():
-        existing = target_file.read_text(encoding="utf-8")
+        try:
+            existing = target_file.read_text(encoding="utf-8")
+        except UnicodeDecodeError:
+            # Not UTF-8, so not a file licenseal wrote: treated like any other
+            # hand-modified skill and replaced only with --force.
+            existing = ""
         stamped_version, installed_body, pristine = _parse_installed_skill(existing)
         if installed_body == body and stamped_version == current_version:
             click.echo(f"licenseal skill already up to date ({current_version}).")

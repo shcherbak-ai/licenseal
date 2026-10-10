@@ -93,7 +93,14 @@ def load_review_file(project_path: Path) -> ReviewFileContents:
     try:
         with open(review_file, "rb") as f:
             data = tomllib.load(f)
-    except tomllib.TOMLDecodeError as exc:
+    except OSError as exc:
+        raise click.ClickException(f"Could not read {REVIEW_FILE_NAME}: {exc}.") from exc
+    except UnicodeDecodeError as exc:
+        raise click.ClickException(
+            f"Invalid {REVIEW_FILE_NAME}: the file must be UTF-8 ({exc})."
+        ) from exc
+    except (tomllib.TOMLDecodeError, RecursionError) as exc:
+        # RecursionError: tables or arrays nested too deeply to parse.
         raise click.ClickException(f"Invalid {REVIEW_FILE_NAME}: {exc}.") from exc
 
     entries = data.get("review", [])
@@ -265,7 +272,13 @@ def flagged_entries_from_json_report(
     """
     try:
         data = json.loads(json_path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
+    except UnicodeDecodeError as exc:
+        raise click.ClickException(
+            f"Invalid JSON report at {json_path}: the file must be UTF-8 ({exc}). "
+            "`licenseal check -f json -o FILE` writes UTF-8."
+        ) from exc
+    except (OSError, json.JSONDecodeError, RecursionError) as exc:
+        # RecursionError: a document nested too deeply to parse.
         raise click.ClickException(f"Invalid JSON report at {json_path}: {exc}.") from exc
     if not isinstance(data, dict):
         raise click.ClickException(f"Invalid JSON report at {json_path}: expected a JSON object.")
@@ -284,7 +297,7 @@ def flagged_entries_from_json_report(
         if verdict == CompatibilityVerdict.COMPATIBLE.value:
             continue
         ecosystem = raw.get("ecosystem", "")
-        if ecosystem not in _VALID_ECOSYSTEMS:
+        if not isinstance(ecosystem, str) or ecosystem not in _VALID_ECOSYSTEMS:
             continue
         name = raw.get("name", "")
         if not isinstance(name, str) or not name:

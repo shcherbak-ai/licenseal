@@ -52,6 +52,10 @@ from licenseal.review import (
 )
 from tests._helpers import _DEEP, _record_path_io
 
+_REVIEW_STANZA = (
+    '[[review]]\necosystem = "python"\npackage = "pkg-a"\nversion = "1.0.0"\nlicense = "MIT"\n'
+)
+
 
 def _mock_pypi(name: str, license_str: str, version: str = "1.0.0"):
     """Helper to mock a PyPI response.
@@ -643,6 +647,39 @@ class TestCheckCommand:
     def test_load_review_file_rejects_invalid_toml(self, tmp_path):
         (tmp_path / "licenseal.review.toml").write_text("[[review]\n")
         with pytest.raises(click.ClickException, match="Invalid licenseal.review.toml"):
+            load_review_file(tmp_path)
+
+    @pytest.mark.parametrize(
+        "content",
+        [
+            pytest.param(_REVIEW_STANZA.encode("utf-8") + b'note = "Jos\xe9"\n', id="stray-byte"),
+            pytest.param(b"\xff\xfe" + _REVIEW_STANZA.encode("utf-16-le"), id="utf16-with-bom"),
+            pytest.param(b"\xff\xfe\x52", id="truncated-utf16"),
+        ],
+    )
+    def test_load_review_file_rejects_a_file_that_is_not_utf8(self, tmp_path, content):
+        (tmp_path / "licenseal.review.toml").write_bytes(content)
+        with pytest.raises(
+            click.ClickException, match=r"Invalid licenseal\.review\.toml: the file must be UTF-8"
+        ):
+            load_review_file(tmp_path)
+
+    @pytest.mark.parametrize(
+        "content",
+        [
+            pytest.param("review = " + "[" * _DEEP + "]" * _DEEP + "\n", id="arrays"),
+            pytest.param("review = " + "{a = " * _DEEP + "1" + "}" * _DEEP + "\n", id="tables"),
+        ],
+    )
+    def test_load_review_file_rejects_a_file_nested_too_deeply(self, tmp_path, content):
+        (tmp_path / "licenseal.review.toml").write_text(content, encoding="utf-8")
+        with pytest.raises(click.ClickException, match=r"Invalid licenseal\.review\.toml"):
+            load_review_file(tmp_path)
+
+    def test_load_review_file_reports_a_file_it_cannot_open(self, tmp_path):
+        # A directory under the review file's name exists but cannot be opened.
+        (tmp_path / "licenseal.review.toml").mkdir()
+        with pytest.raises(click.ClickException, match=r"Could not read licenseal\.review\.toml"):
             load_review_file(tmp_path)
 
     def test_load_review_file_rejects_non_list_review_section(self, tmp_path):
@@ -2208,6 +2245,107 @@ class TestCheckCommand:
         assert result.exit_code != 0
         assert "Invalid JSON report" in result.output
 
+    @pytest.mark.parametrize(
+        ("content", "message"),
+        [
+            pytest.param(
+                # What a Windows shell redirect of `check -f json` writes.
+                b"\xff\xfe" + '{"dependencies": []}'.encode("utf-16-le"),
+                "the file must be UTF-8",
+                id="utf16-with-bom",
+            ),
+            pytest.param(
+                b'{"dependencies": [{"name": "Jos\xe9"}]}',
+                "the file must be UTF-8",
+                id="stray-byte",
+            ),
+            pytest.param(
+                b'{"dependencies": ' + b"[" * _DEEP + b"]" * _DEEP + b"}",
+                # The interpreter's own wording for the depth limit varies.
+                "while decoding a JSON array",
+                id="nested-too-deeply",
+            ),
+        ],
+    )
+    def test_init_review_file_from_report_rejects_an_unreadable_report(
+        self, tmp_path, content, message
+    ):
+        report = tmp_path / "report.json"
+        report.write_bytes(content)
+        result = CliRunner().invoke(
+            main, ["init-review-file", "--path", str(tmp_path), "--from-report", str(report)]
+        )
+        assert isinstance(result.exception, SystemExit)
+        assert result.exit_code == 1
+        assert "Error: Invalid JSON report at" in result.output
+        assert message in result.output
+        assert not (tmp_path / "licenseal.review.toml").exists()
+
+    def test_init_review_file_from_report_skips_entries_with_a_non_string_ecosystem(self, tmp_path):
+        flagged = {"verdict": "unknown", "name": "pkg-a", "resolved_version": "1.0.0"}
+        report = tmp_path / "report.json"
+        report.write_text(
+            json.dumps(
+                {
+                    "dependencies": [
+                        {**flagged, "ecosystem": ["python"]},
+                        {**flagged, "ecosystem": {"name": "python"}},
+                        {**flagged, "ecosystem": 5},
+                        {**flagged, "ecosystem": "python"},
+                    ]
+                }
+            ),
+            encoding="utf-8",
+        )
+        result = CliRunner().invoke(
+            main, ["init-review-file", "--path", str(tmp_path), "--from-report", str(report)]
+        )
+        assert result.exit_code == 0
+        assert "with 1 review entry" in result.output
+        contents = load_review_file(tmp_path)
+        assert contents.incomplete == ["python:pkg-a@1.0.0"]
+
+    @respx.mock
+    def test_check_reports_a_review_file_that_is_not_utf8(self, tmp_path):
+        (tmp_path / "requirements.txt").write_text("flask\n", encoding="utf-8")
+        (tmp_path / "licenseal.review.toml").write_bytes(
+            b"\xff\xfe" + _REVIEW_STANZA.encode("utf-16-le")
+        )
+        _mock_pypi("flask", "BSD-3-Clause")
+        result = CliRunner().invoke(main, ["check", "--path", str(tmp_path)])
+        assert isinstance(result.exception, SystemExit)
+        assert result.exit_code == 1
+        assert "Error: Invalid licenseal.review.toml: the file must be UTF-8" in result.output
+
+    def test_init_review_file_merge_reports_a_review_file_that_is_not_utf8(self, tmp_path):
+        review_file = tmp_path / "licenseal.review.toml"
+        original = _REVIEW_STANZA.encode("utf-8") + b'note = "Jos\xe9"\n'
+        review_file.write_bytes(original)
+        report = tmp_path / "report.json"
+        report.write_text(
+            json.dumps(
+                {
+                    "dependencies": [
+                        {
+                            "ecosystem": "python",
+                            "name": "pkg-b",
+                            "resolved_version": "2.0.0",
+                            "verdict": "unknown",
+                        }
+                    ]
+                }
+            ),
+            encoding="utf-8",
+        )
+        result = CliRunner().invoke(
+            main,
+            ["init-review-file", "--path", str(tmp_path), "--from-report", str(report), "--merge"],
+        )
+        assert isinstance(result.exception, SystemExit)
+        assert result.exit_code == 1
+        assert "Error: Invalid licenseal.review.toml: the file must be UTF-8" in result.output
+        assert review_file.read_bytes() == original
+
     def test_init_review_file_handles_no_dependencies(self, tmp_path):
         # Zero deps → zero flagged entries. We let the flow run through
         # to the second early-return ("No reviewable flagged dependencies
@@ -3220,6 +3358,23 @@ class TestInstallSkill:
         assert content.startswith("---\n")
         assert content != "stale"
 
+    def test_install_skill_treats_a_file_that_is_not_utf8_as_hand_modified(self, tmp_path):
+        out = _installed_skill_path(tmp_path)
+        out.parent.mkdir(parents=True)
+        original = b"\xff\xfe" + "my own notes\n".encode("utf-16-le")
+        out.write_bytes(original)
+        runner = CliRunner()
+
+        refused = runner.invoke(main, ["install-skill", "--path", str(tmp_path)])
+        assert isinstance(refused.exception, SystemExit)
+        assert refused.exit_code == 1
+        assert "looks hand-modified" in refused.output
+        assert out.read_bytes() == original
+
+        forced = runner.invoke(main, ["install-skill", "--path", str(tmp_path), "--force"])
+        assert forced.exit_code == 0
+        assert out.read_text(encoding="utf-8").startswith("---\n")
+
     def test_install_skill_stamps_version_and_hash(self, tmp_path):
         # The installed file carries provenance markers so a later install can
         # tell a pristine copy from a hand-edited one. Frontmatter stays first.
@@ -3357,6 +3512,36 @@ class TestSkillStaleness:
         _write_skill(proj, body="anything", version="0.0.1")
         monkeypatch.setattr("licenseal.cli._bundled_skill_body", boom)
         assert _project_skill_staleness_hint(proj) is None
+
+    @pytest.mark.parametrize(
+        "content",
+        [
+            pytest.param(b"notes by Jos\xe9\n", id="stray-byte"),
+            pytest.param(b"\xff\xfe" + "notes\n".encode("utf-16-le"), id="utf16-with-bom"),
+            pytest.param(b"\x00\xff\xd8\xff", id="binary"),
+        ],
+    )
+    def test_skill_that_is_not_utf8_is_ignored(self, tmp_path, content):
+        # Not text licenseal wrote, so not its to manage: no nudge, no error.
+        proj = tmp_path / "proj"
+        path = _installed_skill_path(proj)
+        path.parent.mkdir(parents=True)
+        path.write_bytes(content)
+        assert _project_skill_staleness_hint(proj) is None
+
+    @respx.mock
+    def test_check_completes_beside_a_skill_that_is_not_utf8(self, tmp_path):
+        # End-to-end: the skill is read after the report prints. A skill file
+        # in another encoding must not turn a finished scan into a failure.
+        (tmp_path / "requirements.txt").write_text("flask\n", encoding="utf-8")
+        path = _installed_skill_path(tmp_path)
+        path.parent.mkdir(parents=True)
+        path.write_bytes(b"\xff\xfe" + "notes\n".encode("utf-16-le"))
+        _mock_pypi("flask", "BSD-3-Clause")
+        result = CliRunner().invoke(main, ["check", "--path", str(tmp_path)])
+        assert result.exit_code == 0
+        assert "flask" in result.output
+        assert "install-skill" not in result.output
 
     def test_check_silent_without_skill(self, tmp_path):
         # End-to-end: `check` on a project with no installed skill runs
