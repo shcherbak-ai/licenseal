@@ -679,6 +679,39 @@ class TestResolveMavenCentralLicense:
             info = resolve_maven_central_license(_java_dep(name="com.example:child"), client)
         assert info.license_id == "Apache-2.0"
 
+    @pytest.mark.parametrize(
+        "licenses",
+        [["Apache-2.0", "non-standard"], ["non-standard", "Apache-2.0"], ["non-standard"]],
+    )
+    @respx.mock
+    def test_parent_404_deps_dev_non_standard_answer_is_no_answer(self, licenses):
+        # A deps.dev array with its ``non-standard`` marker is not an answer
+        # for the parent, with or without a classified entry beside it. The
+        # walk ends, and the artifact's own deps.dev entry is asked.
+        respx.get(
+            "https://repo.maven.apache.org/maven2/com/example/child/1.0.0/child-1.0.0.pom"
+        ).mock(return_value=httpx.Response(200, text=_CHILD_NO_LICENSES_POM))
+        respx.get(
+            "https://repo.maven.apache.org/maven2/com/example/parent/2.0.0/parent-2.0.0.pom"
+        ).mock(return_value=httpx.Response(404))
+        _mock_fallback_404("com/example", "parent", "2.0.0")
+        respx.get(
+            "https://api.deps.dev/v3/systems/MAVEN/packages/com.example%3Aparent/versions/2.0.0"
+        ).mock(return_value=httpx.Response(200, json={"licenses": licenses}))
+        respx.get(
+            "https://api.deps.dev/v3/systems/MAVEN/packages/com.example%3Achild/versions/1.0.0"
+        ).mock(return_value=httpx.Response(200, json={"licenses": licenses}))
+        cache = RegistryCache()
+        with httpx.Client() as client:
+            info = resolve_maven_central_license(
+                _java_dep(name="com.example:child"),
+                client,
+                fetcher=cache.fetch_text,
+                json_fetcher=cache.fetch,
+            )
+        assert info.license_id == "UNKNOWN"
+        assert info.license_raw == ""
+
     @respx.mock
     def test_parent_404_deps_dev_returns_invalid_licenses_field(self):
         # deps.dev returns a malformed ``licenses`` field (e.g. dict

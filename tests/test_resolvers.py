@@ -3604,10 +3604,13 @@ class TestDepsDevLicensesToSpdx:
         assert _licenses_to_spdx(["Non-Standard"]) == ""
         assert _licenses_to_spdx(["  non-standard  "]) == ""
 
-    def test_non_standard_filtered_alongside_real_license(self):
-        # When deps.dev returns both a real SPDX and "non-standard", the
-        # real one wins.
-        assert _licenses_to_spdx(["MIT", "non-standard"]) == "MIT"
+    def test_non_standard_beside_a_real_license_is_no_answer(self):
+        # The real entry describes only part of the license: reporting it
+        # would drop the part deps.dev could not classify.
+        assert _licenses_to_spdx(["MIT", "non-standard"]) == ""
+        assert _licenses_to_spdx(["non-standard", "Apache-2.0"]) == ""
+        assert _licenses_to_spdx(["MIT", " Non-Standard ", "Apache-2.0"]) == ""
+        assert _licenses_to_spdx(["MIT", "non-standard"], system="RUBYGEMS") == ""
 
     def test_rubygems_multi_element_is_a_list_without_an_operator(self):
         # A gemspec ``licenses = [...]`` array does not say whether its
@@ -3624,7 +3627,6 @@ class TestDepsDevLicensesToSpdx:
     def test_non_rubygems_keeps_and_default(self):
         # Default AND semantics for every non-RubyGems system.
         assert _licenses_to_spdx(["MIT", "Apache-2.0"], system="PYPI") == "MIT AND Apache-2.0"
-        assert _licenses_to_spdx(["non-standard", "Apache-2.0"]) == "Apache-2.0"
 
     def test_and_join_groups_an_entry_that_is_itself_an_or(self):
         # Every entry is an independent, binding license. An ``OR`` entry is
@@ -3695,6 +3697,28 @@ class TestDepsDevMultiEntryGrouping:
         info = self._resolve([self._OR_ENTRY])
         assert info.license_id == "Apache-2.0 OR GPL-2.0-only"
         assert check_compatibility("MIT", info).verdict == CompatibilityVerdict.COMPATIBLE
+
+    @pytest.mark.parametrize(
+        "licenses",
+        [
+            ["Apache-2.0", "non-standard"],
+            ["non-standard", "Apache-2.0"],
+            ["MIT", "Non-Standard", "Apache-2.0"],
+            ["non-standard"],
+        ],
+    )
+    @respx.mock
+    def test_array_with_a_non_standard_entry_is_unknown_in_the_single_version_lookup(
+        self, licenses
+    ):
+        # Go has no other source: the module is unknown, not the license of
+        # the entries deps.dev could classify.
+        info = self._resolve(licenses)
+        assert info.license_id == "UNKNOWN"
+        assert info.license_raw == ""
+        assert info.all_apply_license_id == ""
+        assert info.from_registry is True
+        assert check_compatibility("MIT", info).verdict == CompatibilityVerdict.UNKNOWN
 
     @respx.mock
     def test_plain_entries_join_without_a_group(self):

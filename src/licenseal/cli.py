@@ -649,8 +649,8 @@ def _resolve_license_infos(
                 batch entry is missing, explicitly ``None`` (deps.dev says
                 "version doesn't exist" — not authoritative for these
                 ecosystems), or carries ``license_id == "UNKNOWN"`` (deps.dev
-                had the version but no license data, or only filtered
-                ``"non-standard"`` entries).
+                had the version but no license data, or an array with a
+                ``"non-standard"`` entry).
                 """
                 if pinned is None:
                     return None

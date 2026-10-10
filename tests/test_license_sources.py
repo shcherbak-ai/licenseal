@@ -696,3 +696,53 @@ class TestPyPILicenseClassifiers:
         assert exit_code == 0
         assert dep["license"] == "MIT"
         assert dep["verdict"] == "compatible"
+
+
+class TestDepsDevNonStandardBesideALicense:
+    """A deps.dev array that mixes a license with its ``non-standard`` marker
+    is no answer: the license it names is only part of what applies."""
+
+    @pytest.mark.parametrize(
+        "licenses", [["Apache-2.0", "non-standard"], ["non-standard", "Apache-2.0"]]
+    )
+    @pytest.mark.no_default_deps_dev_mock
+    @respx.mock
+    def test_dependency_with_its_own_registry_is_resolved_there(self, tmp_path, licenses):
+        _npm_project(tmp_path)
+        _mock_batch("NPM", "dep", "1.0.0", licenses)
+        _mock_npm("GPL-3.0-only")
+        exit_code, dep = _check(tmp_path, "--no-strict")
+        assert exit_code == 1
+        assert dep["license"] == "GPL-3.0-only"
+        assert dep["license_raw"] == "GPL-3.0-only"
+        assert dep["verdict"] == "incompatible"
+
+    @pytest.mark.no_default_deps_dev_mock
+    @respx.mock
+    def test_array_without_the_marker_is_the_control(self, tmp_path):
+        # The batch answer is used and the registry is not asked: no route
+        # for it is mocked.
+        _npm_project(tmp_path)
+        _mock_batch("NPM", "dep", "1.0.0", ["Apache-2.0"])
+        exit_code, dep = _check(tmp_path)
+        assert exit_code == 0
+        assert dep["license"] == "Apache-2.0"
+
+    @pytest.mark.parametrize(
+        "licenses", [["Apache-2.0", "non-standard"], ["non-standard", "MIT"], ["non-standard"]]
+    )
+    @pytest.mark.no_default_deps_dev_mock
+    @respx.mock
+    def test_go_module_has_no_other_source_and_is_unknown(self, tmp_path, licenses):
+        _declare_project_license(tmp_path, "MIT")
+        (tmp_path / "go.mod").write_text(
+            "module example.com/app\n\ngo 1.22\n\nrequire example.com/dep v1.0.0\n"
+        )
+        _mock_batch("GO", "example.com/dep", "v1.0.0", licenses)
+        exit_code, dep = _check(tmp_path)
+        assert exit_code == 1
+        assert dep["license"] == "UNKNOWN"
+        assert dep["license_raw"] == ""
+        assert dep["verdict"] == "unknown"
+        code, _ = _check(tmp_path, "--no-strict")
+        assert code == 0

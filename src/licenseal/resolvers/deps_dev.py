@@ -176,13 +176,15 @@ def _licenses_to_spdx(licenses_field: object, *, system: str = "") -> str:
     platform's own base libraries from that era among them) carry
     only an old ``<licenseUrl>`` pointing at
     Microsoft's generic ``.NET Library`` EULA page, hitting this code
-    path. We filter ``"non-standard"`` out of the joined expression so
-    it doesn't get fed into ``normalize_license`` (where it would alias
-    to ``Proprietary`` — semantically wrong for the deps.dev source,
-    even though that alias is correct for the Cargo-publisher source
-    where the string is publisher-authored). When the ``"non-standard"``
-    filter leaves the list empty, the caller surfaces UNKNOWN, which
-    is the accurate signal for "deps.dev couldn't classify".
+    path. ``"non-standard"`` is never fed into ``normalize_license``
+    (where it would alias to ``Proprietary`` — semantically wrong for the
+    deps.dev source, even though that alias is correct for the
+    Cargo-publisher source where the string is publisher-authored). An
+    array that holds it, alone or beside other entries, has no usable
+    entries: the entries beside it describe only part of the license, so
+    reporting them would drop a term nobody classified. The caller then
+    surfaces UNKNOWN, which is the accurate signal for "deps.dev couldn't
+    classify", and an ecosystem with its own registry resolves there.
     """
     collected = _license_entries(licenses_field)
     if not collected:
@@ -195,10 +197,11 @@ def _licenses_to_spdx(licenses_field: object, *, system: str = "") -> str:
 
 
 def _license_entries(licenses_field: object) -> list[str]:
-    """Distinct license entries of a ``licenses`` array, in the order given.
+    """Distinct usable license entries of a ``licenses`` array, in the order given.
 
-    Non-string and empty entries are skipped, and so is ``"non-standard"``
-    (see :func:`_licenses_to_spdx`).
+    Non-string and empty entries are skipped. An array with a
+    ``"non-standard"`` entry has no usable entries at all (see
+    :func:`_licenses_to_spdx`).
     """
     if not isinstance(licenses_field, list):
         return []
@@ -207,9 +210,9 @@ def _license_entries(licenses_field: object) -> list[str]:
         if not isinstance(entry, str) or not entry:
             continue
         if entry.strip().lower() == "non-standard":
-            # deps.dev's "I can't classify this" signal; do NOT route to
-            # the publisher-authored "non-standard" → Proprietary alias.
-            continue
+            # deps.dev's "I can't classify this" signal: the array is not
+            # an answer, with or without other entries.
+            return []
         if entry not in collected:
             collected.append(entry)
     return collected

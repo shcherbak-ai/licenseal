@@ -57,6 +57,7 @@ from licenseal.discovery.java.pom_xml import (
 )
 from licenseal.models import Dependency, LicenseInfo
 from licenseal.resolvers.deps_dev import (
+    _license_entries,
     _license_info_from_version_object,
 )
 from licenseal.resolvers.http import (
@@ -250,7 +251,9 @@ def _licenses_from_deps_dev(
     indexed by deps.dev (which mirrors a broader version set than
     Central's primary cache, including some artifacts only published to
     secondary repos like ``repo.jenkins-ci.org``). Empty list when
-    deps.dev also has nothing.
+    deps.dev also has nothing, or answers with its ``non-standard``
+    marker, alone or beside other entries — the same array is no answer in
+    the batch pre-pass either.
     """
     coord = f"{group_id}:{artifact_id}"
     encoded_name = quote_coordinate(coord, safe="")
@@ -259,14 +262,8 @@ def _licenses_from_deps_dev(
     data = json_fetcher(url, client)
     if data is None:
         return []
-    licenses_field = cast("dict", data).get("licenses", [])
-    if not isinstance(licenses_field, list):
-        return []
-    out: list[tuple[str, str]] = []
-    for entry in licenses_field:
-        if isinstance(entry, str) and entry.strip():
-            out.append((entry.strip(), ""))
-    return out
+    entries = _license_entries(cast("dict", data).get("licenses"))
+    return [(entry.strip(), "") for entry in entries if entry.strip()]
 
 
 def _walk_for_licenses(
