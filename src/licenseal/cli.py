@@ -490,11 +490,13 @@ def _resolve_license_infos(
             # exist on deps.dev" → return UNKNOWN without further fetch.
             # For Python/npm/Rust/Java/NuGet/Ruby, ``None`` is only
             # advisory: the official registries remain authoritative and
-            # the per-package fallback runs. (.NET keeps the NuGet
-            # flatcontainer as Tier 1; the batch fills its Tier 2 — see
-            # ``resolve_nuget_license``. Ruby off-registry deps, GIT / PATH
-            # sourced, are filtered out up front: their license can't be
-            # resolved from rubygems.org at all.)
+            # the per-package fallback runs. (.NET follows the same order:
+            # the batch cache is checked first, and on a miss
+            # ``resolve_nuget_license`` reads the NuGet flatcontainer
+            # ``.nuspec``, then the deps.dev single-version GET. Ruby
+            # off-registry deps, GIT / PATH sourced, are filtered out up
+            # front: their license can't be resolved from rubygems.org at
+            # all.)
             batch_pre_pass_started = time.perf_counter()
             batch_caches = bulk_resolve_licenses(
                 {
