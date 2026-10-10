@@ -1724,6 +1724,51 @@ class TestFetchRustDependencies:
         assert deps[0].name == "bar"
         assert deps[0].version_constraint == ""
 
+    @respx.mock
+    def test_skips_optional_dependencies_through_registry_cache(self):
+        # Feature-gated entries carry ``optional: true``. The walk has no
+        # feature resolution, so it must not follow them. Routed through
+        # ``RegistryCache.fetch`` so the flag is read from the cached shape the
+        # production walker sees, not just the raw response.
+        respx.get("https://crates.io/api/v1/crates/foo/1.0.0/dependencies").mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "dependencies": [
+                        {"crate_id": "always", "kind": "normal", "req": "^1.0", "optional": False},
+                        {"crate_id": "gated", "kind": "normal", "req": "^2.0", "optional": True},
+                        {"crate_id": "gated-build", "kind": "build", "req": "1", "optional": True},
+                        {"crate_id": "unflagged", "kind": "normal", "req": "^3.0"},
+                    ]
+                },
+            )
+        )
+        cache = RegistryCache()
+        with httpx.Client() as client:
+            deps = fetch_rust_dependencies(
+                "foo", "1.0.0", client, parent_depth=0, fetcher=cache.fetch
+            )
+        assert [d.name for d in deps] == ["always", "unflagged"]
+
+    @respx.mock
+    def test_non_boolean_optional_flag_is_still_followed(self):
+        # Only an explicit JSON ``true`` skips an entry. A malformed flag is
+        # not evidence the dependency is feature-gated, so the entry is kept
+        # (dropping it would hide a crate from the report).
+        respx.get("https://crates.io/api/v1/crates/foo/1.0.0/dependencies").mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "dependencies": [
+                        {"crate_id": "bar", "kind": "normal", "req": "^1.0", "optional": "true"},
+                    ]
+                },
+            )
+        )
+        with httpx.Client() as client:
+            deps = fetch_rust_dependencies("foo", "1.0.0", client, parent_depth=0)
+        assert [d.name for d in deps] == ["bar"]
+
 
 class TestResolvePythonLicenseFallback:
     """The wrapper's project-level fallback path: pinned per-version fetch

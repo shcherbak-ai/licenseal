@@ -2744,6 +2744,85 @@ class TestRustEcosystem:
         assert "crates.io:" in result.output
 
     @respx.mock
+    def test_check_without_lockfile_does_not_follow_optional_rust_dependencies(self, tmp_path):
+        # No Cargo.lock, so the transitive graph comes from the registry walk.
+        # The direct crate has one required dependency (permissive) and one
+        # feature-gated optional dependency under a copyleft license. The walk
+        # has no feature resolution, so the optional crate must not be
+        # requested, reported, or allowed to fail the check.
+        (tmp_path / "Cargo.toml").write_text(
+            textwrap.dedent("""\
+            [package]
+            name = "myapp"
+            version = "0.1.0"
+            license = "MIT"
+
+            [dependencies]
+            parent = "=1.0.0"
+            """)
+        )
+        respx.get("https://crates.io/api/v1/crates/parent/1.0.0/dependencies").mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "dependencies": [
+                        {
+                            "crate_id": "required-child",
+                            "kind": "normal",
+                            "req": "^1.0",
+                            "optional": False,
+                        },
+                        {
+                            "crate_id": "optional-child",
+                            "kind": "normal",
+                            "req": "^2.0",
+                            "optional": True,
+                        },
+                    ]
+                },
+            )
+        )
+        respx.get("https://crates.io/api/v1/crates/parent/1.0.0").mock(
+            return_value=httpx.Response(200, json={"version": {"num": "1.0.0", "license": "MIT"}})
+        )
+        respx.get("https://crates.io/api/v1/crates/parent").mock(
+            return_value=httpx.Response(200, json={"crate": {"max_stable_version": "1.0.0"}})
+        )
+        respx.get("https://crates.io/api/v1/crates/required-child").mock(
+            return_value=httpx.Response(200, json={"crate": {"max_stable_version": "1.2.0"}})
+        )
+        respx.get("https://crates.io/api/v1/crates/required-child/1.2.0/dependencies").mock(
+            return_value=httpx.Response(200, json={"dependencies": []})
+        )
+        respx.get("https://crates.io/api/v1/crates/required-child/1.2.0").mock(
+            return_value=httpx.Response(
+                200, json={"version": {"num": "1.2.0", "license": "Apache-2.0"}}
+            )
+        )
+        optional_routes = [
+            respx.get("https://crates.io/api/v1/crates/optional-child").mock(
+                return_value=httpx.Response(200, json={"crate": {"max_stable_version": "2.0.0"}})
+            ),
+            respx.get("https://crates.io/api/v1/crates/optional-child/2.0.0/dependencies").mock(
+                return_value=httpx.Response(200, json={"dependencies": []})
+            ),
+            respx.get("https://crates.io/api/v1/crates/optional-child/2.0.0").mock(
+                return_value=httpx.Response(
+                    200, json={"version": {"num": "2.0.0", "license": "GPL-3.0-only"}}
+                )
+            ),
+        ]
+
+        runner = CliRunner()
+        result = runner.invoke(main, ["check", "--path", str(tmp_path), "-f", "json"])
+        assert result.exit_code == 0
+        data = json.loads(result.output[result.output.index("{") :])
+        licenses = {d["name"]: d["license"] for d in data["dependencies"]}
+        assert licenses == {"parent": "MIT", "required-child": "Apache-2.0"}
+        assert data["summary"]["violations"] == 0
+        assert not any(route.called for route in optional_routes)
+
+    @respx.mock
     def test_check_resolves_go_license_from_deps_dev(self, tmp_path):
         # End-to-end: go.mod + go.sum drive discovery, the deps.dev batch POST
         # resolves the license, proxy.golang.org returns the go.mod edge data

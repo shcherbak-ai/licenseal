@@ -140,6 +140,11 @@ def fetch_rust_dependencies(
     dependencies aren't shipped with downstream consumers and are dropped
     from the registry-walk transitive expansion.
 
+    Entries flagged `optional` are skipped: they are built only when a
+    feature enables them, and the registry walk has no feature resolution,
+    so following them would report crates the project may never build. A
+    `Cargo.lock` records the graph Cargo resolved and avoids this walk.
+
     ``fetcher`` defaults to a direct HTTP fetch; the walker passes a
     cache-backed fetcher so the dependencies endpoint is shared with any
     same-(name,version) call.
@@ -157,6 +162,8 @@ def fetch_rust_dependencies(
             continue
         kind = raw.get("kind", "normal")
         if kind not in ("normal", "build"):
+            continue
+        if raw.get("optional") is True:
             continue
         crate_id = raw.get("crate_id")
         if not isinstance(crate_id, str):
