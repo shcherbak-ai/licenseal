@@ -958,6 +958,7 @@ def _resolve_dotnet_transitive(
             out.append(dep)
 
     # ---- Paket lockfile path ----
+    paket_prod_names: set[str] = set()
     for paket_lock in find_paket_lockfiles(project_path, exclude_paths=exclude_paths):
         for dep in parse_paket_lock(paket_lock, project_path=project_path):
             if dep.name.lower() in workspace_local_lower:
@@ -965,6 +966,8 @@ def _resolve_dotnet_transitive(
             if not include_dev and dep.group == DependencyGroup.DEV:
                 continue
             lower = dep.name.lower()
+            if dep.group == DependencyGroup.PROD:
+                paket_prod_names.add(lower)
             if lower in covered_names:
                 continue
             covered_names.add(lower)
@@ -978,6 +981,15 @@ def _resolve_dotnet_transitive(
                     source=source,
                 )
             )
+    # A name is reported once, from the first lockfile that has it. When that
+    # entry is DEV and a Paket production group lists the same package, the
+    # skipped entry is the one that ships: production wins.
+    out = [
+        replace(d, group=DependencyGroup.PROD)
+        if d.group == DependencyGroup.DEV and d.name.lower() in paket_prod_names
+        else d
+        for d in out
+    ]
 
     # ---- deps.dev :dependencies path for uncovered directs ----
     direct_uncovered = [

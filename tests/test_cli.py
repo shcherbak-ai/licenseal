@@ -5482,6 +5482,80 @@ class TestProductionPrecedence:
             "org.example:test-gpl": ("dev", "warning"),
         }
 
+    @respx.mock
+    @pytest.mark.parametrize(
+        "shape", ["paket-dev-first", "paket-prod-first", "nuget-lock-dev-then-paket-prod"]
+    )
+    def test_paket_production_group_over_an_earlier_dev_entry(self, tmp_path, shape):
+        # A .NET package name is reported once, from the first lockfile that
+        # has it. SharedGpl is dev there (a Paket Test group, or reached only
+        # from a dev reference in a NuGet lockfile) and in a Paket production
+        # group in a lockfile read later; TestGpl is in a Test group only.
+        nuget = "NUGET\n  remote: https://api.nuget.org/v3/index.json\n"
+        files = {
+            "paket-dev-first": {
+                "a-tools/paket.lock": f"GROUP Test\n{nuget}    SharedGpl (1.0.0)\n",
+                "b-app/paket.lock": f"{nuget}    SharedGpl (1.0.0)\n",
+            },
+            "paket-prod-first": {
+                "a-app/paket.lock": f"{nuget}    SharedGpl (1.0.0)\n",
+                "b-tools/paket.lock": f"GROUP Test\n{nuget}    SharedGpl (1.0.0)\n",
+            },
+            "nuget-lock-dev-then-paket-prod": {
+                "App.csproj": '<Project Sdk="Microsoft.NET.Sdk">\n  <ItemGroup>\n'
+                '    <PackageReference Include="DevTool" Version="2.0.0" PrivateAssets="all" />\n'
+                "  </ItemGroup>\n</Project>\n",
+                "packages.lock.json": json.dumps(
+                    {
+                        "version": 1,
+                        "dependencies": {
+                            "net8.0": {
+                                "DevTool": {
+                                    "type": "Direct",
+                                    "resolved": "2.0.0",
+                                    "dependencies": {"SharedGpl": "1.0.0"},
+                                },
+                                "SharedGpl": {"type": "Transitive", "resolved": "1.0.0"},
+                            }
+                        },
+                    }
+                ),
+                "paket.lock": f"{nuget}    SharedGpl (1.0.0)\n",
+            },
+        }[shape]
+        files["z-tests/paket.lock"] = f"GROUP Test\n{nuget}    TestGpl (3.0.0)\n"
+        for relative, content in files.items():
+            (tmp_path / relative).parent.mkdir(parents=True, exist_ok=True)
+            (tmp_path / relative).write_text(content, encoding="utf-8")
+        for name, version, license_id in (
+            ("SharedGpl", "1.0.0", "GPL-3.0-only"),
+            ("TestGpl", "3.0.0", "GPL-3.0-only"),
+            ("DevTool", "2.0.0", "MIT"),
+        ):
+            lower = name.lower()
+            respx.get(
+                f"https://api.nuget.org/v3-flatcontainer/{lower}/{version}/{lower}.nuspec"
+            ).mock(
+                return_value=httpx.Response(
+                    200,
+                    text=(
+                        '<package xmlns="http://schemas.microsoft.com/packaging/2013/05/nuspec.xsd">'
+                        f"<metadata><id>{name}</id><version>{version}</version>"
+                        f'<license type="expression">{license_id}</license></metadata></package>'
+                    ),
+                )
+            )
+
+        exit_code, rows = self._check(tmp_path, "--no-dev", "--no-strict")
+        assert exit_code == 1
+        assert rows == {"SharedGpl": ("prod", "incompatible")}
+
+        exit_code, rows = self._check(tmp_path, "--dev", "--no-strict")
+        assert exit_code == 1
+        assert rows["SharedGpl"] == ("prod", "incompatible")
+        # Control: a copyleft package only a Test group lists is a warning.
+        assert rows["TestGpl"] == ("dev", "warning")
+
 
 class TestLockfileWithoutDirectDependencies:
     """A lockfile is scanned even when no manifest yields a direct dependency

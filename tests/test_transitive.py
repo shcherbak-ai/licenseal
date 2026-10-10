@@ -2263,6 +2263,47 @@ class TestProductionPrecedence:
         assert with_dev["DevTool"].group == DependencyGroup.DEV
         assert with_dev["DevChild"].group == DependencyGroup.DEV
 
+    @pytest.mark.parametrize(
+        "shape", ["paket-dev-first", "paket-prod-first", "nuget-lock-dev-then-paket-prod"]
+    )
+    def test_paket_production_group_wins_over_an_earlier_dev_entry(self, tmp_path, shape):
+        # A .NET package name is reported once, from the first lockfile that
+        # has it. Shared is DEV there (a Paket Test group, or reached only
+        # from a dev reference in a NuGet lockfile) and in a Paket production
+        # group in a lockfile read later. TestOnly is in a Test group only.
+        nuget = "NUGET\n  remote: https://api.nuget.org/v3/index.json\n"
+        files = {
+            "paket-dev-first": {
+                "a-tools/paket.lock": f"GROUP Test\n{nuget}    Shared (1.0.0)\n",
+                "b-app/paket.lock": f"{nuget}    Shared (1.0.0)\n",
+            },
+            "paket-prod-first": {
+                "a-app/paket.lock": f"{nuget}    Shared (1.0.0)\n",
+                "b-tools/paket.lock": f"GROUP Test\n{nuget}    Shared (1.0.0)\n",
+            },
+            "nuget-lock-dev-then-paket-prod": {
+                "App.csproj": _csproj(("DevTool", "2.0.0", True)),
+                "packages.lock.json": _nuget_lock(
+                    {
+                        "DevTool": ("Direct", "2.0.0", ["Shared"]),
+                        "Shared": ("Transitive", "1.0.0", []),
+                    }
+                ),
+                "paket.lock": f"{nuget}    Shared (1.0.0)\n",
+            },
+        }[shape]
+        files["z-tests/paket.lock"] = f"GROUP Test\n{nuget}    TestOnly (3.0.0)\n"
+        for relative, content in files.items():
+            _write(tmp_path / relative, content)
+
+        prod_only = self._resolve(tmp_path, include_dev=False)
+        assert [(d.name, d.group) for d in prod_only] == [("Shared", DependencyGroup.PROD)]
+
+        with_dev = {d.name: d.group for d in self._resolve(tmp_path, include_dev=True)}
+        assert with_dev["Shared"] == DependencyGroup.PROD
+        # Control: nothing puts TestOnly in a production group.
+        assert with_dev["TestOnly"] == DependencyGroup.DEV
+
 
 class TestRegistrySeedFiltering:
     def test_skips_ecosystem_when_only_dev_seeds_and_no_dev(self, tmp_path):
