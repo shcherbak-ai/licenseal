@@ -3,11 +3,18 @@
 from __future__ import annotations
 
 import re
+from dataclasses import replace
 from pathlib import Path
+from typing import Any, cast
 
 from licenseal.discovery._read import load_toml, record_unexpected_type, typed_field
 from licenseal.discovery._walk import walk_project_files
-from licenseal.discovery.python import DEV_GROUP_NAMES, parse_pep508_dep, table_spec
+from licenseal.discovery.python import (
+    DEV_GROUP_NAMES,
+    requirement_dependency,
+    source_table_origin,
+    table_spec,
+)
 from licenseal.models import Dependency, DependencyGroup, Ecosystem
 
 # PEP 503: collapse runs of `-`, `_`, `.` to a single `-` and lowercase.
@@ -49,31 +56,65 @@ def _string_list(filepath: Path, value: object, section: str, *, entry: bool = F
     return strings
 
 
-def _extract_deps(dep_list: list[str], group: DependencyGroup, source: str) -> list[Dependency]:
-    """Convert a list of PEP 508 strings to Dependency objects."""
+def _extract_deps(
+    dep_list: list[str], group: DependencyGroup, source: str, base_dir: Path, scan_root: Path
+) -> list[Dependency]:
+    """Convert a list of PEP 508 strings to Dependency objects.
+
+    A direct reference (``name @ <url>``) is a dependency with an origin; one
+    to a path inside ``scan_root`` is the project's own code and is left out.
+    """
     deps = []
     for dep_str in dep_list:
-        name, version, extras = parse_pep508_dep(dep_str)
-        if name:
-            deps.append(
-                Dependency(
-                    name=name,
-                    version_constraint=version,
-                    ecosystem=Ecosystem.PYTHON,
-                    group=group,
-                    source=source,
-                    extras=extras,
-                )
-            )
+        dep = requirement_dependency(dep_str, group, source, base_dir, scan_root)
+        if dep is not None:
+            deps.append(dep)
     return deps
 
 
+def _tables_origin(
+    filepath: Path, spec: object, what: str, base_dir: Path, scan_root: Path
+) -> str | None:
+    """Origin a Poetry dependency spec or a uv source declares.
+
+    ``spec`` is one table, or a list holding one table per environment. In
+    a list, the first table that names a source outside the registry decides:
+    the dependency does not come from the registry everywhere. Empty when no
+    table names one; ``None`` for the project's own code.
+    """
+    for table in spec if isinstance(spec, list) else [spec]:
+        if not isinstance(table, dict):
+            continue
+        origin = source_table_origin(
+            filepath, cast("dict[str, Any]", table), what, base_dir, scan_root
+        )
+        if origin != "":
+            return origin
+    return ""
+
+
 def _poetry_deps(
-    filepath: Path, table: dict, section: str, group: DependencyGroup, source: str
+    filepath: Path,
+    table: dict,
+    section: str,
+    group: DependencyGroup,
+    source: str,
+    scan_root: Path,
+    own: list[str],
 ) -> list[Dependency]:
-    """Convert a Poetry dependency table (name → spec) to Dependency objects."""
+    """Convert a Poetry dependency table (name → spec) to Dependency objects.
+
+    A spec with ``git``, ``url``, or ``path`` is a dependency with an origin
+    and no version constraint. The name of one whose path is inside
+    ``scan_root`` is appended to ``own`` instead: it is the project's own code.
+    """
     deps = []
     for name, spec in table.items():
+        what = f"an entry of {section}"
+        origin = _tables_origin(filepath, spec, what, filepath.parent, scan_root)
+        if origin is None:
+            own.append(name)
+            continue
         # A list holds one constraint table per environment: a valid form
         # with no single version, read as unconstrained.
         version, extras = (
@@ -84,29 +125,58 @@ def _poetry_deps(
         deps.append(
             Dependency(
                 name=name,
-                version_constraint=version,
+                version_constraint="" if origin else version,
                 ecosystem=Ecosystem.PYTHON,
                 group=group,
                 source=source,
+                origin=origin,
                 extras=extras,
             )
         )
     return deps
 
 
-def _parse_pyproject_deps(filepath: Path, data: dict, source: str) -> list[Dependency]:
+def _uv_sources(filepath: Path, data: dict) -> dict[str, object]:
+    """The ``[tool.uv.sources]`` table, keyed by PEP 503 name; empty when absent."""
+    tool = typed_field(filepath, data, "tool", dict) or {}
+    uv = typed_field(filepath, tool, "uv", dict, "tool.uv") or {}
+    sources = typed_field(filepath, uv, "sources", dict, "tool.uv.sources") or {}
+    return {_pep503_normalize(name): spec for name, spec in sources.items()}
+
+
+def _is_uv_workspace_root(filepath: Path, data: dict) -> bool:
+    """Whether this pyproject.toml declares a uv workspace."""
+    tool = typed_field(filepath, data, "tool", dict) or {}
+    uv = typed_field(filepath, tool, "uv", dict, "tool.uv") or {}
+    return isinstance(uv.get("workspace"), dict)
+
+
+def _parse_pyproject_deps(
+    filepath: Path,
+    data: dict,
+    source: str,
+    scan_root: Path,
+    inherited_sources: dict[str, object] | None = None,
+) -> tuple[list[Dependency], list[str]]:
     """Extract dependencies from a single parsed pyproject.toml data dict.
 
     A section or an entry that is not the type its format defines is
     recorded as a gap on ``filepath`` and read as absent; every other section
     is still read.
+
+    Returns ``(deps, own)``. ``own`` names the dependencies that are the
+    project's own code: a path inside ``scan_root``, or a uv workspace
+    member. ``inherited_sources`` is the ``[tool.uv.sources]`` table of the
+    uv workspace root above this file; this file's own entries override it.
     """
     deps: list[Dependency] = []
+    own: list[str] = []
+    base_dir = filepath.parent
 
     # PEP 621: [project.dependencies]
     project = _project_table(filepath, data)
     prod_deps = _string_list(filepath, project.get("dependencies"), "project.dependencies")
-    deps.extend(_extract_deps(prod_deps, DependencyGroup.PROD, source))
+    deps.extend(_extract_deps(prod_deps, DependencyGroup.PROD, source, base_dir, scan_root))
 
     # PEP 621: [project.optional-dependencies]
     optional_section = "project.optional-dependencies"
@@ -116,7 +186,7 @@ def _parse_pyproject_deps(filepath: Path, data: dict, source: str) -> list[Depen
             DependencyGroup.DEV if group_name.lower() in DEV_GROUP_NAMES else DependencyGroup.PROD
         )
         extra_deps = _string_list(filepath, group_deps, optional_section, entry=True)
-        deps.extend(_extract_deps(extra_deps, group, source))
+        deps.extend(_extract_deps(extra_deps, group, source, base_dir, scan_root))
 
     # PEP 735: [dependency-groups] (uv, pdm). Two-pass to resolve
     # ``{ include-group = "<other>" }`` directives correctly:
@@ -162,7 +232,30 @@ def _parse_pyproject_deps(filepath: Path, data: dict, source: str) -> list[Depen
             queue.extend(include_edges.get(current, set()) - dev_reachable)
         for normalized, strings in group_strings.items():
             group = DependencyGroup.DEV if normalized in dev_reachable else DependencyGroup.PROD
-            deps.extend(_extract_deps(strings, group, source))
+            deps.extend(_extract_deps(strings, group, source, base_dir, scan_root))
+
+    # uv: [tool.uv.sources] says where a requirement declared above comes
+    # from. ``git`` / ``url`` / ``path`` take it off the registry; ``index``
+    # leaves it a registry requirement; ``workspace = true`` and a path
+    # inside the scanned directory make it the project's own code.
+    sources = (inherited_sources or {}) | _uv_sources(filepath, data)
+    if sources:
+        declared, deps = deps, []
+        for dep in declared:
+            spec = sources.get(_pep503_normalize(dep.name))
+            origin = (
+                dep.origin
+                if dep.origin or spec is None
+                else _tables_origin(
+                    filepath, spec, "an entry of tool.uv.sources", base_dir, scan_root
+                )
+            )
+            if origin is None:
+                own.append(dep.name)
+            elif origin and not dep.origin:
+                deps.append(replace(dep, origin=origin, version_constraint=""))
+            else:
+                deps.append(dep)
 
     # Poetry: [tool.poetry.dependencies] and [tool.poetry.group.*.dependencies]
     poetry = _poetry_table(filepath, data)
@@ -170,7 +263,11 @@ def _parse_pyproject_deps(filepath: Path, data: dict, source: str) -> list[Depen
     poetry_deps = typed_field(filepath, poetry, "dependencies", dict, poetry_section) or {}
     # ``python`` is the interpreter constraint, not a package.
     poetry_deps = {name: spec for name, spec in poetry_deps.items() if name.lower() != "python"}
-    deps.extend(_poetry_deps(filepath, poetry_deps, poetry_section, DependencyGroup.PROD, source))
+    deps.extend(
+        _poetry_deps(
+            filepath, poetry_deps, poetry_section, DependencyGroup.PROD, source, scan_root, own
+        )
+    )
 
     # Poetry groups
     groups_section = "tool.poetry.group"
@@ -184,9 +281,11 @@ def _parse_pyproject_deps(filepath: Path, data: dict, source: str) -> list[Depen
             record_unexpected_type(filepath, entry_of)
             continue
         group_deps_dict = typed_field(filepath, group_data, "dependencies", dict, entry_of) or {}
-        deps.extend(_poetry_deps(filepath, group_deps_dict, groups_section, group, source))
+        deps.extend(
+            _poetry_deps(filepath, group_deps_dict, groups_section, group, source, scan_root, own)
+        )
 
-    return deps
+    return deps, own
 
 
 def discover_pyproject_dependencies(
@@ -206,6 +305,9 @@ def discover_pyproject_dependencies(
     pulling the installed wheel), not a workspace alias — that dep is
     preserved.
 
+    A dependency declared from a path inside the scanned directory, or as
+    a uv workspace member, is the project's own code and is not returned.
+
     Returns ``(deps, filtered_count)`` where ``filtered_count`` is the number
     of deps removed because their name matched a workspace-local package.
     """
@@ -215,19 +317,27 @@ def discover_pyproject_dependencies(
 
     local_names = _collect_local_python_names(pyprojects)
 
+    parsed = [(pj, data) for pj in pyprojects if (data := load_toml(pj)) is not None]
+    # A uv workspace root's ``[tool.uv.sources]`` applies to its members.
+    workspace_sources = {
+        pj.parent: _uv_sources(pj, data) for pj, data in parsed if _is_uv_workspace_root(pj, data)
+    }
+
     deps: list[Dependency] = []
     owners: list[str] = []
-    for pj in pyprojects:
-        data = load_toml(pj)
-        if data is None:
-            continue
+    own: list[str] = []
+    for pj, data in parsed:
         # Paths come from the walker rooted at project_path, so relative_to
         # is safe. ``as_posix`` keeps the JSON output cross-platform.
         source = pj.relative_to(project_path).as_posix()
-        pj_deps = _parse_pyproject_deps(pj, data, source)
+        inherited = next(
+            (workspace_sources[d] for d in pj.parent.parents if d in workspace_sources), None
+        )
+        pj_deps, pj_own = _parse_pyproject_deps(pj, data, source, project_path, inherited)
         owner = _pyproject_owner_name(pj, data)
         deps.extend(pj_deps)
         owners.extend([owner] * len(pj_deps))
+        own.extend(pj_own)
 
     if not local_names:
         return deps, 0
@@ -237,7 +347,8 @@ def discover_pyproject_dependencies(
         if _pep503_normalize(d.name) not in local_names
         or (owner and _pep503_normalize(d.name) == owner)
     ]
-    return kept, len(deps) - len(kept)
+    own_local = sum(_pep503_normalize(name) in local_names for name in own)
+    return kept, len(deps) - len(kept) + own_local
 
 
 def _pyproject_owner_name(filepath: Path, data: dict) -> str:

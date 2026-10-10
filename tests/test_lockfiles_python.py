@@ -1118,7 +1118,7 @@ class TestParsePipfileLock:
         )
         assert {d.name for d in deps} == {"click"}
 
-    def test_skips_git_path_file_sources(self, tmp_path):
+    def test_git_source_carries_an_origin_and_local_paths_are_own_code(self, tmp_path):
         path = self._write(
             tmp_path,
             """\
@@ -1135,7 +1135,10 @@ class TestParsePipfileLock:
         deps = parse_pipfile_lock(
             path, prod_root_names={"real"}, dev_root_names=set(), include_dev=False
         )
-        assert [d.name for d in deps] == ["real"]
+        assert [(d.name, d.version_constraint, d.origin) for d in deps] == [
+            ("git-dep", "", "git+https://example.com/repo.git@abc"),
+            ("real", "==1.0.0", ""),
+        ]
 
     def test_skips_entries_missing_version(self, tmp_path):
         path = self._write(

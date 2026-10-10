@@ -23,6 +23,13 @@ Pipfile.lock has no per-package dependency graph (each entry only carries
 ``version`` / ``hashes`` / ``markers``), so its attribution falls back to
 the section the entry lives in: ``default`` is PROD, ``develop`` is DEV.
 Without edges, transitive ancestors stay empty for that format.
+
+A package a lockfile takes from a git repository, a direct URL, or a path
+outside the scanned directory is not a PyPI release. Its row carries an
+``origin`` (the repository and the locked commit, the URL and its hash, the
+path) and is never looked up. A package pinned to an alternate index is still
+a registry row. A path inside the scanned directory is the project's own
+code: it stays in the edge graph and gets no row.
 """
 
 from __future__ import annotations
@@ -33,6 +40,7 @@ from typing import Any, cast
 from packaging.utils import canonicalize_name
 
 from licenseal._graph import compute_direct_ancestors
+from licenseal.discovery._origin import UNRECORDED, git_origin, path_origin, url_origin
 from licenseal.discovery._read import (
     check_lockfile_version,
     load_json,
@@ -43,6 +51,7 @@ from licenseal.discovery._read import (
     typed_field,
 )
 from licenseal.discovery._walk import walk_project_files
+from licenseal.discovery.python import source_table_origin
 from licenseal.models import Dependency, DependencyGroup, Ecosystem
 
 
@@ -99,14 +108,21 @@ def parse_python_lockfile(
     prod_root_names: set[str],
     dev_root_names: set[str],
     include_dev: bool,
+    scan_root: Path | None = None,
 ) -> list[Dependency]:
-    """Dispatch to the appropriate parser based on filename."""
+    """Dispatch to the appropriate parser based on filename.
+
+    ``scan_root`` is the scanned directory, the lockfile's own directory when
+    omitted. A package the lockfile takes from a path inside it is the
+    project's own code and gets no row.
+    """
+    scan_root = scan_root or path.parent
     if path.name == "uv.lock":
-        return parse_uv_lock(path, prod_root_names, dev_root_names, include_dev)
+        return parse_uv_lock(path, prod_root_names, dev_root_names, include_dev, scan_root)
     if path.name == "poetry.lock":
-        return parse_poetry_lock(path, prod_root_names, dev_root_names, include_dev)
+        return parse_poetry_lock(path, prod_root_names, dev_root_names, include_dev, scan_root)
     if path.name == "Pipfile.lock":
-        return parse_pipfile_lock(path, prod_root_names, dev_root_names, include_dev)
+        return parse_pipfile_lock(path, prod_root_names, dev_root_names, include_dev, scan_root)
     raise ValueError(f"Unsupported Python lockfile: {path.name}")
 
 
@@ -220,11 +236,51 @@ def _entries_by_key(path: Path, table: dict[str, Any], key: str) -> dict[str, li
     return {name: _entries(path, value) for name, value in field.items()}
 
 
+def _first_hash(path: Path, pkg: dict[str, Any]) -> str:
+    """The hash uv.lock records for a package's one artifact, ``""`` when it records none."""
+    sdist = typed_field(path, pkg, "sdist", dict, _PACKAGE_ENTRY) or {}
+    wheels = typed_field(path, pkg, "wheels", list, _PACKAGE_ENTRY) or []
+    for artifact in (sdist, *wheels):
+        digest = artifact.get("hash") if isinstance(artifact, dict) else None
+        if isinstance(digest, str) and digest:
+            return digest
+    return ""
+
+
+def _uv_source_origin(
+    path: Path, pkg: dict[str, Any], source: dict[str, Any], scan_root: Path
+) -> str | None:
+    """Origin of a uv.lock ``[[package]]``, from its ``source`` table.
+
+    Empty for ``registry`` (PyPI or an alternate index) and for a package
+    with no source table. ``git`` is the repository plus the commit uv
+    writes as the URL fragment; ``url`` the URL plus the artifact's hash;
+    ``path`` / ``directory`` / ``editable`` a path, ``None`` when it is
+    inside ``scan_root``. ``virtual`` is always the project itself.
+    """
+    if "virtual" in source:
+        return None
+    for key in ("git", "url", "path", "directory", "editable"):
+        if key not in source:
+            continue
+        value = typed_field(path, source, key, str, _PACKAGE_ENTRY)
+        if not value:
+            return UNRECORDED
+        if key == "git":
+            location, _, commit = value.partition("#")
+            return git_origin(location, commit)
+        if key == "url":
+            return url_origin(value, _first_hash(path, pkg))
+        return path_origin(value, path.parent, scan_root)
+    return ""
+
+
 def parse_uv_lock(
     path: Path,
     prod_root_names: set[str],
     dev_root_names: set[str],
     include_dev: bool,
+    scan_root: Path | None = None,
 ) -> list[Dependency]:
     """Parse a `uv.lock` file into a flat dependency list.
 
@@ -235,14 +291,21 @@ def parse_uv_lock(
     lock), then run reverse-BFS from prod and dev root sets to determine each
     package's group and direct ancestors. Packages reachable from neither root
     set are dropped (orphans / stale).
+
+    A package whose ``source`` is ``git``, ``url``, or a path outside
+    ``scan_root`` is a row with an origin, at the version the lock records
+    for it. The project itself and the packages under ``scan_root``
+    (``virtual``, and ``editable`` / ``directory`` / ``path`` inside it) are
+    not rows.
     """
+    scan_root = scan_root or path.parent
     prod_root_names = {_canon_name(n) for n in prod_root_names}
     dev_root_names = {_canon_name(n) for n in dev_root_names}
     data = _load_toml(path)
     check_lockfile_version(path, data.get("version"), _UV_LOCK_VERSIONS)
     packages = typed_field(path, data, "package", list) or []
 
-    raw_pkgs: list[tuple[str, str]] = []  # (name, version)
+    raw_pkgs: list[tuple[str, str, str]] = []  # (name, version, origin)
     name_case: dict[str, str] = {}
     edges: dict[str, set[str]] = {}
     optional: dict[str, dict[str, list[_Entry]]] = {}  # package → extra → entries
@@ -263,7 +326,8 @@ def parse_uv_lock(
         # deps to license-check, but their dependency tables (including extras
         # and dependency groups) say which extras of their deps get installed.
         source = typed_field(path, pkg, "source", dict, _PACKAGE_ENTRY) or {}
-        if "virtual" in source or "editable" in source:
+        origin = _uv_source_origin(path, pkg, source, scan_root)
+        if origin is None:
             for table in ("optional-dependencies", "dev-dependencies"):
                 for group_entries in _entries_by_key(path, pkg, table).values():
                     entries += group_entries
@@ -273,8 +337,11 @@ def parse_uv_lock(
 
         name = typed_field(path, pkg, "name", str, _PACKAGE_ENTRY)
         version = typed_field(path, pkg, "version", str, _PACKAGE_ENTRY)
-        if name is None or version is None:
+        # A package that is not a registry release can have no version (a
+        # local project with a dynamic one); a registry package always has.
+        if name is None or (version is None and not origin):
             continue
+        version = version or ""
 
         normalized = _canon_name(name)
         if (normalized, version) in seen:
@@ -287,7 +354,7 @@ def parse_uv_lock(
 
         name_case[normalized] = name
         edges.setdefault(normalized, set()).update(child for child, _ in entries)
-        raw_pkgs.append((name, version))
+        raw_pkgs.append((name, version, origin))
     record_unread_entries(path, len(packages), len(raw_pkgs) + own_packages)
 
     # Follow each requested extra into the package's optional dependencies,
@@ -305,7 +372,7 @@ def parse_uv_lock(
     group_by_name, ancestors_by_name = _attribute(edges, name_case, prod_root_names, dev_root_names)
 
     out: list[Dependency] = []
-    for name, version in raw_pkgs:
+    for name, version, origin in raw_pkgs:
         normalized = _canon_name(name)
         group = group_by_name.get(normalized)
         if group is None:
@@ -316,14 +383,42 @@ def parse_uv_lock(
         out.append(
             Dependency(
                 name=name,
-                version_constraint=f"=={version}",
+                version_constraint=f"=={version}" if version else "",
                 ecosystem=Ecosystem.PYTHON,
                 group=group,
                 depth=0 if is_root else 1,
                 direct_ancestors=() if is_root else ancestors_by_name.get(normalized, ()),
+                origin=origin,
             )
         )
     return out
+
+
+def _poetry_source_origin(path: Path, pkg: dict[str, Any], scan_root: Path) -> str | None:
+    """Origin of a poetry.lock ``[[package]]``, from its ``[package.source]`` table.
+
+    Empty for a package with no source table and for ``legacy`` (an alternate
+    index). ``git`` is the repository plus ``resolved_reference`` (the locked
+    commit), or ``reference`` when no commit is recorded. ``url`` is the URL
+    plus the hash of the package's one file. ``directory`` and ``file`` are a
+    path, ``None`` when it is inside ``scan_root``. Any other type is not a
+    registry and records only its URL.
+    """
+    source = typed_field(path, pkg, "source", dict, _PACKAGE_ENTRY) or {}
+    kind = source.get("type")
+    if kind is None or kind == "legacy":
+        return ""
+    url = typed_field(path, source, "url", str, _PACKAGE_ENTRY) or ""
+    if not url:
+        return UNRECORDED
+    if kind == "git":
+        revision = source.get("resolved_reference") or source.get("reference")
+        return git_origin(url, revision if isinstance(revision, str) else "")
+    if kind in ("directory", "file"):
+        return path_origin(url, path.parent, scan_root)
+    files = typed_field(path, pkg, "files", list, _PACKAGE_ENTRY) or []
+    digest = files[0].get("hash") if len(files) == 1 and isinstance(files[0], dict) else None
+    return url_origin(url, digest if isinstance(digest, str) else "")
 
 
 def parse_poetry_lock(
@@ -331,6 +426,7 @@ def parse_poetry_lock(
     prod_root_names: set[str],
     dev_root_names: set[str],
     include_dev: bool,
+    scan_root: Path | None = None,
 ) -> list[Dependency]:
     """Parse a `poetry.lock` file into a flat dependency list.
 
@@ -342,7 +438,12 @@ def parse_poetry_lock(
     field, but we let reachability be authoritative — a dep marked
     `category = "main"` that's only reachable from a dev root still gets
     classified DEV (it's how it actually reaches the install graph).
+
+    A package whose ``[package.source]`` is ``git``, ``url``, or a
+    ``directory`` / ``file`` outside ``scan_root`` is a row with an origin.
+    One inside ``scan_root`` stays in the edge graph and is not a row.
     """
+    scan_root = scan_root or path.parent
     prod_root_names = {_canon_name(n) for n in prod_root_names}
     dev_root_names = {_canon_name(n) for n in dev_root_names}
     data = _load_toml(path)
@@ -350,7 +451,7 @@ def parse_poetry_lock(
     check_lockfile_version(path, metadata.get("lock-version"), _POETRY_LOCK_VERSIONS)
     packages = typed_field(path, data, "package", list) or []
 
-    raw_pkgs: list[tuple[str, str]] = []
+    raw_pkgs: list[tuple[str, str, str | None]] = []  # (name, version, origin)
     name_case: dict[str, str] = {}
     edges: dict[str, set[str]] = {}
     seen: set[tuple[str, str]] = set()
@@ -375,16 +476,16 @@ def parse_poetry_lock(
 
         name_case[normalized] = name
         edges.setdefault(normalized, set()).update(children)
-        raw_pkgs.append((name, version))
+        raw_pkgs.append((name, version, _poetry_source_origin(path, pkg, scan_root)))
     record_unread_entries(path, len(packages), len(raw_pkgs))
 
     group_by_name, ancestors_by_name = _attribute(edges, name_case, prod_root_names, dev_root_names)
 
     out: list[Dependency] = []
-    for name, version in raw_pkgs:
+    for name, version, origin in raw_pkgs:
         normalized = _canon_name(name)
         group = group_by_name.get(normalized)
-        if group is None:
+        if group is None or origin is None:
             continue
         if group == DependencyGroup.DEV and not include_dev:
             continue
@@ -397,12 +498,10 @@ def parse_poetry_lock(
                 group=group,
                 depth=0 if is_root else 1,
                 direct_ancestors=() if is_root else ancestors_by_name.get(normalized, ()),
+                origin=origin,
             )
         )
     return out
-
-
-_PIPFILE_NON_REGISTRY_KEYS = ("git", "path", "file")
 
 
 def parse_pipfile_lock(
@@ -410,6 +509,7 @@ def parse_pipfile_lock(
     prod_root_names: set[str],
     dev_root_names: set[str],
     include_dev: bool,
+    scan_root: Path | None = None,
 ) -> list[Dependency]:
     """Parse a ``Pipfile.lock`` (Pipenv) into a flat dep list.
 
@@ -424,9 +524,12 @@ def parse_pipfile_lock(
     Direct deps (matched against ``prod_root_names`` / ``dev_root_names``)
     are still depth=0; everything else is depth=1.
 
-    Entries whose source is git / path / file have no PyPI metadata and
-    are skipped.
+    An entry with ``git`` (and its ``ref``, the locked commit), ``path``, or
+    ``file`` is not a PyPI release: it is a row with an origin, at the
+    version the entry records, if any. One whose path is inside
+    ``scan_root`` is the project's own code and is not a row.
     """
+    scan_root = scan_root or path.parent
     prod_root_names = {_canon_name(n) for n in prod_root_names}
     dev_root_names = {_canon_name(n) for n in dev_root_names}
     data = root_table(path, load_json(path))
@@ -451,11 +554,12 @@ def parse_pipfile_lock(
                 record_unexpected_type(path, entry_of)
                 continue
             meta = cast("dict[str, Any]", raw)
-            if any(k in meta for k in _PIPFILE_NON_REGISTRY_KEYS):
+            origin = source_table_origin(path, meta, entry_of, path.parent, scan_root)
+            if origin is None:
                 read += 1
                 continue
-            version = typed_field(path, meta, "version", str, entry_of)
-            if not version:
+            version = typed_field(path, meta, "version", str, entry_of) or ""
+            if not version and not origin:
                 continue
             read += 1
             if group == DependencyGroup.DEV and not include_dev:
@@ -470,6 +574,7 @@ def parse_pipfile_lock(
                     group=group,
                     depth=0 if is_root else 1,
                     direct_ancestors=(),
+                    origin=origin,
                 )
             )
     record_unread_entries(path, total, read)

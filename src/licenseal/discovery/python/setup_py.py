@@ -30,8 +30,8 @@ from pathlib import Path
 
 from licenseal.discovery._read import decode_text, record_parse_failure
 from licenseal.discovery._walk import walk_project_files
-from licenseal.discovery.python import DEV_GROUP_NAMES, parse_pep508_dep
-from licenseal.models import Dependency, DependencyGroup, Ecosystem
+from licenseal.discovery.python import DEV_GROUP_NAMES, requirement_dependency
+from licenseal.models import Dependency, DependencyGroup
 
 # Sibling-file filename patterns checked when a `deps["x"]` subscript cannot
 # be resolved within setup.py itself. Matches the common
@@ -247,26 +247,28 @@ def _find_setup_call(tree: ast.Module) -> ast.Call | None:
 
 
 def _emit_deps(
-    strings: list[str], group: DependencyGroup, source: str, out: list[Dependency]
+    strings: list[str],
+    group: DependencyGroup,
+    source: str,
+    out: list[Dependency],
+    base_dir: Path,
+    scan_root: Path,
 ) -> None:
     for raw in strings:
-        name, version, extras = parse_pep508_dep(raw)
-        if not name:
-            continue
-        out.append(
-            Dependency(
-                name=name,
-                version_constraint=version,
-                ecosystem=Ecosystem.PYTHON,
-                group=group,
-                source=source,
-                extras=extras,
-            )
-        )
+        dep = requirement_dependency(raw, group, source, base_dir, scan_root)
+        if dep is not None:
+            out.append(dep)
 
 
-def _extract_setup_py(path: Path, source: str) -> tuple[list[Dependency], str]:
-    """Return ``(deps, license_str)`` extracted from a single setup.py file."""
+def _extract_setup_py(
+    path: Path, source: str, scan_root: Path | None = None
+) -> tuple[list[Dependency], str]:
+    """Return ``(deps, license_str)`` extracted from a single setup.py file.
+
+    ``scan_root`` is the scanned directory, the file's own directory when
+    omitted: a requirement on a path inside it is the project's own code.
+    """
+    scan_root = scan_root or path.parent
     tree = _parse_ast(path, record_failure=True)
     if tree is None:
         return [], ""
@@ -291,7 +293,9 @@ def _extract_setup_py(path: Path, source: str) -> tuple[list[Dependency], str]:
         elif kw.arg == "install_requires":
             resolved_list = _resolve_to_list_of_strings(kw.value, module, dict_registry)
             if resolved_list is not None:
-                _emit_deps(resolved_list, DependencyGroup.PROD, source, deps)
+                _emit_deps(
+                    resolved_list, DependencyGroup.PROD, source, deps, path.parent, scan_root
+                )
         elif kw.arg == "extras_require":
             resolved_dict = _resolve_to_dict_of_lists(kw.value, module, dict_registry)
             if resolved_dict is not None:
@@ -301,7 +305,7 @@ def _extract_setup_py(path: Path, source: str) -> tuple[list[Dependency], str]:
                         if extra_name.lower() in DEV_GROUP_NAMES
                         else DependencyGroup.PROD
                     )
-                    _emit_deps(extra_deps, group, source, deps)
+                    _emit_deps(extra_deps, group, source, deps, path.parent, scan_root)
 
     # Fallback to the trove ``License :: OSI Approved :: ...`` classifier when
     # there is no explicit ``license=`` kwarg. Mirrors the pyproject.toml
@@ -330,7 +334,7 @@ def discover_setup_py_dependencies(
     deps: list[Dependency] = []
     for setup_py in walk_project_files(project_path, "setup.py", exclude_paths=exclude_paths):
         source = setup_py.relative_to(project_path).as_posix()
-        file_deps, _ = _extract_setup_py(setup_py, source)
+        file_deps, _ = _extract_setup_py(setup_py, source, project_path)
         deps.extend(file_deps)
     return deps
 

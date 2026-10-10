@@ -7,11 +7,11 @@ from pathlib import Path
 
 from licenseal.discovery._read import decode_text, record_parse_failure
 from licenseal.discovery._walk import walk_project_files
-from licenseal.discovery.python import DEV_GROUP_NAMES, parse_pep508_dep
-from licenseal.models import Dependency, DependencyGroup, Ecosystem
+from licenseal.discovery.python import DEV_GROUP_NAMES, requirement_dependency
+from licenseal.models import Dependency, DependencyGroup
 
 
-def _parse_setup_cfg(setup_cfg: Path, source: str) -> list[Dependency]:
+def _parse_setup_cfg(setup_cfg: Path, source: str, scan_root: Path) -> list[Dependency]:
     """Parse a single setup.cfg file into Dependencies."""
     text = decode_text(setup_cfg)
     if text is None:
@@ -39,7 +39,9 @@ def _parse_setup_cfg(setup_cfg: Path, source: str) -> list[Dependency]:
 
     # [options] install_requires
     for line in install_requires.strip().splitlines():
-        dep = _parse_dep_line(line.strip(), DependencyGroup.PROD, source)
+        dep = _parse_dep_line(
+            line.strip(), DependencyGroup.PROD, source, setup_cfg.parent, scan_root
+        )
         if dep:
             deps.append(dep)
 
@@ -49,7 +51,7 @@ def _parse_setup_cfg(setup_cfg: Path, source: str) -> list[Dependency]:
             DependencyGroup.DEV if extra_name.lower() in DEV_GROUP_NAMES else DependencyGroup.PROD
         )
         for line in extra_deps_str.strip().splitlines():
-            dep = _parse_dep_line(line.strip(), group, source)
+            dep = _parse_dep_line(line.strip(), group, source, setup_cfg.parent, scan_root)
             if dep:
                 deps.append(dep)
 
@@ -71,7 +73,7 @@ def discover_setup_cfg_dependencies(
     for setup_cfg in walk_project_files(project_path, "setup.cfg", exclude_paths=exclude_paths):
         # Paths come from os.walk rooted at project_path, so relative_to is safe.
         source = setup_cfg.relative_to(project_path).as_posix()
-        deps.extend(_parse_setup_cfg(setup_cfg, source))
+        deps.extend(_parse_setup_cfg(setup_cfg, source, project_path))
     return deps
 
 
@@ -105,20 +107,14 @@ def detect_project_license_setup_cfg(setup_cfg: Path) -> str:
     return ""
 
 
-def _parse_dep_line(line: str, group: DependencyGroup, source: str) -> Dependency | None:
-    """Parse a single dependency line from setup.cfg."""
+def _parse_dep_line(
+    line: str, group: DependencyGroup, source: str, base_dir: Path, scan_root: Path
+) -> Dependency | None:
+    """Parse a single dependency line from setup.cfg.
+
+    A direct reference (``name @ <url>``) is a dependency with an origin; one
+    to a path inside ``scan_root`` is the project's own code and yields None.
+    """
     if not line or line.startswith("#"):
         return None
-
-    name, version, extras = parse_pep508_dep(line)
-    if not name:
-        return None
-
-    return Dependency(
-        name=name,
-        version_constraint=version,
-        ecosystem=Ecosystem.PYTHON,
-        group=group,
-        source=source,
-        extras=extras,
-    )
+    return requirement_dependency(line, group, source, base_dir, scan_root)

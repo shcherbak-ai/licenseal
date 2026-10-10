@@ -294,6 +294,7 @@ def resolve_transitive(
                         prod_root_names=names_by_group(Ecosystem.PYTHON, DependencyGroup.PROD),
                         dev_root_names=names_by_group(Ecosystem.PYTHON, DependencyGroup.DEV),
                         include_dev=include_dev,
+                        scan_root=project_path,
                     )
                 )
             )
@@ -588,7 +589,41 @@ def resolve_transitive(
         )
         out.extend(walked)
 
-    return _dedupe(out)
+    return _dedupe(_keep_declared_origins(out, direct_deps))
+
+
+def _keep_declared_origins(
+    deps: list[Dependency], direct_deps: list[Dependency]
+) -> list[Dependency]:
+    """Give a lockfile's row for a direct dep the origin its manifests declare.
+
+    A dependency that every manifest declares from a git repository, a URL,
+    or a path is not a registry package, whatever a lockfile records under
+    its name. A lockfile that is stale, or that does not say where a package
+    came from, must not turn the UNKNOWN row the manifest calls for into a
+    registry lookup: a direct row without an origin takes the declared one.
+    A name that some manifest also declares as a registry requirement is
+    left as the lockfile has it.
+    """
+    declared: dict[tuple[Ecosystem, str], str] = {}
+    registry_names: set[tuple[Ecosystem, str]] = set()
+    for dep in direct_deps:
+        key = (dep.ecosystem, _canonical_name(dep))
+        if dep.origin:
+            declared.setdefault(key, dep.origin)
+        else:
+            registry_names.add(key)
+    for key in registry_names:
+        declared.pop(key, None)
+    if not declared:
+        return deps
+    out: list[Dependency] = []
+    for dep in deps:
+        origin = declared.get((dep.ecosystem, _canonical_name(dep)), "")
+        out.append(
+            replace(dep, origin=origin) if origin and dep.depth == 0 and not dep.origin else dep
+        )
+    return out
 
 
 _GO_PROXY_URL = "https://proxy.golang.org"

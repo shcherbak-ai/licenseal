@@ -836,18 +836,24 @@ class TestPipfileLock:
         assert _gaps(diags) == {(lock, _UNREAD)}
 
     @pytest.mark.parametrize(
-        "document",
+        ("document", "off_registry"),
         [
-            {"default": {}, "develop": {}},
-            {"default": {"local": {"path": ".", "editable": True}}},
-            {"default": {"fork": {"git": "https://example.invalid/fork.git", "ref": "abc"}}},
+            ({"default": {}, "develop": {}}, set()),
+            ({"default": {"local": {"path": ".", "editable": True}}}, set()),
+            (
+                {"default": {"fork": {"git": "https://example.invalid/fork.git", "ref": "abc"}}},
+                {("fork", "", PROD)},
+            ),
         ],
         ids=["empty", "path-only", "git-only"],
     )
-    def test_lockfile_with_no_registry_package_is_clean(self, tmp_path: Path, document):
+    def test_lockfile_with_no_registry_package_is_clean(
+        self, tmp_path: Path, document, off_registry
+    ):
+        # The git package is a row of its own, with no version to pin.
         self._project(tmp_path, document)
         rows, diags = _resolve(tmp_path)
-        assert rows == _PY_UNPINNED
+        assert rows == _PY_UNPINNED | off_registry
         assert diags == []
 
     def test_only_develop_entries_without_dev_is_clean(self, tmp_path: Path):

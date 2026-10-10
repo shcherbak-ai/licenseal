@@ -3,19 +3,11 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
 
 from licenseal.discovery._read import load_toml, typed_field
 from licenseal.discovery._walk import walk_project_files
-from licenseal.discovery.python import table_spec
+from licenseal.discovery.python import source_table_origin, table_spec
 from licenseal.models import Dependency, DependencyGroup, Ecosystem
-
-
-def _is_non_registry(spec: Any) -> bool:
-    """Pipfile entries with ``git`` / ``path`` / ``file`` source aren't on PyPI."""
-    if isinstance(spec, dict):
-        return any(k in spec for k in ("git", "path", "file"))
-    return False
 
 
 def discover_pipfile_dependencies(
@@ -28,8 +20,10 @@ def discover_pipfile_dependencies(
     Pipfile uses two top-level sections: ``[packages]`` for production and
     ``[dev-packages]`` for development. Each entry's value can be a string
     version spec or a table carrying ``version`` plus optional ``extras``
-    / ``git`` / ``path`` / ``file``. Non-registry sources (git/path/file)
-    have no PyPI metadata to license-resolve and are skipped.
+    / ``git`` / ``path`` / ``file``. An entry with ``git`` (or ``hg`` /
+    ``svn`` / ``bzr``), ``path``, or ``file`` is not a PyPI package: it is
+    returned with an origin and no version constraint, unless its path is
+    inside the scanned directory, which makes it the project's own code.
 
     Pipfile uses ``"*"`` to mean "any version" — treated as an empty
     constraint so downstream resolution falls back to the registry's latest.
@@ -51,16 +45,23 @@ def discover_pipfile_dependencies(
             entries = typed_field(pf, data, section, dict) or {}
             for name, spec in entries.items():
                 # tomllib guarantees string keys, so no per-key isinstance check.
-                if _is_non_registry(spec):
+                what = f"an entry of {section}"
+                origin = (
+                    source_table_origin(pf, spec, what, pf.parent, project_path)
+                    if isinstance(spec, dict)
+                    else ""
+                )
+                if origin is None:
                     continue
-                version, extras = table_spec(pf, spec, f"an entry of {section}")
+                version, extras = table_spec(pf, spec, what)
                 deps.append(
                     Dependency(
                         name=name,
-                        version_constraint="" if version == "*" else version,
+                        version_constraint="" if origin or version == "*" else version,
                         ecosystem=Ecosystem.PYTHON,
                         group=group,
                         source=source,
+                        origin=origin,
                         extras=extras,
                     )
                 )

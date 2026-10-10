@@ -1562,3 +1562,975 @@ class TestPnpmLockOffRegistry:
         assert rows["old-fork"]["resolved_version"] == "0.3.0"
         assert rows["@scope/scoped"]["direct_ancestors"] == ["old-fork"]
         assert _requests_mentioning("old-fork", "typed", "nameless", "unlocated") == []
+
+
+# ----------------------------------------------------------------------- Python
+
+
+def _mock_pypi_release(name: str, version: str, license_id: str = "MIT") -> None:
+    """Answer PyPI's project and version endpoints for ``name`` at ``version``."""
+    payload = {
+        "info": {"license": license_id, "version": version, "classifiers": [], "requires_dist": []},
+        "releases": {version: []},
+    }
+    for url in (
+        f"https://pypi.org/pypi/{name}/json",
+        f"https://pypi.org/pypi/{name}/{version}/json",
+    ):
+        respx.get(url).mock(return_value=httpx.Response(200, json=payload))
+
+
+def _origins(data: dict) -> dict[str, str]:
+    return {dep["name"]: dep["origin"] for dep in data["dependencies"]}
+
+
+_PY_FORKS = ("wheel-fork", "git-fork", "localonly", "dev-fork", "grp-fork", "rel-fork")
+
+
+class TestPythonDirectReferences:
+    """PEP 508 direct references: one UNKNOWN row each, and no PyPI request."""
+
+    @respx.mock
+    @pytest.mark.parametrize("flags", [(), ("--no-transitive",)])
+    def test_pyproject_pep621_references(self, tmp_path, flags):
+        project = tmp_path / "project"
+        _write(
+            project / "pyproject.toml",
+            """\
+            [project]
+            name = "app"
+            license = "MIT"
+            dependencies = [
+                "regular",
+                "wheel-fork @ https://dl.example.org/w/wheel_fork-2.0-py3-none-any.whl#sha256=0123abcd",
+                "git-fork[extra] @ git+https://tok3n@git.example.org/team/git-fork.git@v1.2#egg=x",
+                "localonly @ file:///opt/pkgs/localonly",
+                "rel-fork @ file:../rel-fork",
+                "own-lib @ file:./libs/own-lib",
+            ]
+
+            [project.optional-dependencies]
+            dev = ["dev-fork @ git+https://git.example.org/team/dev-fork.git"]
+
+            [dependency-groups]
+            test = ["grp-fork @ git+ssh://git@git.example.org/team/grp-fork.git@abc123"]
+            """,
+        )
+        # PyPI owns every one of these names, under another license.
+        for name in (*_PY_FORKS, "own-lib"):
+            _mock_pypi_release(name, "9.9.9", "GPL-3.0-only")
+        _mock_pypi_release("regular", "1.0.0")
+        _refuse_everything_else()
+        result, data = _check_json(project, "--dev", *flags)
+        assert result.exit_code == 1
+        assert _origins(data) == {
+            "regular": "",
+            "wheel-fork": "https://dl.example.org/w/wheel_fork-2.0-py3-none-any.whl#sha256=0123abcd",
+            "git-fork": "git+https://git.example.org/team/git-fork.git@v1.2",
+            "localonly": "/opt/pkgs/localonly",
+            "rel-fork": "../rel-fork",
+            "dev-fork": "git+https://git.example.org/team/dev-fork.git",
+            "grp-fork": "git+ssh://git.example.org/team/grp-fork.git@abc123",
+        }
+        rows = _rows(data)
+        for name in _PY_FORKS:
+            assert (rows[name]["license"], rows[name]["resolved_version"]) == ("UNKNOWN", ""), name
+            assert rows[name]["source"] == "pyproject.toml"
+        assert (rows["regular"]["license"], rows["regular"]["resolved_version"]) == ("MIT", "1.0.0")
+        assert rows["dev-fork"]["group"] == "dev"
+        assert _requests_mentioning(*_PY_FORKS, "own-lib") == []
+        assert "tok3n" not in json.dumps(data)
+
+    @respx.mock
+    def test_setup_cfg_and_setup_py_references(self, tmp_path):
+        project = tmp_path / "project"
+        _write(
+            project / "setup.cfg",
+            """\
+            [metadata]
+            name = app
+            license = MIT
+
+            [options]
+            install_requires =
+                regular
+                cfg-fork @ https://dl.example.org/cfg_fork-1.0.tar.gz
+                cfg-own @ file:./vendor-src/cfg-own
+
+            [options.extras_require]
+            dev =
+                cfg-dev-fork @ git+https://git.example.org/team/cfg-dev-fork.git@main
+            """,
+        )
+        _write(
+            project / "sub" / "setup.py",
+            """\
+            from setuptools import setup
+
+            setup(
+                name="sub",
+                install_requires=[
+                    "py-fork @ git+https://git.example.org/team/py-fork.git@v3",
+                    "py-own @ file:.",
+                ],
+                extras_require={"test": ["py-test-fork @ https://dl.example.org/py_test_fork.zip"]},
+            )
+            """,
+        )
+        forks = ("cfg-fork", "cfg-dev-fork", "py-fork", "py-test-fork")
+        for name in (*forks, "cfg-own", "py-own"):
+            _mock_pypi_release(name, "9.9.9", "GPL-3.0-only")
+        _mock_pypi_release("regular", "1.0.0")
+        _refuse_everything_else()
+        result, data = _check_json(project, "--dev", "--no-strict")
+        assert result.exit_code == 0
+        assert _origins(data) == {
+            "regular": "",
+            "cfg-fork": "https://dl.example.org/cfg_fork-1.0.tar.gz",
+            "cfg-dev-fork": "git+https://git.example.org/team/cfg-dev-fork.git@main",
+            "py-fork": "git+https://git.example.org/team/py-fork.git@v3",
+            "py-test-fork": "https://dl.example.org/py_test_fork.zip",
+        }
+        rows = _rows(data)
+        assert all(rows[name]["license"] == "UNKNOWN" for name in forks)
+        assert rows["py-fork"]["source"] == "sub/setup.py"
+        assert _requests_mentioning(*forks, "cfg-own", "py-own") == []
+
+    @respx.mock
+    def test_review_keyed_on_the_reference_clears_the_row(self, tmp_path):
+        _write(
+            tmp_path / "pyproject.toml",
+            """\
+            [project]
+            name = "app"
+            license = "MIT"
+            dependencies = ["Git_Fork @ git+https://git.example.org/team/git-fork.git@v1.2"]
+            """,
+        )
+        _refuse_everything_else()
+        result = CliRunner().invoke(main, ["init-review-file", "--path", str(tmp_path)])
+        assert result.exit_code == 0
+        scaffold = (tmp_path / REVIEW_FILE_NAME).read_text(encoding="utf-8")
+        assert 'source = "git+https://git.example.org/team/git-fork.git@v1.2"\n' in scaffold
+        (tmp_path / REVIEW_FILE_NAME).write_text(
+            scaffold.replace('license = ""', 'license = "BSD-3-Clause"'),
+            encoding="utf-8",
+            newline="\n",
+        )
+        result, data = _check_json(tmp_path)
+        assert result.exit_code == 0
+        assert _rows(data)["Git_Fork"]["license"] == "BSD-3-Clause"
+        assert respx.calls.call_count == 0
+
+
+class TestPythonSourceTables:
+    """Poetry, uv, and Pipfile source tables."""
+
+    @respx.mock
+    def test_poetry_git_path_and_url_tables(self, tmp_path):
+        project = tmp_path / "project"
+        _write(
+            project / "pyproject.toml",
+            """\
+            [tool.poetry]
+            name = "app"
+            license = "MIT"
+
+            [[tool.poetry.source]]
+            name = "internal"
+            url = "https://pypi.internal.example.org/simple"
+
+            [tool.poetry.dependencies]
+            python = "^3.11"
+            regular = ">=1.0"
+            mirrored = { version = ">=2.0", source = "internal" }
+            git-rev = { git = "https://tok3n@git.example.org/team/git-rev.git", rev = "0123abc" }
+            git-tag = { git = "https://git.example.org/team/git-tag.git", tag = "v1.0" }
+            git-branch = { git = "https://git.example.org/team/git-branch.git", branch = "main" }
+            git-bare = { git = "https://git.example.org/team/git-bare.git" }
+            url-dep = { url = "https://dl.example.org/url_dep-1.0.tar.gz" }
+            path-outside = { path = "../path-outside", develop = true }
+            path-inside = { path = "libs/path-inside" }
+            multi = [
+                { version = "^1.0", python = "<3.12" },
+                { git = "https://git.example.org/team/multi.git", python = ">=3.12" },
+            ]
+            bad-git = { git = 7 }
+
+            [tool.poetry.group.dev.dependencies]
+            dev-git = { git = "https://git.example.org/team/dev-git.git" }
+            dev-inside = { path = "tools/dev-inside" }
+            """,
+        )
+        forks = (
+            "git-rev",
+            "git-tag",
+            "git-branch",
+            "git-bare",
+            "url-dep",
+            "path-outside",
+            "multi",
+            "bad-git",
+            "dev-git",
+        )
+        for name in (*forks, "path-inside", "dev-inside"):
+            _mock_pypi_release(name, "9.9.9", "GPL-3.0-only")
+        _mock_pypi_release("regular", "1.0.0")
+        # An alternate index is not an off-registry source: the name is
+        # looked up on PyPI.
+        _mock_pypi_release("mirrored", "2.0.0")
+        _refuse_everything_else()
+        result, data = _check_json(project, "--dev", "--no-strict")
+        assert result.exit_code == 0
+        assert _origins(data) == {
+            "regular": "",
+            "mirrored": "",
+            "git-rev": "git+https://git.example.org/team/git-rev.git@0123abc",
+            "git-tag": "git+https://git.example.org/team/git-tag.git@v1.0",
+            "git-branch": "git+https://git.example.org/team/git-branch.git@main",
+            "git-bare": "git+https://git.example.org/team/git-bare.git",
+            "url-dep": "https://dl.example.org/url_dep-1.0.tar.gz",
+            "path-outside": "../path-outside",
+            "multi": "git+https://git.example.org/team/multi.git",
+            "bad-git": "unrecorded source",
+            "dev-git": "git+https://git.example.org/team/dev-git.git",
+        }
+        rows = _rows(data)
+        assert all(rows[name]["license"] == "UNKNOWN" for name in forks)
+        assert rows["mirrored"]["license"] == "MIT"
+        assert rows["dev-git"]["group"] == "dev"
+        assert _requests_mentioning(*forks, "path-inside", "dev-inside") == []
+        assert _requests_mentioning("mirrored")
+        # The value that is not a string is on record.
+        assert data["diagnostics"] == [
+            {
+                "path": "pyproject.toml",
+                "reason": "an entry of tool.poetry.dependencies has an unexpected type; ignored",
+                "severity": "gap",
+            }
+        ]
+
+    @respx.mock
+    def test_uv_sources(self, tmp_path):
+        project = tmp_path / "project"
+        _write(
+            project / "pyproject.toml",
+            """\
+            [project]
+            name = "app"
+            license = "MIT"
+            dependencies = [
+                "regular",
+                "indexed",
+                "Git.Fork>=1.0",
+                "url-fork",
+                "path-outside",
+                "path-inside",
+                "member",
+                "per-os",
+                "already @ git+https://git.example.org/team/already.git@v1",
+            ]
+
+            [dependency-groups]
+            dev = ["dev-fork"]
+
+            [tool.uv.workspace]
+            members = ["packages/*"]
+
+            [[tool.uv.index]]
+            name = "internal"
+            url = "https://pypi.internal.example.org/simple"
+
+            [tool.uv.sources]
+            indexed = { index = "internal" }
+            git-fork = { git = "https://git.example.org/team/git-fork.git", tag = "v1.0" }
+            url-fork = { url = "https://dl.example.org/url_fork-1.0-py3-none-any.whl" }
+            path-outside = { path = "../path-outside", editable = true }
+            path-inside = { path = "libs/path-inside" }
+            member = { workspace = true }
+            per-os = [
+                { index = "internal", marker = "os_name != 'nt'" },
+                { git = "https://git.example.org/team/per-os.git", marker = "os_name == 'nt'" },
+                "not a table",
+            ]
+            already = { git = "https://git.example.org/team/other.git" }
+            dev-fork = { git = "https://git.example.org/team/dev-fork.git", branch = "main" }
+            shared-fork = { git = "https://git.example.org/team/shared-fork.git", rev = "abc" }
+            overridden = { git = "https://git.example.org/team/overridden.git" }
+            """,
+        )
+        # A workspace member inherits the root's sources; its own win.
+        _write(
+            project / "packages" / "member" / "pyproject.toml",
+            """\
+            [project]
+            name = "member"
+            dependencies = ["shared-fork", "overridden", "regular"]
+
+            [tool.uv.sources]
+            overridden = { index = "internal" }
+            """,
+        )
+        forks = ("git-fork", "url-fork", "path-outside", "per-os", "already", "dev-fork")
+        for name in (*forks, "shared-fork", "path-inside", "member"):
+            _mock_pypi_release(name.replace("git-fork", "Git.Fork"), "9.9.9", "GPL-3.0-only")
+        for name in ("regular", "indexed", "overridden"):
+            _mock_pypi_release(name, "1.0.0")
+        _refuse_everything_else()
+        result = CliRunner().invoke(
+            main,
+            ["check", "--path", str(project), "--dev", "--no-strict", "-f", "json"],
+        )
+        assert result.exit_code == 0
+        assert "Excluded 1 local Python workspace package reference(s)" in result.output
+        data = json.loads(result.output[result.output.index("{") :])
+        assert _origins(data) == {
+            "regular": "",
+            "indexed": "",
+            "overridden": "",
+            "Git.Fork": "git+https://git.example.org/team/git-fork.git@v1.0",
+            "url-fork": "https://dl.example.org/url_fork-1.0-py3-none-any.whl",
+            "path-outside": "../path-outside",
+            "per-os": "git+https://git.example.org/team/per-os.git",
+            # The requirement's own direct reference wins over the table.
+            "already": "git+https://git.example.org/team/already.git@v1",
+            "dev-fork": "git+https://git.example.org/team/dev-fork.git@main",
+            "shared-fork": "git+https://git.example.org/team/shared-fork.git@abc",
+        }
+        rows = _rows(data)
+        assert rows["shared-fork"]["source"] == "packages/member/pyproject.toml"
+        assert rows["Git.Fork"]["resolved_version"] == ""
+        assert rows["dev-fork"]["group"] == "dev"
+        assert _requests_mentioning(*forks, "git.fork", "shared-fork", "path-inside") == []
+        assert _requests_mentioning("indexed") and _requests_mentioning("overridden")
+
+    @respx.mock
+    def test_pipfile_git_path_and_file_entries(self, tmp_path):
+        project = tmp_path / "project"
+        _write(
+            project / "Pipfile",
+            """\
+            [packages]
+            regular = "*"
+            git-fork = { git = "https://tok3n@git.example.org/team/git-fork.git", ref = "v1.2" }
+            hg-fork = { hg = "https://hg.example.org/team/hg-fork" }
+            file-url = { file = "https://dl.example.org/file_url-1.0.tar.gz" }
+            file-path = { file = "../wheels/file_path-1.0-py3-none-any.whl" }
+            file-uri = { file = "file:///opt/wheels/file_uri-1.0-py3-none-any.whl" }
+            path-outside = { path = "../path-outside", editable = true }
+            itself = { path = ".", editable = true }
+
+            [dev-packages]
+            dev-fork = { git = "https://git.example.org/team/dev-fork.git" }
+            """,
+        )
+        forks = (
+            "git-fork",
+            "hg-fork",
+            "file-url",
+            "file-path",
+            "file-uri",
+            "path-outside",
+            "dev-fork",
+        )
+        for name in (*forks, "itself"):
+            _mock_pypi_release(name, "9.9.9", "GPL-3.0-only")
+        _mock_pypi_release("regular", "1.0.0")
+        _refuse_everything_else()
+        result, data = _check_json(project, "--dev", "--no-strict")
+        assert result.exit_code == 0
+        assert _origins(data) == {
+            "regular": "",
+            "git-fork": "git+https://git.example.org/team/git-fork.git@v1.2",
+            "hg-fork": "hg+https://hg.example.org/team/hg-fork",
+            "file-url": "https://dl.example.org/file_url-1.0.tar.gz",
+            "file-path": "../wheels/file_path-1.0-py3-none-any.whl",
+            "file-uri": "/opt/wheels/file_uri-1.0-py3-none-any.whl",
+            "path-outside": "../path-outside",
+            "dev-fork": "git+https://git.example.org/team/dev-fork.git",
+        }
+        rows = _rows(data)
+        assert all(rows[name]["license"] == "UNKNOWN" for name in forks)
+        assert rows["git-fork"]["source"] == "Pipfile"
+        assert _requests_mentioning(*forks, "itself") == []
+
+
+class TestPythonRequirementsFiles:
+    @respx.mock
+    def test_url_vcs_and_path_lines(self, tmp_path):
+        project = tmp_path / "project"
+        _write(
+            project / "requirements.txt",
+            """\
+            --index-url https://pypi.internal.example.org/simple
+            regular==1.0.0 --hash=sha256:aaaa
+            named-fork @ https://dl.example.org/named_fork-2.0-py3-none-any.whl
+            rel-named @ ../rel-named
+            spaced-ref @ ../dir with space/spaced-ref ; python_version >= "3.9"
+            git+https://tok3n@git.example.org/team/egg-fork.git@v1.2#egg=egg-fork&subdirectory=pkg
+            git+https://git.example.org/team/vcs-fork.git@main
+            hg+https://hg.example.org/team/hg-fork
+            https://dl.example.org/wheels/wheel_fork-3.1-py3-none-any.whl --hash=sha256:bbbb
+            https://dl.example.org/src/sdist-fork-0.9.tar.gz#sha256=cccc
+            https://dl.example.org/src/snapshot.zip
+            -e git+https://git.example.org/team/editable-fork.git#egg=editable-fork
+            --editable=../editable-outside
+            -e ../extras-outside[test,docs]
+            -e .
+            -e ./plugins/own-plugin
+            ./vendor-src/own-vendored
+            ../wheels/outside_wheel-1.0-py3-none-any.whl
+            ..
+            local_archive-1.0.tar.gz
+            C:\\wheelhouse\\win_wheel-1.0-py3-none-any.whl
+            """,
+        )
+        forks = (
+            "named-fork",
+            "rel-named",
+            "spaced-ref",
+            "egg-fork",
+            "vcs-fork",
+            "hg-fork",
+            "wheel_fork",
+            "sdist-fork",
+            "snapshot",
+            "editable-fork",
+            "editable-outside",
+            "extras-outside",
+            "outside_wheel",
+            "win_wheel",
+        )
+        for name in (*forks, "own-plugin", "own-vendored", "local_archive", "git", "https"):
+            _mock_pypi_release(name, "9.9.9", "GPL-3.0-only")
+        _mock_pypi_release("regular", "1.0.0")
+        _refuse_everything_else()
+        result, data = _check_json(project, "--no-strict")
+        assert result.exit_code == 0
+        assert _origins(data) == {
+            "regular": "",
+            "named-fork": "https://dl.example.org/named_fork-2.0-py3-none-any.whl",
+            "rel-named": "../rel-named",
+            "spaced-ref": "../dir with space/spaced-ref",
+            # Named by ``#egg=``, by the archive's file name, or by the last
+            # path segment.
+            "egg-fork": "git+https://git.example.org/team/egg-fork.git@v1.2",
+            "vcs-fork": "git+https://git.example.org/team/vcs-fork.git@main",
+            "hg-fork": "hg+https://hg.example.org/team/hg-fork",
+            "wheel_fork": "https://dl.example.org/wheels/wheel_fork-3.1-py3-none-any.whl#sha256:bbbb",
+            "sdist-fork": "https://dl.example.org/src/sdist-fork-0.9.tar.gz#sha256=cccc",
+            "snapshot": "https://dl.example.org/src/snapshot.zip",
+            "editable-fork": "git+https://git.example.org/team/editable-fork.git",
+            "editable-outside": "../editable-outside",
+            "extras-outside": "../extras-outside",
+            "outside_wheel": "../wheels/outside_wheel-1.0-py3-none-any.whl",
+            "..": "..",
+            "win_wheel": "C:\\wheelhouse\\win_wheel-1.0-py3-none-any.whl",
+        }
+        rows = _rows(data)
+        assert (rows["regular"]["license"], rows["regular"]["resolved_version"]) == ("MIT", "1.0.0")
+        assert all(rows[name]["license"] == "UNKNOWN" for name in forks)
+        assert rows["egg-fork"]["source"] == "requirements.txt"
+        assert _requests_mentioning(*forks, "own-", "local_archive") == []
+        assert "tok3n" not in json.dumps(data)
+
+    @respx.mock
+    def test_editable_install_of_the_project_itself_is_not_a_dependency(self, tmp_path):
+        _write(tmp_path / "requirements-dev.txt", "-e .\n-e .[test]\n--editable .\n.\n")
+        _refuse_everything_else()
+        result, data = _check_json(tmp_path, "--dev")
+        assert result.exit_code == 0
+        assert data["dependencies"] == []
+        assert respx.calls.call_count == 0
+
+    @respx.mock
+    def test_relative_path_is_taken_from_the_file_that_names_it(self, tmp_path):
+        project = tmp_path / "project"
+        _write(project / "requirements.txt", "-r reqs/more.txt\n")
+        # ``../libs/inside`` is inside the project from ``reqs/``; two levels
+        # up is not.
+        _write(project / "reqs" / "more.txt", "../libs/inside\n../../outside\n")
+        _refuse_everything_else()
+        _, data = _check_json(project, "--no-strict")
+        assert [(d["name"], d["origin"], d["source"]) for d in data["dependencies"]] == [
+            ("outside", "../../outside", "reqs/more.txt")
+        ]
+
+
+class TestPythonLockfiles:
+    @respx.mock
+    def test_uv_lock_git_url_path_and_directory_entries(self, tmp_path):
+        project = tmp_path / "project"
+        names = (
+            "regular",
+            "mirrored",
+            "git-fork",
+            "url-fork",
+            "sdist-fork",
+            "bare-url",
+            "dir-outside",
+            "path-outside",
+            "dir-inside",
+            "editable-outside",
+            "editable-inside",
+            "bad-source",
+        )
+        _write(
+            project / "pyproject.toml",
+            '[project]\nname = "app"\nlicense = "MIT"\ndependencies = '
+            + json.dumps(list(names))
+            + "\n\n[tool.uv.sources]\n"
+            + 'dir-inside = { path = "libs/dir-inside" }\n'
+            + 'editable-inside = { path = "libs/editable-inside", editable = true }\n',
+        )
+        _write(
+            project / "uv.lock",
+            """\
+            version = 1
+
+            [[package]]
+            name = "app"
+            version = "0.1.0"
+            source = { virtual = "." }
+
+            [[package]]
+            name = "regular"
+            version = "1.0.0"
+            source = { registry = "https://pypi.org/simple" }
+
+            [[package]]
+            name = "mirrored"
+            version = "2.0.0"
+            source = { registry = "https://pypi.internal.example.org/simple" }
+
+            [[package]]
+            name = "git-fork"
+            version = "1.2.0"
+            source = { git = "https://tok3n@git.example.org/team/git-fork.git?rev=v1.2#0123abcd" }
+            dependencies = [{ name = "via-git" }]
+
+            [[package]]
+            name = "via-git"
+            version = "3.0.0"
+            source = { registry = "https://pypi.org/simple" }
+
+            [[package]]
+            name = "url-fork"
+            version = "2.0"
+            source = { url = "https://dl.example.org/w/url_fork-2.0-py3-none-any.whl" }
+
+            [[package.wheels]]
+            url = "https://dl.example.org/w/url_fork-2.0-py3-none-any.whl"
+            hash = "sha256:89ab"
+
+            [[package]]
+            name = "sdist-fork"
+            version = "0.9"
+            source = { url = "https://dl.example.org/s/sdist_fork-0.9.tar.gz" }
+            sdist = { url = "https://dl.example.org/s/sdist_fork-0.9.tar.gz", hash = "sha256:cdef" }
+
+            [[package]]
+            name = "bare-url"
+            version = "0.1"
+            source = { url = "https://dl.example.org/s/bare_url-0.1.zip" }
+            wheels = ["not a table", { url = "x" }]
+
+            [[package]]
+            name = "dir-outside"
+            version = "0.1.0"
+            source = { directory = "../dir-outside" }
+
+            [[package]]
+            name = "path-outside"
+            version = "0.2.0"
+            source = { path = "../wheels/path_outside-0.2.0-py3-none-any.whl" }
+
+            [[package]]
+            name = "dir-inside"
+            version = "0.3.0"
+            source = { directory = "libs/dir-inside" }
+
+            [[package]]
+            name = "editable-outside"
+            source = { editable = "../editable-outside" }
+
+            [[package]]
+            name = "editable-inside"
+            version = "0.4.0"
+            source = { editable = "libs/editable-inside" }
+
+            [[package]]
+            name = "bad-source"
+            version = "0.5.0"
+            source = { git = 7 }
+            """,
+        )
+        forks = (
+            "git-fork",
+            "url-fork",
+            "sdist-fork",
+            "bare-url",
+            "dir-outside",
+            "path-outside",
+            "editable-outside",
+            "bad-source",
+        )
+        for name in (*forks, "dir-inside", "editable-inside"):
+            _mock_pypi_release(name, "9.9.9", "GPL-3.0-only")
+        for name, version in (("regular", "1.0.0"), ("mirrored", "2.0.0"), ("via-git", "3.0.0")):
+            _mock_pypi_release(name, version)
+        _refuse_everything_else()
+        result, data = _check_json(project, "--no-strict")
+        assert result.exit_code == 0
+        rows = _rows(data)
+        assert {name: (row["origin"], row["resolved_version"]) for name, row in rows.items()} == {
+            "regular": ("", "1.0.0"),
+            "mirrored": ("", "2.0.0"),
+            "via-git": ("", "3.0.0"),
+            "git-fork": ("git+https://git.example.org/team/git-fork.git@0123abcd", "1.2.0"),
+            "url-fork": (
+                "https://dl.example.org/w/url_fork-2.0-py3-none-any.whl#sha256:89ab",
+                "2.0",
+            ),
+            "sdist-fork": ("https://dl.example.org/s/sdist_fork-0.9.tar.gz#sha256:cdef", "0.9"),
+            "bare-url": ("https://dl.example.org/s/bare_url-0.1.zip", "0.1"),
+            "dir-outside": ("../dir-outside", "0.1.0"),
+            "path-outside": ("../wheels/path_outside-0.2.0-py3-none-any.whl", "0.2.0"),
+            "editable-outside": ("../editable-outside", ""),
+            "bad-source": ("unrecorded source", "0.5.0"),
+        }
+        assert all(rows[name]["license"] == "UNKNOWN" for name in forks)
+        assert all(rows[name]["license"] == "MIT" for name in ("regular", "mirrored", "via-git"))
+        # The registry package only the git dependency pulls in names it.
+        assert rows["via-git"]["direct_ancestors"] == ["git-fork"]
+        assert rows["git-fork"]["source"] == "pyproject.toml"
+        assert _requests_mentioning(*forks, "dir-inside", "editable-inside") == []
+        assert _requests_mentioning("mirrored")
+        assert "tok3n" not in json.dumps(data)
+
+    @respx.mock
+    def test_poetry_lock_git_url_directory_and_file_sources(self, tmp_path):
+        project = tmp_path / "project"
+        names = (
+            "regular",
+            "mirrored",
+            "git-fork",
+            "git-unresolved",
+            "url-fork",
+            "url-two-files",
+            "dir-outside",
+            "file-outside",
+            "dir-inside",
+            "odd-source",
+            "no-url",
+        )
+        _write(
+            project / "pyproject.toml",
+            '[tool.poetry]\nname = "app"\nlicense = "MIT"\n\n[tool.poetry.dependencies]\n'
+            + "".join(f'{name} = "*"\n' for name in names if name != "dir-inside")
+            + 'dir-inside = { path = "libs/dir-inside" }\n',
+        )
+        _write(
+            project / "libs" / "dir-inside" / "pyproject.toml",
+            '[tool.poetry]\nname = "dir-inside"\n\n[tool.poetry.dependencies]\nvia-inside = "*"\n',
+        )
+        _write(
+            project / "poetry.lock",
+            """\
+            [[package]]
+            name = "regular"
+            version = "1.0.0"
+
+            [[package]]
+            name = "mirrored"
+            version = "2.0.0"
+
+            [package.source]
+            type = "legacy"
+            url = "https://pypi.internal.example.org/simple"
+            reference = "internal"
+
+            [[package]]
+            name = "git-fork"
+            version = "1.2.0"
+
+            [package.dependencies]
+            via-git = ">=3"
+
+            [package.source]
+            type = "git"
+            url = "https://tok3n@git.example.org/team/git-fork.git"
+            reference = "main"
+            resolved_reference = "0123abcd"
+
+            [[package]]
+            name = "via-git"
+            version = "3.0.0"
+
+            [[package]]
+            name = "git-unresolved"
+            version = "0.1.0"
+
+            [package.source]
+            type = "git"
+            url = "https://git.example.org/team/git-unresolved.git"
+            reference = "v0.1"
+
+            [[package]]
+            name = "url-fork"
+            version = "2.0"
+            files = [{ file = "url_fork-2.0-py3-none-any.whl", hash = "sha256:89ab" }]
+
+            [package.source]
+            type = "url"
+            url = "https://dl.example.org/w/url_fork-2.0-py3-none-any.whl"
+
+            [[package]]
+            name = "url-two-files"
+            version = "2.1"
+            files = [{ file = "a.whl", hash = "sha256:1" }, { file = "b.whl", hash = "sha256:2" }]
+
+            [package.source]
+            type = "url"
+            url = "https://dl.example.org/w/url_two_files-2.1.zip"
+
+            [[package]]
+            name = "dir-outside"
+            version = "0.1.0"
+
+            [package.source]
+            type = "directory"
+            url = "../dir-outside"
+
+            [[package]]
+            name = "file-outside"
+            version = "0.2.0"
+
+            [package.source]
+            type = "file"
+            url = "../wheels/file_outside-0.2.0-py3-none-any.whl"
+
+            [[package]]
+            name = "dir-inside"
+            version = "0.3.0"
+
+            [package.dependencies]
+            via-inside = "*"
+
+            [package.source]
+            type = "directory"
+            url = "libs/dir-inside"
+
+            [[package]]
+            name = "via-inside"
+            version = "4.0.0"
+
+            [[package]]
+            name = "odd-source"
+            version = "0.4.0"
+
+            [package.source]
+            type = "hg"
+            url = "https://hg.example.org/team/odd-source"
+
+            [[package]]
+            name = "no-url"
+            version = "0.5.0"
+
+            [package.source]
+            type = "git"
+
+            [metadata]
+            lock-version = "2.0"
+            """,
+        )
+        forks = (
+            "git-fork",
+            "git-unresolved",
+            "url-fork",
+            "url-two-files",
+            "dir-outside",
+            "file-outside",
+            "odd-source",
+            "no-url",
+        )
+        for name in (*forks, "dir-inside"):
+            _mock_pypi_release(name, "9.9.9", "GPL-3.0-only")
+        for name, version in (
+            ("regular", "1.0.0"),
+            ("mirrored", "2.0.0"),
+            ("via-git", "3.0.0"),
+            ("via-inside", "4.0.0"),
+        ):
+            _mock_pypi_release(name, version)
+        _refuse_everything_else()
+        result, data = _check_json(project, "--no-strict")
+        assert result.exit_code == 0
+        rows = _rows(data)
+        assert {name: (row["origin"], row["resolved_version"]) for name, row in rows.items()} == {
+            "regular": ("", "1.0.0"),
+            "mirrored": ("", "2.0.0"),
+            "via-git": ("", "3.0.0"),
+            "via-inside": ("", "4.0.0"),
+            "git-fork": ("git+https://git.example.org/team/git-fork.git@0123abcd", "1.2.0"),
+            "git-unresolved": ("git+https://git.example.org/team/git-unresolved.git@v0.1", "0.1.0"),
+            "url-fork": (
+                "https://dl.example.org/w/url_fork-2.0-py3-none-any.whl#sha256:89ab",
+                "2.0",
+            ),
+            "url-two-files": ("https://dl.example.org/w/url_two_files-2.1.zip", "2.1"),
+            "dir-outside": ("../dir-outside", "0.1.0"),
+            "file-outside": ("../wheels/file_outside-0.2.0-py3-none-any.whl", "0.2.0"),
+            "odd-source": ("https://hg.example.org/team/odd-source", "0.4.0"),
+            "no-url": ("unrecorded source", "0.5.0"),
+        }
+        assert all(rows[name]["license"] == "UNKNOWN" for name in forks)
+        assert rows["via-git"]["direct_ancestors"] == ["git-fork"]
+        # ``dir-inside`` is the project's own code: no row. The registry
+        # package it needs is a dependency its own manifest declares.
+        assert rows["via-inside"]["source"] == "libs/dir-inside/pyproject.toml"
+        assert rows["via-inside"]["direct_ancestors"] == []
+        assert _requests_mentioning(*forks, "dir-inside") == []
+        assert _requests_mentioning("mirrored")
+        assert "tok3n" not in json.dumps(data)
+
+    @respx.mock
+    def test_pipfile_lock_git_path_and_file_entries(self, tmp_path):
+        project = tmp_path / "project"
+        _write(project / "Pipfile", '[packages]\nregular = "*"\n')
+        (project / "Pipfile.lock").write_text(
+            json.dumps(
+                {
+                    "_meta": {"pipfile-spec": 6},
+                    "default": {
+                        "regular": {"version": "==1.0.0", "hashes": ["sha256:aa"]},
+                        "git-fork": {
+                            "git": "https://tok3n@git.example.org/team/git-fork.git",
+                            "ref": "0123abcd",
+                            "version": "==1.2.0",
+                        },
+                        "file-fork": {"file": "https://dl.example.org/file_fork-1.0.tar.gz"},
+                        "path-outside": {"path": "../path-outside", "editable": True},
+                        "itself": {"path": ".", "editable": True},
+                    },
+                    "develop": {
+                        "dev-fork": {
+                            "git": "https://git.example.org/team/dev-fork.git",
+                            "ref": "beef",
+                        },
+                        "noversion": {"hashes": []},
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+        forks = ("git-fork", "file-fork", "path-outside", "dev-fork")
+        for name in (*forks, "itself"):
+            _mock_pypi_release(name, "9.9.9", "GPL-3.0-only")
+        _mock_pypi_release("regular", "1.0.0")
+        _refuse_everything_else()
+        result, data = _check_json(project, "--dev", "--no-strict")
+        assert result.exit_code == 0
+        rows = _rows(data)
+        assert {name: (row["origin"], row["resolved_version"]) for name, row in rows.items()} == {
+            "regular": ("", "1.0.0"),
+            "git-fork": ("git+https://git.example.org/team/git-fork.git@0123abcd", "1.2.0"),
+            "file-fork": ("https://dl.example.org/file_fork-1.0.tar.gz", ""),
+            "path-outside": ("../path-outside", ""),
+            "dev-fork": ("git+https://git.example.org/team/dev-fork.git@beef", ""),
+        }
+        assert rows["dev-fork"]["group"] == "dev"
+        assert _requests_mentioning(*forks, "itself") == []
+
+        without_dev, data = _check_json(project, "--no-strict")
+        assert without_dev.exit_code == 0
+        assert "dev-fork" not in _rows(data)
+
+
+class TestPythonAlternateIndex:
+    @respx.mock
+    def test_local_version_from_a_mirror_is_looked_up_on_pypi(self, tmp_path):
+        # A ``+local`` build pinned from an internal mirror is not an
+        # off-registry source: PyPI is asked for the name, and its license
+        # is what is reported.
+        _write(
+            tmp_path / "requirements.txt",
+            "--extra-index-url https://m.example.org/simple\nmirrored==2.1.0+cu124\n",
+        )
+        respx.get("https://pypi.org/pypi/mirrored/2.1.0+cu124/json").mock(
+            return_value=httpx.Response(404)
+        )
+        respx.get("https://pypi.org/pypi/mirrored/json").mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "info": {"license": "BSD-3-Clause", "version": "2.1.0", "requires_dist": []},
+                    "releases": {"2.1.0": []},
+                },
+            )
+        )
+        _refuse_everything_else()
+        result, data = _check_json(tmp_path, "--no-transitive")
+        assert result.exit_code == 0
+        row = _rows(data)["mirrored"]
+        assert (row["origin"], row["license"]) == ("", "BSD-3-Clause")
+        assert _requests_mentioning("mirrored")
+
+
+class TestLockfileCannotClearADeclaredSource:
+    """A dependency every manifest declares off-registry stays off-registry."""
+
+    _LOCK = """\
+        version = 1
+
+        [[package]]
+        name = "app"
+        version = "0.1.0"
+        source = { virtual = "." }
+
+        [[package]]
+        name = "git-fork"
+        version = "1.2.0"
+        source = { registry = "https://pypi.org/simple" }
+        """
+
+    @respx.mock
+    def test_stale_lockfile_entry_takes_the_declared_origin(self, tmp_path):
+        _write(
+            tmp_path / "pyproject.toml",
+            """\
+            [project]
+            name = "app"
+            license = "MIT"
+            dependencies = ["git-fork @ git+https://git.example.org/team/git-fork.git@v1.2"]
+            """,
+        )
+        _write(tmp_path / "uv.lock", self._LOCK)
+        # PyPI has a release of that name and version.
+        _mock_pypi_release("git-fork", "1.2.0")
+        _refuse_everything_else()
+        result, data = _check_json(tmp_path)
+        assert result.exit_code == 1
+        row = _rows(data)["git-fork"]
+        assert row["origin"] == "git+https://git.example.org/team/git-fork.git@v1.2"
+        assert (row["license"], row["resolved_version"]) == ("UNKNOWN", "1.2.0")
+        assert _requests_mentioning("git-fork") == []
+
+    @respx.mock
+    def test_name_also_declared_as_a_registry_requirement_follows_the_lockfile(self, tmp_path):
+        _write(
+            tmp_path / "pyproject.toml",
+            '[project]\nname = "app"\nlicense = "MIT"\ndependencies = ["git-fork>=1.0"]\n',
+        )
+        _write(
+            tmp_path / "tools" / "requirements.txt",
+            "git-fork @ git+https://git.example.org/team/git-fork.git@v1.2\n",
+        )
+        _write(tmp_path / "uv.lock", self._LOCK)
+        _mock_pypi_release("git-fork", "1.2.0")
+        _refuse_everything_else()
+        result, data = _check_json(tmp_path)
+        assert result.exit_code == 0
+        assert [(d["name"], d["origin"], d["license"]) for d in data["dependencies"]] == [
+            ("git-fork", "", "MIT")
+        ]

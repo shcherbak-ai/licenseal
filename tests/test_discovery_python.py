@@ -689,7 +689,7 @@ class TestRequirementsDiscovery:
         deps = discover_requirements_dependencies(tmp_path)
         assert len(deps) == 2
 
-    def test_options_and_urls_skipped(self, tmp_path):
+    def test_options_skipped_and_urls_carry_an_origin(self, tmp_path):
         (tmp_path / "requirements.txt").write_text(
             textwrap.dedent("""\
             --index-url https://pypi.org/simple
@@ -701,8 +701,11 @@ class TestRequirementsDiscovery:
             """)
         )
         deps = discover_requirements_dependencies(tmp_path)
-        assert len(deps) == 1
-        assert deps[0].name == "requests"
+        assert [(d.name, d.version_constraint, d.origin) for d in deps] == [
+            ("requests", ">=2.0", ""),
+            ("repo", "", "git+https://github.com/user/repo.git"),
+            ("package", "", "https://example.com/package.tar.gz"),
+        ]
 
     def test_trailing_url_comment_keeps_requirement(self, tmp_path):
         # A URL inside a trailing comment must not trip the URL-requirement
@@ -723,7 +726,7 @@ class TestRequirementsDiscovery:
         assert by_name["extras-pkg"].version_constraint == ">=2"
         assert by_name["extras-pkg"].extras == frozenset({"socks"})
 
-    def test_url_requirements_with_fragment_or_comment_still_skipped(self, tmp_path):
+    def test_url_requirements_with_fragment_or_comment(self, tmp_path):
         # ``#`` only starts a comment at the start of a line or after
         # whitespace. A ``#fragment`` glued to a URL stays part of it, and a
         # URL requirement carrying a real trailing comment is still a URL.
@@ -736,11 +739,21 @@ class TestRequirementsDiscovery:
             """)
         )
         deps, _ = discover_all_dependencies(tmp_path)
-        assert [d.name for d in deps] == ["real-dep"]
+        assert [(d.name, d.origin) for d in deps] == [
+            ("frag-pkg", "git+https://example.org/user/repo.git"),
+            ("archive", "https://example.org/archive-1.0.tar.gz"),
+            (
+                "direct-ref",
+                "https://example.org/direct_ref-1.0-py3-none-any.whl#sha256=abc",
+            ),
+            ("real-dep", ""),
+        ]
 
-    def test_local_path_lines_yield_no_dependency(self, tmp_path):
-        # A local wheel, archive, or directory path is not a requirement: its
-        # first path segment must not be reported as a package name.
+    def test_local_path_lines_inside_the_project_yield_no_dependency(self, tmp_path):
+        # A local wheel, archive, or directory path inside the scanned
+        # directory is the project's own code, and its first path segment
+        # must not be reported as a package name. The drive-qualified paths
+        # are outside it: each is one dependency, named after the wheel.
         (tmp_path / "requirements.txt").write_text(
             textwrap.dedent("""\
             wheelhouse/wheels/local_pkg-1.0-py3-none-any.whl
@@ -755,7 +768,11 @@ class TestRequirementsDiscovery:
             """)
         )
         deps, _ = discover_all_dependencies(tmp_path)
-        assert [(d.name, d.version_constraint) for d in deps] == [("real-dep", "==1.0")]
+        assert [(d.name, d.version_constraint, d.origin) for d in deps] == [
+            ("local_pkg", "", "C:\\wheelhouse\\local_pkg-1.0-py3-none-any.whl"),
+            ("local_pkg", "", "C:/wheelhouse/local_pkg-1.0-py3-none-any.whl"),
+            ("real-dep", "==1.0", ""),
+        ]
 
     def test_line_continuation_backslash_is_not_a_path(self, tmp_path):
         # Hash-pinned files end each requirement line with a continuation
@@ -1204,7 +1221,7 @@ class TestPipfileDiscovery:
         deps = discover_pipfile_dependencies(tmp_path)
         assert deps[0].version_constraint == ""
 
-    def test_skips_git_path_file_sources(self, tmp_path):
+    def test_git_source_carries_an_origin_and_local_paths_are_own_code(self, tmp_path):
         (tmp_path / "Pipfile").write_text(
             textwrap.dedent("""\
             [packages]
@@ -1215,7 +1232,10 @@ class TestPipfileDiscovery:
             """)
         )
         deps = discover_pipfile_dependencies(tmp_path)
-        assert [d.name for d in deps] == ["real"]
+        assert [(d.name, d.version_constraint, d.origin) for d in deps] == [
+            ("from-git", "", "git+https://example.com/repo.git"),
+            ("real", ">=1", ""),
+        ]
 
     def test_skips_malformed_extras(self, tmp_path):
         # `extras` containing non-string entries: only the string ones survive.
@@ -1354,16 +1374,16 @@ class TestPyprojectEdgeCases:
 
 
 class TestSetupCfgEdgeCases:
-    def test_parse_dep_line_empty(self):
-        result = _parse_dep_line("", DependencyGroup.PROD, "setup.cfg")
+    def test_parse_dep_line_empty(self, tmp_path):
+        result = _parse_dep_line("", DependencyGroup.PROD, "setup.cfg", tmp_path, tmp_path)
         assert result is None
 
-    def test_parse_dep_line_comment(self):
-        result = _parse_dep_line("# comment", DependencyGroup.PROD, "setup.cfg")
+    def test_parse_dep_line_comment(self, tmp_path):
+        result = _parse_dep_line("# comment", DependencyGroup.PROD, "setup.cfg", tmp_path, tmp_path)
         assert result is None
 
-    def test_parse_dep_line_no_match(self):
-        result = _parse_dep_line("!!!", DependencyGroup.PROD, "setup.cfg")
+    def test_parse_dep_line_no_match(self, tmp_path):
+        result = _parse_dep_line("!!!", DependencyGroup.PROD, "setup.cfg", tmp_path, tmp_path)
         assert result is None
 
     def test_no_options_section(self, tmp_path):
@@ -1435,11 +1455,11 @@ class TestPyprojectEmptyDeps:
         deps, _ = discover_pyproject_dependencies(tmp_path)
         assert deps == []
 
-    def test_dep_with_empty_name(self):
+    def test_dep_with_empty_name(self, tmp_path):
         """A dep string that parses to empty name should be skipped."""
 
         # An empty string parses to empty name
-        result = _extract_deps([""], DependencyGroup.PROD, "pyproject.toml")
+        result = _extract_deps([""], DependencyGroup.PROD, "pyproject.toml", tmp_path, tmp_path)
         assert result == []
 
 

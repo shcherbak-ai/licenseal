@@ -12,8 +12,8 @@ from licenseal.discovery._read import (
     rejected_path_reference,
 )
 from licenseal.discovery._walk import walk_project_files_matching
-from licenseal.discovery.python import DEV_GROUP_NAMES, parse_pep508_dep
-from licenseal.models import Dependency, DependencyGroup, Ecosystem
+from licenseal.discovery.python import DEV_GROUP_NAMES, requirement_dependency
+from licenseal.models import Dependency, DependencyGroup
 
 # pip's comment rule: ``#`` starts a comment at the start of a line or after
 # whitespace. A ``#fragment`` glued to a URL (``...repo.git#egg=name``) is not
@@ -25,6 +25,15 @@ _COMMENT_RE = re.compile(r"(^|\s+)#.*$")
 # the long one after a space or ``=``. ``-c`` / ``--constraint`` is not an
 # include: a constraints file only pins versions and adds no requirement.
 _INCLUDE_RE = re.compile(r"^(?:-r\s*|--requirement(?:\s+|=))(?P<target>\S.*)$")
+
+# ``-e <target>`` / ``--editable <target>``: an editable install of a path or
+# a VCS URL. The target is read like any other requirement.
+_EDITABLE_RE = re.compile(r"^(?:-e\s*|--editable(?:\s+|=))(?P<target>\S.*)$")
+
+# Per-requirement options that follow the requirement on its line
+# (``--hash=sha256:…``, ``--config-settings …``).
+_LINE_OPTIONS_RE = re.compile(r"\s+--\S.*$")
+_HASH_OPTION_RE = re.compile(r"\s--hash[=\s]\s*(?P<hash>\S+)")
 
 
 def _is_dev_file(filename: str) -> bool:
@@ -121,25 +130,27 @@ def _parse_requirements_file(
                     seen.add(target)
                     pending.append((target, target.relative_to(scan_root).as_posix()))
                 continue
+            editable = _EDITABLE_RE.match(line)
+            if editable:
+                line = editable.group("target").strip()
             # Skip comments, empty lines, and every other option line
-            if not line or line.startswith("-"):
-                continue
-            # Skip URL-based deps (git+, http://, etc.)
-            if "://" in line or line.startswith("git+"):
+            elif not line or line.startswith("-"):
                 continue
 
-            name, version, extras = parse_pep508_dep(line)
-            if name:
-                deps.append(
-                    Dependency(
-                        name=name,
-                        version_constraint=version,
-                        ecosystem=Ecosystem.PYTHON,
-                        group=group,
-                        source=source,
-                        extras=extras,
-                    )
-                )
+            # A URL, a VCS URL, or a path is a requirement like any other: it
+            # is a row with an origin, or the project's own code. A relative
+            # path is taken from the directory of the file that names it.
+            recorded = _HASH_OPTION_RE.search(line)
+            dep = requirement_dependency(
+                _LINE_OPTIONS_RE.sub("", line),
+                group,
+                source,
+                filepath.parent,
+                scan_root,
+                digest=recorded.group("hash") if recorded else "",
+            )
+            if dep is not None:
+                deps.append(dep)
 
     return deps
 
