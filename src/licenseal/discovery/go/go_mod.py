@@ -49,7 +49,7 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
-from licenseal.discovery._read import decode_text
+from licenseal.discovery._read import decode_text, rejected_path_reference
 from licenseal.discovery._walk import walk_project_files
 from licenseal.models import Dependency, DependencyGroup, Ecosystem
 
@@ -248,7 +248,9 @@ def _discover_workspace_local_module_paths(
     2. The repo root has a ``go.work`` whose ``use ./dir`` directive points
        at a directory containing a ``go.mod`` (covers explicit multi-module
        workspaces, including ``use ../sibling`` targets outside the project
-       tree).
+       tree). Only relative ``use`` directories are followed: a rooted,
+       drive-qualified, UNC or device path is recorded as a gap on
+       ``go.work`` and never reaches the filesystem.
 
     These modules are filtered from registry resolution: licenseal can't
     fetch their license from deps.dev because they aren't published
@@ -276,6 +278,10 @@ def _discover_workspace_local_module_paths(
         if work_text is None:
             return local
         for use_dir in _parse_go_work_use_directories(work_text):
+            # Only relative ``use`` directories are followed. The check is
+            # lexical and precedes ``resolve()``, which is itself filesystem I/O.
+            if rejected_path_reference(go_work, use_dir):
+                continue
             target = (project_path / use_dir).resolve()
             gm = target / "go.mod"
             if not gm.is_file():

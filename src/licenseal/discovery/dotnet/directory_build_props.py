@@ -49,7 +49,11 @@ from pathlib import Path
 
 from defusedxml import ElementTree as DefusedET
 
-from licenseal.discovery._read import read_xml_bytes, record_parse_failure
+from licenseal.discovery._read import (
+    read_xml_bytes,
+    record_parse_failure,
+    rejected_path_reference,
+)
 from licenseal.discovery._walk import walk_project_files_matching
 from licenseal.discovery.dotnet.csproj import _strip_ns
 
@@ -209,6 +213,11 @@ def _resolve_imports(
     tokens like ``$(MSBuildThisFileDirectory)`` in import paths are
     NOT expanded (those would require a full MSBuild engine); the
     import is silently skipped when the target doesn't resolve.
+
+    Only relative import paths are followed (parent ``..`` references
+    included). A rooted, drive-qualified, UNC or device path is
+    recorded as a gap on the importing file and never reaches the
+    filesystem.
     """
     if depth >= _MAX_IMPORT_DEPTH:
         return {}
@@ -222,6 +231,10 @@ def _resolve_imports(
         # which itself depends on imports — chicken/egg). Skip any
         # path that still contains ``$(``.
         if "$(" in raw:
+            continue
+        # Only relative imports are followed. The check is lexical and
+        # precedes ``resolve()``, which is itself filesystem I/O.
+        if rejected_path_reference(importing_path, raw):
             continue
         # MSBuild paths use Windows-style backslashes in many real
         # files; convert for cross-platform resolution.

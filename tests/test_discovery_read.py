@@ -17,7 +17,9 @@ from licenseal.discovery._read import (
     read_xml_bytes,
     record_parse_failure,
     record_walk_error,
+    rejected_path_reference,
 )
+from tests._helpers import _NON_RELATIVE_PATH_VALUES, _record_path_io
 
 
 class TestDecodeText:
@@ -258,3 +260,49 @@ class TestRecordHelpers:
         with collect_read_diagnostics() as diags:
             record_walk_error(OSError("no filename"))
         assert len(diags) == 1 and diags[0].is_gap
+
+
+class TestRejectedPathReference:
+    """Paths written inside a manifest are followed only when relative. The
+    verdict is lexical, so it is identical on every platform and involves no
+    filesystem call.
+    """
+
+    @pytest.mark.parametrize("value", _NON_RELATIVE_PATH_VALUES)
+    def test_non_relative_value_rejected_as_gap(self, tmp_path: Path, monkeypatch, value):
+        manifest = tmp_path / "manifest"
+        calls = _record_path_io(monkeypatch, "example.invalid")
+        with collect_read_diagnostics() as diags:
+            assert rejected_path_reference(manifest, value) is True
+        assert calls == []
+        assert len(diags) == 1
+        # The gap names the manifest that carried the value, not the value's target.
+        assert diags[0].path == manifest
+        assert diags[0].is_gap
+        assert "not a relative path" in diags[0].reason
+        assert repr(value) in diags[0].reason
+
+    @pytest.mark.parametrize(
+        "value",
+        [
+            "Versions.props",
+            "./sub",
+            ".",
+            "",
+            "build/Common.props",
+            r"build\Common.props",
+            "../sibling",
+            r"..\..\shared\Common.props",
+            # A colon past the second character is not a drive qualifier.
+            "sub/a:b",
+        ],
+    )
+    def test_relative_value_accepted(self, tmp_path: Path, value):
+        with collect_read_diagnostics() as diags:
+            assert rejected_path_reference(tmp_path / "manifest", value) is False
+        assert diags == []
+
+    def test_any_character_before_a_colon_is_a_drive(self, tmp_path: Path):
+        # Windows path parsing treats any single character followed by a
+        # colon as a drive, not only ASCII letters.
+        assert rejected_path_reference(tmp_path / "manifest", "1:/target") is True

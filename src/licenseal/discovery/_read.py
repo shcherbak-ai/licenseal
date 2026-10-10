@@ -16,8 +16,9 @@ couldn't look". So every read/parse failure is recorded on a context-scoped
 sink, partitioned into:
 
 * **gap** (``is_gap=True``) — a manifest that may declare dependencies was lost
-  (unreadable, unparseable, or in a subtree we couldn't enter). Analysis is
-  *incomplete*; ``--strict`` treats this like an UNKNOWN and fails.
+  (unreadable, unparseable, in a subtree we couldn't enter, or referenced
+  through a path that is not followed). Analysis is *incomplete*; ``--strict``
+  treats this like an UNKNOWN and fails.
 * **recovered** (``is_gap=False``) — decoded with a caveat (latin-1 fallback);
   the ASCII dependency lines survived, so analysis is complete but lossy for any
   non-ASCII content. Worth a warning, not a failure.
@@ -56,6 +57,7 @@ __all__ = [
     "read_xml_bytes",
     "record_parse_failure",
     "record_walk_error",
+    "rejected_path_reference",
 ]
 
 
@@ -139,6 +141,32 @@ def record_walk_error(exc: OSError) -> None:
         "manifests under it were not scanned",
         is_gap=True,
     )
+
+
+def rejected_path_reference(manifest: Path, value: str) -> bool:
+    """Record a gap and return True when ``value`` is not a relative path.
+
+    ``value`` is a path written inside ``manifest`` that a parser is about to
+    follow (an MSBuild ``<Import>``, a Go workspace ``use`` directory). Only
+    relative values are followed, ``..`` segments included. A rooted,
+    drive-qualified, UNC (``\\\\host\\share``, ``//host/share``) or device
+    (``\\\\?\\``, ``\\\\.\\``) value is rejected: on Windows the first filesystem
+    call on such a path — ``Path.resolve()`` included — can reach a network
+    share or a device.
+
+    The check is lexical, so callers run it before joining ``value`` to
+    anything. Backslashes are normalised first: the verdict is the same on
+    Windows and POSIX.
+    """
+    normalized = value.replace("\\", "/")
+    if normalized.startswith("/") or normalized[1:2] == ":":
+        _record(
+            manifest,
+            f"references {value!r}, which is not a relative path; not followed",
+            is_gap=True,
+        )
+        return True
+    return False
 
 
 def _over_size_cap(path: Path) -> bool:

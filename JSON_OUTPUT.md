@@ -76,7 +76,7 @@
 | `violations` | int | Count where `verdict == "incompatible"`. |
 | `unknown` | int | Count where `verdict == "unknown"`. |
 | `reviewed` | int | Dependencies with a manual review override applied. Reviewed deps still appear in `warnings` / `violations` / `unknown` (the verdict counters are by classification, not by acceptance state), but the strict-mode CI exit code skips them — the review file `note` is the audit trail. |
-| `gaps` | int | Distinct manifests lost to an **analysis gap** — unreadable or unparseable files whose dependencies are missing from this report (see [`diagnostics` block](#diagnostics-block)). `total` therefore counts deps from successfully-parsed files only. Non-zero `gaps` fails strict mode. |
+| `gaps` | int | Distinct manifests with an **analysis gap** — unreadable or unparseable files whose dependencies are missing from this report, or manifests that reference another file through a path that was not followed (see [`diagnostics` block](#diagnostics-block)). `total` therefore counts deps from successfully-parsed files only. Non-zero `gaps` fails strict mode. |
 
 ## `diagnostics` block
 
@@ -93,7 +93,7 @@ Each entry is a manifest/lockfile read or parse anomaly surfaced during the scan
 | Field | Type | Description |
 | --- | --- | --- |
 | `path` | string | Offending file, project-relative when under the scan root (else absolute). |
-| `reason` | string | Human-readable cause (unreadable, unparseable, untraversable directory, or latin-1 fallback). |
+| `reason` | string | Human-readable cause (unreadable, unparseable, untraversable directory, a non-relative path reference that was not followed, or latin-1 fallback). |
 | `severity` | `"gap"` \| `"recovered"` | `gap` = a dependency-bearing file was lost (incomplete analysis — counted in `summary.gaps`, fails `--strict`). `recovered` = decoded with a caveat (latin-1 fallback) but the ASCII dependency lines survived — a warning, not a gap. |
 
 ## Per-dependency fields

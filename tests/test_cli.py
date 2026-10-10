@@ -50,6 +50,7 @@ from licenseal.review import (
     render_review_template,
     review_key,
 )
+from tests._helpers import _record_path_io
 
 
 def _mock_pypi(name: str, license_str: str, version: str = "1.0.0"):
@@ -248,6 +249,48 @@ class TestCheckCommand:
             d["severity"] == "gap" and "package.json" in d["path"] and "JSON" in d["reason"]
             for d in data["diagnostics"]
         )
+
+    @respx.mock
+    @pytest.mark.parametrize(
+        ("manifest", "content"),
+        [
+            (
+                "Directory.Build.props",
+                '<Project>\n  <Import Project="\\\\example.invalid\\share\\external.props" />\n'
+                "</Project>\n",
+            ),
+            ("go.work", 'go 1.22\n\nuse "\\\\example.invalid\\share\\module"\n'),
+        ],
+    )
+    def test_non_relative_manifest_reference_is_a_gap(
+        self, tmp_path, monkeypatch, manifest, content
+    ):
+        # A manifest that points at another file through a UNC path is not
+        # followed: the scan never issues a filesystem call on that path, the
+        # manifest is surfaced as a gap, and --strict fails. Neither file needs
+        # a project of its own ecosystem around it to be read.
+        (tmp_path / "requirements.txt").write_text("flask\n", encoding="utf-8")
+        (tmp_path / manifest).write_text(content, encoding="utf-8")
+        _mock_pypi("flask", "BSD-3-Clause")
+        out = tmp_path / "report.json"
+        calls = _record_path_io(monkeypatch, "example.invalid")
+        runner = CliRunner()
+
+        advisory = runner.invoke(main, ["check", "--path", str(tmp_path), "--no-strict"])
+        assert advisory.exit_code == 0
+        assert f"Warning: {manifest}: references" in advisory.output
+        assert "which is not a relative path; not followed" in advisory.output
+
+        strict = runner.invoke(
+            main, ["check", "--path", str(tmp_path), "--strict", "-f", "json", "-o", str(out)]
+        )
+        assert strict.exit_code == 1
+        assert "fails --strict" in strict.output
+        data = json.loads(out.read_text(encoding="utf-8"))
+        assert data["summary"]["gaps"] == 1
+        assert [(d["path"], d["severity"]) for d in data["diagnostics"]] == [(manifest, "gap")]
+
+        assert [call for call in calls if "example.invalid" in call[1]] == []
 
     @respx.mock
     def test_json_report_clean_has_empty_diagnostics(self, tmp_path):

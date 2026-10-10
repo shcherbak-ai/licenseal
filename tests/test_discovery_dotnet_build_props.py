@@ -4,11 +4,17 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
+from licenseal.discovery import discover_all_dependencies
+from licenseal.discovery._read import collect_read_diagnostics
 from licenseal.discovery.dotnet.directory_build_props import (
     _parse_directory_build_props,
     closest_build_props,
     find_directory_build_props,
 )
+from licenseal.models import Ecosystem
+from tests._helpers import _NON_RELATIVE_PATH_VALUES, _record_path_io
 
 
 def _write(path: Path, text: str) -> None:
@@ -570,3 +576,116 @@ class TestImportFollowing:
         assert merged.get("FromB") == "B"
         # The last link past the cap doesn't appear.
         assert merged.get("FromJ") is None
+
+
+class TestImportPathConfinement:
+    """An ``<Import Project>`` value is followed only when it is a relative
+    path. A rooted, drive-qualified, UNC or device value is rejected before
+    any filesystem call and recorded as a gap on the importing file.
+    """
+
+    _VERSIONS = """<Project>
+  <PropertyGroup>
+    <LibVersion>3.1.1</LibVersion>
+  </PropertyGroup>
+</Project>"""
+
+    @pytest.mark.parametrize("value", _NON_RELATIVE_PATH_VALUES)
+    def test_non_relative_import_never_reaches_filesystem(self, tmp_path, monkeypatch, value):
+        _write(tmp_path / "Versions.props", self._VERSIONS)
+        manifest = tmp_path / "Directory.Build.props"
+        _write(
+            manifest,
+            f"""<Project>
+  <Import Project="{value}" />
+  <Import Project="Versions.props" />
+  <PropertyGroup>
+    <Local>local</Local>
+  </PropertyGroup>
+</Project>""",
+        )
+        calls = _record_path_io(monkeypatch, "example.invalid")
+        with collect_read_diagnostics() as diags:
+            result = find_directory_build_props(tmp_path)
+
+        assert [call for call in calls if "example.invalid" in call[1]] == []
+        # The recorder is live: the relative import beside it was resolved,
+        # probed and read.
+        followed = {method for method, path in calls if Path(path).name == "Versions.props"}
+        assert {"resolve", "is_file", "read_bytes"} <= followed
+        assert result[tmp_path] == {"LibVersion": "3.1.1", "Local": "local"}
+
+        gaps = [d for d in diags if d.is_gap]
+        assert len(gaps) == 1
+        assert gaps[0].path == manifest
+        assert repr(value) in gaps[0].reason
+
+    def test_rejected_import_in_imported_file_names_that_file(self, tmp_path, monkeypatch):
+        # The gap points at the file that carried the value, which is the
+        # imported file here, not the top-level one.
+        imported = tmp_path / "build" / "Common.props"
+        _write(
+            imported,
+            r"""<Project>
+  <Import Project="\\example.invalid\share\external.props" />
+  <PropertyGroup>
+    <FromCommon>common</FromCommon>
+  </PropertyGroup>
+</Project>""",
+        )
+        _write(
+            tmp_path / "Directory.Build.props",
+            r"""<Project>
+  <Import Project="build\Common.props" />
+</Project>""",
+        )
+        calls = _record_path_io(monkeypatch, "example.invalid")
+        with collect_read_diagnostics() as diags:
+            result = find_directory_build_props(tmp_path)
+
+        assert [call for call in calls if "example.invalid" in call[1]] == []
+        assert result[tmp_path] == {"FromCommon": "common"}
+        assert [d.path for d in diags if d.is_gap] == [imported.resolve()]
+
+    def test_parent_relative_import_still_followed(self, tmp_path):
+        # ``..`` stays a relative reference: a props file shared from above
+        # the importing directory keeps resolving, with no gap.
+        _write(tmp_path / "shared" / "Versions.props", self._VERSIONS)
+        _write(
+            tmp_path / "src" / "Directory.Build.props",
+            r"""<Project>
+  <Import Project="..\shared\Versions.props" />
+</Project>""",
+        )
+        with collect_read_diagnostics() as diags:
+            result = find_directory_build_props(tmp_path / "src")
+        assert result[tmp_path / "src"] == {"LibVersion": "3.1.1"}
+        assert diags == []
+
+    def test_rejected_import_leaves_version_token_unexpanded(self, tmp_path, monkeypatch):
+        # Through the aggregator: the property the rejected import would have
+        # supplied is not invented, and the gap is recorded.
+        _write(
+            tmp_path / "Directory.Build.props",
+            r"""<Project>
+  <Import Project="\\example.invalid\share\external.props" />
+</Project>""",
+        )
+        _write(
+            tmp_path / "src" / "App.csproj",
+            """<Project Sdk="Microsoft.NET.Sdk">
+  <ItemGroup>
+    <PackageReference Include="Example.Lib" Version="$(LibVersion)" />
+  </ItemGroup>
+</Project>""",
+        )
+        calls = _record_path_io(monkeypatch, "example.invalid")
+        with collect_read_diagnostics() as diags:
+            deps, _ = discover_all_dependencies(tmp_path)
+
+        assert [call for call in calls if "example.invalid" in call[1]] == []
+        dotnet = [d for d in deps if d.ecosystem == Ecosystem.DOTNET]
+        assert [(d.name, d.version_constraint) for d in dotnet] == [
+            ("Example.Lib", "$(LibVersion)")
+        ]
+        assert [d.path for d in diags if d.is_gap] == [tmp_path / "Directory.Build.props"]

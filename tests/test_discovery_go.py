@@ -4,6 +4,10 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
+from licenseal.discovery import discover_all_dependencies
+from licenseal.discovery._read import collect_read_diagnostics
 from licenseal.discovery.go.go_mod import (
     _is_test_fixture_go_mod,
     _module_for_tool_path,
@@ -11,6 +15,7 @@ from licenseal.discovery.go.go_mod import (
     discover_go_mod_dependencies,
 )
 from licenseal.models import DependencyGroup, Ecosystem
+from tests._helpers import _NON_RELATIVE_PATH_VALUES, _record_path_io
 
 
 class TestParseGoMod:
@@ -529,6 +534,109 @@ class TestWorkspaceLocalFilter:
         # external from root is present; sub's go.mod produced no requires
         # so nothing else.
         assert "github.com/external" in {d.name for d in deps}
+
+
+class TestGoWorkUsePathConfinement:
+    """A ``go.work`` ``use`` value is followed only when it is a relative
+    path. A rooted, drive-qualified, UNC or device value is rejected before
+    any filesystem call and recorded as a gap on ``go.work``.
+    """
+
+    # The ``//host/share`` spelling cannot survive go.work parsing (see
+    # ``test_double_slash_use_is_cut_off_as_a_comment``); every other
+    # non-relative spelling reaches the lexical check.
+    @pytest.mark.parametrize("value", [v for v in _NON_RELATIVE_PATH_VALUES if "//" not in v])
+    def test_non_relative_use_never_reaches_filesystem(self, tmp_path, monkeypatch, value):
+        go_work = tmp_path / "go.work"
+        go_work.write_text(f'go 1.22\n\nuse (\n    ./sub\n    "{value}"\n)\n', encoding="utf-8")
+        (tmp_path / "sub").mkdir()
+        (tmp_path / "sub" / "go.mod").write_text("module example.com/sub\n", encoding="utf-8")
+        (tmp_path / "go.mod").write_text(
+            "module example.com/root\n\n"
+            "require (\n"
+            "    example.com/sub v0.0.0-abc\n"
+            "    github.com/external v1.0.0\n"
+            ")\n",
+            encoding="utf-8",
+        )
+        calls = _record_path_io(monkeypatch, "example.invalid")
+        with collect_read_diagnostics() as diags:
+            deps, filtered = discover_all_dependencies(tmp_path)
+
+        assert [call for call in calls if "example.invalid" in call[1]] == []
+        # The recorder is live: the relative ``use`` beside it was resolved,
+        # and its go.mod probed and read.
+        assert ("resolve", str(tmp_path / "sub")) in calls
+        sub_go_mod = {
+            method for method, path in calls if Path(path).parts[-2:] == ("sub", "go.mod")
+        }
+        assert {"is_file", "read_bytes"} <= sub_go_mod
+        assert [d.name for d in deps] == ["github.com/external"]
+        assert filtered["go"] == 1
+
+        gaps = [d for d in diags if d.is_gap]
+        assert len(gaps) == 1
+        assert gaps[0].path == go_work
+        assert repr(value) in gaps[0].reason
+
+    def test_single_line_unquoted_use_rejected(self, tmp_path, monkeypatch):
+        go_work = tmp_path / "go.work"
+        go_work.write_text("go 1.22\n\nuse \\\\example.invalid\\share\\target\n", encoding="utf-8")
+        calls = _record_path_io(monkeypatch, "example.invalid")
+        with collect_read_diagnostics() as diags:
+            deps, filtered = discover_go_mod_dependencies(tmp_path)
+
+        assert [call for call in calls if "example.invalid" in call[1]] == []
+        assert (deps, filtered) == ([], 0)
+        assert [d.path for d in diags if d.is_gap] == [go_work]
+
+    def test_double_slash_use_is_cut_off_as_a_comment(self, tmp_path, monkeypatch):
+        # ``//`` starts a line comment in go.work, so a forward-slash UNC
+        # value is truncated to an empty directory before it is ever treated
+        # as a path. Nothing reaches the filesystem under that name.
+        (tmp_path / "go.work").write_text(
+            'go 1.22\n\nuse "//example.invalid/share/target"\n', encoding="utf-8"
+        )
+        calls = _record_path_io(monkeypatch, "example.invalid")
+        with collect_read_diagnostics() as diags:
+            deps, filtered = discover_go_mod_dependencies(tmp_path)
+
+        assert [call for call in calls if "example.invalid" in call[1]] == []
+        assert (deps, filtered) == ([], 0)
+        assert diags == []
+
+    def test_comment_marker_cannot_smuggle_a_double_slash_value(self, tmp_path, monkeypatch):
+        # A line whose comment is the ``// indirect`` marker is kept whole by
+        # the comment stripper, so the value starts with ``//`` and is rejected
+        # by the lexical check instead.
+        go_work = tmp_path / "go.work"
+        go_work.write_text(
+            'go 1.22\n\nuse "// indirect //example.invalid/share/target"\n', encoding="utf-8"
+        )
+        calls = _record_path_io(monkeypatch, "example.invalid")
+        with collect_read_diagnostics() as diags:
+            deps, filtered = discover_go_mod_dependencies(tmp_path)
+
+        assert [call for call in calls if "example.invalid" in call[1]] == []
+        assert (deps, filtered) == ([], 0)
+        assert [d.path for d in diags if d.is_gap] == [go_work]
+
+    def test_parent_relative_use_records_no_gap(self, tmp_path):
+        # ``use ../sibling`` stays a relative reference: followed, no gap.
+        sibling = tmp_path / "sibling"
+        sibling.mkdir()
+        (sibling / "go.mod").write_text("module example.com/sibling\n", encoding="utf-8")
+        project = tmp_path / "project"
+        project.mkdir()
+        (project / "go.work").write_text("go 1.22\n\nuse ../sibling\n", encoding="utf-8")
+        (project / "go.mod").write_text(
+            "module example.com/project\nrequire example.com/sibling v0.0.0-abc\n",
+            encoding="utf-8",
+        )
+        with collect_read_diagnostics() as diags:
+            deps, filtered = discover_go_mod_dependencies(project)
+        assert (deps, filtered) == ([], 1)
+        assert diags == []
 
 
 class TestIsTestFixtureGoMod:

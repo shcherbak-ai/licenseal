@@ -14,6 +14,8 @@ The load-bearing architectural constraint: licenseal's input surface is **on-dis
 
 This constraint is intentional: package archives and scan-target-controlled registry declarations are outside licenseal's trusted input surface.
 
+Two manifest formats can name other files to read: an MSBuild `<Import Project="…">` in `Directory.Build.props` / `.targets`, and a `go.work` `use` directory. licenseal follows these only when the value is a relative path. Parent `..` references are relative, so the target may sit outside the scan root. A rooted, drive-qualified, UNC (`\\host\share`, `//host/share`), or device (`\\?\…`, `\\.\…`) value is rejected by a lexical check before any filesystem call — on Windows, the first call on such a path can open a connection to a network share — and the manifest that contains it is reported as an analysis gap.
+
 ### Network egress
 
 Outbound network access is restricted to fourteen hosts via [`tethered.scope()`](https://github.com/shcherbak-ai/tethered) wrapped tightly around the resolution call only:
