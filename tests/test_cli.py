@@ -6576,6 +6576,61 @@ class TestComposedLicenseExitCode:
         assert dep["verdict"] == "compatible"
 
 
+class TestCustomReferenceExitCode:
+    """A ``LicenseRef-*`` operand in a PEP 639 expression must not turn a
+    copyleft violation into an UNKNOWN that ``--no-strict`` lets through."""
+
+    @staticmethod
+    def _check(tmp_path, expression: str):
+        (tmp_path / "pyproject.toml").write_text(
+            textwrap.dedent("""\
+            [project]
+            name = "myapp"
+            version = "0.1.0"
+            license = "MIT"
+            dependencies = ["refpkg==1.0.0"]
+            """)
+        )
+        respx.get("https://pypi.org/pypi/refpkg/1.0.0/json").mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "info": {
+                        "license": None,
+                        "license_expression": expression,
+                        "version": "1.0.0",
+                        "classifiers": [],
+                    }
+                },
+            )
+        )
+        result = CliRunner().invoke(
+            main,
+            ["check", "--path", str(tmp_path), "--no-transitive", "--no-strict", "-f", "json"],
+        )
+        data = json.loads(result.output[result.output.index("{") :])
+        return result.exit_code, data["dependencies"][0]
+
+    @pytest.mark.parametrize(
+        "expression",
+        ["LicenseRef-custom AND GPL-3.0-only", "GPL-3.0-only AND LicenseRef-custom"],
+    )
+    @respx.mock
+    def test_reference_and_copyleft_fail_in_either_order(self, tmp_path, expression):
+        exit_code, dep = self._check(tmp_path, expression)
+        assert exit_code == 1
+        assert dep["license"] == "GPL-3.0-only AND Proprietary"
+        assert dep["license_raw"] == expression
+        assert dep["verdict"] == "incompatible"
+
+    @respx.mock
+    def test_reference_alone_is_unknown_and_passes_no_strict(self, tmp_path):
+        exit_code, dep = self._check(tmp_path, "LicenseRef-custom")
+        assert exit_code == 0
+        assert dep["license"] == "Proprietary"
+        assert dep["verdict"] == "unknown"
+
+
 class TestCliMarkdownViolation:
     @respx.mock
     def test_markdown_with_violation_exits_nonzero(self, tmp_path):

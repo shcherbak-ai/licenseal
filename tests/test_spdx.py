@@ -474,6 +474,206 @@ class TestSpdxOperandCanonicalization:
         assert normalize_license(expr) == expr
 
 
+class TestNestedAndRepeatedOperands:
+    """Grouping that does not change the meaning does not change the result."""
+
+    @pytest.mark.parametrize(
+        "raw, expected",
+        [
+            ("(MIT AND Zlib) AND Apache-2.0", "Apache-2.0 AND MIT AND Zlib"),
+            ("(Apache-2.0 OR Zlib) OR MIT", "Apache-2.0 OR MIT OR Zlib"),
+            ("Zlib AND (MIT AND (ISC AND Apache-2.0))", "Apache-2.0 AND ISC AND MIT AND Zlib"),
+            ("Zlib OR (MIT OR (ISC OR Apache-2.0))", "Apache-2.0 OR ISC OR MIT OR Zlib"),
+            (
+                "(MIT OR ISC) AND (Apache-2.0 AND (Zlib OR 0BSD))",
+                "(0BSD OR Zlib) AND (ISC OR MIT) AND Apache-2.0",
+            ),
+            (
+                "(MIT AND Zlib) OR (Apache-2.0 AND (0BSD OR ISC))",
+                "(0BSD OR ISC) AND Apache-2.0 OR MIT AND Zlib",
+            ),
+        ],
+    )
+    def test_group_of_the_same_operator_is_spliced_into_its_parent(self, raw, expected):
+        assert normalize_license(raw) == expected
+
+    def test_group_of_the_other_operator_keeps_its_meaning(self):
+        # Control: an ``OR`` group under ``AND`` keeps its parens; an ``AND``
+        # group under ``OR`` needs none (``AND`` binds tighter).
+        assert normalize_license("(MIT OR Zlib) AND Apache-2.0") == "(MIT OR Zlib) AND Apache-2.0"
+        assert normalize_license("(MIT AND Zlib) OR Apache-2.0") == "Apache-2.0 OR MIT AND Zlib"
+
+    @pytest.mark.parametrize(
+        "raw, expected",
+        [
+            ("MIT AND MIT", "MIT"),
+            ("MIT OR MIT", "MIT"),
+            ("MIT OR Apache-2.0 OR MIT", "Apache-2.0 OR MIT"),
+            ("MIT AND (Apache-2.0 AND MIT)", "Apache-2.0 AND MIT"),
+            # The two groups are the same choice: one remains, unwrapped.
+            ("(MIT OR ISC) AND (ISC OR MIT)", "ISC OR MIT"),
+            ("(MIT OR ISC) AND (ISC OR MIT) AND Zlib", "(ISC OR MIT) AND Zlib"),
+        ],
+    )
+    def test_repeated_operand_is_dropped(self, raw, expected):
+        assert normalize_license(raw) == expected
+
+    def test_operands_that_differ_are_all_kept(self):
+        # Control: a ``WITH`` leaf is not its bare license.
+        expr = "Apache-2.0 OR Apache-2.0 WITH LLVM-exception"
+        assert normalize_license(expr) == expr
+
+
+class TestLicenseRefLeaves:
+    """``LicenseRef-*`` maps to ``Proprietary`` one parsed leaf at a time, so
+    a reference never stands in for the operands around it."""
+
+    @pytest.mark.parametrize(
+        "leading, trailing, expected",
+        [
+            (
+                "LicenseRef-custom AND GPL-3.0-only",
+                "GPL-3.0-only AND LicenseRef-custom",
+                "GPL-3.0-only AND Proprietary",
+            ),
+            ("LicenseRef-custom OR MIT", "MIT OR LicenseRef-custom", "MIT OR Proprietary"),
+            (
+                "LicenseRef-custom OR GPL-3.0-only",
+                "GPL-3.0-only OR LicenseRef-custom",
+                "GPL-3.0-only OR Proprietary",
+            ),
+            (
+                "(LicenseRef-custom OR MIT) AND Apache-2.0",
+                "Apache-2.0 AND (MIT OR LicenseRef-custom)",
+                "(MIT OR Proprietary) AND Apache-2.0",
+            ),
+        ],
+    )
+    def test_reference_position_does_not_change_the_result(self, leading, trailing, expected):
+        assert normalize_license(leading) == expected
+        assert normalize_license(trailing) == expected
+
+    def test_reference_alone_is_the_control(self):
+        assert normalize_license("LicenseRef-custom") == "Proprietary"
+        assert normalize_license("(LicenseRef-custom)") == "Proprietary"
+        assert normalize_license("licenseref-custom") == "Proprietary"
+
+    def test_operators_set_off_by_other_whitespace_are_still_operators(self):
+        assert (
+            normalize_license("LicenseRef-custom\tAND\tGPL-3.0-only")
+            == "GPL-3.0-only AND Proprietary"
+        )
+
+    def test_public_domain_sentinel_is_not_a_custom_reference(self):
+        assert (
+            normalize_license("LicenseRef-Public-Domain OR GPL-3.0-only")
+            == "GPL-3.0-only OR LicenseRef-Public-Domain"
+        )
+
+    def test_reference_with_an_exception_is_one_custom_leaf(self):
+        assert normalize_license("LicenseRef-custom WITH Classpath-exception-2.0") == "Proprietary"
+        assert (
+            normalize_license("MIT AND LicenseRef-custom WITH Classpath-exception-2.0")
+            == "MIT AND Proprietary"
+        )
+
+    def test_expression_of_references_only_is_proprietary(self):
+        assert normalize_license("LicenseRef-a AND LicenseRef-b") == "Proprietary"
+        assert normalize_license("LicenseRef-a OR LicenseRef-b") == "Proprietary"
+
+    def test_reference_followed_by_prose_is_not_an_expression(self):
+        assert normalize_license("LicenseRef-custom plus other terms") == "UNKNOWN"
+
+    def test_unbalanced_expression_is_left_alone(self):
+        raw = "LicenseRef-custom OR (MIT"
+        assert normalize_license(raw) == raw
+
+
+class TestNormalizeIdempotence:
+    """Normalizing a normalized license changes nothing."""
+
+    @pytest.mark.parametrize(
+        "raw",
+        [
+            # Sentinels, single IDs, aliases, classifiers, URLs.
+            "",
+            "UNKNOWN",
+            "Proprietary",
+            "MIT",
+            "mit",
+            "Apache License, Version 2.0",
+            "GPLv3+",
+            "Public Domain",
+            "SEE LICENSE IN LICENSE.md",
+            "LICENSE.txt",
+            "License :: OSI Approved :: MIT License",
+            "https://www.apache.org/licenses/LICENSE-2.0",
+            "https://example.com/some-custom-license",
+            "zlib-acknowledgement",
+            "SomeCustomLicense",
+            # Flat compounds in every operand order.
+            "MIT OR Apache-2.0",
+            "Apache-2.0 OR MIT",
+            "MIT AND BSD-3-Clause",
+            "BSD-3-Clause AND 0BSD AND MIT AND Zlib AND CC0-1.0",
+            "MIT OR GPL-3.0-only AND BSD-3-Clause",
+            "GPL-3.0-only AND BSD-3-Clause OR MIT",
+            # Grouping: required, redundant, nested, repeated.
+            "(MIT OR Apache-2.0) AND Unicode-DFS-2016",
+            "Unicode-DFS-2016 AND (MIT OR Apache-2.0)",
+            "((MIT OR Apache-2.0))",
+            "(MIT) AND (Apache-2.0)",
+            "(MIT AND Zlib) AND Apache-2.0",
+            "(Apache-2.0 OR Zlib) OR MIT",
+            "(MIT OR ISC) AND (Apache-2.0 AND (Zlib OR 0BSD))",
+            "((MIT OR ISC) AND Zlib) OR (Apache-2.0 AND (0BSD OR BSD-3-Clause))",
+            "(MIT OR ISC) AND (ISC OR MIT)",
+            "MIT AND MIT",
+            # WITH leaves.
+            "Apache-2.0 WITH LLVM-exception",
+            "Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT",
+            "GPL-2.0-only WITH Classpath-exception-2.0 AND MIT",
+            "GPL-2.0-with-classpath-exception",
+            # Custom references in every position.
+            "LicenseRef-custom",
+            "LicenseRef-Public-Domain",
+            "LicenseRef-custom AND GPL-3.0-only",
+            "GPL-3.0-only AND LicenseRef-custom",
+            "LicenseRef-custom OR MIT",
+            "MIT OR LicenseRef-custom",
+            "(LicenseRef-custom OR MIT) AND Apache-2.0",
+            "LicenseRef-a AND LicenseRef-b",
+            "LicenseRef-custom WITH Classpath-exception-2.0",
+            "MIT OR LicenseRef-Vendor-Proprietary",
+            # Prose separators and connectors.
+            "MIT/Apache-2.0",
+            "MIT, Apache-2.0, BSD-3-Clause",
+            "BSD, Public Domain",
+            "MIT -or- Apache License 2.0",
+            "MIT and ISC",
+            "BSD or MIT",
+            "GPL-3.0-only or Apache-2.0 and AGPL-3.0-only",
+            "(MIT or Apache-2.0) and GPL-3.0-only",
+            "CDDL+GPL and MIT",
+            "MIT, LicenseRef-custom",
+            # Rewritten pairs.
+            "CDDL-1.0 AND GPL-2.0-with-classpath-exception",
+            "Apache-2.0 AND CDDL-1.0 AND GPL-2.0-with-classpath-exception",
+            "LGPL-3.0-only AND GPL-3.0-or-later",
+            "Apache-2.0 AND GPL-3.0-only AND LGPL-3.0-only",
+            # Unbalanced parens pass through.
+            "(MIT OR Apache-2.0",
+            "((MIT)",
+            "LicenseRef-custom OR (MIT",
+            # Whitespace.
+            "  MIT   OR\tApache-2.0  ",
+        ],
+    )
+    def test_normalizing_a_result_changes_nothing(self, raw):
+        once = normalize_license(raw)
+        assert normalize_license(once) == once
+
+
 class TestAndJoinLicenses:
     """Composing independent license entries into one ``AND`` expression."""
 

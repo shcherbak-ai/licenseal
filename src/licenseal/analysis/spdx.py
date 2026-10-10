@@ -40,7 +40,10 @@ _LICENSE_FILENAME_RE = re.compile(
 # SPDX `LicenseRef-*` is the namespace for project-defined custom license
 # references — by definition opaque to a generic classifier, so route to
 # Proprietary. `LicenseRef-Public-Domain` is our internal permissive sentinel
-# (see `risk.py`) so it's excluded from this rule.
+# (see `risk.py`) so it's excluded from this rule. Matched against one parsed
+# expression leaf at a time (`_canonical_leaf`), never against a whole
+# expression: a prefix match there would swallow every operand after a
+# leading reference.
 _LICENSE_REF_RE = re.compile(r"^LicenseRef-(?!Public-Domain$)", re.IGNORECASE)
 
 # Free-form "this is a commercial / proprietary license" signals. The alias
@@ -933,22 +936,26 @@ def _canonicalize_spdx_operands(expr: str) -> str:
       each operand, then leave ``WITH``-compounds as opaque leaves
       (``WITH`` is NOT commutative — ``"Apache-2.0 WITH LLVM-exception"``
       is a single leaf for the purposes of operand sorting).
-    * At each ``OR`` / ``AND`` node, sort children case-insensitively
-      after recursive canonicalization.
+    * Each leaf is rewritten to its canonical spelling
+      (:func:`_canonical_leaf`).
+    * At each ``OR`` / ``AND`` node, a child that is itself a group of
+      the same operator is spliced in (``(A OR B) OR C`` is one
+      three-way choice), repeated operands are dropped (``A AND A`` is
+      ``A``), and the rest are sorted case-insensitively.
     * Re-serialize with the minimum parens needed: ``AND`` children that
       contain a top-level ``OR`` get wrapped; ``OR`` children never do
       (since ``OR`` is the lowest-precedence operator).
 
-    Best-effort: returns ``expr`` unchanged if the input doesn't parse
-    as a recognizable compound (no top-level operators or unbalanced
-    parens). Whitespace inside the expression is collapsed to single
-    spaces so ``"MIT  OR Apache-2.0"`` canonicalizes the same as the
-    well-spaced form.
+    The result is a fixpoint: canonicalizing it again returns it
+    unchanged.
+
+    Best-effort: returns ``expr`` unchanged if its parens are unbalanced.
+    Whitespace inside the expression is collapsed to single spaces so
+    ``"MIT  OR Apache-2.0"`` canonicalizes the same as the well-spaced
+    form.
     """
     expr = " ".join(expr.split())
     if expr.count("(") != expr.count(")"):
-        return expr
-    if " OR " not in expr and " AND " not in expr:
         return expr
     return _canon(expr)
 
@@ -958,23 +965,36 @@ def _canon(expr: str) -> str:
     expr = _strip_outer_parens(expr.strip())
     or_parts = _split_top_level(expr, " OR ")
     if len(or_parts) > 1:
-        canonical = sorted((_canon(p) for p in or_parts), key=str.lower)
-        return " OR ".join(canonical)
+        operands = [arm for p in or_parts for arm in _split_top_level(_canon(p), " OR ")]
+        return " OR ".join(sorted(dict.fromkeys(operands), key=str.lower))
     and_parts = _split_top_level(expr, " AND ")
     if len(and_parts) > 1:
-        canonical: list[str] = []
+        operands: list[str] = []
         for p in and_parts:
             c = _canon(p)
-            # Wrap children that contain a top-level ``OR`` so that the
-            # serialized form is unambiguous to readers/tools that don't
-            # apply SPDX precedence. ``AND``/``WITH`` children don't
-            # need wrapping since ``AND`` binds tighter than ``OR``.
-            if " OR " in c and len(_split_top_level(c, " OR ")) > 1:
-                c = f"({c})"
-            canonical.append(c)
-        canonical.sort(key=str.lower)
-        return " AND ".join(canonical)
-    return expr
+            # Wrap children that contain a top-level ``OR``: ``AND`` binds
+            # tighter, so the group is what keeps the choice together.
+            # ``AND``/``WITH`` children need no wrap.
+            if len(_split_top_level(c, " OR ")) > 1:
+                operands.append(f"({c})")
+            else:
+                operands.extend(_split_top_level(c, " AND "))
+        operands = sorted(dict.fromkeys(operands), key=str.lower)
+        # When every operand was the same ``OR`` group, one is left and it
+        # no longer needs its wrap.
+        return _strip_outer_parens(" AND ".join(operands))
+    return _canonical_leaf(expr)
+
+
+def _canonical_leaf(leaf: str) -> str:
+    """Canonical spelling of one expression leaf.
+
+    A leaf is a license ID, optionally followed by ``WITH`` and an
+    exception. A custom ``LicenseRef-*`` leaf becomes ``Proprietary``.
+    """
+    if _LICENSE_REF_RE.match(leaf):
+        return "Proprietary"
+    return leaf
 
 
 def and_join_licenses(expressions: Iterable[str]) -> str:
@@ -1086,6 +1106,9 @@ def normalize_license(raw: str) -> str:
     Sun/Oracle's ``CDDL+GPL-with-classpath-exception`` AND-shorthand for
     publisher-intended-OR dual licensing) are also collapsed — see
     :func:`_collapse_redundant_license_pairs`.
+
+    Normalizing a result again returns it unchanged, for any result
+    within the expression length limit of :func:`_looks_like_spdx`.
     """
     return _collapse_redundant_license_pairs(
         _canonicalize_spdx_operands(_normalize_license_inner(raw))
@@ -1144,14 +1167,13 @@ def _normalize_license_inner(raw: str) -> str:
             return " OR ".join(normalized_parts)
         stripped = _SLASH_OR_RE.sub(" OR ", stripped)
 
-    # File-pointer / filename-mistake / LicenseRef patterns are all anchored
-    # at `^`, so they only fire on whole-string inputs (won't match inside a
-    # compound expression).
+    # File-pointer / filename-mistake strings name a bundled file, not a
+    # license. `LicenseRef-*` is not handled here: it is mapped per leaf
+    # once the expression is parsed (`_canonical_leaf`), so a leading
+    # reference cannot stand in for the operands that follow it.
     if _SEE_FILE_RE.match(stripped):
         return "Proprietary"
     if _LICENSE_FILENAME_RE.match(stripped):
-        return "Proprietary"
-    if _LICENSE_REF_RE.match(stripped):
         return "Proprietary"
 
     # Free-form proprietary signals (`\bproprietary\b`, EULA, "License

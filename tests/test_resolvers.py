@@ -3322,6 +3322,56 @@ class TestPep658CacheIntegration:
         assert info.license_id == "MIT"
 
 
+class TestCustomReferenceExpressionThroughCache:
+    """A PEP 639 ``license_expression`` carrying a ``LicenseRef-*`` operand,
+    read through ``RegistryCache.fetch``."""
+
+    @staticmethod
+    def _resolve(expression: str):
+        respx.get("https://pypi.org/pypi/pkg-ref/1.0.0/json").mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "info": {
+                        "license": None,
+                        "license_expression": expression,
+                        "version": "1.0.0",
+                        "classifiers": [],
+                    }
+                },
+            )
+        )
+        cache = RegistryCache()
+        with httpx.Client() as client:
+            return resolve_python_license(
+                _python_dep("pkg-ref", version="==1.0.0"), client, fetcher=cache.fetch
+            )
+
+    @pytest.mark.parametrize(
+        "expression",
+        ["LicenseRef-custom AND GPL-3.0-only", "GPL-3.0-only AND LicenseRef-custom"],
+    )
+    @respx.mock
+    def test_reference_does_not_swallow_the_copyleft_operand(self, expression):
+        info = self._resolve(expression)
+        assert info.license_id == "GPL-3.0-only AND Proprietary"
+        assert info.license_raw == expression
+        assert check_compatibility("MIT", info).verdict == CompatibilityVerdict.INCOMPATIBLE
+
+    @pytest.mark.parametrize("expression", ["LicenseRef-custom OR MIT", "MIT OR LicenseRef-custom"])
+    @respx.mock
+    def test_reference_does_not_swallow_the_permissive_choice(self, expression):
+        info = self._resolve(expression)
+        assert info.license_id == "MIT OR Proprietary"
+        assert check_compatibility("MIT", info).verdict == CompatibilityVerdict.COMPATIBLE
+
+    @respx.mock
+    def test_reference_alone_is_the_control(self):
+        info = self._resolve("LicenseRef-custom")
+        assert info.license_id == "Proprietary"
+        assert check_compatibility("MIT", info).verdict == CompatibilityVerdict.UNKNOWN
+
+
 def _go_dep(name: str = "github.com/foo/bar", version: str = "v1.0.0") -> Dependency:
     return Dependency(
         name=name,

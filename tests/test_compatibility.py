@@ -395,6 +395,79 @@ class TestComposedExpressionGrouping:
         assert result.risk_level == RiskLevel.STRONG_COPYLEFT
 
 
+class TestLicenseRefOperandOrder:
+    """A custom ``LicenseRef-*`` operand gives the same verdict wherever it
+    sits in the expression."""
+
+    @staticmethod
+    def _check(project: str, raw: str):
+        return check_compatibility(project, _make_license_info(normalize_license(raw), name="dep"))
+
+    def test_reference_and_copyleft_is_a_violation_in_either_order(self):
+        for raw in ("LicenseRef-custom AND GPL-3.0-only", "GPL-3.0-only AND LicenseRef-custom"):
+            result = self._check("MIT", raw)
+            assert result.verdict == CompatibilityVerdict.INCOMPATIBLE, raw
+            assert result.risk_level == RiskLevel.STRONG_COPYLEFT, raw
+
+    def test_reference_and_copyleft_needs_review_under_a_copyleft_project(self):
+        # The GPL arm suits the project; the custom arm still binds.
+        for raw in ("LicenseRef-custom AND GPL-3.0-only", "GPL-3.0-only AND LicenseRef-custom"):
+            result = self._check("GPL-3.0-only", raw)
+            assert result.verdict == CompatibilityVerdict.UNKNOWN, raw
+            assert result.reason == (
+                "dep uses GPL-3.0-only AND Proprietary; the consumer cannot avoid "
+                "Proprietary, which did not resolve to a recognized license — "
+                "manual review required"
+            )
+
+    def test_reference_or_permissive_is_electable_in_either_order(self):
+        for raw in ("LicenseRef-custom OR MIT", "MIT OR LicenseRef-custom"):
+            result = self._check("MIT", raw)
+            assert result.verdict == CompatibilityVerdict.COMPATIBLE, raw
+            assert result.risk_level == RiskLevel.PERMISSIVE, raw
+
+    def test_reference_or_copyleft_keeps_the_copyleft_arm_in_either_order(self):
+        for raw in ("LicenseRef-custom OR GPL-3.0-only", "GPL-3.0-only OR LicenseRef-custom"):
+            result = self._check("MIT", raw)
+            assert result.verdict == CompatibilityVerdict.INCOMPATIBLE, raw
+
+    def test_reference_alone_is_the_control(self):
+        result = self._check("MIT", "LicenseRef-custom")
+        assert result.verdict == CompatibilityVerdict.UNKNOWN
+        assert "proprietary license" in result.reason
+
+    def test_references_only_keep_the_proprietary_routing(self):
+        # Prod: manual review. Dev: the proprietary downgrade to a warning.
+        result = self._check("MIT", "LicenseRef-a AND LicenseRef-b")
+        assert result.verdict == CompatibilityVerdict.UNKNOWN
+        assert "proprietary license" in result.reason
+        dev = _make_license_info(
+            normalize_license("LicenseRef-a AND LicenseRef-b"), group=DependencyGroup.DEV
+        )
+        assert check_compatibility("MIT", dev).verdict == CompatibilityVerdict.WARNING
+
+    def test_project_reference_arm_does_not_hide_the_other_arm(self):
+        # The project's GPL-2.0-only arm cannot take Apache-2.0, whichever
+        # side of the ``OR`` the commercial arm is written on.
+        for project in (
+            "LicenseRef-Commercial OR GPL-2.0-only",
+            "GPL-2.0-only OR LicenseRef-Commercial",
+        ):
+            result = check_compatibility(project, _make_license_info("Apache-2.0"))
+            assert result.verdict == CompatibilityVerdict.INCOMPATIBLE, project
+            assert "GPLv2-incompatible" in result.reason
+
+    def test_project_reference_arm_still_pins_the_permissive_row(self):
+        for project in (
+            "LicenseRef-Commercial OR AGPL-3.0-only",
+            "AGPL-3.0-only OR LicenseRef-Commercial",
+        ):
+            result = check_compatibility(project, _make_license_info("GPL-3.0-only"))
+            assert result.verdict == CompatibilityVerdict.INCOMPATIBLE, project
+        report = analyze("LicenseRef-Commercial OR AGPL-3.0-only", [])
+        assert report.project_license == "AGPL-3.0-only OR Proprietary"
+
+
 class TestSourceAvailableProjectLicense:
     """When the *project's own* license is source-available (BUSL-1.1,
     SSPL-1.0, Elastic-2.0, ...) it should behave like a permissive license
