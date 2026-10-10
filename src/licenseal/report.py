@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import re
-from pathlib import Path
+from pathlib import Path, PurePath
 from typing import Any
 from urllib.parse import quote, urlsplit
 
@@ -25,6 +25,7 @@ from licenseal.models import (
     CompatibilityResult,
     CompatibilityVerdict,
     Ecosystem,
+    ReportDiagnostic,
     RiskLevel,
 )
 
@@ -504,6 +505,50 @@ def _grouped_results(results: list[CompatibilityResult]) -> list[CompatibilityRe
     return out
 
 
+_GAP_NOTE = "their dependencies may be missing from this report"
+
+
+def _gap_diagnostics(report: AnalysisReport) -> list[ReportDiagnostic]:
+    """Diagnostics for manifests the scan could not fully analyze.
+
+    Leaves out recovered reads (a latin-1 fallback): those lost no dependency.
+    """
+    return [d for d in report.read_diagnostics if d.severity == "gap"]
+
+
+def _gap_count(gaps: list[ReportDiagnostic]) -> int:
+    """Distinct manifests among ``gaps``; one file can carry several diagnostics."""
+    return len({d.path for d in gaps})
+
+
+def _gap_summary(gaps: list[ReportDiagnostic]) -> str:
+    """Gap count for a summary line, e.g. ``2 analysis gaps``."""
+    count = _gap_count(gaps)
+    return f"{count} analysis gap{'s' if count != 1 else ''}"
+
+
+def _gap_file(path: str) -> tuple[str, str]:
+    """Return ``(label, relative URL)`` for the file a gap was recorded on.
+
+    A file outside the scan root (reached through ``..`` from a manifest)
+    arrives as an absolute path, which differs between machines and checkouts.
+    A saved report must not depend on where the project was scanned, so such a
+    file is named by its last component and gets no link.
+    """
+    if PurePath(path).is_absolute():
+        return f"{PurePath(path).name} (outside the project directory)", ""
+    return path, _url_quote(path)
+
+
+def _gap_rows(gaps: list[ReportDiagnostic]) -> list[tuple[str, str, str]]:
+    """``(file label, relative URL, reason)`` for each gap, sorted.
+
+    Sorted on what is shown, so the order depends neither on the order the
+    files were visited in nor on the absolute path of a file outside the root.
+    """
+    return sorted((*_gap_file(d.path), d.reason) for d in gaps)
+
+
 def _other_ancestors_suffix(result: CompatibilityResult) -> str:
     """Return ' (also: X, Y)' for transitives shared across multiple direct deps."""
     dep = result.license_info.dependency
@@ -590,12 +635,21 @@ def render_table(
     summary = ", ".join(parts)
     if n_reviewed:
         summary += f" [cyan](of which {n_reviewed} reviewed)[/cyan]"
+    gaps = _gap_diagnostics(report)
+    if gaps:
+        summary += f", [yellow]{_gap_summary(gaps)}[/yellow]"
     console.print(f"  Summary: {summary}")
     console.print(
         f"  Completed in: [bold]{_format_elapsed(report.elapsed_seconds)}[/bold]",
         highlight=False,
     )
     console.print()
+
+    if gaps:
+        console.print(f"  [bold]Analysis gaps[/bold] ({_GAP_NOTE}):")
+        for label, _, reason in _gap_rows(gaps):
+            console.print(f"    {_rich_escape(label)}: {_rich_escape(reason)}")
+        console.print()
 
     # Show reasons for non-ok results
     detail_results = [r for r in grouped if r.verdict != CompatibilityVerdict.COMPATIBLE]
@@ -725,7 +779,22 @@ def render_markdown(report: AnalysisReport) -> str:
 
     # No run time here, unlike the table output: the Markdown report is meant
     # to be checked in (LICENSES.md), so it must depend only on the findings.
-    lines.append(f"**Summary:** {_summary_text(report)}")
+    gaps = _gap_diagnostics(report)
+    summary = _summary_text(report)
+    if gaps:
+        summary += f", {_gap_summary(gaps)}"
+    lines.append(f"**Summary:** {summary}")
+
+    if gaps:
+        lines.append("")
+        lines.append("## Analysis gaps")
+        lines.append("")
+        lines.append(f"These manifests could not be fully analyzed; {_GAP_NOTE}.")
+        lines.append("")
+        lines.append(_markdown_row(["File", "Reason"]))
+        lines.append(_markdown_row(["------", "--------"]))
+        for label, url, reason in _gap_rows(gaps):
+            lines.append(_markdown_row([_markdown_link(label, url), _escape_md(reason)]))
 
     detail_results = [r for r in grouped if r.verdict != CompatibilityVerdict.COMPATIBLE]
     if detail_results:
@@ -766,10 +835,10 @@ def _report_to_dict(report: AnalysisReport) -> dict[str, Any]:
     ``summary.gaps`` counts distinct manifests lost to an analysis gap
     (unreadable / unparseable), and the top-level ``diagnostics`` array lists
     every surfaced read/parse anomaly — so a CI consumer reading only the JSON
-    can see what the scan couldn't (these are otherwise stderr-only). Both are
-    always present (``0`` / ``[]`` on a clean scan).
+    can see what the scan couldn't. Both are always present (``0`` / ``[]`` on
+    a clean scan); the table and Markdown reports list the gaps only when
+    there are any.
     """
-    gap_paths = {d.path for d in report.read_diagnostics if d.severity == "gap"}
     return {
         "project_license": report.project_license,
         "elapsed_seconds": report.elapsed_seconds,
@@ -780,7 +849,7 @@ def _report_to_dict(report: AnalysisReport) -> dict[str, Any]:
             "violations": len(report.violations),
             "unknown": len(report.unknown),
             "reviewed": len(report.reviewed),
-            "gaps": len(gap_paths),
+            "gaps": _gap_count(_gap_diagnostics(report)),
         },
         "dependencies": [_dep_to_dict(r) for r in _sorted_results(report.results)],
         "diagnostics": [

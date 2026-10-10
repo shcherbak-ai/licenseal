@@ -18,6 +18,7 @@ from licenseal.models import (
     DependencyGroup,
     Ecosystem,
     LicenseInfo,
+    ReportDiagnostic,
     RiskLevel,
 )
 from licenseal.report import (
@@ -2037,3 +2038,173 @@ class TestUntrustedStrings:
         )
         assert url("pkg x", Ecosystem.R) == "https://cran.r-project.org/package=pkg%20x"
         assert url("é", Ecosystem.NPM) == "https://www.npmjs.com/package/%C3%A9"
+
+
+def _gap(path: str, reason: str = "is not valid TOML; skipped") -> ReportDiagnostic:
+    return ReportDiagnostic(path=path, reason=reason, severity="gap")
+
+
+_RECOVERED = ReportDiagnostic(
+    path="requirements.txt",
+    reason="decoded as latin-1 (not valid UTF-8); non-ASCII content may be wrong",
+    severity="recovered",
+)
+
+
+class TestAnalysisGaps:
+    """Manifests the scan could not analyze are listed in the saved reports."""
+
+    @staticmethod
+    def _table(report: AnalysisReport) -> str:
+        console, buf = _make_console(width=200)
+        render_table(report, console)
+        return buf.getvalue()
+
+    def test_report_without_gaps_is_unchanged(self):
+        # A recovered read (latin-1 fallback) lost nothing and is not a gap.
+        clean = _sample_report()
+        recovered = _sample_report()
+        recovered.read_diagnostics = [_RECOVERED]
+
+        assert render_markdown(recovered) == render_markdown(clean)
+        assert self._table(recovered) == self._table(clean)
+        assert "nalysis gap" not in render_markdown(clean)
+        assert "nalysis gap" not in self._table(clean)
+
+    def test_markdown_lists_gaps(self):
+        report = _sample_report()
+        report.read_diagnostics = [
+            _gap("services/api/pom.xml", "is not valid XML; skipped"),
+            _RECOVERED,
+            _gap("broken/pyproject.toml"),
+        ]
+        md = render_markdown(report)
+        # After the summary, before Details; sorted by file.
+        assert (
+            "\n**Summary:** 1 violation, 1 warning, 1 unknown, 3 ok, 2 analysis gaps\n"
+            "\n"
+            "## Analysis gaps\n"
+            "\n"
+            "These manifests could not be fully analyzed; "
+            "their dependencies may be missing from this report.\n"
+            "\n"
+            "|File|Reason|\n"
+            "|------|--------|\n"
+            "|[broken/pyproject.toml](broken/pyproject.toml)|is not valid TOML; skipped|\n"
+            "|[services/api/pom.xml](services/api/pom.xml)|is not valid XML; skipped|\n"
+            "\n"
+            "## Details\n"
+        ) in md
+        assert "requirements.txt" not in md
+
+    def test_table_lists_gaps(self):
+        report = _sample_report()
+        report.read_diagnostics = [
+            _gap("services/api/pom.xml", "is not valid XML; skipped"),
+            _RECOVERED,
+            _gap("broken/pyproject.toml"),
+        ]
+        table = self._table(report)
+        assert "  Summary: 1 violation, 1 warning, 1 unknown, 3 ok, 2 analysis gaps\n" in table
+        assert (
+            "  Analysis gaps (their dependencies may be missing from this report):\n"
+            "    broken/pyproject.toml: is not valid TOML; skipped\n"
+            "    services/api/pom.xml: is not valid XML; skipped\n"
+            "\n"
+            "  Details:\n"
+        ) in table
+        assert "requirements.txt" not in table
+
+    def test_gap_count_is_distinct_files_as_in_json(self):
+        # One file can carry more than one diagnostic; it is one gap.
+        report = AnalysisReport(
+            project_license="MIT",
+            results=[
+                _make_result("pkg", "MIT", RiskLevel.PERMISSIVE, CompatibilityVerdict.COMPATIBLE)
+            ],
+            read_diagnostics=[
+                _gap("go.work", "references '/abs/module', which is not a relative path"),
+                _gap("go.work", "references 'C:/module', which is not a relative path"),
+            ],
+        )
+        assert json.loads(render_json(report))["summary"]["gaps"] == 1
+        md = render_markdown(report)
+        assert "**Summary:** 0 violations, 0 warnings, 0 unknown, 1 ok, 1 analysis gap\n" in md
+        assert md.count("|[go.work](go.work)|references ") == 2
+        table = self._table(report)
+        assert "  Summary: 1 ok, 1 analysis gap\n" in table
+        assert table.count("    go.work: references ") == 2
+
+    def test_empty_report_with_a_gap_does_not_read_as_clean(self):
+        clean = AnalysisReport(project_license="MIT")
+        gapped = AnalysisReport(
+            project_license="MIT",
+            read_diagnostics=[_gap("package.json", "is not valid JSON; skipped")],
+        )
+        md = render_markdown(gapped)
+        assert md != render_markdown(clean)
+        assert "**Summary:** 0 violations, 0 warnings, 0 unknown, 0 ok, 1 analysis gap\n" in md
+        assert "|[package.json](package.json)|is not valid JSON; skipped|" in md
+
+        table = self._table(gapped)
+        assert table != self._table(clean)
+        assert "  Summary: 0 ok, 1 analysis gap\n" in table
+        assert "    package.json: is not valid JSON; skipped\n" in table
+
+    def test_file_outside_the_project_is_named_without_its_absolute_path(self, tmp_path):
+        # The diagnostics view shows a file outside the scan root by its
+        # absolute path. A saved report must not depend on the checkout
+        # location, so only the file name is printed.
+        outside = tmp_path / "shared" / "common.props"
+        report = AnalysisReport(
+            project_license="MIT",
+            read_diagnostics=[
+                _gap(str(outside), "is not valid XML; skipped"),
+                _gap("z-last/pom.xml", "is not valid XML; skipped"),
+                _gap("../sibling/go.mod", "could not be read (PermissionError); skipped"),
+            ],
+        )
+        md = render_markdown(report)
+        assert (
+            "|[../sibling/go.mod](../sibling/go.mod)"
+            "|could not be read (PermissionError); skipped|\n"
+            "|common.props (outside the project directory)|is not valid XML; skipped|\n"
+            "|[z-last/pom.xml](z-last/pom.xml)|is not valid XML; skipped|\n"
+        ) in md
+        table = self._table(report)
+        assert (
+            "    common.props (outside the project directory): is not valid XML; skipped" in table
+        )
+        for rendered in (md, table):
+            assert str(tmp_path) not in rendered
+            assert tmp_path.as_posix() not in rendered
+            assert "shared" not in rendered
+        # JSON keeps reporting the path it was given.
+        paths = [d["path"] for d in json.loads(render_json(report))["diagnostics"]]
+        assert paths == [str(outside), "z-last/pom.xml", "../sibling/go.mod"]
+
+    def test_gap_paths_and_reasons_are_escaped(self):
+        report = AnalysisReport(
+            project_license="MIT",
+            read_diagnostics=[
+                _gap(
+                    "we|ird [dir]/<b>/pyproject.toml",
+                    "references '[x](https://evil.example)\x1b[2J', which is not `relative` | <i>",
+                ),
+            ],
+        )
+        md = render_markdown(report)
+        assert (
+            "|[we\\|ird \\[dir\\]/\\<b\\>/pyproject.toml]"
+            "(we%7Cird%20%5Bdir%5D/%3Cb%3E/pyproject.toml)"
+            "|references '\\[x\\](https://evil.example)\\\\x1b\\[2J', "
+            "which is not \\`relative\\` \\| \\<i\\>|"
+        ) in md.splitlines()
+        assert not _RAW_CONTROL.search(md)
+
+        table = self._table(report)
+        assert (
+            "    we|ird [dir]/<b>/pyproject.toml: references "
+            "'[x](https://evil.example)\\x1b[2J', which is not `relative` | <i>\n"
+        ) in table
+        assert not _RAW_CONTROL.search(table)

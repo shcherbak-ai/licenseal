@@ -212,7 +212,8 @@ class AnalysisReport:
     elapsed_seconds: float = 0.0
     results: list[CompatibilityResult] = field(default_factory=list)
     # Manifest read/parse anomalies surfaced during the scan (set by the CLI,
-    # like ``elapsed_seconds``). Emitted in the JSON report's ``diagnostics``.
+    # like ``elapsed_seconds``). Emitted in the JSON report's ``diagnostics``;
+    # the gaps among them are also listed in the table and Markdown reports.
     read_diagnostics: list[ReportDiagnostic] = field(default_factory=list)
 
     @property

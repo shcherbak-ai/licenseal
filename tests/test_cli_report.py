@@ -366,3 +366,125 @@ class TestUntrustedStrings:
         assert deps["brack[et"]["package_url"] == "https://www.npmjs.com/package/brack%5Bet"
         # The file itself is ASCII: JSON escapes the control characters.
         assert "\\u001b[2JEvil" in raw_json
+
+
+class TestAnalysisGaps:
+    """A manifest the scan could not analyze is named in the table and Markdown reports."""
+
+    GAP_ROW = "|[broken/pyproject.toml](broken/pyproject.toml)|is not valid TOML; skipped|"
+    GAP_LINE = "    broken/pyproject.toml: is not valid TOML; skipped"
+
+    @staticmethod
+    def _healthy_manifest_beside_a_broken_one(project: Path) -> None:
+        (project / "requirements.txt").write_text("flask\n")
+        (project / "broken").mkdir()
+        (project / "broken" / "pyproject.toml").write_text("[project\nname = ")
+        _mock_pypi("flask", "BSD-3-Clause")
+
+    @respx.mock
+    def test_markdown_names_the_gap(self, tmp_path):
+        self._healthy_manifest_beside_a_broken_one(tmp_path)
+        _, raw_json = _check_to_file(tmp_path, "json", "--no-strict")
+        assert json.loads(raw_json)["summary"]["gaps"] == 1
+
+        exit_code, stdout = _check(tmp_path, "-f", "markdown", "--no-strict")
+        file_exit_code, saved = _check_to_file(tmp_path, "markdown", "--no-strict")
+
+        # Advisory mode passes, and this is the mode a saved audit is made in:
+        # the report itself has to say that a manifest is missing from it.
+        assert exit_code == file_exit_code == 0
+        assert saved == stdout
+        lines = saved.splitlines()
+        assert "**Summary:** 0 violations, 0 warnings, 0 unknown, 1 ok, 1 analysis gap" in lines
+        assert "## Analysis gaps" in lines
+        assert self.GAP_ROW in lines
+
+    @respx.mock
+    def test_table_names_the_gap(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("COLUMNS", "200")
+        self._healthy_manifest_beside_a_broken_one(tmp_path)
+
+        exit_code, stdout = _check(tmp_path, "--no-strict")
+        file_exit_code, saved = _check_to_file(tmp_path, "table", "--no-strict")
+
+        assert exit_code == file_exit_code == 0
+        for table in (stdout, saved):
+            lines = table.splitlines()
+            assert "  Summary: 1 ok, 1 analysis gap" in lines
+            assert "  Analysis gaps (their dependencies may be missing from this report):" in lines
+            assert self.GAP_LINE in lines
+
+    @respx.mock
+    def test_strict_fails_and_the_saved_report_still_names_the_gap(self, tmp_path):
+        self._healthy_manifest_beside_a_broken_one(tmp_path)
+        exit_code, markdown = _check_to_file(tmp_path, "markdown")
+        table_exit_code, table = _check_to_file(tmp_path, "table")
+
+        assert exit_code == table_exit_code == 1
+        assert self.GAP_ROW in markdown.splitlines()
+        assert self.GAP_LINE in table.splitlines()
+
+    @respx.mock
+    def test_scan_with_only_an_unparseable_manifest_does_not_read_as_clean(self, tmp_path):
+        (tmp_path / "package.json").write_text("{ not valid json")
+
+        exit_code, markdown = _check_to_file(tmp_path, "markdown", "--no-strict")
+        table_exit_code, table = _check_to_file(tmp_path, "table", "--no-strict")
+
+        assert exit_code == table_exit_code == 0
+        assert _markdown_rows(markdown) == []
+        assert (
+            "**Summary:** 0 violations, 0 warnings, 0 unknown, 0 ok, 1 analysis gap"
+        ) in markdown.splitlines()
+        assert "|[package.json](package.json)|is not valid JSON; skipped|" in markdown.splitlines()
+        assert "  Summary: 0 ok, 1 analysis gap" in table.splitlines()
+        assert "    package.json: is not valid JSON; skipped" in table.splitlines()
+
+    @respx.mock
+    def test_scan_without_gaps_has_no_gap_section(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("COLUMNS", "200")
+        # A stray non-UTF-8 byte in a comment is recovered, not a gap.
+        (tmp_path / "requirements.txt").write_bytes(b"# maintainer: Jos\xe9\nflask\n")
+        _mock_pypi("flask", "BSD-3-Clause")
+
+        _, raw_json = _check_to_file(tmp_path, "json")
+        data = json.loads(raw_json)
+        assert data["summary"]["gaps"] == 0
+        assert [d["severity"] for d in data["diagnostics"]] == ["recovered"]
+        for exit_code, report in (
+            _check(tmp_path, "-f", "markdown"),
+            _check_to_file(tmp_path, "markdown"),
+            _check(tmp_path),
+            _check_to_file(tmp_path, "table"),
+        ):
+            assert exit_code == 0
+            assert "nalysis gap" not in report
+            assert "1 ok" in report
+
+    @respx.mock
+    def test_file_outside_the_scan_root_is_named_without_its_absolute_path(self, tmp_path):
+        # A manifest imports a malformed file that sits beside the project.
+        project = tmp_path / "project"
+        project.mkdir()
+        (tmp_path / "shared").mkdir()
+        (tmp_path / "shared" / "common.props").write_text("<Project><broken")
+        (project / "Directory.Build.props").write_text(
+            '<Project>\n  <Import Project="../shared/common.props" />\n</Project>\n'
+        )
+        (project / "requirements.txt").write_text("flask\n")
+        _mock_pypi("flask", "BSD-3-Clause")
+
+        _, markdown = _check_to_file(project, "markdown", "--no-strict")
+        _, table = _check_to_file(project, "table", "--no-strict")
+
+        assert (
+            "|common.props (outside the project directory)|is not valid XML; skipped|"
+        ) in markdown.splitlines()
+        assert (
+            "    common.props (outside the project directory): is not valid XML; skipped"
+        ) in table.splitlines()
+        # Nothing in a saved report depends on where the project was checked out.
+        for report in (markdown, table):
+            assert str(tmp_path) not in report
+            assert tmp_path.as_posix() not in report
+            assert tmp_path.name not in report

@@ -80,7 +80,7 @@
 
 ## `diagnostics` block
 
-Each entry is a manifest/lockfile read or parse anomaly surfaced during the scan — the same set printed as `Warning:` lines on stderr, included here so a consumer reading only the JSON can see what the scan couldn't. The array is empty on a clean scan, and `(path, reason)` pairs are de-duplicated.
+Each entry is a manifest/lockfile read or parse anomaly surfaced during the scan — the same set printed as `Warning:` lines on stderr, included here so a consumer reading only the JSON can see what the scan couldn't. The array is empty on a clean scan, and `(path, reason)` pairs are de-duplicated. The table and Markdown reports list the `gap` entries in an **Analysis gaps** section (file and reason) and add the gap count to their summary line; they name a file outside the scan root by its file name only, where JSON gives its absolute path.
 
 ```json
 "diagnostics": [

@@ -226,7 +226,7 @@ If the math doesn't work out for reasons 1 and 2, the review entries probably re
 licenseal check --no-dev -f markdown --no-strict -o LICENSES.md
 ```
 
-`LICENSES.md` at the project root is licenseal's convention for the checked-in human-readable audit (licenseal itself ships one). The file captures the post-review state — all per-dep verdicts, the project license, residual flagged deps, and the review entries that were applied. Commit it alongside `licenseal.review.toml`:
+`LICENSES.md` at the project root is licenseal's convention for the checked-in human-readable audit (licenseal itself ships one). The file captures the post-review state — all per-dep verdicts, the project license, residual flagged deps, the review entries that were applied, and any analysis gaps. `--no-strict` lets the command pass with gaps, so read the summary line of the saved file: if it ends with `N analysis gap(s)`, the file has an **Analysis gaps** section naming each manifest licenseal couldn't read or parse, and the audit is incomplete until those are fixed. Tell the user which manifests are listed. Commit it alongside `licenseal.review.toml`:
 
 - `licenseal.review.toml` — machine-readable override state (what the next scan will apply).
 - `LICENSES.md` — human-readable narrative for reviewers, auditors, and future-you.
