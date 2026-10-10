@@ -2,10 +2,18 @@
 
 from __future__ import annotations
 
+import itertools
+import json
+import textwrap
+
+import httpx
 import pytest
+import respx
+from click.testing import CliRunner
 
 from licenseal.analysis.compatibility import analyze, check_compatibility
 from licenseal.analysis.spdx import and_join_licenses, normalize_license
+from licenseal.cli import main
 from licenseal.models import (
     CompatibilityVerdict,
     Dependency,
@@ -936,6 +944,365 @@ class TestDeprecatedIdPairConflicts:
             for license_id in (dep, normalize_license(dep)):
                 result = check_compatibility("MIT", _make_license_info(license_id))
                 assert result.verdict == expected, license_id
+
+
+class TestOrArmJudgedWhole:
+    """An ``OR`` dependency takes the verdict of one arm judged as a whole —
+    risk class, pair-level conflict and unresolved licenses together. Two arms
+    cannot each supply the half of a clean verdict that the other lacks."""
+
+    _STRICTNESS = {
+        CompatibilityVerdict.COMPATIBLE: 0,
+        CompatibilityVerdict.WARNING: 1,
+        CompatibilityVerdict.UNKNOWN: 2,
+        CompatibilityVerdict.INCOMPATIBLE: 3,
+    }
+
+    @staticmethod
+    def _check(project: str, license_id: str, group: DependencyGroup = DependencyGroup.PROD):
+        return check_compatibility(project, _make_license_info(license_id, name="dep", group=group))
+
+    @pytest.mark.parametrize(
+        "project, arms, expected",
+        [
+            (
+                "GPL-2.0-only",
+                {
+                    "Apache-2.0": CompatibilityVerdict.INCOMPATIBLE,
+                    "GPL-2.0-only AND CustomLicense": CompatibilityVerdict.UNKNOWN,
+                },
+                CompatibilityVerdict.INCOMPATIBLE,
+            ),
+            (
+                "GPL-2.0-only",
+                {
+                    "Apache-2.0": CompatibilityVerdict.INCOMPATIBLE,
+                    "AGPL-1.0-only": CompatibilityVerdict.WARNING,
+                },
+                CompatibilityVerdict.WARNING,
+            ),
+            (
+                "GPL-3.0-only",
+                {
+                    "EPL-1.0": CompatibilityVerdict.INCOMPATIBLE,
+                    "AGPL-3.0-only": CompatibilityVerdict.WARNING,
+                },
+                CompatibilityVerdict.WARNING,
+            ),
+            (
+                "GPL-3.0-only",
+                {
+                    "GPL-2.0-only": CompatibilityVerdict.INCOMPATIBLE,
+                    "AGPL-3.0-only": CompatibilityVerdict.WARNING,
+                },
+                CompatibilityVerdict.WARNING,
+            ),
+            (
+                # No pair entry involved: the unresolved operand rules one arm
+                # out, the matrix cell flags the other.
+                "GPL-3.0-only",
+                {
+                    "AGPL-3.0-only": CompatibilityVerdict.WARNING,
+                    "GPL-3.0-only AND CustomLicense": CompatibilityVerdict.UNKNOWN,
+                },
+                CompatibilityVerdict.WARNING,
+            ),
+            (
+                "GPL-3.0-only",
+                {
+                    "EPL-2.0": CompatibilityVerdict.WARNING,
+                    "GPL-3.0-only AND CustomLicense": CompatibilityVerdict.UNKNOWN,
+                },
+                CompatibilityVerdict.WARNING,
+            ),
+        ],
+    )
+    def test_no_arm_compatible_on_its_own_means_not_compatible(self, project, arms, expected):
+        # Single-arm controls: neither arm is compatible when it is the whole
+        # license.
+        for arm, verdict in arms.items():
+            assert self._check(project, arm).verdict == verdict, arm
+        operands = [f"({arm})" if " " in arm else arm for arm in arms]
+        for ordered in (operands, operands[::-1]):
+            assert self._check(project, " OR ".join(ordered)).verdict == expected, ordered
+
+    def test_arm_with_an_unresolved_operand_is_not_elected_over_a_resolved_one(self):
+        # The resolved arm is a definite conflict and the other arm needs
+        # review. The dependency stays a violation rather than dropping to a
+        # verdict that --no-strict would pass.
+        result = self._check("GPL-2.0-only", "Apache-2.0 OR (GPL-2.0-only AND CustomLicense)")
+        assert result.verdict == CompatibilityVerdict.INCOMPATIBLE
+        assert "GPLv2-incompatible" in result.reason
+
+    def test_reason_names_the_risk_class_of_the_arm_taken(self):
+        result = self._check("GPL-2.0-only", "Apache-2.0 OR AGPL-1.0-only")
+        assert result.reason == (
+            "dep uses Apache-2.0 OR AGPL-1.0-only — network copyleft license — "
+            "copyleft extends to network use (SaaS). Review whether this is "
+            "acceptable for your GPL-2.0-only project"
+        )
+
+    def test_reason_keeps_the_dependencys_own_class_where_it_gives_the_same_verdict(self):
+        # The project takes the GPL arm, and a permissive dependency would be
+        # compatible too, so the reason still names the dependency's own class.
+        compatible = self._check("GPL-2.0-only", "Apache-2.0 OR GPL-2.0-only")
+        assert compatible.verdict == CompatibilityVerdict.COMPATIBLE
+        assert compatible.reason == "Apache-2.0 OR GPL-2.0-only is permissive license"
+        # Under a permissive project either copyleft class is a violation.
+        violation = self._check("MIT", "AGPL-1.0-only OR (GPL-2.0-only AND CustomLicense)")
+        assert violation.verdict == CompatibilityVerdict.INCOMPATIBLE
+        assert violation.risk_level == RiskLevel.STRONG_COPYLEFT
+        assert "(strong copyleft license" in violation.reason
+
+    def test_risk_level_stays_the_dependencys_own(self):
+        # The risk level is the dependency's least restrictive choice under
+        # every project license, including one that cannot take that choice.
+        for license_id, risk in (
+            ("Apache-2.0 OR AGPL-1.0-only", RiskLevel.PERMISSIVE),
+            ("Apache-2.0 OR (GPL-2.0-only AND CustomLicense)", RiskLevel.PERMISSIVE),
+            ("EPL-1.0 OR AGPL-3.0-only", RiskLevel.WEAK_COPYLEFT),
+            ("AGPL-3.0-only OR (GPL-3.0-only AND CustomLicense)", RiskLevel.STRONG_COPYLEFT),
+        ):
+            for project in ("MIT", "GPL-2.0-only", "GPL-3.0-only", "AGPL-3.0-only"):
+                assert self._check(project, license_id).risk_level == risk, (project, license_id)
+
+    def test_or_nested_in_an_and_is_judged_the_same_way(self):
+        nested = self._check("GPL-2.0-only", "(Apache-2.0 OR AGPL-1.0-only) AND MIT")
+        assert nested.verdict == CompatibilityVerdict.WARNING
+        assert "network copyleft license" in nested.reason
+        electable = self._check("GPL-2.0-only", "(Apache-2.0 OR GPL-2.0-only) AND MIT")
+        assert electable.verdict == CompatibilityVerdict.COMPATIBLE
+
+    def test_dev_dependency_downgrade_applies_to_the_arm_taken(self):
+        result = self._check(
+            "GPL-2.0-only",
+            "Apache-2.0 OR (GPL-2.0-only AND CustomLicense)",
+            group=DependencyGroup.DEV,
+        )
+        assert result.verdict == CompatibilityVerdict.WARNING
+        assert "dev-only" in result.reason
+
+    def test_dev_downgrade_stops_at_unknown_under_an_unclassified_project_license(self):
+        # The project license has no matrix row, so every verdict starts at
+        # UNKNOWN. A pair violation raises a prod dependency to INCOMPATIBLE;
+        # for a dev dependency the downgrade stops at UNKNOWN, level with a
+        # dev dependency that has no conflict at all.
+        project = "(GPL-2.0-only OR MIT) AND SomeUnrecognizedLicense"
+        for license_id in ("Apache-2.0", "Apache-2.0 OR (GPL-2.0-only AND CustomLicense)"):
+            prod = self._check(project, license_id)
+            assert prod.verdict == CompatibilityVerdict.INCOMPATIBLE, license_id
+            dev = self._check(project, license_id, group=DependencyGroup.DEV)
+            assert dev.verdict == CompatibilityVerdict.UNKNOWN, license_id
+            assert "GPLv2-incompatible" in dev.reason
+        clean = self._check(project, "MIT", group=DependencyGroup.DEV)
+        assert clean.verdict == CompatibilityVerdict.UNKNOWN
+
+    def test_every_arm_with_a_pair_conflict_keeps_the_worst_one(self):
+        # Each arm has a pair-level conflict, so the worst one stands even
+        # though the EPL-2.0 arm alone only warns.
+        assert self._check("GPL-2.0-only", "Apache-2.0").verdict == (
+            CompatibilityVerdict.INCOMPATIBLE
+        )
+        assert self._check("GPL-2.0-only", "EPL-2.0").verdict == CompatibilityVerdict.WARNING
+        for license_id in ("Apache-2.0 OR EPL-2.0", "EPL-2.0 OR Apache-2.0"):
+            result = self._check("GPL-2.0-only", license_id)
+            assert result.verdict == CompatibilityVerdict.INCOMPATIBLE, license_id
+            assert "GPLv2-incompatible" in result.reason
+
+    def test_conflict_on_an_unresolved_arm_counts_when_every_resolved_arm_has_one(self):
+        result = self._check("GPL-2.0-only", "EPL-2.0 OR (Apache-2.0 AND CustomLicense)")
+        assert result.verdict == CompatibilityVerdict.INCOMPATIBLE
+        assert "GPLv2-incompatible" in result.reason
+
+    def test_no_fully_resolved_arm_routes_every_unresolved_license_to_review(self):
+        # The GPL arm has a known risk class and no pair conflict, so the
+        # other arm's conflict does not stand; both custom licenses do.
+        result = self._check(
+            "GPL-2.0-only",
+            "(GPL-2.0-only AND CustomLicense) OR (Apache-2.0 AND OtherCustomLicense)",
+        )
+        assert result.verdict == CompatibilityVerdict.UNKNOWN
+        assert "cannot avoid CustomLicense, OtherCustomLicense" in result.reason
+
+    def test_no_fully_resolved_arm_keeps_a_conflict_no_known_arm_escapes(self):
+        result = self._check("GPL-2.0-only", "(Apache-2.0 AND CustomLicense) OR OtherCustomLicense")
+        assert result.verdict == CompatibilityVerdict.INCOMPATIBLE
+        assert "GPLv2-incompatible" in result.reason
+
+    def test_electable_arm_still_clears_the_dependency(self):
+        for project, license_id in (
+            ("GPL-2.0-only", "MIT OR GPL-3.0-only"),
+            ("GPL-2.0-only", "Apache-2.0 OR GPL-2.0-only"),
+            ("GPL-3.0-only", "GPL-2.0-only OR GPL-3.0-only"),
+            ("GPL-3.0-only", "EPL-1.0 OR LGPL-2.1-only"),
+            ("MIT", "MIT OR CustomLicense"),
+        ):
+            assert self._check(project, license_id).verdict == CompatibilityVerdict.COMPATIBLE
+
+    def test_project_license_without_a_simple_id_arm_has_no_pair_entries(self):
+        # A WITH-compound project license matches no pair entry; the
+        # dependency is still judged on risk class and unresolved licenses.
+        project = "GPL-2.0-only WITH Classpath-exception-2.0"
+        assert self._check(project, "Apache-2.0").verdict == CompatibilityVerdict.COMPATIBLE
+        mixed = self._check(project, "Apache-2.0 OR (MIT AND CustomLicense)")
+        assert mixed.verdict == CompatibilityVerdict.COMPATIBLE
+        assert self._check(project, "MIT AND CustomLicense").verdict == CompatibilityVerdict.UNKNOWN
+
+    _LEAVES = (
+        "MIT",
+        "Apache-2.0",
+        "LGPL-2.1-only",
+        "MPL-2.0",
+        "EPL-1.0",
+        "EPL-2.0",
+        "GPL-2.0-only",
+        "GPL-2.0-or-later",
+        "GPL-3.0-only",
+        "AGPL-1.0-only",
+        "AGPL-3.0-only",
+        "CustomLicense",
+        "Proprietary",
+        "GPL-3.0-only WITH Classpath-exception-2.0",
+    )
+    # Operands for the compound arms: each matrix column, both pair-level
+    # verdicts, and an unresolved license.
+    _BINDING = (
+        "MIT",
+        "Apache-2.0",
+        "EPL-2.0",
+        "GPL-2.0-only",
+        "GPL-3.0-only",
+        "AGPL-3.0-only",
+        "CustomLicense",
+    )
+    # Single-license projects from every matrix row, multi-licensed projects
+    # with at most one GPL-family arm, and a license with a GPL-family arm
+    # but no matrix row.
+    _PROJECTS = (
+        "MIT",
+        "Apache-2.0",
+        "MPL-2.0",
+        "GPL-2.0-only",
+        "GPL-2.0-or-later",
+        "GPL-3.0-only",
+        "AGPL-3.0-only",
+        "Proprietary",
+        "BUSL-1.1",
+        "SomeUnrecognizedLicense",
+        "MIT OR Apache-2.0",
+        "GPL-2.0-only OR Proprietary",
+        "AGPL-3.0-only OR Proprietary",
+        "GPL-2.0-only WITH Classpath-exception-2.0",
+        "(GPL-2.0-only OR MIT) AND SomeUnrecognizedLicense",
+    )
+
+    @pytest.mark.parametrize("project", _PROJECTS)
+    @pytest.mark.parametrize("group", [DependencyGroup.PROD, DependencyGroup.DEV])
+    def test_compound_is_never_more_lenient_than_its_best_arm(self, project, group):
+        # Arms are single licenses and AND-compounds; each arm's own verdict
+        # comes from the public function.
+        conjunctions = [f"({a} AND {b})" for a, b in itertools.combinations(self._BINDING, 2)]
+        own = {
+            arm: self._STRICTNESS[self._check(project, arm, group).verdict]
+            for arm in (*self._LEAVES, *conjunctions)
+        }
+        for a, b in itertools.combinations(own, 2):
+            compound = self._check(project, f"{a} OR {b}", group)
+            assert self._STRICTNESS[compound.verdict] >= min(own[a], own[b]), (a, b)
+        for a, b, c in itertools.combinations(self._BINDING, 3):
+            compound = self._check(project, f"{a} OR {b} OR {c}", group)
+            assert self._STRICTNESS[compound.verdict] >= min(own[a], own[b], own[c]), (a, b, c)
+
+    @pytest.mark.parametrize("project", _PROJECTS)
+    def test_and_keeps_the_obligations_of_every_operand(self, project):
+        # An OR operand of an AND is no more lenient inside the AND than on
+        # its own, whatever it is combined with.
+        choices = [f"({a} OR {b})" for a, b in itertools.combinations(self._LEAVES, 2)]
+        own = {
+            operand: self._STRICTNESS[self._check(project, operand).verdict]
+            for operand in (*self._BINDING, *choices)
+        }
+        for choice in choices:
+            for leaf in self._BINDING:
+                compound = self._check(project, f"{choice} AND {leaf}")
+                assert self._STRICTNESS[compound.verdict] >= max(own[choice], own[leaf]), (
+                    choice,
+                    leaf,
+                )
+
+    def test_project_with_two_gpl_family_arms_elects_per_project_arm(self):
+        # A multi-licensed project distributes under each arm separately, and
+        # the dependency is judged against each one: it can take its
+        # GPL-2.0-only arm for the project's GPL-2.0-only arm and its
+        # GPL-3.0-only arm for the other. Either dependency arm as the whole
+        # license fails one project arm.
+        project = "GPL-2.0-only OR GPL-3.0-only"
+        for arm in ("GPL-2.0-only", "GPL-3.0-only"):
+            assert self._check(project, arm).verdict == CompatibilityVerdict.INCOMPATIBLE, arm
+        both = self._check(project, "GPL-2.0-only OR GPL-3.0-only")
+        assert both.verdict == CompatibilityVerdict.COMPATIBLE
+        # An arm that fails the same project arm either way is not rescued.
+        neither = self._check(project, "GPL-3.0-only OR AGPL-3.0-only")
+        assert neither.verdict == CompatibilityVerdict.INCOMPATIBLE
+
+
+class TestOrArmVerdictDrivesTheExitCode:
+    """``licenseal check`` on a GPL-2.0-only project exits by the verdict of
+    the arm the project can take, not by a mix of two arms."""
+
+    @pytest.mark.parametrize(
+        "declared, extra_args, exit_code, verdict, risk",
+        [
+            # Strict mode fails on the warning from the only arm left.
+            ("Apache-2.0 OR AGPL-1.0-only", [], 1, "warning", "permissive"),
+            # Single-arm controls.
+            ("Apache-2.0", [], 1, "incompatible", "permissive"),
+            ("AGPL-1.0-only", [], 1, "warning", "network-copyleft"),
+            # --no-strict passes a warning and never a violation.
+            ("Apache-2.0 OR AGPL-1.0-only", ["--no-strict"], 0, "warning", "permissive"),
+            (
+                "Apache-2.0 OR (GPL-2.0-only AND CustomLicense)",
+                ["--no-strict"],
+                1,
+                "incompatible",
+                "permissive",
+            ),
+            # An arm the project can take whole still clears the dependency.
+            ("Apache-2.0 OR GPL-2.0-only", [], 0, "compatible", "permissive"),
+        ],
+    )
+    @respx.mock
+    def test_check_exit_code(self, tmp_path, declared, extra_args, exit_code, verdict, risk):
+        (tmp_path / "pyproject.toml").write_text(
+            textwrap.dedent("""\
+            [project]
+            name = "myproject"
+            license = "GPL-2.0-only"
+            dependencies = ["some-lib"]
+            """)
+        )
+        payload = {
+            "info": {
+                "license": declared,
+                "version": "1.0.0",
+                "classifiers": [],
+                "requires_dist": [],
+            }
+        }
+        for url in (
+            "https://pypi.org/pypi/some-lib/json",
+            "https://pypi.org/pypi/some-lib/1.0.0/json",
+        ):
+            respx.get(url).mock(return_value=httpx.Response(200, json=payload))
+
+        result = CliRunner().invoke(
+            main, ["check", "--path", str(tmp_path), "-f", "json", *extra_args]
+        )
+        assert result.exit_code == exit_code
+        data = json.loads(result.output[result.output.index("{") :])
+        assert data["project_license"] == "GPL-2.0-only"
+        assert data["dependencies"][0]["verdict"] == verdict
+        assert data["dependencies"][0]["risk"] == risk
 
 
 class TestDualLicensedProjectRow:

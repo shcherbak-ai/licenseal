@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+from typing import NamedTuple
+
 from licenseal.analysis.risk import (
+    _aggregate,
     _split_top_level,
     _strip_outer_parens,
     classify_risk,
-    unavoidable_unresolved_licenses,
 )
 from licenseal.analysis.spdx import canonical_license_id, normalize_license
 from licenseal.models import (
@@ -265,47 +267,78 @@ def _pair_conflict(project_spdx: str, dep_leaf: str) -> tuple[CompatibilityVerdi
     return None
 
 
-def _unavoidable_pair_conflict(
-    project_spdx: str, dep_expr: str
-) -> tuple[CompatibilityVerdict, str] | None:
-    """Pair conflict the consumer cannot avoid however they elect ``OR`` choices.
+class _Outcome(NamedTuple):
+    """What a dependency expression binds the consumer to once its ``OR``
+    choices are elected: the risk class, the pair-level conflict, and the
+    licenses that did not resolve."""
 
-    Mirrors :func:`risk.unavoidable_unresolved_licenses`' bind/elect walk:
+    risk: RiskLevel
+    pair: tuple[CompatibilityVerdict, str] | None
+    unresolved: list[str]
 
-    * **leaf** → the pair override for (project, leaf), if any.
-    * **AND** → every arm binds, so the worst conflict across arms.
-    * **OR** → no conflict when some arm is conflict-free and classifies to a
-      known risk (the consumer elects that arm); an UNKNOWN arm cannot clear
-      the expression, matching the dep-side convention that unresolvable arms
-      never relax a verdict. Otherwise the worst conflict across arms.
+
+def _elect(project_risk: RiskLevel, project_leaf: str, dep_expr: str) -> _Outcome:
+    """Outcome of ``dep_expr`` under the ``OR`` choices that suit the project best.
+
+    Risk class, pair conflict and unresolved licenses are settled together
+    for each operand, so one ``OR`` arm cannot supply the risk class while
+    another supplies the clean pair check. ``project_leaf`` is one simple-ID
+    arm of the project license. The walk mirrors :func:`classify_risk`'s
+    parser with bind/elect semantics:
+
+    * **leaf** → its risk class, its pair override against ``project_leaf``,
+      and the leaf itself when it classifies UNKNOWN.
+    * **AND** → every operand binds: the risk classes aggregate as in
+      :func:`classify_risk`, the worst pair conflict stands, and the
+      unresolved licenses add up.
+    * **OR** → the fully-resolved arm with the most lenient verdict, taken
+      whole. An arm that binds an unresolved license is never elected over a
+      fully-resolved one, matching the dep-side convention that unresolvable
+      arms never relax a verdict (``AGPL-3.0-only OR Proprietary`` stays
+      driven by its AGPL arm). When every fully-resolved arm has a pair
+      conflict, the worst conflict across all arms stands.
+    * **OR with no fully-resolved arm** → no choice can be elected cleanly,
+      so the unresolved licenses of every arm are unavoidable (``(GPL AND
+      <custom>) OR Proprietary``). The risk class is the least restrictive
+      known one, and the worst pair conflict stands unless an arm of known
+      risk is conflict-free.
     """
     expr = dep_expr.strip()
     unwrapped = _strip_outer_parens(expr)
     if unwrapped != expr:
-        return _unavoidable_pair_conflict(project_spdx, unwrapped)
+        return _elect(project_risk, project_leaf, unwrapped)
 
+    # Split at the lowest-precedence operator first: AND binds tighter than OR.
     or_parts = _split_top_level(expr, " OR ")
-    if len(or_parts) > 1:
-        conflicts: list[tuple[CompatibilityVerdict, str]] = []
-        for part in or_parts:
-            conflict = _unavoidable_pair_conflict(project_spdx, part)
-            if conflict is None:
-                if classify_risk(part) != RiskLevel.UNKNOWN:
-                    return None  # a conflict-free resolved arm is electable
-            else:
-                conflicts.append(conflict)
-        return _worst_pair_conflict(conflicts)
+    is_or = len(or_parts) > 1
+    parts = or_parts if is_or else _split_top_level(expr, " AND ")
+    if len(parts) == 1:
+        risk = classify_risk(expr)
+        unresolved = [expr] if risk == RiskLevel.UNKNOWN else []
+        return _Outcome(risk, _pair_conflict(project_leaf, expr), unresolved)
 
-    and_parts = _split_top_level(expr, " AND ")
-    if len(and_parts) > 1:
-        conflicts = [
-            conflict
-            for part in and_parts
-            if (conflict := _unavoidable_pair_conflict(project_spdx, part)) is not None
-        ]
-        return _worst_pair_conflict(conflicts)
+    arms = [_elect(project_risk, project_leaf, part) for part in parts]
+    worst = _worst_pair_conflict([arm.pair for arm in arms if arm.pair is not None])
+    unresolved = list(dict.fromkeys(tok for arm in arms for tok in arm.unresolved))
+    risk = _aggregate([arm.risk for arm in arms], prefer_lower=is_or)
+    if not is_or:
+        return _Outcome(risk, worst, unresolved)
 
-    return _pair_conflict(project_spdx, expr)
+    resolved = [arm for arm in arms if not arm.unresolved]
+    if resolved:
+        best = min(
+            resolved,
+            key=lambda arm: (
+                _VERDICT_STRICTNESS[_outcome_verdict(project_risk, arm)[0]],
+                arm.risk.severity,
+            ),
+        )
+        if all(arm.pair is not None for arm in resolved):
+            return best._replace(pair=worst)
+        return best
+    if any(arm.pair is None and arm.risk != RiskLevel.UNKNOWN for arm in arms):
+        worst = None
+    return _Outcome(risk, worst, unresolved)
 
 
 def _worst_pair_conflict(
@@ -338,20 +371,35 @@ def _project_pair_leaves(project_spdx: str) -> list[str]:
     return [canonical_license_id(expr)] if " " not in expr else []
 
 
-def _pair_strengthens(
-    pair_verdict: CompatibilityVerdict, matrix_verdict: CompatibilityVerdict
-) -> bool:
-    """True when the pair override is stricter than the matrix verdict.
+# Verdicts from most to least lenient. INCOMPATIBLE (a definite, documented
+# conflict) outranks everything, including UNKNOWN — the same precedence
+# ``risk._aggregate`` gives a pinned copyleft violation over an unresolvable
+# AND arm. UNKNOWN outranks WARNING: its manual-review routing is already at
+# least as loud.
+_VERDICT_STRICTNESS: dict[CompatibilityVerdict, int] = {
+    CompatibilityVerdict.COMPATIBLE: 0,
+    CompatibilityVerdict.WARNING: 1,
+    CompatibilityVerdict.UNKNOWN: 2,
+    CompatibilityVerdict.INCOMPATIBLE: 3,
+}
 
-    INCOMPATIBLE (a definite, documented conflict) replaces anything below
-    it, including UNKNOWN — the same precedence ``risk._aggregate`` gives a
-    pinned copyleft violation over an unresolvable AND arm. WARNING only
-    replaces COMPATIBLE: it must never soften INCOMPATIBLE, and UNKNOWN's
-    manual-review routing is already at least as loud.
+
+def _outcome_verdict(
+    project_risk: RiskLevel, outcome: _Outcome
+) -> tuple[CompatibilityVerdict, str]:
+    """Verdict for an outcome, with the pair's reason fragment when the pair set it.
+
+    The matrix verdict for the outcome's risk class stands unless the pair
+    conflict is stricter: an override only ever strengthens the matrix, so a
+    pair WARNING replaces COMPATIBLE alone and never softens INCOMPATIBLE or
+    UNKNOWN. The fragment is empty when the matrix verdict stands.
     """
-    if pair_verdict == CompatibilityVerdict.INCOMPATIBLE:
-        return matrix_verdict != CompatibilityVerdict.INCOMPATIBLE
-    return matrix_verdict == CompatibilityVerdict.COMPATIBLE
+    verdict = _COMPAT_MATRIX.get((project_risk, outcome.risk), CompatibilityVerdict.UNKNOWN)
+    if outcome.pair is not None and (
+        _VERDICT_STRICTNESS[outcome.pair[0]] > _VERDICT_STRICTNESS[verdict]
+    ):
+        return outcome.pair
+    return verdict, ""
 
 
 _RISK_LABELS = {
@@ -404,41 +452,45 @@ def _check_compat(
             reason=_proprietary_reason(license_info, is_dev),
         )
 
+    # ``risk_level`` is a property of the dependency: its least restrictive
+    # choice, whatever the project. The verdict comes from the choice the
+    # project can actually take, which is settled per ``OR`` arm — matrix
+    # cell, pair-level override (GPL-family version conflicts, Apache-2.0
+    # under GPL-2.0-only, GPL-incompatible weak copyleft) and unresolved
+    # licenses together. A multi-licensed project distributes under every arm
+    # it offers, so the dependency is settled against each simple-ID arm and
+    # the strictest outcome stands; a project license with no such arm has no
+    # pair entries and is settled once, on risk class and unresolved licenses.
     dep_risk = classify_risk(dep_license)
-    verdict = _COMPAT_MATRIX.get((project_risk, dep_risk), CompatibilityVerdict.UNKNOWN)
-
-    # Pair-level overrides: specific (project, dep) license pairs the coarse
-    # matrix lands in a too-soft cell for (GPL-family version conflicts,
-    # Apache-2.0 under GPL-2.0-only, GPL-incompatible weak copyleft). Only
-    # ever strengthens the verdict. Every simple-ID arm of a multi-licensed
-    # project is checked: the project distributes under all of them.
-    pair_fragment = ""
-    pair = _worst_pair_conflict(
-        [
-            conflict
-            for leaf in _project_pair_leaves(project_spdx)
-            if (conflict := _unavoidable_pair_conflict(leaf, dep_license)) is not None
-        ]
+    outcome = max(
+        (
+            _elect(project_risk, leaf, dep_license)
+            for leaf in _project_pair_leaves(project_spdx) or [project_spdx]
+        ),
+        key=lambda candidate: _VERDICT_STRICTNESS[_outcome_verdict(project_risk, candidate)[0]],
     )
-    if pair is not None and _pair_strengthens(pair[0], verdict):
-        verdict, pair_fragment = pair
+    verdict, pair_fragment = _outcome_verdict(project_risk, outcome)
 
-    # Downgrade violations to warnings for dev dependencies
+    # Downgrade violations to warnings for dev dependencies. Under a project
+    # license with no matrix row the violation can only come from a pair
+    # entry, and the matrix alone already says UNKNOWN: the downgrade stops
+    # there instead of dropping below it.
     if is_dev and verdict == CompatibilityVerdict.INCOMPATIBLE:
-        verdict = CompatibilityVerdict.WARNING
+        verdict = (
+            CompatibilityVerdict.UNKNOWN
+            if project_risk == RiskLevel.UNKNOWN
+            else CompatibilityVerdict.WARNING
+        )
 
-    # A compound license can bind the consumer to an unresolved license that
-    # ``classify_risk`` hid behind a recognized one — an ``AND`` arm always
-    # binds, and an ``OR`` only lets you escape it when some arm is fully
-    # resolved (a GPL project consuming ``GPL-3.0-only AND <custom>``, or
-    # ``(GPL AND <custom>) OR Proprietary``: no selectable branch is fully
-    # resolved, so ``<custom>`` still needs review). The project context lives
-    # here, not in the context-free classifier, so re-surface an unavoidable
-    # unresolved license — but never soften the stricter INCOMPATIBLE, which
+    # The elected choice can still bind the consumer to an unresolved license
+    # — an ``AND`` operand always binds, and an ``OR`` only escapes it when
+    # some arm is fully resolved (a GPL project consuming ``GPL-3.0-only AND
+    # <custom>``, or ``(GPL AND <custom>) OR Proprietary``: no selectable
+    # branch is fully resolved, so ``<custom>`` still needs review). Route it
+    # to manual review — but never soften the stricter INCOMPATIBLE, which
     # already flags a definite conflict (e.g. the same dep in a permissive
     # project).
-    unresolved = unavoidable_unresolved_licenses(dep_license)
-    if unresolved and verdict in (
+    if outcome.unresolved and verdict in (
         CompatibilityVerdict.COMPATIBLE,
         CompatibilityVerdict.WARNING,
     ):
@@ -446,13 +498,27 @@ def _check_compat(
             license_info=license_info,
             risk_level=dep_risk,
             verdict=CompatibilityVerdict.UNKNOWN,
-            reason=_unresolved_and_reason(license_info, unresolved),
+            reason=_unresolved_and_reason(license_info, outcome.unresolved),
         )
 
     if pair_fragment:
         reason = _pair_conflict_reason(license_info, pair_fragment, is_dev)
     else:
-        reason = _build_reason(project_spdx, project_risk, license_info, dep_risk, verdict, is_dev)
+        # The reason names the dependency's own risk class when that class
+        # lands in the same matrix cell as the choice taken, and the class of
+        # the choice taken when the project cannot take the least restrictive
+        # one.
+        same_cell = _COMPAT_MATRIX.get((project_risk, dep_risk)) == _COMPAT_MATRIX.get(
+            (project_risk, outcome.risk)
+        )
+        reason = _build_reason(
+            project_spdx,
+            project_risk,
+            license_info,
+            dep_risk if same_cell else outcome.risk,
+            verdict,
+            is_dev,
+        )
 
     return CompatibilityResult(
         license_info=license_info,

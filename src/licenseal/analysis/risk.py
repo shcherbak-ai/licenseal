@@ -269,11 +269,11 @@ def classify_risk(spdx_id: str) -> RiskLevel:
     # than OR per SPDX 3.0 grammar.
     or_parts = _split_top_level(expr, " OR ")
     if len(or_parts) > 1:
-        return _aggregate(or_parts, prefer_lower=True)
+        return _aggregate([classify_risk(p) for p in or_parts], prefer_lower=True)
 
     and_parts = _split_top_level(expr, " AND ")
     if len(and_parts) > 1:
-        return _aggregate(and_parts, prefer_lower=False)
+        return _aggregate([classify_risk(p) for p in and_parts], prefer_lower=False)
 
     if " WITH " in expr:
         base, _, exception = expr.partition(" WITH ")
@@ -295,8 +295,7 @@ def classify_risk(spdx_id: str) -> RiskLevel:
     return RiskLevel.UNKNOWN
 
 
-def _aggregate(parts: list[str], *, prefer_lower: bool) -> RiskLevel:
-    risks = [classify_risk(p) for p in parts]
+def _aggregate(risks: list[RiskLevel], *, prefer_lower: bool) -> RiskLevel:
     known = [r for r in risks if r != RiskLevel.UNKNOWN]
 
     # OR: the consumer may elect any single arm, so an unresolvable arm is
@@ -364,48 +363,3 @@ def _split_top_level(expr: str, sep: str) -> list[str]:
             i += 1
     parts.append("".join(buf).strip())
     return parts
-
-
-def unavoidable_unresolved_licenses(spdx_id: str) -> list[str]:
-    """Unresolved licenses the consumer is bound by however they elect the
-    expression's ``OR`` choices.
-
-    :func:`classify_risk` collapses each sub-expression to a single risk level
-    and can hide an unresolved arm behind a recognized one (``GPL-3.0-only AND
-    <custom>`` → STRONG_COPYLEFT). The compatibility layer uses this walk —
-    where the project license is known — to re-surface an unresolved license the
-    consumer can't escape, without softening a definite incompatibility.
-
-    The walk mirrors :func:`classify_risk`'s parser with bind/elect semantics:
-
-    * **leaf** → the leaf itself when it classifies UNKNOWN, else nothing.
-    * **AND** → the union over arms: every arm binds, so any unresolved arm is
-      unavoidable.
-    * **OR** → nothing when *any* arm is fully resolved (the consumer elects
-      that arm and avoids the rest); otherwise the union over arms, because
-      every electable branch still leaves an unresolved license. This is why
-      ``AGPL-3.0-only OR Proprietary`` (resolved AGPL arm) and ``(LGPL AND
-      <custom>) OR MIT`` (resolved MIT arm) do not escalate, but ``(GPL AND
-      <custom>) OR Proprietary`` (no fully-resolved arm) does.
-
-    Returns ``[]`` when every binding license resolved.
-    """
-    expr = spdx_id.strip()
-    unwrapped = _strip_outer_parens(expr)
-    if unwrapped != expr:
-        return unavoidable_unresolved_licenses(unwrapped)
-
-    or_parts = _split_top_level(expr, " OR ")
-    if len(or_parts) > 1:
-        per_arm = [unavoidable_unresolved_licenses(p) for p in or_parts]
-        if any(not arm for arm in per_arm):
-            return []  # a fully-resolved arm is electable → the rest is avoidable
-        return list(dict.fromkeys(tok for arm in per_arm for tok in arm))
-
-    and_parts = _split_top_level(expr, " AND ")
-    if len(and_parts) > 1:
-        return list(
-            dict.fromkeys(tok for p in and_parts for tok in unavoidable_unresolved_licenses(p))
-        )
-
-    return [expr] if classify_risk(expr) == RiskLevel.UNKNOWN else []
