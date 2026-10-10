@@ -5,10 +5,15 @@ from __future__ import annotations
 import pytest
 
 from licenseal.analysis.spdx import (
+    _CLASSIFIER_MAP,
+    _LICENSE_URL_PREFIXES,
+    _NORMALIZATION_MAP,
     _looks_like_spdx,
     and_join_licenses,
+    canonical_license_id,
     normalize_license,
     normalize_r_license,
+    spdx_from_license_url,
 )
 
 
@@ -230,7 +235,7 @@ class TestNormalizeLicense:
         assert normalize_license(raw) == "UNKNOWN"
 
     def test_url_input_canonical_variants_still_resolve(self):
-        assert normalize_license("https://www.gnu.org/licenses/gpl-3.0.en.html") == "GPL-3.0"
+        assert normalize_license("https://www.gnu.org/licenses/gpl-3.0.en.html") == "GPL-3.0-only"
         assert normalize_license("https://www.apache.org/licenses/LICENSE-2.0.txt") == "Apache-2.0"
         assert normalize_license("https://unlicense.org/") == "Unlicense"
 
@@ -342,7 +347,7 @@ class TestPublisherAliasGapsClosedByBench:
             normalize_license("CDDL or GPL 2 with Classpath Exception")
             == "CDDL-1.0 OR GPL-2.0-with-classpath-exception"
         )
-        assert normalize_license("CDDL v1.1 / GPL v2 dual license") == "CDDL-1.1 AND GPL-2.0"
+        assert normalize_license("CDDL v1.1 / GPL v2 dual license") == "CDDL-1.1 AND GPL-2.0-only"
 
     def test_the_go_license_alias(self):
         # com.google.re2j:re2j and other Go-port libraries. The bare
@@ -524,6 +529,121 @@ class TestNestedAndRepeatedOperands:
         assert normalize_license(expr) == expr
 
 
+class TestCanonicalLicenseIds:
+    """A deprecated GNU-family ID is reported in its current SPDX spelling:
+    the bare ID is ``-only`` and a ``+`` suffix is ``-or-later``."""
+
+    @pytest.mark.parametrize(
+        "deprecated, current",
+        [
+            ("GPL-1.0", "GPL-1.0-only"),
+            ("GPL-2.0", "GPL-2.0-only"),
+            ("GPL-3.0", "GPL-3.0-only"),
+            ("LGPL-2.0", "LGPL-2.0-only"),
+            ("LGPL-2.1", "LGPL-2.1-only"),
+            ("LGPL-3.0", "LGPL-3.0-only"),
+            ("AGPL-1.0", "AGPL-1.0-only"),
+            ("AGPL-3.0", "AGPL-3.0-only"),
+            ("GFDL-1.3", "GFDL-1.3-only"),
+            ("GPL-1.0+", "GPL-1.0-or-later"),
+            ("GPL-2.0+", "GPL-2.0-or-later"),
+            ("GPL-3.0+", "GPL-3.0-or-later"),
+            ("LGPL-2.0+", "LGPL-2.0-or-later"),
+            ("LGPL-2.1+", "LGPL-2.1-or-later"),
+            ("LGPL-3.0+", "LGPL-3.0-or-later"),
+            ("AGPL-3.0+", "AGPL-3.0-or-later"),
+        ],
+    )
+    def test_deprecated_gnu_id_becomes_its_current_id(self, deprecated, current):
+        assert canonical_license_id(deprecated) == current
+        assert normalize_license(deprecated) == current
+
+    @pytest.mark.parametrize(
+        "unchanged",
+        [
+            "MIT",
+            "Apache-2.0",
+            "GPL-2.0-only",
+            "GPL-2.0-or-later",
+            # ``+`` on a license that has no ``-or-later`` ID.
+            "MPL-2.0+",
+            "Apache-2.0+",
+            # The deprecated compound ID and ``WITH`` leaves are not rewritten.
+            "GPL-2.0-with-classpath-exception",
+            "GPL-2.0 WITH Classpath-exception-2.0",
+            "GPL-2.0+ WITH GCC-exception-2.0",
+            # Not a listed ID once rewritten.
+            "GPL-4.0",
+            "gpl-2.0",
+            "Proprietary",
+            "UNKNOWN",
+            "",
+        ],
+    )
+    def test_anything_else_is_returned_unchanged(self, unchanged):
+        assert canonical_license_id(unchanged) == unchanged
+
+    @pytest.mark.parametrize(
+        "raw, expected",
+        [
+            ("GPL-2.0 AND MIT", "GPL-2.0-only AND MIT"),
+            ("MIT AND GPL-2.0", "GPL-2.0-only AND MIT"),
+            ("GPL-3.0 AND MIT", "GPL-3.0-only AND MIT"),
+            ("GPL-3.0+ AND MIT", "GPL-3.0-or-later AND MIT"),
+            ("GPL-2.0+ OR MIT", "GPL-2.0-or-later OR MIT"),
+            ("LGPL-3.0 OR AGPL-3.0", "AGPL-3.0-only OR LGPL-3.0-only"),
+            ("(GPL-2.0+ OR MIT) AND LGPL-2.1", "(GPL-2.0-or-later OR MIT) AND LGPL-2.1-only"),
+            ("MIT OR (Apache-2.0 AND GPL-3.0)", "Apache-2.0 AND GPL-3.0-only OR MIT"),
+            ("GPL-2.0 or MIT", "GPL-2.0-only OR MIT"),
+            ("GPL-2.0, MIT", "GPL-2.0-only OR MIT"),
+            ("GPL-2.0+/MIT", "GPL-2.0-or-later OR MIT"),
+            # The two spellings of one license are one operand.
+            ("GPL-2.0 AND GPL-2.0-only", "GPL-2.0-only"),
+        ],
+    )
+    def test_deprecated_id_inside_an_expression_is_rewritten(self, raw, expected):
+        assert normalize_license(raw) == expected
+
+    def test_current_ids_are_the_control(self):
+        assert normalize_license("GPL-2.0-only AND MIT") == "GPL-2.0-only AND MIT"
+        assert normalize_license("GPL-3.0-or-later AND MIT") == "GPL-3.0-or-later AND MIT"
+
+    def test_with_leaf_is_left_as_written(self):
+        for expr in ("GPL-2.0 WITH Classpath-exception-2.0", "GPL-3.0+ WITH GCC-exception-3.1"):
+            assert normalize_license(expr) == expr
+        assert (
+            normalize_license("GPL-2.0 OR GPL-2.0 WITH Classpath-exception-2.0")
+            == "GPL-2.0 WITH Classpath-exception-2.0 OR GPL-2.0-only"
+        )
+        assert (
+            normalize_license("GPL-2.0-with-classpath-exception AND GPL-2.0")
+            == "GPL-2.0-only AND GPL-2.0-with-classpath-exception"
+        )
+
+    def test_plus_on_a_license_without_an_or_later_id_is_kept(self):
+        assert normalize_license("MPL-2.0+ OR Apache-2.0") == "Apache-2.0 OR MPL-2.0+"
+
+    @pytest.mark.parametrize(
+        "url, expected",
+        [
+            ("https://www.gnu.org/licenses/gpl-2.0.html", "GPL-2.0-only"),
+            ("https://www.gnu.org/licenses/gpl-3.0.html", "GPL-3.0-only"),
+            ("https://www.gnu.org/licenses/lgpl-2.1.html", "LGPL-2.1-only"),
+            ("https://www.gnu.org/licenses/lgpl-3.0.html", "LGPL-3.0-only"),
+            ("https://www.gnu.org/licenses/agpl-3.0.html", "AGPL-3.0-only"),
+            ("https://spdx.org/licenses/GPL-3.0", "GPL-3.0-only"),
+            ("https://spdx.org/licenses/GPL-2.0+", "GPL-2.0-or-later"),
+        ],
+    )
+    def test_license_url_yields_the_current_id(self, url, expected):
+        assert spdx_from_license_url(url) == expected
+        assert normalize_license(url) == expected
+
+    def test_every_license_url_table_id_is_already_normalized(self):
+        for marker, spdx_id in _LICENSE_URL_PREFIXES:
+            assert normalize_license(spdx_id) == spdx_id, marker
+
+
 class TestLicenseRefLeaves:
     """``LicenseRef-*`` maps to ``Proprietary`` one parsed leaf at a time, so
     a reference never stands in for the operands around it."""
@@ -661,6 +781,24 @@ class TestNormalizeIdempotence:
             "Apache-2.0 AND CDDL-1.0 AND GPL-2.0-with-classpath-exception",
             "LGPL-3.0-only AND GPL-3.0-or-later",
             "Apache-2.0 AND GPL-3.0-only AND LGPL-3.0-only",
+            # Deprecated GNU spellings: alone, in compounds, from URLs, and as
+            # the survivors of a rewritten pair.
+            "GPL-2.0",
+            "GPL-3.0+",
+            "LGPL-3.0+",
+            "GPL-2.0 AND MIT",
+            "GPL-3.0+ AND MIT",
+            "MIT OR (Apache-2.0 AND GPL-3.0)",
+            "GPL-2.0 AND GPL-2.0-only",
+            "LGPL-3.0 AND GPL-3.0",
+            "LGPL-2.1 AND GPL-2.0 AND MIT",
+            "CDDL-1.0 AND GPL-2.0",
+            "CDDL v1.1 / GPL v2 dual license",
+            "https://www.gnu.org/licenses/gpl-3.0.html",
+            "https://www.gnu.org/licenses/lgpl-2.1.html",
+            "https://spdx.org/licenses/GPL-2.0+",
+            "GPL-2.0 WITH Classpath-exception-2.0",
+            "MPL-2.0+ OR Apache-2.0",
             # Unbalanced parens pass through.
             "(MIT OR Apache-2.0",
             "((MIT)",
@@ -672,6 +810,11 @@ class TestNormalizeIdempotence:
     def test_normalizing_a_result_changes_nothing(self, raw):
         once = normalize_license(raw)
         assert normalize_license(once) == once
+
+    def test_every_alias_and_classifier_result_is_stable(self):
+        for raw in (*_NORMALIZATION_MAP, *_CLASSIFIER_MAP):
+            once = normalize_license(raw)
+            assert normalize_license(once) == once, raw
 
 
 class TestAndJoinLicenses:
@@ -787,15 +930,17 @@ class TestRedundantLicensePairCollapse:
 
     def test_lgpl_and_gpl_same_version_collapses_to_lgpl(self):
         # The pygithub case after operand canonicalization:
-        # GPL-3.0 AND GPL-3.0-or-later AND LGPL-3.0 → LGPL-3.0.
-        assert normalize_license("LGPL-3.0 AND GPL-3.0") == "LGPL-3.0"
-        assert normalize_license("GPL-3.0 AND LGPL-3.0") == "LGPL-3.0"
-        assert normalize_license("GPL-3.0 AND GPL-3.0-or-later AND LGPL-3.0") == "LGPL-3.0"
+        # GPL-3.0 AND GPL-3.0-or-later AND LGPL-3.0 → LGPL-3.0. The surviving
+        # LGPL operand is in its current spelling.
+        assert normalize_license("LGPL-3.0 AND GPL-3.0") == "LGPL-3.0-only"
+        assert normalize_license("GPL-3.0 AND LGPL-3.0") == "LGPL-3.0-only"
+        assert normalize_license("GPL-3.0 AND GPL-3.0-or-later AND LGPL-3.0") == "LGPL-3.0-only"
+        assert normalize_license("GPL-3.0+ AND LGPL-3.0+") == "LGPL-3.0-or-later"
 
     def test_lgpl_2_1_and_gpl_2_0_collapses(self):
         # LGPL-2.1 explicitly references GPL-2.0 in its text — same
         # inclusion relationship as the matching-X.Y case.
-        assert normalize_license("LGPL-2.1 AND GPL-2.0") == "LGPL-2.1"
+        assert normalize_license("LGPL-2.1 AND GPL-2.0") == "LGPL-2.1-only"
         assert normalize_license("GPL-2.0-only AND LGPL-2.1-only") == "LGPL-2.1-only"
 
     def test_lgpl_only_and_gpl_or_later_variants_collapse(self):
@@ -819,15 +964,16 @@ class TestRedundantLicensePairCollapse:
     def test_mismatched_versions_not_collapsed(self):
         # LGPL-3.0 + GPL-2.0 is NOT a known inclusion pair (LGPL-3.0
         # references GPL-3.0, not GPL-2.0). Keep AND.
-        result = normalize_license("LGPL-3.0 AND GPL-2.0")
-        assert " AND " in result
-        assert "LGPL-3.0" in result and "GPL-2.0" in result
+        assert normalize_license("LGPL-3.0 AND GPL-2.0") == "GPL-2.0-only AND LGPL-3.0-only"
 
     def test_lgpl_and_gpl_chain_with_other_licenses(self):
         # Mixed compound: LGPL+GPL+Apache. Drop the GPL (LGPL subsumes
         # it), keep Apache. The result is the operand-canonical join of
         # the remaining two.
-        assert normalize_license("Apache-2.0 AND GPL-3.0 AND LGPL-3.0") == "Apache-2.0 AND LGPL-3.0"
+        assert (
+            normalize_license("Apache-2.0 AND GPL-3.0 AND LGPL-3.0")
+            == "Apache-2.0 AND LGPL-3.0-only"
+        )
 
     def test_cddl_and_gpl_classpath_exception_becomes_or(self):
         # The Sun/Oracle javax.* dual-license convention: POM forces
@@ -901,9 +1047,9 @@ class TestNormalizeRLicense:
 
     def test_plain_cddl_and_gpl_without_cpe_not_rewritten(self):
         # Without the classpath-exception, the AND is NOT the Sun/Oracle
-        # convention — keep as-is.
+        # convention — the operator is kept.
         result = normalize_license("CDDL-1.0 AND GPL-2.0")
-        assert result == "CDDL-1.0 AND GPL-2.0"
+        assert result == "CDDL-1.0 AND GPL-2.0-only"
 
 
 class TestSpdxLooksLike:

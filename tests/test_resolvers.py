@@ -3555,6 +3555,23 @@ class TestDepsDevMultiEntryGrouping:
         assert info.license_id == "Apache-2.0 AND MIT"
         assert check_compatibility("MIT", info).verdict == CompatibilityVerdict.COMPATIBLE
 
+    @pytest.mark.parametrize(
+        "licenses, expected",
+        [
+            (["GPL-3.0", "MIT"], "GPL-3.0-only AND MIT"),
+            (["MIT", "GPL-3.0"], "GPL-3.0-only AND MIT"),
+            (["GPL-3.0+", "MIT"], "GPL-3.0-or-later AND MIT"),
+            # Control: the single entry was already rewritten by the alias map.
+            (["GPL-3.0"], "GPL-3.0-only"),
+        ],
+    )
+    @respx.mock
+    def test_deprecated_id_in_a_joined_entry_reaches_the_pair_rules(self, licenses, expected):
+        info = self._resolve(licenses)
+        assert info.license_id == expected
+        result = check_compatibility("GPL-2.0-only", info)
+        assert result.verdict == CompatibilityVerdict.INCOMPATIBLE
+
 
 class TestDepsDevRepoUrlFromLinks:
     def test_returns_source_repo_url(self):

@@ -377,15 +377,15 @@ def resolve_nuget_license(
                     from_registry=True,
                 )
         if license_url:
-            # ``spdx_from_license_url`` already returns canonical SPDX IDs
-            # (its known-patterns table maps URLs straight to identifiers
-            # like ``MIT``, ``Apache-2.0``), so no further normalization
-            # is needed — a non-empty return is always a usable license ID.
+            # A non-empty return is always a usable license ID. It goes
+            # through ``normalize_license`` like every other resolved
+            # license, so this path cannot hand the compatibility layer a
+            # spelling the rest of the pipeline would have rewritten.
             mapped = spdx_from_license_url(license_url)
             if mapped:
                 return LicenseInfo(
                     dependency=dep,
-                    license_id=mapped,
+                    license_id=normalize_license(mapped),
                     license_raw=license_url,
                     resolved_version=pinned,
                     from_registry=True,

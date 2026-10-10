@@ -8,7 +8,7 @@ from licenseal.analysis.risk import (
     classify_risk,
     unavoidable_unresolved_licenses,
 )
-from licenseal.analysis.spdx import normalize_license
+from licenseal.analysis.spdx import canonical_license_id, normalize_license
 from licenseal.models import (
     AnalysisReport,
     CompatibilityResult,
@@ -220,8 +220,13 @@ def _pair_conflict(project_spdx: str, dep_leaf: str) -> tuple[CompatibilityVerdi
 
     ``dep_leaf`` is a single expression leaf (no top-level OR/AND). Returns
     ``None`` when the pair has no override — the matrix verdict stands.
+
+    The entries key on current SPDX IDs, so a deprecated GNU spelling is
+    rewritten first: ``GPL-3.0`` is ``GPL-3.0-only`` and ``GPL-3.0+`` is
+    ``GPL-3.0-or-later``. That has to happen before the ``+`` is stripped —
+    stripped first, an 'or later' grant would read as the bare, 'only' ID.
     """
-    leaf = dep_leaf.rstrip("+")
+    leaf = canonical_license_id(dep_leaf).rstrip("+")
     if project_spdx == "GPL-2.0-only":
         if leaf in _GPL3_FAMILY_DEP_IDS:
             return (
@@ -322,13 +327,15 @@ def _project_pair_leaves(project_spdx: str) -> list[str]:
     under every arm it offers, so the dep must clear each one. WITH-compound
     leaves are dropped — pair entries key on exact simple IDs, and a
     GPL-with-exception project doesn't match the bare-GPL conflict entries.
+    Each leaf is returned in its current SPDX spelling, the form the pair
+    entries key on.
     """
     expr = _strip_outer_parens(project_spdx.strip())
     for sep in (" OR ", " AND "):
         parts = _split_top_level(expr, sep)
         if len(parts) > 1:
             return [leaf for part in parts for leaf in _project_pair_leaves(part)]
-    return [expr] if " " not in expr else []
+    return [canonical_license_id(expr)] if " " not in expr else []
 
 
 def _pair_strengthens(

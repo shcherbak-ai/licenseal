@@ -266,12 +266,15 @@ class TestSpdxFromLicenseUrl:
         assert spdx_from_license_url("https://www.eclipse.org/legal/epl-2.0/") == "EPL-2.0"
 
     def test_gnu_gpl_3_0(self):
-        assert spdx_from_license_url("https://www.gnu.org/licenses/gpl-3.0.html") == "GPL-3.0"
+        # The current SPDX ID, not the deprecated bare ``GPL-3.0``.
+        assert spdx_from_license_url("https://www.gnu.org/licenses/gpl-3.0.html") == "GPL-3.0-only"
 
     def test_gnu_lgpl_2_1_specific_before_bare_lgpl(self):
         # Order matters: ``lgpl-2.1`` must be checked before bare ``lgpl``
         # so 2.1 doesn't get caught by the generic LGPL prefix.
-        assert spdx_from_license_url("https://www.gnu.org/licenses/lgpl-2.1.html") == "LGPL-2.1"
+        assert (
+            spdx_from_license_url("https://www.gnu.org/licenses/lgpl-2.1.html") == "LGPL-2.1-only"
+        )
 
     def test_mit_via_opensource_org(self):
         assert spdx_from_license_url("https://opensource.org/licenses/MIT") == "MIT"
@@ -386,11 +389,11 @@ class TestSpdxFromLicenseUrl:
             # Listed file-format / language suffixes.
             ("https://www.apache.org/licenses/LICENSE-2.0.txt", "Apache-2.0"),
             ("https://www.apache.org/licenses/LICENSE-2.0.html", "Apache-2.0"),
-            ("https://www.gnu.org/licenses/gpl-3.0.en.html", "GPL-3.0"),
-            ("https://www.gnu.org/licenses/gpl.txt", "GPL-3.0"),
-            ("https://www.gnu.org/licenses/lgpl.html", "LGPL-3.0"),
-            ("https://www.gnu.org/licenses/agpl-3.0.html", "AGPL-3.0"),
-            ("https://www.gnu.org/copyleft/lesser.html", "LGPL-2.1"),
+            ("https://www.gnu.org/licenses/gpl-3.0.en.html", "GPL-3.0-only"),
+            ("https://www.gnu.org/licenses/gpl.txt", "GPL-3.0-only"),
+            ("https://www.gnu.org/licenses/lgpl.html", "LGPL-3.0-only"),
+            ("https://www.gnu.org/licenses/agpl-3.0.html", "AGPL-3.0-only"),
+            ("https://www.gnu.org/copyleft/lesser.html", "LGPL-2.1-only"),
             ("http://www.opensource.org/licenses/bsd-license.php", "BSD-2-Clause"),
             ("https://www.eclipse.org/org/documents/epl-v10.php", "EPL-1.0"),
             ("https://www.json.org/license.html", "JSON"),
@@ -402,9 +405,9 @@ class TestSpdxFromLicenseUrl:
             # Legacy file names with their own rows.
             ("http://www.opensource.org/licenses/mit-license.php", "MIT"),
             ("http://www.opensource.org/licenses/isc-license.txt", "ISC"),
-            ("https://www.gnu.org/licenses/gpl-3.0-standalone.html", "GPL-3.0"),
-            ("https://www.gnu.org/licenses/lgpl-3.0-standalone.html", "LGPL-3.0"),
-            ("https://www.gnu.org/licenses/agpl-3.0-standalone.html", "AGPL-3.0"),
+            ("https://www.gnu.org/licenses/gpl-3.0-standalone.html", "GPL-3.0-only"),
+            ("https://www.gnu.org/licenses/lgpl-3.0-standalone.html", "LGPL-3.0-only"),
+            ("https://www.gnu.org/licenses/agpl-3.0-standalone.html", "AGPL-3.0-only"),
             # Host-only rows cover every path on the steward's host.
             ("https://unlicense.org", "Unlicense"),
             ("https://unlicense.org/UNLICENSE", "Unlicense"),
@@ -453,10 +456,24 @@ class TestSpdxFromLicenseUrl:
             ("https://spdx.org/licenses/MIT.json", "MIT"),
             ("https://spdx.org/licenses/GPL-3.0-or-later.html", "GPL-3.0-or-later"),
             ("https://spdx.org/licenses/Apache-2.0/", "Apache-2.0"),
-            # Deprecated IDs keep their spdx.org page; ``+`` is dropped.
-            ("https://spdx.org/licenses/GPL-2.0.html", "GPL-2.0"),
-            ("https://spdx.org/licenses/GPL-2.0+.html", "GPL-2.0"),
-            ("https://spdx.org/licenses/LGPL-2.1", "LGPL-2.1"),
+            # Deprecated GNU IDs keep their spdx.org page and come back in
+            # their current spelling: the bare ID is ``-only``, ``+`` is
+            # ``-or-later`` (never ``-only``).
+            ("https://spdx.org/licenses/GPL-2.0.html", "GPL-2.0-only"),
+            ("https://spdx.org/licenses/GPL-2.0+.html", "GPL-2.0-or-later"),
+            ("https://spdx.org/licenses/GPL-2.0+", "GPL-2.0-or-later"),
+            ("https://spdx.org/licenses/LGPL-2.1", "LGPL-2.1-only"),
+            ("https://spdx.org/licenses/LGPL-3.0+.html", "LGPL-3.0-or-later"),
+            ("https://spdx.org/licenses/AGPL-3.0", "AGPL-3.0-only"),
+            # The deprecated compound ID stays as it is; on an ID with no
+            # ``-or-later`` form a ``+`` is still dropped.
+            (
+                "https://spdx.org/licenses/GPL-2.0-with-classpath-exception",
+                "GPL-2.0-with-classpath-exception",
+            ),
+            ("https://spdx.org/licenses/MPL-2.0+", "MPL-2.0"),
+            # A deprecated ID outside the recognized set is still not mapped.
+            ("https://spdx.org/licenses/GFDL-1.3", ""),
             # Not an SPDX ID: nothing is returned rather than the raw tail.
             ("https://spdx.org/licenses/NotARealLicense", ""),
             ("https://spdx.org/licenses/NotARealLicense.html", ""),

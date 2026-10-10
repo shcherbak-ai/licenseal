@@ -110,7 +110,7 @@ Each entry is a manifest/lockfile read or parse anomaly surfaced during the scan
 | `source_url` | string | Project-relative URL form of `source` for clickable rendering. Empty when `source` is empty. |
 | `license` | string | Effective SPDX expression. Equal to `effective_license`. |
 | `license_raw` | string | Original license string from the registry, before normalization. |
-| `detected_license` | string | SPDX expression detected from registry metadata. A custom `LicenseRef-*` operand reads `Proprietary`; `license_raw` keeps the declared string. |
+| `detected_license` | string | SPDX expression detected from registry metadata. A custom `LicenseRef-*` operand reads `Proprietary`, and a deprecated GNU ID reads as its current ID (`GPL-2.0` → `GPL-2.0-only`, `GPL-2.0+` → `GPL-2.0-or-later`); `license_raw` keeps the declared string. |
 | `reviewed_license` | string | SPDX expression supplied via `licenseal.review.toml`, or empty. |
 | `effective_license` | string | `reviewed_license` if non-empty, else `detected_license`. |
 | `reviewed` | bool | Whether a review override applied. |

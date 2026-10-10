@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import pytest
+
 from licenseal.analysis.compatibility import analyze, check_compatibility
 from licenseal.analysis.spdx import and_join_licenses, normalize_license
 from licenseal.models import (
@@ -780,6 +782,109 @@ class TestPairLevelOverrides:
             check_compatibility("GPL-3.0-only", _make_license_info("LGPL-2.1-only")).verdict
             == CompatibilityVerdict.COMPATIBLE
         )
+
+
+class TestDeprecatedIdPairConflicts:
+    """Deprecated GNU spellings reach the pair-level rules as their current
+    IDs — the bare ID as ``-only``, ``+`` as ``-or-later`` — on the
+    dependency side and the project side."""
+
+    @pytest.mark.parametrize(
+        "project, deprecated, current",
+        [
+            ("GPL-3.0-only", "GPL-2.0 AND MIT", "GPL-2.0-only AND MIT"),
+            ("GPL-3.0-only", "GPL-2.0", "GPL-2.0-only"),
+            ("AGPL-3.0-only", "MIT AND GPL-2.0", "GPL-2.0-only AND MIT"),
+            ("GPL-2.0-only", "GPL-3.0 AND MIT", "GPL-3.0-only AND MIT"),
+            ("GPL-2.0-only", "GPL-3.0+ AND MIT", "GPL-3.0-or-later AND MIT"),
+            ("GPL-2.0-only", "LGPL-3.0+", "LGPL-3.0-or-later"),
+            ("GPL-2.0-only", "LGPL-3.0", "LGPL-3.0-only"),
+            ("GPL-2.0-only", "AGPL-3.0", "AGPL-3.0-only"),
+            (
+                "GPL-2.0-only",
+                "(GPL-3.0+ OR LGPL-3.0) AND MIT",
+                "(GPL-3.0-or-later OR LGPL-3.0-only) AND MIT",
+            ),
+        ],
+    )
+    def test_deprecated_dep_id_conflicts_like_its_current_id(self, project, deprecated, current):
+        assert normalize_license(deprecated) == current
+        # As resolved, as the current ID was already handled, and as a raw
+        # ``license_id`` that skipped normalization.
+        for license_id in (normalize_license(deprecated), current, deprecated):
+            result = check_compatibility(project, _make_license_info(license_id))
+            assert result.verdict == CompatibilityVerdict.INCOMPATIBLE, license_id
+
+    def test_plus_is_or_later_never_only(self):
+        # ``GPL-2.0+`` carries an upgrade clause, so a GPLv3 project can take
+        # it. Read as ``GPL-2.0-only`` it would be a false violation.
+        for license_id in (
+            "GPL-2.0+",
+            "GPL-2.0+ AND MIT",
+            normalize_license("GPL-2.0+"),
+            normalize_license("GPL-2.0+ AND MIT"),
+        ):
+            result = check_compatibility("GPL-3.0-only", _make_license_info(license_id))
+            assert result.verdict == CompatibilityVerdict.COMPATIBLE, license_id
+        # Control: without the ``+`` the same ID is 'only' and conflicts.
+        bare = check_compatibility("GPL-3.0-only", _make_license_info("GPL-2.0 AND MIT"))
+        assert bare.verdict == CompatibilityVerdict.INCOMPATIBLE
+
+    def test_or_arm_still_clears_a_deprecated_conflicting_arm(self):
+        li = _make_license_info(normalize_license("MIT OR GPL-3.0"))
+        assert check_compatibility("GPL-2.0-only", li).verdict == CompatibilityVerdict.COMPATIBLE
+
+    @pytest.mark.parametrize(
+        "project, dep",
+        [
+            ("GPL-2.0", "Apache-2.0"),
+            ("GPL-2.0 OR MIT", "Apache-2.0"),
+            ("MIT OR GPL-2.0", "Apache-2.0"),
+            ("GPL-2.0", "GPL-3.0-only"),
+            ("GPL-3.0", "GPL-2.0-only"),
+            ("GPL-3.0+", "GPL-2.0-only"),
+            ("AGPL-3.0", "GPL-2.0-only"),
+            ("GPL-3.0", "EPL-1.0"),
+        ],
+    )
+    def test_deprecated_project_id_conflicts_like_its_current_id(self, project, dep):
+        result = check_compatibility(project, _make_license_info(dep))
+        assert result.verdict == CompatibilityVerdict.INCOMPATIBLE, (project, dep)
+
+    @pytest.mark.parametrize(
+        "project, dep",
+        [
+            ("GPL-2.0+", "Apache-2.0"),
+            ("GPL-2.0+ OR MIT", "Apache-2.0"),
+            ("GPL-2.0+", "GPL-3.0-only"),
+        ],
+    )
+    def test_project_plus_is_or_later_never_only(self, project, dep):
+        result = check_compatibility(project, _make_license_info(dep))
+        assert result.verdict == CompatibilityVerdict.COMPATIBLE, (project, dep)
+
+    def test_report_names_the_project_license_by_its_current_id(self):
+        assert analyze("GPL-2.0", []).project_license == "GPL-2.0-only"
+        assert analyze("GPL-2.0+ OR MIT", []).project_license == "GPL-2.0-or-later OR MIT"
+
+    def test_survivor_of_a_collapsed_pair_conflicts_like_its_current_id(self):
+        # ``LGPL-3.0 AND GPL-3.0`` collapses to its LGPL operand, which a
+        # GPL-2.0-only project cannot take.
+        li = _make_license_info(normalize_license("LGPL-3.0 AND GPL-3.0"))
+        assert li.license_id == "LGPL-3.0-only"
+        assert check_compatibility("GPL-2.0-only", li).verdict == CompatibilityVerdict.INCOMPATIBLE
+
+    def test_permissive_project_verdicts_are_the_control(self):
+        # The risk class comes from the ID's family prefix, so a permissive
+        # project already judged the deprecated spellings correctly.
+        for dep, expected in (
+            ("GPL-2.0 AND MIT", CompatibilityVerdict.INCOMPATIBLE),
+            ("LGPL-3.0+", CompatibilityVerdict.WARNING),
+            ("AGPL-3.0", CompatibilityVerdict.INCOMPATIBLE),
+        ):
+            for license_id in (dep, normalize_license(dep)):
+                result = check_compatibility("MIT", _make_license_info(license_id))
+                assert result.verdict == expected, license_id
 
 
 class TestDualLicensedProjectRow:

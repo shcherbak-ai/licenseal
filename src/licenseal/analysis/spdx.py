@@ -146,7 +146,7 @@ _NORMALIZATION_MAP: dict[str, str] = {
     # below, but the short publisher phrasing seen in Sun/Oracle and
     # Jenkins-bundled artifacts.
     "cddl or gpl 2 with classpath exception": "CDDL-1.0 AND GPL-2.0-with-classpath-exception",
-    "cddl v1.1 / gpl v2 dual license": "CDDL-1.1 AND GPL-2.0",
+    "cddl v1.1 / gpl v2 dual license": "CDDL-1.1 AND GPL-2.0-only",
     # Eclipse-foundation prose variant with ``v.`` (period after ``v``).
     "eclipse public license v. 1.0": "EPL-1.0",
     "eclipse public license v. 2.0": "EPL-2.0",
@@ -459,8 +459,8 @@ _NORMALIZATION_MAP: dict[str, str] = {
     # (over-conservative — either license is sufficient by their own
     # stated SPDX expression). Map the literal compound string to keep
     # the AND form rather than rewriting publisher intent.
-    "eclipse public license - v 1.0 and gnu lesser general public license": "EPL-1.0 AND LGPL-2.1",
-    "eclipse public license - v 2.0 and gnu lesser general public license": "EPL-2.0 AND LGPL-2.1",
+    "eclipse public license - v 1.0 and gnu lesser general public license": "EPL-1.0 AND LGPL-2.1-only",
+    "eclipse public license - v 2.0 and gnu lesser general public license": "EPL-2.0 AND LGPL-2.1-only",
     # EPL variants that appear as split halves of compound POM strings
     # ("EPL 2.0 AND GPL2 w/ CPE"); decompose-and-normalize needs each
     # half to map independently.
@@ -688,22 +688,24 @@ _LICENSE_URL_PREFIXES: tuple[tuple[str, str], ...] = (
     ("apache.org/licenses/license-2.0", "Apache-2.0"),
     ("apache.org/licenses/license-1.1", "Apache-1.1"),
     ("apache.org/licenses/license-1.0", "Apache-1.0"),
-    # GNU family
-    ("gnu.org/licenses/lgpl-3.0", "LGPL-3.0"),
-    ("gnu.org/licenses/lgpl-3.0-standalone", "LGPL-3.0"),
-    ("gnu.org/licenses/lgpl-2.1", "LGPL-2.1"),
-    ("gnu.org/licenses/lgpl-2.0", "LGPL-2.0"),
-    ("gnu.org/licenses/lgpl", "LGPL-3.0"),
-    ("gnu.org/licenses/gpl-3.0", "GPL-3.0"),
-    ("gnu.org/licenses/gpl-3.0-standalone", "GPL-3.0"),
-    ("gnu.org/licenses/gpl-2.0", "GPL-2.0"),
-    ("gnu.org/licenses/gpl-1.0", "GPL-1.0"),
-    ("gnu.org/licenses/gpl", "GPL-3.0"),
-    ("gnu.org/licenses/agpl-3.0", "AGPL-3.0"),
-    ("gnu.org/licenses/agpl-3.0-standalone", "AGPL-3.0"),
-    ("gnu.org/licenses/agpl", "AGPL-3.0"),
-    ("gnu.org/copyleft/lesser", "LGPL-2.1"),
-    ("gnu.org/copyleft/gpl", "GPL-3.0"),
+    # GNU family. A license page names a version, not an upgrade clause, so
+    # each maps to the ``-only`` ID — the same reading SPDX gives the
+    # deprecated bare ID (``GPL-3.0``).
+    ("gnu.org/licenses/lgpl-3.0", "LGPL-3.0-only"),
+    ("gnu.org/licenses/lgpl-3.0-standalone", "LGPL-3.0-only"),
+    ("gnu.org/licenses/lgpl-2.1", "LGPL-2.1-only"),
+    ("gnu.org/licenses/lgpl-2.0", "LGPL-2.0-only"),
+    ("gnu.org/licenses/lgpl", "LGPL-3.0-only"),
+    ("gnu.org/licenses/gpl-3.0", "GPL-3.0-only"),
+    ("gnu.org/licenses/gpl-3.0-standalone", "GPL-3.0-only"),
+    ("gnu.org/licenses/gpl-2.0", "GPL-2.0-only"),
+    ("gnu.org/licenses/gpl-1.0", "GPL-1.0-only"),
+    ("gnu.org/licenses/gpl", "GPL-3.0-only"),
+    ("gnu.org/licenses/agpl-3.0", "AGPL-3.0-only"),
+    ("gnu.org/licenses/agpl-3.0-standalone", "AGPL-3.0-only"),
+    ("gnu.org/licenses/agpl", "AGPL-3.0-only"),
+    ("gnu.org/copyleft/lesser", "LGPL-2.1-only"),
+    ("gnu.org/copyleft/gpl", "GPL-3.0-only"),
     # OSI canonical, plus the legacy ``<name>-license`` file names
     ("opensource.org/licenses/mit", "MIT"),
     ("opensource.org/licenses/mit-license", "MIT"),
@@ -771,10 +773,10 @@ _LICENSE_URL_PATH_SUFFIXES: tuple[str, ...] = (
 )
 
 # Deprecated SPDX IDs that keep a page under ``spdx.org/licenses/`` but are
-# absent from the bundled list (current IDs only). These are the deprecated
-# spellings the table above already emits for the stewards' own URLs, so an
-# ``spdx.org`` URL and the steward's URL for one license agree. All copyleft:
-# recognizing them can only add scrutiny.
+# absent from the bundled list (current IDs only). Recognized so an
+# ``spdx.org`` URL and the steward's own URL for one license agree; each is
+# returned in its current spelling (see :func:`canonical_license_id`). All
+# copyleft: recognizing them can only add scrutiny.
 _DEPRECATED_SPDX_URL_IDS: frozenset[str] = frozenset(
     {
         "AGPL-3.0",
@@ -787,6 +789,26 @@ _DEPRECATED_SPDX_URL_IDS: frozenset[str] = frozenset(
         "LGPL-3.0",
     }
 )
+
+
+def canonical_license_id(license_id: str) -> str:
+    """Current SPDX spelling of a deprecated GNU-family license ID.
+
+    SPDX replaced the bare ``GPL-2.0`` (that version only) and the ``+``
+    suffix (that version or any later one) with the explicit
+    ``GPL-2.0-only`` / ``GPL-2.0-or-later``. The pair-level conflict rules
+    key on the explicit IDs, so a deprecated spelling has to be rewritten
+    before it reaches them — and ``+`` has to become ``-or-later``, never
+    ``-only``.
+
+    The rewrite is applied only when it lands on a listed SPDX ID. Anything
+    else is returned unchanged: a current ID, a ``WITH`` leaf, the
+    ``GPL-2.0-with-classpath-exception`` compound ID, a ``+`` on a license
+    with no ``-or-later`` ID (``MPL-2.0+``), a sentinel.
+    """
+    suffix = "-or-later" if license_id.endswith("+") else "-only"
+    current = license_id.rstrip("+") + suffix
+    return current if current in KNOWN_SPDX_IDS else license_id
 
 
 def _url_host_is(host: str, domain: str) -> bool:
@@ -832,14 +854,13 @@ def spdx_from_license_url(url: str) -> str:
             if tail.lower().endswith(suffix):
                 tail = tail[: -len(suffix)]
                 break
-        # SPDX 3+ deprecated the ``+`` suffix in favor of ``-or-later``;
-        # canonical risk classification strips ``+`` defensively, but the
-        # license_id surfaced from URL extraction should already use the
-        # base form. The risk-classifier handles either, but downstream
-        # alias normalization is cleaner without the trailing ``+``.
-        tail = tail.rstrip("+")
-        if tail in KNOWN_SPDX_IDS or tail in _DEPRECATED_SPDX_URL_IDS:
-            return tail
+        # A deprecated GNU ID and its ``+`` form each keep a page. Recognize
+        # the page by its bare ID and return the current spelling: ``-only``
+        # for the bare ID, ``-or-later`` for ``+``. A ``+`` on any other ID
+        # is dropped.
+        base = tail.rstrip("+")
+        if base in KNOWN_SPDX_IDS or base in _DEPRECATED_SPDX_URL_IDS:
+            return canonical_license_id(tail).rstrip("+")
         return ""
 
     for marker, spdx in _LICENSE_URL_PREFIXES:
@@ -990,11 +1011,13 @@ def _canonical_leaf(leaf: str) -> str:
     """Canonical spelling of one expression leaf.
 
     A leaf is a license ID, optionally followed by ``WITH`` and an
-    exception. A custom ``LicenseRef-*`` leaf becomes ``Proprietary``.
+    exception. A custom ``LicenseRef-*`` leaf becomes ``Proprietary``; a
+    deprecated GNU-family ID becomes its current ``-only`` / ``-or-later``
+    form. A ``WITH`` leaf that is not a custom reference is left as written.
     """
     if _LICENSE_REF_RE.match(leaf):
         return "Proprietary"
-    return leaf
+    return canonical_license_id(leaf)
 
 
 def and_join_licenses(expressions: Iterable[str]) -> str:

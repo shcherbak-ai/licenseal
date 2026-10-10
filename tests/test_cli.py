@@ -6576,6 +6576,115 @@ class TestComposedLicenseExitCode:
         assert dep["verdict"] == "compatible"
 
 
+class TestDeprecatedIdExitCode:
+    """A GPLv3-family dependency declared with a deprecated ID, or through a
+    legacy license URL, fails a GPL-2.0-only project."""
+
+    _ARGS = ("--no-transitive", "--no-strict", "-f", "json")
+
+    @staticmethod
+    def _run(tmp_path, name: str):
+        result = CliRunner().invoke(
+            main, ["check", "--path", str(tmp_path), *TestDeprecatedIdExitCode._ARGS]
+        )
+        data = json.loads(result.output[result.output.index("{") :])
+        dep = next(d for d in data["dependencies"] if d["name"] == name)
+        return result.exit_code, data["project_license"], dep
+
+    @staticmethod
+    def _python_project(tmp_path, project_license: str = "GPL-2.0-only") -> None:
+        (tmp_path / "pyproject.toml").write_text(
+            textwrap.dedent(f"""\
+            [project]
+            name = "myapp"
+            version = "0.1.0"
+            license = "{project_license}"
+            dependencies = ["gnulib==1.0.0"]
+            """)
+        )
+
+    @staticmethod
+    def _mock_batch(licenses: list[str]) -> None:
+        respx.post("https://api.deps.dev/v3alpha/versionbatch").mock(
+            return_value=httpx.Response(
+                200,
+                json=TestDepsDevBatchHitShortcut._batch_response(
+                    "PYPI", "gnulib", "1.0.0", licenses
+                ),
+            )
+        )
+
+    @pytest.mark.parametrize(
+        "licenses, expected",
+        [
+            (["GPL-3.0", "MIT"], "GPL-3.0-only AND MIT"),
+            (["GPL-3.0+", "MIT"], "GPL-3.0-or-later AND MIT"),
+            (["LGPL-3.0+"], "LGPL-3.0-or-later"),
+        ],
+    )
+    @pytest.mark.no_default_deps_dev_mock
+    @respx.mock
+    def test_deprecated_ids_from_the_batch_fail(self, tmp_path, licenses, expected):
+        self._python_project(tmp_path)
+        self._mock_batch(licenses)
+        exit_code, _, dep = self._run(tmp_path, "gnulib")
+        assert exit_code == 1
+        assert dep["license"] == expected
+        assert dep["verdict"] == "incompatible"
+
+    @pytest.mark.no_default_deps_dev_mock
+    @respx.mock
+    def test_deprecated_project_license_arm_fails_an_apache_dependency(self, tmp_path):
+        self._python_project(tmp_path, project_license="GPL-2.0 OR MIT")
+        self._mock_batch(["Apache-2.0"])
+        exit_code, project_license, dep = self._run(tmp_path, "gnulib")
+        assert exit_code == 1
+        assert project_license == "GPL-2.0-only OR MIT"
+        assert dep["verdict"] == "incompatible"
+
+    @pytest.mark.no_default_deps_dev_mock
+    @respx.mock
+    def test_or_later_project_license_is_the_control(self, tmp_path):
+        self._python_project(tmp_path, project_license="GPL-2.0+ OR MIT")
+        self._mock_batch(["Apache-2.0"])
+        exit_code, project_license, dep = self._run(tmp_path, "gnulib")
+        assert exit_code == 0
+        assert project_license == "GPL-2.0-or-later OR MIT"
+        assert dep["verdict"] == "compatible"
+
+    @respx.mock
+    def test_legacy_license_url_fails(self, tmp_path):
+        (tmp_path / "App.csproj").write_text(
+            textwrap.dedent("""\
+            <Project Sdk="Microsoft.NET.Sdk">
+              <PropertyGroup>
+                <PackageLicenseExpression>GPL-2.0-only</PackageLicenseExpression>
+              </PropertyGroup>
+              <ItemGroup>
+                <PackageReference Include="LegacyGnu" Version="1.0.0" />
+              </ItemGroup>
+            </Project>
+            """),
+            encoding="utf-8",
+        )
+        respx.get("https://api.nuget.org/v3-flatcontainer/legacygnu/1.0.0/legacygnu.nuspec").mock(
+            return_value=httpx.Response(
+                200,
+                text=(
+                    "<package><metadata><id>LegacyGnu</id>"
+                    "<licenseUrl>https://www.gnu.org/licenses/gpl-3.0.html</licenseUrl>"
+                    "</metadata></package>"
+                ),
+            )
+        )
+        exit_code, project_license, dep = self._run(tmp_path, "LegacyGnu")
+        assert exit_code == 1
+        assert project_license == "GPL-2.0-only"
+        assert dep["license"] == "GPL-3.0-only"
+        assert dep["license_raw"] == "https://www.gnu.org/licenses/gpl-3.0.html"
+        assert dep["verdict"] == "incompatible"
+
+
 class TestCustomReferenceExitCode:
     """A ``LicenseRef-*`` operand in a PEP 639 expression must not turn a
     copyleft violation into an UNKNOWN that ``--no-strict`` lets through."""

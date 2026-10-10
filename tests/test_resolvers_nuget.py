@@ -6,7 +6,8 @@ import httpx
 import pytest
 import respx
 
-from licenseal.models import Dependency, DependencyGroup, Ecosystem
+from licenseal.analysis.compatibility import check_compatibility
+from licenseal.models import CompatibilityVerdict, Dependency, DependencyGroup, Ecosystem
 from licenseal.resolvers.http import (
     RegistryCache,
     _trim_for_cache,
@@ -613,3 +614,65 @@ class TestTrimNuspec:
             )
         assert info.license_id == "MIT"
         assert info.from_registry is True
+
+
+class TestLegacyLicenseUrlIds:
+    """A legacy ``<licenseUrl>`` resolves to the current SPDX ID, the form
+    the pair-level compatibility rules key on. Fetched through
+    ``RegistryCache.fetch_text``."""
+
+    @staticmethod
+    def _resolve(license_url: str):
+        respx.get(_nuspec_url("LegacyGnu", "1.0.0")).respond(
+            text=f"""<package><metadata>
+  <id>LegacyGnu</id>
+  <licenseUrl>{license_url}</licenseUrl>
+</metadata></package>"""
+        )
+        cache = RegistryCache()
+        with httpx.Client() as client:
+            return resolve_nuget_license(
+                _dotnet_dep("LegacyGnu", "1.0.0"), client, fetcher=cache.fetch_text
+            )
+
+    @pytest.mark.parametrize(
+        "license_url, expected",
+        [
+            ("https://www.gnu.org/licenses/gpl-3.0.html", "GPL-3.0-only"),
+            ("https://www.gnu.org/licenses/lgpl-3.0.html", "LGPL-3.0-only"),
+            ("https://www.gnu.org/licenses/agpl-3.0.html", "AGPL-3.0-only"),
+            ("https://spdx.org/licenses/GPL-3.0", "GPL-3.0-only"),
+            ("https://spdx.org/licenses/GPL-3.0+", "GPL-3.0-or-later"),
+        ],
+    )
+    @respx.mock
+    def test_gplv3_family_url_conflicts_with_a_gpl2_only_project(self, license_url, expected):
+        info = self._resolve(license_url)
+        assert info.license_id == expected
+        assert info.license_raw == license_url
+        result = check_compatibility("GPL-2.0-only", info)
+        assert result.verdict == CompatibilityVerdict.INCOMPATIBLE
+
+    @respx.mock
+    def test_gpl2_url_conflicts_with_a_gpl3_project(self):
+        info = self._resolve("https://www.gnu.org/licenses/gpl-2.0.html")
+        assert info.license_id == "GPL-2.0-only"
+        assert check_compatibility("GPL-3.0-only", info).verdict == (
+            CompatibilityVerdict.INCOMPATIBLE
+        )
+
+    @respx.mock
+    def test_or_later_url_is_not_read_as_only(self):
+        info = self._resolve("https://spdx.org/licenses/GPL-2.0+")
+        assert info.license_id == "GPL-2.0-or-later"
+        assert check_compatibility("GPL-3.0-only", info).verdict == (
+            CompatibilityVerdict.COMPATIBLE
+        )
+
+    @respx.mock
+    def test_permissive_url_is_the_control(self):
+        info = self._resolve("https://www.apache.org/licenses/LICENSE-2.0")
+        assert info.license_id == "Apache-2.0"
+        assert check_compatibility("GPL-3.0-only", info).verdict == (
+            CompatibilityVerdict.COMPATIBLE
+        )
