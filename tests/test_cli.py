@@ -3718,6 +3718,77 @@ class TestJavaEcosystem:
         assert java_dep["ecosystem"] == "java"
         assert java_dep["license"] == "Apache-2.0"
 
+    @respx.mock
+    def test_check_reports_dependency_declared_in_default_active_profile(self, tmp_path):
+        # The project's only dependency is declared inside a profile that is
+        # active by default, with its version in a profile-scoped property.
+        # It is scanned like any other: a copyleft license in an MIT project
+        # is a violation and the check fails, instead of an empty clean scan.
+        (tmp_path / "pom.xml").write_text(
+            textwrap.dedent("""\
+            <?xml version="1.0" encoding="UTF-8"?>
+            <project xmlns="http://maven.apache.org/POM/4.0.0">
+                <groupId>com.example</groupId>
+                <artifactId>myapp</artifactId>
+                <version>1.0.0</version>
+                <licenses>
+                    <license><name>MIT</name></license>
+                </licenses>
+                <profiles>
+                    <profile>
+                        <id>default</id>
+                        <activation><activeByDefault>true</activeByDefault></activation>
+                        <properties>
+                            <copyleft.version>2.0.0</copyleft.version>
+                        </properties>
+                        <dependencies>
+                            <dependency>
+                                <groupId>org.example</groupId>
+                                <artifactId>copyleft-lib</artifactId>
+                                <version>${copyleft.version}</version>
+                                <scope>runtime</scope>
+                            </dependency>
+                        </dependencies>
+                    </profile>
+                </profiles>
+            </project>
+            """),
+            encoding="utf-8",
+        )
+        respx.get(
+            "https://repo.maven.apache.org/maven2/org/example/"
+            "copyleft-lib/2.0.0/copyleft-lib-2.0.0.pom"
+        ).mock(
+            return_value=httpx.Response(
+                200,
+                text="""<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0">
+    <groupId>org.example</groupId>
+    <artifactId>copyleft-lib</artifactId>
+    <version>2.0.0</version>
+    <licenses>
+        <license><name>GPL-3.0-only</name></license>
+    </licenses>
+</project>
+""",
+            )
+        )
+        runner = CliRunner()
+        result = runner.invoke(
+            main,
+            ["check", "--path", str(tmp_path), "--strict", "-f", "json", "--no-transitive"],
+        )
+        assert result.exit_code == 1
+        data = json.loads(result.output[result.output.index("{") :])
+        assert data["summary"]["total"] == 1
+        assert data["summary"]["violations"] == 1
+        assert data["summary"]["gaps"] == 0
+        (java_dep,) = data["dependencies"]
+        assert java_dep["name"] == "org.example:copyleft-lib"
+        assert java_dep["resolved_version"] == "2.0.0"
+        assert java_dep["license"] == "GPL-3.0-only"
+        assert java_dep["group"] == "prod"
+
 
 class TestDotnetEcosystem:
     @respx.mock

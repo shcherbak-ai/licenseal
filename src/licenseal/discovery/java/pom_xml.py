@@ -58,6 +58,15 @@ Scope-to-group mapping (per the Maven scope semantics):
 * ``import`` → skipped entirely (a BOM-import marker, valid only inside
   ``<dependencyManagement>``; not a real dependency)
 
+Profiles are unioned, not evaluated. A ``<dependency>`` declared under
+``<profiles><profile><dependencies>`` is emitted like a top-level one,
+with the same scope mapping, whether the profile is active by default or
+activated by JDK, OS, or property. A scan cannot know which profiles a
+build will activate, and a license obligation does not depend on it. A
+profile's ``<properties>`` are a fallback for those dependencies only: a
+name defined in the POM's own ``<properties>`` wins, and among profiles
+the first definition wins.
+
 Multi-module workspaces are detected via the in-tree ``<modules>`` graph
 plus each module's own ``<artifactId>`` + ``<groupId>`` (with the Maven
 spec's fallback to the parent's ``<groupId>`` when the child omits it).
@@ -106,6 +115,9 @@ class _PomDep:
     shape appears so the discovery loop filters them out regardless of
     block — they declare *managed versions for other deps*, not deps
     themselves.
+
+    ``from_profile`` flags a ``<dependencies>`` entry declared inside a
+    ``<profiles><profile>`` block rather than at the top level.
     """
 
     group_id: str
@@ -113,6 +125,7 @@ class _PomDep:
     version: str
     scope: str
     is_import: bool
+    from_profile: bool = False
 
 
 @dataclass
@@ -126,6 +139,13 @@ class _PomData:
     parent_artifact_id: str = ""
     parent_version: str = ""
     properties: dict[str, str] = field(default_factory=dict)
+    # ``<profiles><profile><properties>`` entries, first definition wins
+    # across profiles. Kept apart from ``properties`` because they are only a
+    # fallback: discovery consults them for profile-declared dependencies,
+    # and only for names nothing else defines.
+    profile_properties: dict[str, str] = field(default_factory=dict)
+    # Top-level ``<dependencies>`` entries, followed by every profile's
+    # (``from_profile=True``). Activation conditions are not evaluated.
     dependencies: list[_PomDep] = field(default_factory=list)
     # ``<dependencyManagement><dependencies>`` entries — managed versions
     # plus BOM-import markers (``<scope>import</scope>`` + ``<type>pom</type>``,
@@ -243,7 +263,48 @@ def _parse_pom(raw: str | bytes) -> _PomData | None:
                 data.licenses.append((name, url))
         break
 
-    for deps_el in _findall(root, "dependencies"):
+    _collect_dependencies(root, data, from_profile=False)
+
+    # ``<dependencyManagement><dependencies>`` — managed versions and BOM
+    # markers. Same parsing shape as ``<dependencies>``; the discovery
+    # layer uses this block to fill in versions for ``<dependencies>``
+    # entries whose own ``<version>`` was omitted (a child POM with both
+    # blocks declares the dep twice — once with version in DM, once
+    # without in ``<dependencies>``). We collect from BOTH the top-level
+    # ``<dependencyManagement>`` and from every ``<profiles><profile>``
+    # — for license-scanning the profile-activation conditions
+    # (JDK version, OS, system property) are irrelevant; any managed
+    # version we can find resolves a coord that would otherwise UNKNOWN.
+    _collect_managed_dependencies(root, data)
+
+    # Profiles are unioned the same way for ordinary ``<dependencies>``: a
+    # dependency declared in any profile is a dependency of the project,
+    # whatever activates the profile. They are appended after the top-level
+    # entries, so the always-active declaration of a coordinate comes first.
+    for profiles_el in _findall(root, "profiles"):
+        for profile_el in _findall(profiles_el, "profile"):
+            _collect_managed_dependencies(profile_el, data)
+            _collect_dependencies(profile_el, data, from_profile=True)
+            for props_el in _findall(profile_el, "properties"):
+                for prop_el in props_el:
+                    data.profile_properties.setdefault(
+                        _strip_ns(prop_el.tag), (prop_el.text or "").strip()
+                    )
+                break
+        break
+
+    return data
+
+
+def _collect_dependencies(parent_el, data: _PomData, *, from_profile: bool) -> None:
+    """Append every ``<dependencies><dependency>`` entry directly under
+    ``parent_el`` to ``data.dependencies``.
+
+    ``parent_el`` is either the ``<project>`` root or a ``<profile>``
+    element; ``from_profile`` records which, so discovery knows which
+    entries may fall back to profile ``<properties>``.
+    """
+    for deps_el in _findall(parent_el, "dependencies"):
         for dep_el in _findall(deps_el, "dependency"):
             group_id = _findtext(dep_el, "groupId")
             artifact_id = _findtext(dep_el, "artifactId")
@@ -259,28 +320,10 @@ def _parse_pom(raw: str | bytes) -> _PomData | None:
                         version=version,
                         scope=scope,
                         is_import=is_import,
+                        from_profile=from_profile,
                     )
                 )
         break
-
-    # ``<dependencyManagement><dependencies>`` — managed versions and BOM
-    # markers. Same parsing shape as ``<dependencies>``; the discovery
-    # layer uses this block to fill in versions for ``<dependencies>``
-    # entries whose own ``<version>`` was omitted (a child POM with both
-    # blocks declares the dep twice — once with version in DM, once
-    # without in ``<dependencies>``). We collect from BOTH the top-level
-    # ``<dependencyManagement>`` and from every ``<profiles><profile>``
-    # — for license-scanning the profile-activation conditions
-    # (JDK version, OS, system property) are irrelevant; any managed
-    # version we can find resolves a coord that would otherwise UNKNOWN.
-    _collect_managed_dependencies(root, data)
-
-    for profiles_el in _findall(root, "profiles"):
-        for profile_el in _findall(profiles_el, "profile"):
-            _collect_managed_dependencies(profile_el, data)
-        break
-
-    return data
 
 
 def _collect_managed_dependencies(parent_el, data: _PomData) -> None:
@@ -504,9 +547,11 @@ def discover_pom_xml_dependencies(
     """Discover direct Maven dependencies from every ``pom.xml`` in the tree.
 
     Returns ``(deps, filtered_count)``. ``deps`` is a flat list with one
-    ``Dependency`` per ``<dependency>`` after applying:
+    ``Dependency`` per ``<dependency>`` — top-level and inside every
+    ``<profile>``, whatever its activation — after applying:
 
-    * Property expansion (local ``${…}`` tokens — see :func:`_expand_properties`)
+    * Property expansion (local ``${…}`` tokens — see :func:`_expand_properties`;
+      a profile's dependency also falls back to profile ``<properties>``)
     * Scope-to-group mapping (``compile``/``runtime`` → PROD; ``test`` / ``provided``
       / ``system`` → DEV)
     * BOM-import filter (``<scope>import</scope>`` + ``<type>pom</type>`` skipped)
@@ -530,6 +575,9 @@ def discover_pom_xml_dependencies(
             record_parse_failure(pom_path, "XML")
             continue
         props = _project_properties(pom)
+        # Profile ``<properties>`` only fill names nothing else defines, and
+        # only for dependencies a profile declares.
+        profile_props = {**pom.profile_properties, **props}
         source = pom_path.relative_to(project_path).as_posix()
 
         # Local <dependencyManagement> index, keyed by group:artifact.
@@ -557,9 +605,10 @@ def discover_pom_xml_dependencies(
                 # BOM marker — let the transitive walker handle the BOM's
                 # managed versions; nothing to emit here.
                 continue
-            group_id = _expand_properties(dep.group_id, props)
-            artifact_id = _expand_properties(dep.artifact_id, props)
-            version = _expand_properties(dep.version, props)
+            dep_props = profile_props if dep.from_profile else props
+            group_id = _expand_properties(dep.group_id, dep_props)
+            artifact_id = _expand_properties(dep.artifact_id, dep_props)
+            version = _expand_properties(dep.version, dep_props)
             coord = f"{group_id}:{artifact_id}"
             # Local <dependencyManagement> fill-in: if the <dependency>
             # omitted <version>, look up the managed version in this

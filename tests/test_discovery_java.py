@@ -6,6 +6,8 @@ from pathlib import Path
 
 import pytest
 
+from licenseal.discovery import discover_all_dependencies
+from licenseal.discovery._read import collect_read_diagnostics
 from licenseal.discovery.java.build_gradle import (
     _extract_coord_from_rest,
     _parse_build_gradle,
@@ -878,6 +880,264 @@ class TestDiscoverPomXmlDependencies:
         (tmp_path / "pom.xml").write_bytes(pom.encode("latin-1"))
         deps, _ = discover_pom_xml_dependencies(tmp_path)
         assert {d.name for d in deps} == {"com.x:y"}
+
+
+def _dep(coord: str, version: str = "", scope: str = "", dep_type: str = "") -> str:
+    group_id, artifact_id = coord.split(":")
+    return (
+        f"<dependency><groupId>{group_id}</groupId><artifactId>{artifact_id}</artifactId>"
+        + (f"<version>{version}</version>" if version else "")
+        + (f"<scope>{scope}</scope>" if scope else "")
+        + (f"<type>{dep_type}</type>" if dep_type else "")
+        + "</dependency>"
+    )
+
+
+def _deps(*entries: str) -> str:
+    return "<dependencies>" + "".join(entries) + "</dependencies>"
+
+
+def _properties(**values: str) -> str:
+    # Keyword names use ``_`` where the property name has ``.``.
+    body = "".join(f"<{k.replace('_', '.')}>{v}</{k.replace('_', '.')}>" for k, v in values.items())
+    return f"<properties>{body}</properties>"
+
+
+def _profile(*body: str, activation: str = "") -> str:
+    return f"<profile><id>p</id>{activation}{''.join(body)}</profile>"
+
+
+def _profile_pom(*profiles: str, top_level: str = "") -> str:
+    return f"""<project xmlns="http://maven.apache.org/POM/4.0.0">
+    <groupId>com.example</groupId>
+    <artifactId>app</artifactId>
+    <version>1.0.0</version>
+    {top_level}
+    <profiles>{"".join(profiles)}</profiles>
+</project>"""
+
+
+class TestDiscoverPomXmlProfileDependencies:
+    """A ``<dependency>`` declared inside ``<profiles><profile>`` is a
+    dependency of the project. Activation is not evaluated: every profile's
+    dependencies are unioned with the top-level ones.
+    """
+
+    def test_default_active_profile_dependency_discovered(self, tmp_path):
+        # The only dependency lives in a profile that is active by default.
+        _write_pom(
+            tmp_path / "pom.xml",
+            _profile_pom(
+                _profile(
+                    _deps(_dep("org.example:runtime-lib", "2.1.0", "runtime")),
+                    activation="<activation><activeByDefault>true</activeByDefault></activation>",
+                )
+            ),
+        )
+        with collect_read_diagnostics() as diags:
+            deps, _ = discover_all_dependencies(tmp_path)
+        assert [(d.name, d.version_constraint, d.group, d.source) for d in deps] == [
+            ("org.example:runtime-lib", "2.1.0", DependencyGroup.PROD, "pom.xml")
+        ]
+        # A profile is not an analysis gap.
+        assert diags == []
+
+    def test_every_profile_unioned_whatever_its_activation(self, tmp_path):
+        activations = [
+            "",
+            "<activation><jdk>[17,)</jdk></activation>",
+            "<activation><os><family>windows</family></os></activation>",
+            "<activation><property><name>release</name></property></activation>",
+            "<activation><activeByDefault>false</activeByDefault></activation>",
+        ]
+        profiles = [
+            _profile(_deps(_dep(f"org.example:lib-{i}", "1.0")), activation=activation)
+            for i, activation in enumerate(activations)
+        ]
+        _write_pom(tmp_path / "pom.xml", _profile_pom(*profiles))
+        deps, _ = discover_all_dependencies(tmp_path)
+        assert [d.name for d in deps] == [f"org.example:lib-{i}" for i in range(5)]
+
+    def test_profile_dependencies_use_the_normal_scope_mapping(self, tmp_path):
+        entries = [
+            _dep(f"org.example:{scope or 'default'}", "1.0", scope)
+            for scope in ("", "compile", "runtime", "test", "provided", "system")
+        ]
+        _write_pom(tmp_path / "pom.xml", _profile_pom(_profile(_deps(*entries))))
+        deps, _ = discover_all_dependencies(tmp_path)
+        assert {d.name.split(":")[1]: d.group for d in deps} == {
+            "default": DependencyGroup.PROD,
+            "compile": DependencyGroup.PROD,
+            "runtime": DependencyGroup.PROD,
+            "test": DependencyGroup.DEV,
+            "provided": DependencyGroup.DEV,
+            "system": DependencyGroup.DEV,
+        }
+
+    def test_profile_property_resolves_profile_dependency_version(self, tmp_path):
+        _write_pom(
+            tmp_path / "pom.xml",
+            _profile_pom(
+                _profile(
+                    _properties(lib_version="4.5.6"),
+                    _deps(_dep("org.example:lib", "${lib.version}")),
+                )
+            ),
+        )
+        deps, _ = discover_all_dependencies(tmp_path)
+        assert [(d.name, d.version_constraint) for d in deps] == [("org.example:lib", "4.5.6")]
+
+    def test_project_property_wins_over_profile_property(self, tmp_path):
+        # Profile properties are a fallback: a name the POM's own
+        # <properties> defines is never overridden by a profile.
+        _write_pom(
+            tmp_path / "pom.xml",
+            _profile_pom(
+                _profile(
+                    _properties(lib_version="9.9.9"),
+                    _deps(_dep("org.example:lib", "${lib.version}")),
+                ),
+                top_level=_properties(lib_version="1.2.3"),
+            ),
+        )
+        deps, _ = discover_all_dependencies(tmp_path)
+        assert [d.version_constraint for d in deps] == ["1.2.3"]
+
+    def test_first_profile_definition_of_a_property_wins(self, tmp_path):
+        _write_pom(
+            tmp_path / "pom.xml",
+            _profile_pom(
+                _profile(_properties(lib_version="1.0.0")),
+                _profile(
+                    _properties(lib_version="2.0.0"),
+                    _deps(_dep("org.example:lib", "${lib.version}")),
+                ),
+            ),
+        )
+        deps, _ = discover_all_dependencies(tmp_path)
+        assert [d.version_constraint for d in deps] == ["1.0.0"]
+
+    def test_profile_property_does_not_reach_top_level_dependency(self, tmp_path):
+        # A top-level dependency keeps resolving exactly as before: a name
+        # defined only in a profile stays a literal token for it.
+        _write_pom(
+            tmp_path / "pom.xml",
+            _profile_pom(
+                _profile(_properties(lib_version="4.5.6")),
+                top_level=_deps(_dep("org.example:lib", "${lib.version}")),
+            ),
+        )
+        deps, _ = discover_all_dependencies(tmp_path)
+        assert [d.version_constraint for d in deps] == ["${lib.version}"]
+
+    def test_unresolved_profile_property_left_literal(self, tmp_path):
+        _write_pom(
+            tmp_path / "pom.xml",
+            _profile_pom(
+                _profile(
+                    "<properties/>",
+                    _deps(_dep("org.example:lib", "${elsewhere.version}")),
+                )
+            ),
+        )
+        deps, _ = discover_all_dependencies(tmp_path)
+        assert [d.version_constraint for d in deps] == ["${elsewhere.version}"]
+
+    def test_versionless_profile_dependency_filled_from_dependency_management(self, tmp_path):
+        managed = _deps(_dep("org.example:managed", "3.0.0"))
+        _write_pom(
+            tmp_path / "pom.xml",
+            _profile_pom(
+                _profile(_deps(_dep("org.example:managed"))),
+                top_level=f"<dependencyManagement>{managed}</dependencyManagement>",
+            ),
+        )
+        deps, _ = discover_all_dependencies(tmp_path)
+        assert [(d.name, d.version_constraint) for d in deps] == [("org.example:managed", "3.0.0")]
+
+    def test_bom_import_marker_in_profile_dependencies_skipped(self, tmp_path):
+        _write_pom(
+            tmp_path / "pom.xml",
+            _profile_pom(
+                _profile(
+                    _deps(
+                        _dep("org.example:bom", "1.0", "import", "pom"),
+                        _dep("org.example:lib", "1.0"),
+                    )
+                )
+            ),
+        )
+        deps, _ = discover_all_dependencies(tmp_path)
+        assert [d.name for d in deps] == ["org.example:lib"]
+
+    def test_workspace_local_sibling_in_profile_filtered(self, tmp_path):
+        _write_pom(
+            tmp_path / "pom.xml",
+            _profile_pom(
+                _profile(_deps(_dep("com.example:core", "1.0.0"), _dep("org.example:lib", "1.0")))
+            ),
+        )
+        (tmp_path / "core").mkdir()
+        _write_pom(
+            tmp_path / "core" / "pom.xml",
+            "<project><groupId>com.example</groupId><artifactId>core</artifactId>"
+            "<version>1.0.0</version></project>",
+        )
+        deps, counts = discover_all_dependencies(tmp_path)
+        assert [d.name for d in deps] == ["org.example:lib"]
+        assert counts["java"] == 1
+
+    def test_top_level_declaration_precedes_profile_declaration(self, tmp_path):
+        # The same coordinate declared at both levels: the always-active
+        # top-level entry is listed first, so it is the one the aggregator
+        # keeps.
+        _write_pom(
+            tmp_path / "pom.xml",
+            _profile_pom(
+                _profile(_deps(_dep("org.example:lib", "2.0.0"))),
+                top_level=_deps(_dep("org.example:lib", "1.0.0")),
+            ),
+        )
+        deps, _ = discover_pom_xml_dependencies(tmp_path)
+        assert [d.version_constraint for d in deps] == ["1.0.0", "2.0.0"]
+        unique, _ = discover_all_dependencies(tmp_path)
+        assert [d.version_constraint for d in unique] == ["1.0.0"]
+
+    def test_profile_production_scope_upgrades_top_level_test_scope(self, tmp_path):
+        # Test-scoped at the top level, compile-scoped in a profile: the
+        # aggregator prefers the production declaration.
+        _write_pom(
+            tmp_path / "pom.xml",
+            _profile_pom(
+                _profile(_deps(_dep("org.example:lib", "1.0.0"))),
+                top_level=_deps(_dep("org.example:lib", "1.0.0", "test")),
+            ),
+        )
+        deps, _ = discover_all_dependencies(tmp_path)
+        assert [(d.name, d.group) for d in deps] == [("org.example:lib", DependencyGroup.PROD)]
+
+    def test_profile_without_dependencies_emits_nothing(self, tmp_path):
+        _write_pom(
+            tmp_path / "pom.xml",
+            _profile_pom(_profile("<build/>"), _profile("<dependencies/>")),
+        )
+        deps, _ = discover_all_dependencies(tmp_path)
+        assert deps == []
+
+    def test_parse_pom_marks_profile_dependencies(self):
+        pom = _parse_pom(
+            _profile_pom(
+                _profile(_properties(a="1"), _deps(_dep("org.example:in-profile", "1.0"))),
+                top_level=_properties(b="2") + _deps(_dep("org.example:top-level", "1.0")),
+            )
+        )
+        assert [(d.artifact_id, d.from_profile) for d in pom.dependencies] == [
+            ("top-level", False),
+            ("in-profile", True),
+        ]
+        # Profile properties stay out of the project's own property map.
+        assert pom.properties == {"b": "2"}
+        assert pom.profile_properties == {"a": "1"}
 
 
 class TestDiscoverWorkspaceLocalArtifacts:

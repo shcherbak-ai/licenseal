@@ -46,7 +46,7 @@ src/licenseal/
       go_mod.py               go.mod parser (require blocks, replace directives incl. local-path drop, // indirect, tool directive for Go 1.24+ DEV attribution, go.work `use` block for workspace-local module discovery, relative paths only)
       lockfile.py             go.sum parser (.zip + /go.mod row dedup; the edge graph and group attribution live in transitive.py via proxy.golang.org go.mod fetches)
     java/
-      pom_xml.py              Maven pom.xml parser (multi-module reactor, parent chain, <dependencyManagement>, BOM imports, ${…} property expansion, workspace-local sibling filter)
+      pom_xml.py              Maven pom.xml parser (multi-module reactor, parent chain, <dependencyManagement>, BOM imports, ${…} property expansion, workspace-local sibling filter; every <profile>'s <dependencies> and <dependencyManagement> unioned without evaluating activation, profile <properties> a fallback for profile-declared dependencies only)
       build_gradle.py         build.gradle[.kts] heuristic text parser (static-string dependency declarations; variable interpolation and version catalogs deliberately not supported — see ecosystem-doc)
       gradle_lockfile.py      gradle.lockfile parser (classpath-attributed PROD/DEV split; supersedes the build.gradle heuristic when present)
     dotnet/
