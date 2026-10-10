@@ -30,7 +30,7 @@ from dataclasses import replace
 from pathlib import Path
 
 from licenseal._graph import compute_direct_ancestors
-from licenseal.discovery._read import decode_text
+from licenseal.discovery._read import decode_lockfile_text, record_unread_entries
 from licenseal.discovery._walk import walk_project_files
 from licenseal.models import Dependency, DependencyGroup, Ecosystem
 
@@ -48,6 +48,9 @@ _ENTRY_RE = re.compile(r'^\s*"(?P<name>[^"]+)"\s*(?::|=>)\s*\{(?P<body>.*)\}\s*,
 
 _ATOM_RE = re.compile(r":(\w+)")
 _STRING_RE = re.compile(r'"([^"]*)"')
+
+# The lines of a lock that hold no entry: blank ones and the map's delimiters.
+_MAP_DELIMITERS = frozenset({"", "%{", "}", "%{}"})
 
 
 def is_off_registry_marker(source: str) -> bool:
@@ -227,14 +230,17 @@ def parse_mix_lock(
     reverse-BFS that attributes group + direct ancestors per package. With
     ``include_dev=False`` the DEV-attributed entries are filtered out.
     """
-    text = decode_text(path)
+    text = decode_lockfile_text(path)
     if text is None:
         return []
 
     # name_lower -> (orig_name, registry_name, version, off_registry)
     spec_info: dict[str, tuple[str, str, str, bool]] = {}
     edges: dict[str, set[str]] = {}
+    entries = 0
     for raw_line in text.splitlines():
+        # Every line but the map's own delimiters is where an entry goes.
+        entries += raw_line.strip() not in _MAP_DELIMITERS
         m = _ENTRY_RE.match(raw_line)
         if m is None:
             continue
@@ -254,6 +260,7 @@ def parse_mix_lock(
         spec_info.setdefault(normalized, (name, reg_name, version, off_registry))
         edges.setdefault(normalized, set()).update(c.lower() for c in child_names)
 
+    record_unread_entries(path, entries, len(spec_info))
     if not spec_info:
         return []
 

@@ -39,7 +39,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from licenseal.discovery._read import decode_text
+from licenseal.discovery._read import decode_lockfile_text, record_unread_entries
 from licenseal.discovery._walk import walk_project_files
 from licenseal.models import Dependency, DependencyGroup, Ecosystem
 
@@ -93,11 +93,12 @@ def parse_gradle_lockfile(
     parameters are unused here. ``include_dev`` is honored: when False,
     pure-DEV deps are dropped from the output.
     """
-    text = decode_text(path)
+    text = decode_lockfile_text(path)
     if text is None:
         return []
 
     seen: dict[tuple[str, str], DependencyGroup] = {}
+    entries = 0
     for raw in text.splitlines():
         line = raw.strip()
         if not line or line.startswith("#"):
@@ -105,6 +106,7 @@ def parse_gradle_lockfile(
         # Gradle records empty classpaths as ``empty=<classpath>`` — no dep.
         if line.startswith("empty="):
             continue
+        entries += 1
         if "=" not in line:
             continue
         coord, _, classpath_list = line.partition("=")
@@ -135,6 +137,7 @@ def parse_gradle_lockfile(
         if key in seen and seen[key] == DependencyGroup.PROD:
             continue
         seen[key] = group
+    record_unread_entries(path, entries, len(seen))
 
     out: list[Dependency] = []
     for (name, version), group in seen.items():

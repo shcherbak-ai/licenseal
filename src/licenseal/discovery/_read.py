@@ -20,8 +20,10 @@ sink, partitioned into:
 * **gap** (``is_gap=True``) — a manifest that may declare dependencies was lost
   (unreadable, undecodable, unparseable, in a subtree we couldn't enter, or
   referenced through a path that is not followed), or part of one was (a
-  value of a type its format does not allow, read as absent). Analysis is
-  *incomplete*; ``--strict`` treats this like an UNKNOWN and fails.
+  value of a type its format does not allow, read as absent), or a lockfile
+  that parsed could not be used (an unsupported version, no entry in a form
+  the parser reads, merge-conflict markers). Analysis is *incomplete*;
+  ``--strict`` treats this like an UNKNOWN and fails.
 * **recovered** (``is_gap=False``) — decoded with a caveat (latin-1 fallback);
   the ASCII dependency lines survived, so analysis is complete but lossy for any
   non-ASCII content. Worth a warning, not a failure.
@@ -36,6 +38,7 @@ import codecs
 import contextlib
 import contextvars
 import json
+import re
 import sys
 from collections.abc import Iterator
 from dataclasses import dataclass
@@ -52,6 +55,7 @@ else:  # pragma: no cover
 __all__ = [
     "ReadDiagnostic",
     "collect_read_diagnostics",
+    "decode_lockfile_text",
     "decode_text",
     "load_json",
     "load_toml",
@@ -60,10 +64,12 @@ __all__ = [
     "read_xml_bytes",
     "record_parse_failure",
     "record_unexpected_type",
+    "record_unread_entries",
     "record_walk_error",
     "rejected_path_reference",
     "root_table",
     "typed_field",
+    "unsupported_lockfile_version",
 ]
 
 _T = TypeVar("_T")
@@ -178,6 +184,64 @@ def root_table(path: Path, data: object) -> dict[str, Any] | None:
     if data is not None:
         record_unexpected_type(path, "the top level")
     return None
+
+
+def unsupported_lockfile_version(
+    path: Path, declared: object, supported: frozenset[str], *, dotted: bool = False
+) -> bool:
+    """Record a gap and return True when a lockfile declares an unsupported version.
+
+    ``declared`` is the version exactly as the lockfile gives it (``3``,
+    ``"9.0"``, ``5.4``) and ``supported`` the versions the parser reads, as
+    strings. A format that numbers its versions ``major.minor`` passes
+    ``dotted`` and lists majors; otherwise the whole value must match. A
+    lockfile that declares no version is not rejected here: what it contains
+    decides (see :func:`record_unread_entries`).
+
+    A parser that reads a lockfile version it was not written for can come
+    back with part of the packages, or none, and no way to tell. The caller
+    skips the file instead, which leaves the direct dependencies to the
+    registry walk and the lockfile on record.
+    """
+    version = str(declared)
+    if declared is None or (version.split(".", 1)[0] if dotted else version) in supported:
+        return False
+    _record(path, "declares a lockfile version that is not supported; skipped", is_gap=True)
+    return True
+
+
+def record_unread_entries(path: Path, entries: int, read: int) -> None:
+    """Record a gap when a lockfile has entries and the parser could read none.
+
+    ``entries`` counts what the file holds where its packages go; ``read``
+    counts those the parser recognised, including the ones it leaves out on
+    purpose (the project's own packages, non-registry sources). Callers count
+    before any dev, workspace, or orphan filtering: a lockfile that is read
+    in full and then filters down to nothing is not a gap, and neither is
+    one with no entries at all.
+    """
+    if entries and not read:
+        _record(path, "holds no entry in a form that can be read; skipped", is_gap=True)
+
+
+# A line git writes around the two sides of an unresolved merge.
+_CONFLICT_MARKER_RE = re.compile(r"^(?:<{7}|>{7})(?: |$)", re.MULTILINE)
+
+
+def decode_lockfile_text(path: Path) -> str | None:
+    """:func:`decode_text` for a line-oriented lockfile.
+
+    A file with merge-conflict markers holds both sides of an unresolved
+    merge. A line parser would read past the markers, or read them as
+    entries, and report a mixture of the two sides; the file is recorded as
+    a gap and skipped instead. (A JSON, TOML, or YAML lockfile in that state
+    does not parse, which is already a gap.)
+    """
+    text = decode_text(path)
+    if text is not None and _CONFLICT_MARKER_RE.search(text):
+        _record(path, "contains merge-conflict markers; skipped", is_gap=True)
+        return None
+    return text
 
 
 def record_walk_error(exc: OSError) -> None:

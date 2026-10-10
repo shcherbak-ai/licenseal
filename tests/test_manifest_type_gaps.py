@@ -10,29 +10,26 @@ that could not be read is on record.
 from __future__ import annotations
 
 import json
-import textwrap
 from pathlib import Path
 
-import httpx
 import pytest
 import respx
-from click.testing import CliRunner
 
-from licenseal.cli import main
 from licenseal.discovery import detect_project_license, discover_all_dependencies
 from licenseal.discovery._read import ReadDiagnostic, collect_read_diagnostics
 from licenseal.models import Dependency, DependencyGroup
-from licenseal.transitive import resolve_transitive
+from tests._helpers import (
+    _assert_gap_fails_only_strict,
+    _gaps,
+    _mock_npm,
+    _mock_pypi,
+    _resolve,
+    _write,
+)
 
 
 def _reason(what: str) -> str:
     return f"{what} has an unexpected type; ignored"
-
-
-def _write(path: Path, content: str) -> Path:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(textwrap.dedent(content), encoding="utf-8", newline="\n")
-    return path
 
 
 def _discover(project: Path) -> tuple[list[Dependency], list[ReadDiagnostic]]:
@@ -43,33 +40,6 @@ def _discover(project: Path) -> tuple[list[Dependency], list[ReadDiagnostic]]:
 
 def _found(deps: list[Dependency]) -> set[tuple[str, str]]:
     return {(dep.name, dep.version_constraint) for dep in deps}
-
-
-def _gaps(diags: list[ReadDiagnostic]) -> set[tuple[Path, str]]:
-    assert all(diag.is_gap for diag in diags)
-    return {(diag.path, diag.reason) for diag in diags}
-
-
-def _no_registry(url: str, client: httpx.Client) -> None:
-    """Stand-in fetcher: every registry lookup fails, so only files are read."""
-    return None
-
-
-def _resolve(project: Path, *, include_dev: bool = True) -> tuple[set, list[ReadDiagnostic]]:
-    """Discovery plus transitive resolution; ``(name, version, group)`` rows."""
-    with collect_read_diagnostics() as diags:
-        direct, _ = discover_all_dependencies(project)
-        with httpx.Client() as client:
-            deps = resolve_transitive(
-                direct,
-                project,
-                include_dev=include_dev,
-                max_depth=50,
-                client=client,
-                fetcher=_no_registry,
-                pom_fetcher=_no_registry,
-            )
-    return {(d.name, d.version_constraint, d.group) for d in deps}, diags
 
 
 PROD = DependencyGroup.PROD
@@ -1242,28 +1212,6 @@ class TestRenvLock:
         assert _gaps(diags) == {(lock, _reason("the top level"))}
 
 
-def _mock_pypi(name: str, license_str: str, version: str = "1.0.0") -> None:
-    payload = {
-        "info": {"license": license_str, "version": version, "classifiers": [], "requires_dist": []}
-    }
-    for url in (
-        f"https://pypi.org/pypi/{name}/json",
-        f"https://pypi.org/pypi/{name}/{version}/json",
-    ):
-        respx.get(url).mock(return_value=httpx.Response(200, json=payload))
-
-
-def _mock_npm(name: str, license_str: str, version: str = "1.0.0") -> None:
-    meta = {"license": license_str, "version": version}
-    respx.get(f"https://registry.npmjs.org/{name}").mock(
-        return_value=httpx.Response(200, json={"versions": {version: meta}})
-    )
-    for suffix in ("latest", version):
-        respx.get(f"https://registry.npmjs.org/{name}/{suffix}").mock(
-            return_value=httpx.Response(200, json=meta)
-        )
-
-
 class TestCheckCommand:
     """One file with a value of the wrong type beside a healthy manifest.
 
@@ -1272,38 +1220,6 @@ class TestCheckCommand:
     the bad file is the control: the same scan then passes ``--strict``, so
     the gap is what failed it.
     """
-
-    @staticmethod
-    def _check(project: Path, *flags: str):
-        out = project / "report.json"
-        result = CliRunner().invoke(
-            main, ["check", "--path", str(project), *flags, "-f", "json", "-o", str(out)]
-        )
-        return result, json.loads(out.read_text(encoding="utf-8"))
-
-    def _assert_gap_fails_only_strict(
-        self, project: Path, bad: Path, reason: str, rows: list[tuple[str, str]]
-    ) -> None:
-        shown = bad.relative_to(project).as_posix()
-
-        lenient, data = self._check(project, "--no-strict", "--dev")
-        assert lenient.exit_code == 0
-        assert sorted((d["name"], d["license"]) for d in data["dependencies"]) == sorted(rows)
-        assert data["summary"]["gaps"] == 1
-        assert data["diagnostics"] == [{"path": shown, "reason": reason, "severity": "gap"}]
-
-        strict, data = self._check(project, "--strict", "--dev")
-        assert strict.exit_code == 1
-        assert f"Warning: {shown}: {reason}" in strict.output
-        assert "1 manifest(s) could not be fully analyzed" in strict.output
-        assert "fails --strict" in strict.output
-        assert data["summary"]["gaps"] == 1
-
-        bad.unlink()
-        control, data = self._check(project, "--strict", "--dev")
-        assert control.exit_code == 0
-        assert data["summary"]["gaps"] == 0
-        assert data["diagnostics"] == []
 
     @respx.mock
     @pytest.mark.parametrize(
@@ -1348,8 +1264,12 @@ class TestCheckCommand:
         _mock_pypi("left-pad", "MIT")
         _mock_npm("left-pad", "MIT")
 
-        self._assert_gap_fails_only_strict(
-            tmp_path, bad, _reason(what), [("flask", "BSD-3-Clause"), ("left-pad", "MIT")]
+        _assert_gap_fails_only_strict(
+            tmp_path,
+            bad,
+            _reason(what),
+            [("flask", "BSD-3-Clause"), ("left-pad", "MIT")],
+            repair=bad.unlink,
         )
 
     @respx.mock
@@ -1363,6 +1283,6 @@ class TestCheckCommand:
         bad.write_text(json.dumps({"lockfileVersion": 3, "packages": ["node_modules/left-pad"]}))
         _mock_npm("left-pad", "MIT")
 
-        self._assert_gap_fails_only_strict(
-            tmp_path, bad, _reason('"packages"'), [("left-pad", "MIT")]
+        _assert_gap_fails_only_strict(
+            tmp_path, bad, _reason('"packages"'), [("left-pad", "MIT")], repair=bad.unlink
         )

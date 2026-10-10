@@ -58,7 +58,7 @@ from dataclasses import replace
 from pathlib import Path
 
 from licenseal._graph import compute_direct_ancestors
-from licenseal.discovery._read import decode_text
+from licenseal.discovery._read import decode_lockfile_text, record_unread_entries
 from licenseal.discovery._walk import walk_project_files
 from licenseal.models import Dependency, DependencyGroup, Ecosystem
 
@@ -136,7 +136,7 @@ def parse_gemfile_lock(
     With ``include_dev=False``, DEV-attributed entries are filtered out
     (mirrors the PHP / Python posture).
     """
-    text = decode_text(path)
+    text = decode_lockfile_text(path)
     if text is None:
         return []
 
@@ -148,6 +148,10 @@ def parse_gemfile_lock(
     section: str = ""
     in_specs = False
     current_spec: str | None = None  # name_lower of the most recent 4-space spec
+    # Lines where the lockfile names a gem: inside a ``specs:`` block, or
+    # under DEPENDENCIES. A lockfile that has some and yields no spec was
+    # not read.
+    entries = 0
 
     for raw_line in text.splitlines():
         line = raw_line.rstrip()
@@ -171,6 +175,7 @@ def parse_gemfile_lock(
             if not in_specs:
                 # Source-options lines (``remote:``, ``revision:``, ...).
                 continue
+            entries += 1
             indent = _indent_level(line)
             content = stripped
             if indent == 4:
@@ -197,15 +202,18 @@ def parse_gemfile_lock(
         # strictly need these entries — direct_names from the Gemfile is
         # the authoritative root set — but if direct_names is empty (no
         # Gemfile, library-only repo with just a gemspec), fall back here.
-        if section == "DEPENDENCIES" and _indent_level(line) == 2 and not direct_names:
-            content = line.strip().rstrip("!").strip()
-            child_name = _parse_dep_line(content)
-            if child_name:  # pragma: no branch
-                direct_names = {*direct_names, child_name.lower()}
+        if section == "DEPENDENCIES":
+            entries += 1
+            if _indent_level(line) == 2 and not direct_names:
+                content = line.strip().rstrip("!").strip()
+                child_name = _parse_dep_line(content)
+                if child_name:  # pragma: no branch
+                    direct_names = {*direct_names, child_name.lower()}
 
         # Other sections (PLATFORMS / RUBY VERSION / BUNDLED WITH / CHECKSUMS)
         # are informational — no per-line action needed.
 
+    record_unread_entries(path, entries, len(spec_info))
     if not spec_info:
         return []
 

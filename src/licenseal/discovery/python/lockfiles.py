@@ -37,8 +37,10 @@ from licenseal.discovery._read import (
     load_json,
     load_toml,
     record_unexpected_type,
+    record_unread_entries,
     root_table,
     typed_field,
+    unsupported_lockfile_version,
 )
 from licenseal.discovery._walk import walk_project_files
 from licenseal.models import Dependency, DependencyGroup, Ecosystem
@@ -61,6 +63,14 @@ def _canon_name(name: str) -> str:
 
 
 _PYTHON_LOCKFILES = ("uv.lock", "poetry.lock", "Pipfile.lock")
+
+# The lockfile versions each parser reads: ``version`` in uv.lock, the major
+# of ``metadata.lock-version`` (``major.minor``) in poetry.lock, and
+# ``_meta.pipfile-spec`` in Pipfile.lock. A lockfile that declares any other
+# version is a gap rather than a best-effort parse.
+_UV_LOCK_VERSIONS = frozenset({"1"})
+_POETRY_LOCK_VERSIONS = frozenset({"1", "2"})
+_PIPFILE_LOCK_VERSIONS = frozenset({"6"})
 
 
 def find_python_lockfiles(
@@ -229,6 +239,8 @@ def parse_uv_lock(
     prod_root_names = {_canon_name(n) for n in prod_root_names}
     dev_root_names = {_canon_name(n) for n in dev_root_names}
     data = _load_toml(path)
+    if unsupported_lockfile_version(path, data.get("version"), _UV_LOCK_VERSIONS):
+        return []
     packages = typed_field(path, data, "package", list) or []
 
     raw_pkgs: list[tuple[str, str]] = []  # (name, version)
@@ -237,6 +249,7 @@ def parse_uv_lock(
     optional: dict[str, dict[str, list[_Entry]]] = {}  # package → extra → entries
     requested: list[tuple[str, str]] = []  # (package, extra) pairs the lock installs
     seen: set[tuple[str, str]] = set()
+    own_packages = 0
     for raw in packages:
         if not isinstance(raw, dict):
             record_unexpected_type(path, _PACKAGE_ENTRY)
@@ -256,6 +269,7 @@ def parse_uv_lock(
                 for group_entries in _entries_by_key(path, pkg, table).values():
                     entries += group_entries
             requested += [(child, extra) for child, extras in entries for extra in extras]
+            own_packages += 1
             continue
 
         name = typed_field(path, pkg, "name", str, _PACKAGE_ENTRY)
@@ -275,6 +289,7 @@ def parse_uv_lock(
         name_case[normalized] = name
         edges.setdefault(normalized, set()).update(child for child, _ in entries)
         raw_pkgs.append((name, version))
+    record_unread_entries(path, len(packages), len(raw_pkgs) + own_packages)
 
     # Follow each requested extra into the package's optional dependencies,
     # which can request further extras of their own.
@@ -332,6 +347,11 @@ def parse_poetry_lock(
     prod_root_names = {_canon_name(n) for n in prod_root_names}
     dev_root_names = {_canon_name(n) for n in dev_root_names}
     data = _load_toml(path)
+    metadata = typed_field(path, data, "metadata", dict) or {}
+    if unsupported_lockfile_version(
+        path, metadata.get("lock-version"), _POETRY_LOCK_VERSIONS, dotted=True
+    ):
+        return []
     packages = typed_field(path, data, "package", list) or []
 
     raw_pkgs: list[tuple[str, str]] = []
@@ -360,6 +380,7 @@ def parse_poetry_lock(
         name_case[normalized] = name
         edges.setdefault(normalized, set()).update(children)
         raw_pkgs.append((name, version))
+    record_unread_entries(path, len(packages), len(raw_pkgs))
 
     group_by_name, ancestors_by_name = _attribute(edges, name_case, prod_root_names, dev_root_names)
 
@@ -415,8 +436,12 @@ def parse_pipfile_lock(
     data = root_table(path, load_json(path))
     if data is None:
         return []
+    lock_meta = typed_field(path, data, "_meta", dict, '"_meta"') or {}
+    if unsupported_lockfile_version(path, lock_meta.get("pipfile-spec"), _PIPFILE_LOCK_VERSIONS):
+        return []
 
     out: list[Dependency] = []
+    total = read = 0
     # Both sections are read whatever ``include_dev`` is, so a malformed
     # ``develop`` section is on record in either mode; only its rows are gated.
     for section, group in (
@@ -425,16 +450,19 @@ def parse_pipfile_lock(
     ):
         entry_of = f'an entry of "{section}"'
         entries = typed_field(path, data, section, dict, f'"{section}"') or {}
+        total += len(entries)
         for name, raw in entries.items():
             if not isinstance(raw, dict):
                 record_unexpected_type(path, entry_of)
                 continue
             meta = cast("dict[str, Any]", raw)
             if any(k in meta for k in _PIPFILE_NON_REGISTRY_KEYS):
+                read += 1
                 continue
             version = typed_field(path, meta, "version", str, entry_of)
             if not version:
                 continue
+            read += 1
             if group == DependencyGroup.DEV and not include_dev:
                 continue
             normalized = _canon_name(name)
@@ -449,4 +477,5 @@ def parse_pipfile_lock(
                     direct_ancestors=(),
                 )
             )
+    record_unread_entries(path, total, read)
     return out

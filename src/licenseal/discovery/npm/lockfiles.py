@@ -24,13 +24,16 @@ import yaml
 
 from licenseal._graph import compute_direct_ancestors
 from licenseal.discovery._read import (
+    decode_lockfile_text,
     decode_text,
     load_json,
     load_yaml,
     record_parse_failure,
     record_unexpected_type,
+    record_unread_entries,
     root_table,
     typed_field,
+    unsupported_lockfile_version,
 )
 from licenseal.discovery._walk import walk_project_files
 from licenseal.models import Dependency, DependencyGroup, Ecosystem
@@ -183,6 +186,15 @@ def _finalize(
 # one, is not the type the lockfile format defines.
 _PACKAGES_ENTRY = 'an entry of "packages"'
 
+# The lockfile versions each parser reads (for pnpm, whose versions are
+# ``major.minor``, the majors). A lockfile that declares any other version is
+# a gap rather than a best-effort parse.
+_PACKAGE_LOCK_VERSIONS = frozenset({"1", "2", "3"})
+_PNPM_LOCK_VERSIONS = frozenset({"6", "9"})
+_YARN_CLASSIC_VERSIONS = frozenset({"1"})
+_YARN_BERRY_VERSIONS = frozenset({"4", "5", "6", "7", "8"})
+_BUN_LOCK_VERSIONS = frozenset({"0", "1"})
+
 
 def _collect_npm_edge_children(
     path: Path, meta: dict[str, Any], what: str, *, pnpm_references: bool = False
@@ -235,7 +247,9 @@ def parse_package_lock_json(
       itself contain a nested ``dependencies`` map for sub-resolved versions.
     """
     data = root_table(path, load_json(path))
-    if data is None:
+    if data is None or unsupported_lockfile_version(
+        path, data.get("lockfileVersion"), _PACKAGE_LOCK_VERSIONS
+    ):
         return []
 
     if "packages" not in data:
@@ -274,6 +288,7 @@ def parse_package_lock_json(
     seen: set[tuple[str, str]] = set()
     edges: dict[str, set[str]] = {}
     name_case: dict[str, str] = {}
+    read = 0
     for key, raw in packages.items():
         if key == "":
             # The empty-string key holds the project's own metadata; skip.
@@ -284,7 +299,11 @@ def parse_package_lock_json(
         meta = cast("dict[str, Any]", raw)
         version = typed_field(path, meta, "version", str, _PACKAGES_ENTRY)
         if version is None:
+            # A workspace member, and a link to one, can carry no version:
+            # that entry is read, it is just not a row.
+            read += "link" in meta or "node_modules/" not in key
             continue
+        read += 1
 
         # Only `node_modules/<name>` keys are installed-from-registry. Other
         # shapes are workspace metadata:
@@ -324,6 +343,7 @@ def parse_package_lock_json(
                 depth=_depth_from_key(key),
             )
         )
+    record_unread_entries(path, len(packages) - ("" in packages), read)
     return _finalize(deps, edges, name_case, prod_root_names, dev_root_names, include_dev)
 
 
@@ -385,6 +405,7 @@ def _parse_package_lock_v1(
                 _walk(nested, depth + 1)
 
     _walk(deps_map, 1)
+    record_unread_entries(path, len(deps_map), len(deps))
     return _finalize(deps, edges, name_case, prod_root_names, dev_root_names, include_dev)
 
 
@@ -397,9 +418,18 @@ def parse_pnpm_lock(
     dev_root_names: set[str],
     include_dev: bool,
 ) -> list[Dependency]:
-    """Parse a `pnpm-lock.yaml` into a flat dep list."""
+    """Parse a `pnpm-lock.yaml` into a flat dep list.
+
+    Reads ``lockfileVersion`` 6 (``/name@version`` keys) and 9
+    (``name@version`` keys, edges in ``snapshots``). Version 5 keys its
+    packages as ``/name/version``, which this parser does not read: such a
+    lockfile is a gap, by its declared version or, failing that, because
+    none of its keys can be read.
+    """
     data = root_table(path, load_yaml(path))
-    if data is None:
+    if data is None or unsupported_lockfile_version(
+        path, data.get("lockfileVersion"), _PNPM_LOCK_VERSIONS, dotted=True
+    ):
         return []
 
     packages = typed_field(path, data, "packages", dict, '"packages"') or {}
@@ -408,6 +438,7 @@ def parse_pnpm_lock(
     seen: set[tuple[str, str]] = set()
     edges: dict[str, set[str]] = {}
     name_case: dict[str, str] = {}
+    non_registry = 0
     for key, raw in packages.items():
         # A package key always holds an ``@``, so YAML never reads a real one
         # as anything but a string.
@@ -424,6 +455,7 @@ def parse_pnpm_lock(
         # genuine unresolved entry of the same name (which IS resolvable
         # from another path).
         if _is_non_registry_pnpm_key(key):
+            non_registry += 1
             continue
 
         name, version = _parse_pnpm_package_key(key)
@@ -450,6 +482,7 @@ def parse_pnpm_lock(
                 depth=1,
             )
         )
+    record_unread_entries(path, len(packages), len(deps) + non_registry)
 
     # pnpm-lock v9 split dependency edges out of ``packages:`` into a separate
     # ``snapshots:`` block. v6/v8 lockfiles don't have this block, so this loop
@@ -564,6 +597,8 @@ def _pnpm_edge_target(child_name: str, value: object) -> str:
 
 _YARN_VERSION_RE = re.compile(r'^\s+version\s+"([^"]+)"')
 _YARN_DEP_RE = re.compile(r'^\s{4}"?([^"\s]+)"?\s+"[^"]*"\s*$')
+# The comment a v1 lockfile opens with: ``# yarn lockfile v1``.
+_YARN_CLASSIC_HEADER_RE = re.compile(r"^# yarn lockfile v(\S+)", re.MULTILINE)
 
 
 def parse_yarn_lock(
@@ -572,8 +607,13 @@ def parse_yarn_lock(
     dev_root_names: set[str],
     include_dev: bool,
 ) -> list[Dependency]:
-    """Parse `yarn.lock` (v1 custom format or v2/Berry YAML) into a flat dep list."""
-    text = decode_text(path)
+    """Parse `yarn.lock` (v1 custom format or v2/Berry YAML) into a flat dep list.
+
+    A lockfile with merge-conflict markers, one that declares a format
+    version this parser does not read, and one whose entries cannot be read
+    at all are each recorded as a gap and yield nothing.
+    """
+    text = decode_lockfile_text(path)
     if text is None:
         return []
     # Both v1 and Berry lockfiles open with a comment header; skip those
@@ -588,7 +628,10 @@ def parse_yarn_lock(
         if stripped.startswith("__metadata"):
             return _parse_yarn_berry(text, path, prod_root_names, dev_root_names, include_dev)
         break
-    return _parse_yarn_v1(text, prod_root_names, dev_root_names, include_dev)
+    header = _YARN_CLASSIC_HEADER_RE.search(text)
+    if unsupported_lockfile_version(path, header and header.group(1), _YARN_CLASSIC_VERSIONS):
+        return []
+    return _parse_yarn_v1(text, path, prod_root_names, dev_root_names, include_dev)
 
 
 def _parse_yarn_berry(
@@ -604,6 +647,9 @@ def _parse_yarn_berry(
         record_parse_failure(path, "YAML")
         return []
     if data is None:
+        return []
+    metadata = typed_field(path, data, "__metadata", dict, "__metadata") or {}
+    if unsupported_lockfile_version(path, metadata.get("version"), _YARN_BERRY_VERSIONS):
         return []
     entry = "a package entry"
 
@@ -626,6 +672,7 @@ def _parse_yarn_berry(
     seen: set[tuple[str, str]] = set()
     edges: dict[str, set[str]] = {}
     name_case: dict[str, str] = {}
+    workspaces = 0
     for key, raw in data.items():
         if key == "__metadata":
             continue
@@ -653,6 +700,7 @@ def _parse_yarn_berry(
         # ``name@workspace:path`` is one of the project's own packages, not a
         # registry package: its edges stay in the graph, but it is no row.
         if "@workspace:" in first:
+            workspaces += 1
             continue
         if (normalized, version) in seen:
             continue
@@ -666,11 +714,13 @@ def _parse_yarn_berry(
                 depth=1,
             )
         )
+    record_unread_entries(path, len(data) - ("__metadata" in data), len(deps) + workspaces)
     return _finalize(deps, edges, name_case, prod_root_names, dev_root_names, include_dev)
 
 
 def _parse_yarn_v1(
     text: str,
+    path: Path,
     prod_root_names: set[str],
     dev_root_names: set[str],
     include_dev: bool,
@@ -700,6 +750,7 @@ def _parse_yarn_v1(
     current_version: str | None = None
     in_deps_block = False
     pending_deps: list[str] = []
+    entries = 0
 
     def flush_entry() -> None:
         if current_name is None or current_version is None:
@@ -725,6 +776,7 @@ def _parse_yarn_v1(
             continue
         if not line.startswith(" "):
             flush_entry()
+            entries += 1
             stripped = line.rstrip(":")
             first = stripped.split(",")[0].strip().strip('"')
             current_name = _yarn_name_from_descriptor(first)
@@ -752,6 +804,9 @@ def _parse_yarn_v1(
             else:
                 in_deps_block = False
     flush_entry()
+    # Every line that starts in the first column is an entry header; one
+    # that is not followed by a version line was not read as a package.
+    record_unread_entries(path, entries, len(deps))
     return _finalize(deps, edges, name_case, prod_root_names, dev_root_names, include_dev)
 
 
@@ -864,7 +919,9 @@ def parse_bun_lock(
     except (json.JSONDecodeError, RecursionError):
         record_parse_failure(path, "JSON")
         return []
-    if data is None:
+    if data is None or unsupported_lockfile_version(
+        path, data.get("lockfileVersion"), _BUN_LOCK_VERSIONS
+    ):
         return []
 
     packages = typed_field(path, data, "packages", dict, '"packages"') or {}
@@ -873,11 +930,11 @@ def parse_bun_lock(
     seen: set[tuple[str, str]] = set()
     edges: dict[str, set[str]] = {}
     name_case: dict[str, str] = {}
+    workspaces = 0
     for key, raw in packages.items():
         # First element is the resolved "name@version" id; second is URL or
-        # empty; third is the meta dict; fourth is the integrity hash. The
-        # tuple is shorter for a non-registry source, so only the id's type
-        # is fixed.
+        # empty; third is the meta dict; fourth is the integrity hash. Only
+        # the id must be a string; the meta dict is read when it is there.
         if not isinstance(raw, list) or not raw or not isinstance(raw[0], str):
             record_unexpected_type(path, _PACKAGES_ENTRY)
             continue
@@ -896,6 +953,7 @@ def parse_bun_lock(
         # ``name@workspace:path`` is one of the project's own packages, not a
         # registry package: its edges stay in the graph, but it is no row.
         if version.startswith("workspace:"):
+            workspaces += 1
             continue
         if (normalized, version) in seen:
             continue
@@ -911,6 +969,7 @@ def parse_bun_lock(
             )
         )
 
+    record_unread_entries(path, len(packages), len(deps) + workspaces)
     return _finalize(deps, edges, name_case, prod_root_names, dev_root_names, include_dev)
 
 

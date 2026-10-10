@@ -28,6 +28,7 @@ from licenseal._graph import compute_direct_ancestors
 from licenseal.discovery._read import (
     load_json,
     record_unexpected_type,
+    record_unread_entries,
     root_table,
     typed_field,
 )
@@ -144,8 +145,11 @@ def parse_composer_lockfile(
                 n = entry.get("name")
                 if isinstance(n, str):
                     dev_names_set.add(n)
+    total = read = 0
     for field_name in ("packages", "packages-dev"):
-        for entry in typed_field(path, data, field_name, list, f'"{field_name}"') or []:
+        section = typed_field(path, data, field_name, list, f'"{field_name}"') or []
+        total += len(section)
+        for entry in section:
             if isinstance(entry, dict):
                 raw_packages.append(cast("dict[str, Any]", entry))
             else:
@@ -162,6 +166,7 @@ def parse_composer_lockfile(
         version = typed_field(path, entry, "version", str, _PACKAGES_ENTRY)
         if name is None or version is None:
             continue
+        read += 1
         if _is_path_source(entry):
             continue
 
@@ -203,6 +208,7 @@ def parse_composer_lockfile(
         )
         pending.append((dep, is_direct))
 
+    record_unread_entries(path, total, read)
     if not pending:
         return [], license_map
 

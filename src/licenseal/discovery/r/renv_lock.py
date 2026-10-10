@@ -27,6 +27,7 @@ from pathlib import Path
 from licenseal.discovery._read import (
     load_json,
     record_unexpected_type,
+    record_unread_entries,
     root_table,
     typed_field,
 )
@@ -103,6 +104,7 @@ def parse_renv_lock(
         child_names = [r.strip() for r in reqs if isinstance(r, str) and r.strip()]
         spec_info.setdefault(normalized, (name, version, off_registry))
         edges.setdefault(normalized, set()).update(c.lower() for c in child_names)
+    record_unread_entries(path, len(packages), len(spec_info))
 
     return build_lock_dependencies(
         spec_info,
