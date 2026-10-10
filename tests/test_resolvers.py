@@ -429,7 +429,7 @@ class TestVersionSelection:
     def test_select_npm_version_accepts_space_after_operator(self):
         # Real npm accepts whitespace between comparison operators and the
         # version (`">= 1.0.0"`); the underlying NpmSpec parser does not.
-        # Surfaced in real registry data by safer-buffer transitives that
+        # Surfaced in real registry data by transitives that
         # declare `">= 2.1.2 < 3.0.0"`.
         assert select_npm_version(">= 1.0.0", ["0.9.0", "1.2.0"]) == "1.2.0"
         assert select_npm_version("~ 1.2.3", ["1.2.4", "1.3.0"]) == "1.2.4"

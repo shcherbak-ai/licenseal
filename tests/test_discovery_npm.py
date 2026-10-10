@@ -58,7 +58,7 @@ class TestNpmDiscovery:
         # `optionalDependencies` are installed by default — they end up in
         # node_modules and the project is using them under their license.
         # Without this branch licenseal silently dropped platform-specific
-        # native bindings (better-sqlite3, sharp, fsevents) and their entire
+        # native bindings and their entire
         # transitive trees from npm scans.
         (tmp_path / "package.json").write_text(
             json.dumps(
@@ -344,7 +344,7 @@ class TestWorkspaceFiltering:
         """`tests/fixtures/*/package.json` and `__fixtures__/*/package.json`
         hold fake-project scaffolding for the project's own test suite, not
         real source. Without this guard, fixture projects can inflate the
-        dep tree with phantom react/react-dom-style deps."""
+        dep tree with phantom deps."""
         self._write(
             tmp_path / "package.json",
             {"name": "real-root", "dependencies": {"lodash": "^4.17.21"}},

@@ -468,7 +468,7 @@ class TestParseCargoLock:
            so the upstream walker doesn't treat it as uncovered and
            registry-walk the unpatched crates.io version (which would pull
            a different transitive set — the phantom-version bug seen on
-           polars and brush before this fix).
+           Cargo workspaces with patched crates before this fix).
         """
         path = _write(
             tmp_path,

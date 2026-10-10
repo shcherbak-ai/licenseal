@@ -287,7 +287,7 @@ def _walk_for_licenses(
       :data:`_MAX_PARENT_DEPTH` levels deep.
     * When Maven Central 404s on a parent (the parent is published only
       to a secondary repository like ``repo.jenkins-ci.org`` or a
-      retired Sun glassfish mirror), falls back to deps.dev's ``MAVEN``
+      retired vendor mirror), falls back to deps.dev's ``MAVEN``
       index for the parent's own ``<licenses>``. deps.dev does not
       expose POM content, so we can't continue the parent walk past
       that point — but the licenses for that specific parent are often

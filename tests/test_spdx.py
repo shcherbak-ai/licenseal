@@ -167,7 +167,7 @@ class TestNormalizeLicense:
         assert result == "BSD-3-Clause OR EPL-2.0"
 
     def test_lowercase_and_connector(self):
-        # Some publishers write ``"MIT and ISC"`` (visx/vendor) instead of
+        # Some publishers write ``"MIT and ISC"`` instead of
         # SPDX's uppercase AND. Each side normalizes and the result becomes
         # a valid compound expression — without this, the lowercase ``and``
         # wasn't recognized as a keyword and the whole string flunked
@@ -321,24 +321,25 @@ class TestSlashOrFallback:
 
 
 class TestPublisherAliasGapsClosedByBench:
-    """Aliases added after the 20-repo lmp head-to-head surfaced cases
+    """Aliases added after a head-to-head run against another license
+    tool surfaced cases
     where a publisher's literal license name routed to Proprietary or
     UNKNOWN despite the underlying license being a well-known SPDX. Each
-    entry traces back to a specific corpus repo's L_PROPRIETARY_LMP_SPDX
-    or DIFFERENT_SPDX disagreement.
+    entry traces back to a disagreement between the two tools on the
+    same dependency.
     """
 
     def test_short_gplv2_classpath_exception_variants(self):
-        # Used by Sun-licensed libraries / OpenJDK-derived projects
-        # (nashorn-core, com.sun.* family). Without these the comma-
-        # decompose path falls through to Proprietary.
+        # Used by Sun-licensed libraries / OpenJDK-derived projects.
+        # Without these the comma-decompose path falls through to
+        # Proprietary.
         cpe = "GPL-2.0-with-classpath-exception"
         assert normalize_license("GPLv2 with classpath exception") == cpe
         assert normalize_license("GPL v2 with classpath exception") == cpe
         assert normalize_license("GPL v2 with the Classpath exception") == cpe
 
     def test_short_cddl_or_gpl_dual_variants(self):
-        # Jenkins / glassfish.org / com.sun.* family. The
+        # Short publisher phrasings. The
         # ``CDDL + GPL-2.0-with-classpath-exception`` two-license shape
         # is the Sun/Oracle dual-license pattern — publisher intent is
         # OR (either license suffices), and the collapse step in
@@ -353,19 +354,19 @@ class TestPublisherAliasGapsClosedByBench:
         assert normalize_license("CDDL v1.1 / GPL v2 dual license") == "CDDL-1.1 AND GPL-2.0-only"
 
     def test_the_go_license_alias(self):
-        # com.google.re2j:re2j and other Go-port libraries. The bare
+        # Go-to-Java port libraries. The bare
         # "go license" was already aliased; this adds the "the" prefix
-        # variant that re2j's POM uses verbatim.
+        # variant that some of their POMs use verbatim.
         assert normalize_license("The Go license") == "BSD-3-Clause"
 
     def test_jai_imaging_nuclear_disclaimer_variant(self):
-        # com.github.jai-imageio:jai-imageio-core publisher string —
+        # Publisher string from a JVM imaging library's POM —
         # the "w/nuclear disclaimer" suffix hits the proprietary-signal
         # regex without this alias.
         assert normalize_license("BSD 3-clause License w/nuclear disclaimer") == "BSD-3-Clause"
 
     def test_mysql_universal_foss_exception_routes_to_gpl(self):
-        # com.mysql:mysql-connector-j. Oracle/MySQL FOSS Exception
+        # Database-connector POMs. The Oracle/MySQL FOSS Exception
         # wraps a GPL-2.0 base; we map to GPL-2.0-only so the risk classifier
         # places it correctly (the exception is documented separately).
         assert (
@@ -1052,7 +1053,7 @@ class TestRedundantLicensePairCollapse:
     """
 
     def test_lgpl_and_gpl_same_version_collapses_to_lgpl(self):
-        # The pygithub case after operand canonicalization:
+        # An LGPL package that also ships the GPL text, after operand canonicalization:
         # GPL-3.0 AND GPL-3.0-or-later AND LGPL-3.0 → LGPL-3.0. The surviving
         # LGPL operand is in its current spelling.
         assert normalize_license("LGPL-3.0 AND GPL-3.0") == "LGPL-3.0-only"

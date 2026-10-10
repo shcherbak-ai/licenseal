@@ -197,7 +197,7 @@ def discover_pyproject_dependencies(
     """Discover dependencies from every pyproject.toml in the project tree.
 
     Python monorepos (uv workspaces, poetry workspaces, ad-hoc multi-package
-    layouts like LangChain's libs/*) declare deps in nested pyproject.toml
+    layouts such as a ``libs/*`` tree) declare deps in nested pyproject.toml
     files. Walk the tree, parse each, and filter out workspace-internal
     references (deps whose name matches another pyproject in the project).
 

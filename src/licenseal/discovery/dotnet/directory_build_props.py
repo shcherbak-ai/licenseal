@@ -117,8 +117,8 @@ def _parse_imports(raw: str | bytes) -> list[str]:
     """Return the ``Project="..."`` attribute of every ``<Import>`` element.
 
     MSBuild's ``Directory.Build.props`` commonly imports sibling
-    ``.props`` files (xunit uses ``<Import Project="Versions.props" />``,
-    .NET Foundation projects use ``<Import Project="build/Common.props" />``).
+    ``.props`` files (``<Import Project="Versions.props" />`` beside it, or
+    ``<Import Project="build/Common.props" />`` in a subdirectory).
     We follow these imports to pick up version properties they declare.
 
     Returns the raw ``Project="..."`` value as-authored — the caller
@@ -164,9 +164,9 @@ def find_directory_build_props(
     a counterexample).
 
     Each ``Directory.Build.props`` may carry ``<Import Project="..."/>``
-    directives pulling in sibling ``.props`` files (xunit's
-    ``Versions.props`` pattern, .NET Foundation's ``build/Common.props``
-    pattern). We follow these imports up to :data:`_MAX_IMPORT_DEPTH`
+    directives pulling in sibling ``.props`` files (a ``Versions.props``
+    beside it, a ``build/Common.props`` in a subdirectory, and similar
+    layouts). We follow these imports up to :data:`_MAX_IMPORT_DEPTH`
     levels deep so the version variables declared in the imported file
     are visible to the property-scope lookup.
     """

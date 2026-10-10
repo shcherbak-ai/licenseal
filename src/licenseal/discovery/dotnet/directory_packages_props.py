@@ -38,7 +38,7 @@ MSBuild's CPM rules:
 2. **GlobalPackageReference is implicit.** Every project under the props
    file's directory gets these packages applied as if they had explicit
    ``<PackageReference>`` entries. Most commonly used for analyzers
-   (StyleCop.Analyzers, SonarAnalyzer) and source-link tooling.
+   and source-link tooling.
 
 3. **PackageVersion only supplies versions.** It does NOT add the package
    as a dependency — only the project's ``<PackageReference>`` decides

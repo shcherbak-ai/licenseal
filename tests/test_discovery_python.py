@@ -316,7 +316,7 @@ class TestProjectLicenseDetection:
         assert detect_project_license_pyproject(tmp_path) == "Apache-2.0"
 
     def test_monorepo_falls_through_to_first_subpackage_when_root_lacks_license(self, tmp_path):
-        # LangChain-style: no root pyproject.toml, but every sub-package has
+        # Monorepo layout: no root pyproject.toml, but every sub-package has
         # a `license = {text = "MIT"}` entry. First sub-package wins.
         (tmp_path / "libs" / "core").mkdir(parents=True)
         (tmp_path / "libs" / "core" / "pyproject.toml").write_text(
@@ -352,7 +352,7 @@ class TestProjectLicenseDetection:
 
 
 class TestPythonMonorepoDiscovery:
-    """LangChain, Ray, JAX, and many other large Python projects ship a
+    """Many large Python projects ship a
     repo with no root pyproject.toml — instead, multiple sub-packages live
     under `libs/`, `packages/`, or similar. Walk for them and filter
     workspace-internal references so they don't show as unresolved deps."""
@@ -447,8 +447,8 @@ class TestPythonMonorepoDiscovery:
         assert by_name["nested-dep"].source == "libs/core/pyproject.toml"
 
     def test_workspace_filter_is_pep503_normalized(self, tmp_path):
-        # `langchain_core` (underscore) in one pyproject and `langchain-core`
-        # (dash) referenced in another must both match the same package.
+        # `Some_Pkg.Name` (underscore, dot) in one pyproject and `some-pkg-name`
+        # (dashes) referenced in another must both match the same package.
         (tmp_path / "a").mkdir()
         (tmp_path / "a" / "pyproject.toml").write_text(
             textwrap.dedent("""\

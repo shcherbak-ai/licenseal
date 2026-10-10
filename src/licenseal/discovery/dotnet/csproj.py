@@ -47,13 +47,13 @@ mapping):
 
 * Plain ``<PackageReference Include="X" Version="Y" />`` → PROD
 * ``PrivateAssets="all"`` (won't be propagated to consumers, typically
-  analyzers + test frameworks like xunit/nunit/MSTest), written as an
+  analyzers + test frameworks), written as an
   attribute or as a ``<PrivateAssets>all</PrivateAssets>`` child element
   → DEV
 * A ``Condition`` that is, as a whole, a Debug / Test configuration or an
   IsTestProject comparison (``'$(Configuration)' == 'Debug'``) → DEV
-  (heuristic — full MSBuild condition evaluation is out of scope, same
-  trade-off Trivy and license-checker tools make). A condition that only
+  (heuristic — full MSBuild condition evaluation is out of scope, the same
+  trade-off other manifest scanners make). A condition that only
   contains such a comparison (``… Or '$(Configuration)' == 'Release'``)
   is PROD.
 * ``IncludeAssets="all"`` and other normal usage attributes → PROD
@@ -184,8 +184,7 @@ def _is_dev_package_ref(
     """Classify a ``<PackageReference>`` as DEV or PROD via attribute hints.
 
     ``PrivateAssets="all"`` is the canonical signal for analyzer +
-    test-framework packages (xunit, nunit, MSTest, StyleCop.Analyzers,
-    SonarAnalyzer, etc.) that don't flow to consumers. A ``Condition``
+    test-framework packages that don't flow to consumers. A ``Condition``
     that is exactly one of the Debug / Test / IsTestProject comparisons
     also marks DEV; everything else is PROD.
     """

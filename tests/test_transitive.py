@@ -3856,9 +3856,9 @@ class TestGoEdgeAwareResolution:
         # transitive walker must apply the same filter when iterating
         # go.sum, otherwise the leaked entries get registry-resolved as
         # though they were public modules (404s, wasted requests, and noise
-        # in the report). Real-world observation: grafana's go.sum contains
-        # entries for github.com/grafana/grafana/apps/dashboard and three
-        # similar paths that are workspace-local; without this filter they
+        # in the report). Real-world observation: the go.sum of a large Go
+        # monorepo contains entries for its own ``apps/<name>`` modules,
+        # which are workspace-local; without this filter they
         # leak into the report and get UNKNOWN-classified.
         (tmp_path / "go.mod").write_text(
             "module example.com/root\ngo 1.22\nrequire example.com/extdep v1.0.0\n",
@@ -3876,8 +3876,8 @@ class TestGoEdgeAwareResolution:
             encoding="utf-8",
         )
         # go.sum contains entries for BOTH the external require AND for the
-        # workspace-internal sibling — mirroring grafana's actual go.sum
-        # shape. The workspace-local entry must be filtered out.
+        # workspace-internal sibling — mirroring the go.sum shape of a
+        # real multi-module workspace. The workspace-local entry must be filtered out.
         (tmp_path / "go.sum").write_text(
             "example.com/extdep v1.0.0 h1:h\n"
             "example.com/extdep v1.0.0/go.mod h1:h\n"
@@ -8709,7 +8709,7 @@ class TestRLockfileFirstPath:
         assert is_off_registry_marker(by_name["myfork"].source)
 
     def test_renv_lock_only_no_description(self, tmp_path):
-        # renv.lock with NO DESCRIPTION (analysis-project / Shiny-app layout):
+        # renv.lock with NO DESCRIPTION (analysis-project / web-app layout):
         # the lockfile branch must NOT be gated on DESCRIPTION discovery, or
         # these projects yield zero deps. Graph roots become the direct set.
         # All versions are pinned → lockfile-first → no registry calls.

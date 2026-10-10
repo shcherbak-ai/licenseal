@@ -516,7 +516,7 @@ def resolve_transitive(
     # manifest-only projects with no lock — have their closure walked locally
     # over the parsed CRAN ``PACKAGES`` index (``cran_index``). Lock discovery is
     # unconditional (renv.lock / packrat.lock commonly exist WITHOUT a
-    # DESCRIPTION — analysis projects, Shiny apps — so a project can be
+    # DESCRIPTION — analysis projects, web apps — so a project can be
     # R-via-lockfile-only with zero R direct deps from manifests).
     renv_locks = find_renv_lockfiles(project_path, exclude_paths=exclude_paths)
     packrat_locks = find_packrat_lockfiles(project_path, exclude_paths=exclude_paths)

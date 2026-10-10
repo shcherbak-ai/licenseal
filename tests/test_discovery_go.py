@@ -800,8 +800,8 @@ class TestWorkspaceLocalTestdataFilter:
         # the parser. Without the testdata filter, that declaration would
         # be added to the workspace-local set and the project's real
         # ``require golang.org/x/xerrors`` would silently disappear.
-        # Mirrors the trivy regression discovered via polyglot regression
-        # sweep on 2026-05-26.
+        # Mirrors a regression found in a polyglot repository that keeps
+        # Go test fixtures in its tree.
         (tmp_path / "go.mod").write_text(
             "module example.com/project\n"
             "require golang.org/x/xerrors v0.0.0-20240903120638-7835f813f4da\n",

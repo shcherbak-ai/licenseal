@@ -97,7 +97,7 @@ class TestPatternBasedClassification:
             ("EUPL-1.1", RiskLevel.STRONG_COPYLEFT),
             ("EUPL-1.2", RiskLevel.STRONG_COPYLEFT),
             # ODbL — Open Database License. Share-alike on derivative databases
-            # *including the source data*; OSM-style strong copyleft.
+            # *including the source data*; strong copyleft for databases.
             ("ODbL-1.0", RiskLevel.STRONG_COPYLEFT),
             # GFDL — GNU Free Documentation License (strong copyleft for docs).
             ("GFDL-1.1-only", RiskLevel.STRONG_COPYLEFT),

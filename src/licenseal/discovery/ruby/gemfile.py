@@ -297,8 +297,8 @@ def discover_gemfile_dependencies(
     """Discover Ruby dependencies declared in ``Gemfile`` files.
 
     ``workspace_names`` is the lowercased set of gem names declared by
-    in-tree gemspecs — those are workspace-internal references (the rails
-    monorepo case) and get filtered. The filter count is returned as the
+    in-tree gemspecs — those are workspace-internal references (the
+    multi-gem monorepo case) and get filtered. The filter count is returned as the
     int in the tuple.
     """
     out: list[Dependency] = []

@@ -30,7 +30,7 @@ def find_rust_lockfiles(
 ) -> list[Path]:
     """Return every Cargo.lock in the project tree.
 
-    Polyglot setups commonly nest a Rust workspace (e.g. ``tauri/src-tauri/
+    Polyglot setups commonly nest a Rust workspace (e.g. ``desktop/native/
     Cargo.lock``) next to JS / Python code that has its own ecosystem
     lockfiles. The nested Cargo.lock is the ground truth for that subtree
     and must be parsed alongside any root-level one.
@@ -109,9 +109,9 @@ def parse_cargo_lock(
     but not in ``deps_list``, and re-fetching it from crates.io would
     pull a different version than what's actually built. Without this
     set, ``_walk_uncovered`` would treat patched deps as uncovered and
-    pull phantom transitives from the registry-latest version — bug
-    seen on polars (3 patched deps -> phantom ``aws-lc-sys@0.41.0``
-    chain), brush (``wgpu`` patch -> phantom ``av-scenechange@0.23.0``).
+    pull phantom transitives from the registry-latest version: chains
+    of crates the patched build never compiles. Cargo workspaces that
+    patch registry crates are where this shows up.
 
     Crates with no ``source`` field (the local workspace crate) and
     crates whose source isn't the crates.io registry index (path / git /

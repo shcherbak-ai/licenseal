@@ -389,7 +389,7 @@ class TestExpandProperties:
         assert _expand_properties("5.3.20", {"foo": "bar"}) == "5.3.20"
 
     def test_nested_property_reference_expands(self):
-        # Real Maven BOMs (jackson-bom is the canonical example) define
+        # Real Maven BOMs define
         # a property whose value is itself another ``${…}`` reference.
         # Single-pass expansion would leave the intermediate literal in
         # place; the multi-pass loop chases through until stable.

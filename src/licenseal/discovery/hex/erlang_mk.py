@@ -161,8 +161,8 @@ def workspace_erlang_mk_project_names(
     """Return the lowercased ``PROJECT`` names of every in-tree erlang.mk app.
 
     Used (unioned with the Mix umbrella app names) to filter monorepo sibling
-    references — e.g. a rabbitmq sub-app's ``DEPS`` lists both external hex
-    packages and dozens of internal ``deps/*`` apps.
+    references — e.g. in a large erlang.mk monorepo a sub-app's ``DEPS`` lists
+    both external hex packages and dozens of internal ``deps/*`` apps.
     """
     names: set[str] = set()
     for makefile in walk_project_files(project_path, "Makefile", exclude_paths=exclude_paths):

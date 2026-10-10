@@ -72,7 +72,7 @@ def build_lock_dependencies(
 
     # renv.lock / packrat.lock carry no explicit "direct dependency" marker.
     # When the project also declares no direct deps (a lock-only layout with no
-    # DESCRIPTION — common for analysis projects / Shiny apps), fall back to the
+    # DESCRIPTION — common for analysis projects and web apps), fall back to the
     # lockfile's own graph roots — packages not required by any other package in
     # the lock — as the direct set, so depth / group / ancestor attribution
     # stays meaningful instead of collapsing every package to an orphan.

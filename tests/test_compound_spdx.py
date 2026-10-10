@@ -63,8 +63,8 @@ class TestCompoundSpdxRisk:
         assert classify_risk("LGPL-3.0-only AND CustomLicense") == RiskLevel.UNKNOWN
 
     def test_or_with_proprietary_arm_does_not_clear_copyleft(self):
-        # A `copyleft OR commercial` dual license (e.g. Artifex/PyMuPDF's
-        # "AGPL OR commercial") must NOT read as permissive: there's no free
+        # A `copyleft OR commercial` dual license (e.g. an
+        # "AGPL OR commercial" offer) must NOT read as permissive: there's no free
         # permissive arm to choose. Proprietary's UNKNOWN risk drops out of
         # the OR aggregation, leaving the copyleft arm as the effective risk.
         assert classify_risk("AGPL-3.0-only OR Proprietary") == RiskLevel.NETWORK_COPYLEFT
@@ -83,7 +83,7 @@ class TestCompoundSpdxRisk:
         assert classify_risk("MIT-CMU") == RiskLevel.PERMISSIVE
 
     def test_with_exception_classifies_on_base_permissive(self):
-        # Real example: Apache-2.0 WITH LLVM-exception (used by wasi, wit-bindgen)
+        # Real example: Apache-2.0 WITH LLVM-exception (used by WebAssembly-tooling crates)
         # The exception adds patent-grant clarifications; base stays permissive.
         assert classify_risk("Apache-2.0 WITH LLVM-exception") == RiskLevel.PERMISSIVE
 
@@ -121,7 +121,7 @@ class TestCompoundSpdxRisk:
 
     def test_or_later_plus_suffix_weak_copyleft(self):
         # SPDX `+` suffix means "this version or later". MPL has no `-or-later`
-        # SPDX ID, and several Rust crates (bitmaps, imbl, imbl-sized-chunks)
+        # SPDX ID, and several Rust crates
         # publish as `MPL-2.0+`. Must classify the same as `MPL-2.0`.
         assert classify_risk("MPL-2.0+") == RiskLevel.WEAK_COPYLEFT
 
@@ -422,8 +422,8 @@ class TestAdditionalPermissiveLicenses:
         assert normalize_license("PSF 2.0") == "PSF-2.0"
 
     def test_zpl_variants_normalize_and_classify_permissive(self):
-        # Zope Public License: OSI-approved permissive, used by many Plone
-        # ecosystem packages. Was previously normalize-passthrough → UNKNOWN
+        # Zope Public License: OSI-approved permissive, used by a family of
+        # PyPI packages. Was previously normalize-passthrough → UNKNOWN
         # because no entry existed in the risk map. Space-separated form
         # (`"ZPL 2.1"`) shows up in PyPI metadata alongside the SPDX dash form.
         assert normalize_license("ZPL-2.1") == "ZPL-2.1"
@@ -478,7 +478,7 @@ class TestAdditionalPermissiveLicenses:
 
     def test_hpnd_is_permissive(self):
         # HPND (Historical Permission Notice and Disclaimer) is OSI-approved
-        # permissive; used by Pillow and other long-lived deps.
+        # permissive; used by some long-lived PyPI packages.
         assert normalize_license("HPND") == "HPND"
         assert classify_risk("HPND") == RiskLevel.PERMISSIVE
 
@@ -621,8 +621,8 @@ class TestAdditionalPermissiveLicenses:
         assert classify_risk(result) == RiskLevel.UNKNOWN
 
     def test_comma_separated_dual_license_treated_as_or(self):
-        # PyPI convention surfaced by pycryptodome (`"BSD, Public Domain"`)
-        # and several other packages. Comma is informal "OR" when both
+        # PyPI convention (`"BSD, Public Domain"`) used by
+        # several packages. Comma is informal "OR" when both
         # parts are recognizable licenses.
         result = normalize_license("BSD, Public Domain")
         assert result == "BSD-3-Clause OR LicenseRef-Public-Domain"
@@ -652,8 +652,8 @@ class TestAdditionalPermissiveLicenses:
         assert classify_risk(normalize_license("MIT, see LICENSE for details")) == RiskLevel.UNKNOWN
 
     def test_bzip2_postgresql_openssl_are_permissive(self):
-        # SPDX IDs for the bzip2 license (used by `libbz2-rs-sys`),
-        # PostgreSQL License (used by `pq-src`), and OpenSSL License are all
+        # SPDX IDs for the bzip2 license,
+        # PostgreSQL License, and OpenSSL License are all
         # OSI-approved permissive. Surfaced by Rust scans of packages
         # wrapping C dependencies.
         assert classify_risk("bzip2-1.0.6") == RiskLevel.PERMISSIVE
@@ -700,7 +700,7 @@ class TestAdditionalPermissiveLicenses:
     def test_see_license_in_file_normalizes_to_proprietary(self):
         # Generic `SEE LICENSE IN <filename>` regex handles any filename and
         # any common spelling variant. Examples seen in real registry data:
-        # claude-agent-sdk → README.md; many private packages → LICENSE.txt.
+        # some packages → README.md; many private packages → LICENSE.txt.
         assert normalize_license("SEE LICENSE IN LICENSE") == "Proprietary"
         assert normalize_license("SEE LICENSE IN LICENSE.md") == "Proprietary"
         assert normalize_license("SEE LICENSE IN LICENSE.txt") == "Proprietary"

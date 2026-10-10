@@ -199,8 +199,8 @@ class TestCheckCompatibility:
         assert "dev-only" in result.reason.lower() or "will not ship" in result.reason.lower()
 
     def test_copyleft_or_proprietary_dual_license_is_flagged(self):
-        """A `copyleft OR commercial` dual-license dep (Artifex/PyMuPDF's
-        "AGPL OR commercial") must be flagged against a permissive project —
+        """A `copyleft OR commercial` dual-license dep (an
+        "AGPL OR commercial" offer) must be flagged against a permissive project —
         the Proprietary arm must not let it masquerade as permissive."""
         li = _make_license_info("AGPL-3.0-only OR Proprietary", name="pymupdf")
         result = check_compatibility("MIT", li)
@@ -603,7 +603,7 @@ class TestEcosystemAgnosticVerdicts:
     flagged identically to an AGPL Python dep; a GPL Rust dep in an MIT npm
     project must be flagged identically to a GPL npm dep. This invariant is
     load-bearing for polyglot projects (e.g. Python wheels with bundled JS,
-    Tauri apps mixing Rust+TS) where ecosystem-skipping would silently hide
+    desktop apps mixing Rust+TS) where ecosystem-skipping would silently hide
     real copyleft contamination."""
 
     def _li(self, license_id: str, name: str, ecosystem: Ecosystem) -> LicenseInfo:

@@ -150,8 +150,8 @@ def workspace_gemspec_names(
     """Return the lowercased set of in-tree gemspec ``spec.name`` values.
 
     Used as the workspace-internal filter by the Gemfile and Gemfile.lock
-    discovery paths so monorepo siblings (rails: ``actionpack`` referencing
-    ``activesupport``) are dropped before any registry lookup.
+    discovery paths so monorepo siblings (one in-tree gem referencing
+    another) are dropped before any registry lookup.
     """
     names: set[str] = set()
     for gemspec in _walk_gemspecs(project_path, exclude_paths=exclude_paths):
@@ -190,8 +190,8 @@ def discover_gemspec_dependencies(
 ) -> tuple[list[Dependency], int]:
     """Discover deps from every ``*.gemspec`` in the tree.
 
-    ``workspace_names`` filters out monorepo sibling references (e.g. rails
-    gemspecs reference each other). The filter count is returned alongside.
+    ``workspace_names`` filters out monorepo sibling references (the gemspecs
+    of a multi-gem repo reference each other). The filter count is returned alongside.
     """
     out: list[Dependency] = []
     filtered = 0

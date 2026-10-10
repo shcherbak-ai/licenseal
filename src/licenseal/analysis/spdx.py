@@ -137,31 +137,30 @@ _NORMALIZATION_MAP: dict[str, str] = {
     # Same compound with the parenthesized ``(GPL)`` infix — common in
     # publisher POMs that name-drop the abbreviation in the long form.
     "gnu general public license (gpl), version 2, with the classpath exception": "GPL-2.0-with-classpath-exception",
-    "gnu general public license (gpl), version 2, with the classpath exception)": "GPL-2.0-with-classpath-exception",  # trailing paren from lmp's compound parser
+    "gnu general public license (gpl), version 2, with the classpath exception)": "GPL-2.0-with-classpath-exception",  # trailing paren left by a compound-license parser
     # ``with the GNU Classpath Exception`` (extra "GNU" word before "Classpath")
-    # — used by ``jakarta.el-api`` and other Eclipse-foundation EPL+GPL deps.
+    # — used by Eclipse-foundation EPL+GPL API artifacts.
     "gnu general public license, version 2 with the gnu classpath exception": "GPL-2.0-with-classpath-exception",
     "gnu general public license, version 2, with the gnu classpath exception": "GPL-2.0-with-classpath-exception",
     # Short publisher phrasings ("GPLv2 with classpath exception" without
     # the GNU prefix or "version 2" expansion). Used by Sun-licensed
-    # libraries and OpenJDK-derived projects like nashorn-core. Without
+    # libraries and OpenJDK-derived projects. Without
     # these, the bare phrase trips ``Proprietary`` via the comma-decompose
     # path that doesn't recognize the abbreviation.
     "gplv2 with classpath exception": "GPL-2.0-with-classpath-exception",
     "gpl v2 with classpath exception": "GPL-2.0-with-classpath-exception",
     "gpl v2 with the classpath exception": "GPL-2.0-with-classpath-exception",
     # Same shape as the longer "Dual license consisting of..." entries
-    # below, but the short publisher phrasing seen in Sun/Oracle and
-    # Jenkins-bundled artifacts.
+    # below, but the short publisher phrasing seen in Sun/Oracle
+    # artifacts and other JVM artifacts.
     "cddl or gpl 2 with classpath exception": "CDDL-1.0 AND GPL-2.0-with-classpath-exception",
     "cddl v1.1 / gpl v2 dual license": "CDDL-1.1 AND GPL-2.0-only",
     # Eclipse-foundation prose variant with ``v.`` (period after ``v``).
     "eclipse public license v. 1.0": "EPL-1.0",
     "eclipse public license v. 2.0": "EPL-2.0",
     # ``Dual license consisting of the CDDL v1.1 and GPL v2`` — the Sun /
-    # OpenJDK / glassfish.org pattern (different phrasing than ``CDDL +
-    # GPLv2 with classpath exception``); used by ``javax.json``,
-    # ``stax-ex``, ``jersey-multipart``, and the broader JSR-spec API
+    # OpenJDK pattern (different phrasing than ``CDDL +
+    # GPLv2 with classpath exception``); used across the JSR-spec API
     # family. Has the same legal substance as the CDDL+GPL+CPE compound.
     "dual license consisting of the cddl v1.1 and gpl v2": "CDDL-1.1 AND GPL-2.0-with-classpath-exception",
     "dual license consisting of the cddl v1.0 and gpl v2": "CDDL-1.0 AND GPL-2.0-with-classpath-exception",
@@ -324,7 +323,7 @@ _NORMALIZATION_MAP: dict[str, str] = {
     "gnu affero general public license v3 or later (agplv3+)": "AGPL-3.0-or-later",
     # The spelled-out "GNU AFFERO GPL <ver>" form — sibling of the existing
     # "gnu affero gpl" / "...v3" entries, just with the version as a bare
-    # trailing number. Used by Artifex-published bindings (PyMuPDF et al.).
+    # trailing number. Used by some publishers of AGPL-licensed PyPI bindings.
     "gnu affero gpl 3.0": "AGPL-3.0-only",
     "gnu affero gpl 3": "AGPL-3.0-only",
     # Artifex's dual license, declared as free-form prose in the PyPI
@@ -380,7 +379,7 @@ _NORMALIZATION_MAP: dict[str, str] = {
     # Apache Foundation publisher variants surfaced by the Java corpus.
     # The alias map already has "the apache software license, version 2.0";
     # these are the parallel "license without 'Software'" variants and the
-    # abbreviation "ASF" used by some Apache projects (cglib, etc.).
+    # abbreviation "ASF" used by some Apache projects.
     "the apache license, version 2.0": "Apache-2.0",
     "the apache license version 2.0": "Apache-2.0",
     # The ``The Apache Software License`` family — the leading ``The`` is
@@ -395,8 +394,8 @@ _NORMALIZATION_MAP: dict[str, str] = {
     "asf 2.0": "Apache-2.0",
     "asf license 2.0": "Apache-2.0",
     "apache software foundation 2.0": "Apache-2.0",
-    # CDDL long-form variants (the GlassFish family — javax.activation,
-    # javax.annotation-api, jaxb-api). The long-form name's
+    # CDDL long-form variants (common across the JSR-specification API
+    # artifacts). The long-form name's
     # parenthesized "(CDDL)" hint trips the comma-split heuristic
     # without an alias entry.
     "cddl": "CDDL-1.0",
@@ -414,9 +413,8 @@ _NORMALIZATION_MAP: dict[str, str] = {
     "cddl+gpl license": "CDDL-1.0 AND GPL-2.0-with-classpath-exception",
     "cddl + gpl": "CDDL-1.0 AND GPL-2.0-with-classpath-exception",
     "cddl/gplv2+ce": "CDDL-1.0 AND GPL-2.0-with-classpath-exception",
-    # Sun/Oracle ``javax.*`` API canonical publisher string — used verbatim by
-    # ``javax.servlet-api``, ``javax.el-api``, ``javax.annotation-api``, the
-    # ``com.sun.jersey:*`` family, and other JSR specification artifacts.
+    # Sun/Oracle ``javax.*`` API canonical publisher string — used verbatim
+    # across the JSR specification artifacts.
     # Without this entry the embedded ``+`` and free-form ``with classpath
     # exception`` clause trip every compound-decomposition branch and the
     # name falls through to UNKNOWN; the resolver then probes deps.dev,
@@ -519,7 +517,7 @@ _NORMALIZATION_MAP: dict[str, str] = {
     # under BSD-3-Clause, so map the bare phrase to BSD-3-Clause.
     "go license": "BSD-3-Clause",
     "the go license": "BSD-3-Clause",
-    # JAI (Java Advanced Imaging) imaging library — publisher labels its
+    # Some JVM imaging-library POMs label a BSD-3-Clause
     # license with a "w/nuclear disclaimer" suffix the comma-decomposer
     # treats as a proprietary signal. The underlying license is BSD-3-Clause.
     "bsd 3-clause license w/nuclear disclaimer": "BSD-3-Clause",
@@ -598,7 +596,7 @@ _NORMALIZATION_MAP: dict[str, str] = {
     # NCSA — University of Illinois/NCSA Open Source License. OSI permissive.
     "ncsa": "NCSA",
     "university of illinois/ncsa open source license": "NCSA",
-    # Zope Public License (OSI-approved permissive, common on plone/zope deps)
+    # Zope Public License (OSI-approved permissive)
     "zpl": "ZPL-2.1",
     "zpl-1.1": "ZPL-1.1",
     "zpl 1.1": "ZPL-1.1",
@@ -1069,8 +1067,8 @@ def _collapse_redundant_license_pairs(expr: str) -> str:
       ``LGPL-X.Y[-only|-or-later]`` and any ``GPL-X.Y[-only|-or-later]``
       of the same X.Y; the GPL variants are dropped. The LGPL-2.1 +
       GPL-2.0 case is also covered (LGPL-2.1 explicitly references
-      GPL-2.0). Without this, packages like ``PyGithub`` (LGPL-3.0
-      publisher declaration; ships LICENSE.GPL alongside) classify as
+      GPL-2.0). Without this, a package with an LGPL-3.0 publisher
+      declaration that ships LICENSE.GPL alongside would classify as
       strong-copyleft / violation when AND-aggregated.
 
     * Exact ``CDDL-X.Y AND GPL-2.0-with-classpath-exception`` →
@@ -1220,7 +1218,7 @@ def _normalize_license_inner(raw: str) -> str:
         return "Proprietary"
 
     # Comma-separated multi-license: PyPI publishers commonly express dual
-    # licensing informally as `"BSD, Public Domain"` (pycryptodome) or
+    # licensing informally as `"BSD, Public Domain"` or
     # `"MIT, Apache-2.0"`. Treat as an OR compound only when every part
     # independently normalizes to a known license — that avoids splitting
     # license names that contain a legitimate comma (`"Apache License,

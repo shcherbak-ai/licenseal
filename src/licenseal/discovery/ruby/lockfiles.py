@@ -1,8 +1,8 @@
 """Gemfile.lock parser.
 
 Bundler's lockfile is a fully-static plain-text format with a well-defined
-2/4/6-space indent contract that downstream tools (Snyk, Dependabot,
-ScanCode, gemfileparser) all parse identically. We mirror that grammar.
+2/4/6-space indent contract that downstream dependency scanners all
+parse identically. We mirror that grammar.
 
 Top-level shape::
 

@@ -49,7 +49,7 @@ def find_npm_lockfiles(
     """Return every npm lockfile in the project tree, one per directory.
 
     Monorepos commonly ship multiple lockfiles — a root one plus per-app
-    nested ones, or vendored subprojects (e.g. ``tauri/`` next to a web
+    nested ones, or vendored subprojects (e.g. a desktop shell next to a web
     front-end). Each lockfile is the ground truth for its own subtree, so
     we must parse all of them rather than only the root. When a single
     directory contains more than one supported lockfile (project

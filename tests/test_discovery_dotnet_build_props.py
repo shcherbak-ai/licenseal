@@ -729,10 +729,10 @@ class TestImportFollowing:
         assert result[tmp_path] == {"Local": "local"}
 
     def test_xunit_versions_props_pattern_end_to_end(self, tmp_path):
-        # Real-world xunit pattern: src/Directory.Build.props imports
+        # Real-world pattern: src/Directory.Build.props imports
         # src/Versions.props which declares package-version variables.
         # licenseal must see those variables when resolving a .csproj
-        # under src/xunit.v3.core/.
+        # in a project directory under src/.
         _write(
             tmp_path / "src" / "Versions.props",
             """<Project>

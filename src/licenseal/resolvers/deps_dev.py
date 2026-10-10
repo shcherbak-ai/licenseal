@@ -129,10 +129,10 @@ def _extract_pinned_version(version_constraint: str) -> str | None:
 # Systems whose publisher convention treats a multi-element ``licenses``
 # array as disjunctive (consumer picks one). RubyGems' gemspec ``licenses
 # = [...]`` follows the same convention as Composer's composer.json
-# ``license`` array — the publisher offers a choice. Empirically validated
-# against the Ruby bench corpus: license_finder's ``Simplified BSD OR
-# ruby`` matches the canonical ``["BSD-2-Clause", "Ruby"]`` interpretation
-# that bigdecimal / nio4r / drb / json (Ruby stdlib gems) all carry.
+# ``license`` array — the publisher offers a choice. Gems bundled with the
+# Ruby standard library are the common case: they declare
+# ``["BSD-2-Clause", "Ruby"]``, and an independent license scanner reports
+# that array as a choice between the two as well.
 _DISJUNCTIVE_MULTI_LICENSE_SYSTEMS: frozenset[str] = frozenset({"RUBYGEMS"})
 
 
@@ -165,9 +165,9 @@ def _licenses_to_spdx(licenses_field: object, *, system: str = "") -> str:
     expression — the publisher declared a license but in a shape
     deps.dev's licensecheck couldn't categorize. The string is returned
     by deps.dev as a "no opinion" signal, NOT a "proprietary license"
-    claim. Some legacy Microsoft .NET Framework / pre-2018 NuGet
-    packages (Microsoft.CSharp 4.3.0, System.* 4.3.x, ~60 mainstream
-    packages from that era) carry only an old ``<licenseUrl>`` to
+    claim. Some legacy .NET Framework / pre-2018 NuGet packages (the
+    platform's own base libraries from that era among them) carry
+    only an old ``<licenseUrl>`` pointing at
     Microsoft's generic ``.NET Library`` EULA page, hitting this code
     path. We filter ``"non-standard"`` out of the joined expression so
     it doesn't get fed into ``normalize_license`` (where it would alias

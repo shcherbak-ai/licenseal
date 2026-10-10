@@ -79,7 +79,7 @@ class TestDiscoverAll:
 
 
 class TestPolyglotDiscovery:
-    """Real-world polyglot layouts (Tauri = Rust+TS, ML projects = Python+JS,
+    """Real-world polyglot layouts (desktop apps = Rust+TS, ML projects = Python+JS,
     Python+npm+Rust hybrids). All three ecosystems must be discovered from
     one scan, with no cross-ecosystem dedup collisions."""
 
