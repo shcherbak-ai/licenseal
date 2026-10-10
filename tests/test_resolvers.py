@@ -30,6 +30,7 @@ from licenseal.resolvers.deps_dev import (
 from licenseal.resolvers.http import (
     _INITIAL_BACKOFF_SECONDS,
     _MAX_RETRY_AFTER_SECONDS,
+    _PEP658_HEADER_LINES_MAX,
     RegistryCache,
     _jittered_backoff,
     _parse_pep658_headers,
@@ -2659,9 +2660,9 @@ class TestPep658MetadataFallback:
     def test_long_legacy_license_text_rejected(self):
         # A maintainer who pastes the full MIT text into the legacy `License:`
         # field is doing prose. Stays UNKNOWN — extraction from license bodies
-        # is banned. ``_parse_pep658_headers`` already skips continuation lines
-        # so a multi-line body never reaches the resolver, but the length
-        # guard adds a second belt against single-line bodies.
+        # is banned. A multi-line body is rejected for its continuation lines
+        # (see ``test_legacy_license_body_first_line_is_not_an_identifier``);
+        # the length guard is the second belt, against single-line bodies.
         long_blob = "MIT License " + "x " * 50  # > 60 chars, single line
         respx.get("https://pypi.org/pypi/pkg-longtext/1.0.0/json").mock(
             return_value=httpx.Response(
@@ -2853,6 +2854,120 @@ class TestPep658MetadataFallback:
             info = resolve_python_license(dep, client)
         assert info.license_id == "BSD-3-Clause"
 
+    def _resolve_from_sidecar(self, metadata_text: str):
+        """Resolve a pinned package whose only license source is the sidecar.
+
+        The JSON endpoints carry no license, so the result is decided by
+        ``metadata_text``. Routed through ``RegistryCache.fetch`` — the
+        production path — so the wheel URL is read from the trimmed shape.
+        """
+        respx.get("https://pypi.org/pypi/pkg-a/1.0.0/json").mock(
+            return_value=httpx.Response(200, json=self._PYPI_JSON_NO_LICENSE)
+        )
+        respx.get("https://pypi.org/pypi/pkg-a/json").mock(
+            return_value=httpx.Response(200, json={"info": {"version": "1.0.0"}})
+        )
+        respx.get(self._WHEEL_URL + ".metadata").mock(
+            return_value=httpx.Response(200, text=metadata_text)
+        )
+        cache = RegistryCache()
+        with httpx.Client() as client:
+            return resolve_python_license(
+                _python_dep("pkg-a", version="==1.0.0"), client, fetcher=cache.fetch
+            )
+
+    @respx.mock
+    def test_folded_license_expression_is_validated_whole(self):
+        # A long expression can be folded onto a continuation line. Reading
+        # only the first line would keep the permissive operand and drop the
+        # copyleft one.
+        info = self._resolve_from_sidecar(
+            "Metadata-Version: 2.4\n"
+            "Name: pkg-a\n"
+            "License-Expression: MIT\n"
+            " AND GPL-3.0-only\n"
+            "License-File: LICENSE\n"
+            "\n"
+        )
+        assert info.license_raw == "MIT AND GPL-3.0-only"
+        assert info.license_id == "GPL-3.0-only AND MIT"
+
+    @respx.mock
+    def test_license_expression_folded_after_operator_is_rejoined(self):
+        # Fold placed after the operator: the first line alone ends in a
+        # dangling ``OR``. Unfolded, it is an ordinary two-operand expression.
+        info = self._resolve_from_sidecar(
+            "Metadata-Version: 2.4\nLicense-Expression: MIT OR\n\tApache-2.0\n\n"
+        )
+        assert info.license_raw == "MIT OR Apache-2.0"
+        assert info.license_id == "Apache-2.0 OR MIT"
+
+    @respx.mock
+    def test_legacy_license_body_first_line_is_not_an_identifier(self):
+        # A license text pasted into the legacy field: heading on the header
+        # line, body on continuation lines, indented blank lines between
+        # paragraphs. The heading alone would normalize to an SPDX identifier,
+        # which is prose extraction — the whole field is rejected.
+        info = self._resolve_from_sidecar(
+            "Metadata-Version: 2.1\n"
+            "Name: pkg-a\n"
+            "License: MIT License\n"
+            "        \n"
+            "        Redistribution is subject to the terms set out below.\n"
+            "Classifier: Programming Language :: Python :: 3\n"
+            "\n"
+        )
+        assert info.license_id == "UNKNOWN"
+        assert info.license_raw == ""
+
+    @respx.mock
+    def test_legacy_license_heading_of_a_different_body_rejected(self):
+        # The heading names a license family, the body is one specific
+        # version of it. Taking the heading as the identifier would report a
+        # version the body never grants.
+        info = self._resolve_from_sidecar(
+            "Metadata-Version: 2.1\n"
+            "License: GNU GENERAL PUBLIC LICENSE\n"
+            "                           Version 2, June 1991\n"
+            "\n"
+        )
+        assert info.license_id == "UNKNOWN"
+        assert info.license_raw == ""
+
+    @respx.mock
+    def test_legacy_license_with_only_a_blank_continuation_rejected(self):
+        # Fail-closed edge: the continuation line is blank, so the value has no
+        # extra text, but the field is still folded. A folded legacy field is
+        # never accepted, whatever its continuation lines hold.
+        info = self._resolve_from_sidecar(
+            "Metadata-Version: 2.1\nLicense: MIT\n        \nName: pkg-a\n\n"
+        )
+        assert info.license_id == "UNKNOWN"
+
+    @respx.mock
+    def test_indented_blank_line_does_not_end_the_headers(self):
+        # A multi-paragraph legacy body sits before the structured field.
+        # Its indented blank lines are part of the body, so parsing continues
+        # past them: the body is rejected and the structured field is read.
+        info = self._resolve_from_sidecar(
+            "Metadata-Version: 2.4\n"
+            "License: MIT License\n"
+            "        \n"
+            "        Redistribution is subject to the terms set out below.\n"
+            "License-Expression: Apache-2.0\n"
+            "\n"
+        )
+        assert info.license_id == "Apache-2.0"
+
+    @respx.mock
+    def test_duplicate_license_expression_first_occurrence_wins(self):
+        # A repeated header resolves to its first occurrence, the same value
+        # a standard-library message lookup returns for it.
+        info = self._resolve_from_sidecar(
+            "Metadata-Version: 2.4\nLicense-Expression: GPL-3.0-only\nLicense-Expression: MIT\n\n"
+        )
+        assert info.license_id == "GPL-3.0-only"
+
 
 class TestPep658FetcherAndHeaders:
     """Direct tests of the PEP 658 helpers — retry behaviour and parser edges."""
@@ -2933,19 +3048,80 @@ class TestPep658FetcherAndHeaders:
         headers = _parse_pep658_headers(text)
         assert headers == {"Metadata-Version": "2.4", "License-Expression": "MIT"}
 
-    def test_parse_headers_skips_continuation_and_no_colon_lines(self):
-        # Continuation (space-indented) lines extend the prior header in RFC 5322;
-        # we deliberately drop them so a multi-line License: body doesn't surface.
-        # No-colon lines aren't headers — also dropped.
+    def test_parse_headers_folds_continuation_and_skips_no_colon_lines(self):
+        # Continuation (space-indented) lines extend the prior header in RFC 5322.
+        # They are kept, newline-marked, so the caller sees the whole value and
+        # can tell a folded field from a single-line one — returning only the
+        # first line would pass a license body's heading off as an identifier.
+        # No-colon lines aren't headers — dropped.
         text = (
             "License: MIT License\n"
-            "  continuation that should be ignored\n"
+            "  continuation of the value\n"
             "Junk-no-colon-line\n"
             "Author: somebody\n"
             "\n"
         )
         headers = _parse_pep658_headers(text)
-        assert headers == {"License": "MIT License", "Author": "somebody"}
+        assert headers == {
+            "License": "MIT License\ncontinuation of the value",
+            "Author": "somebody",
+        }
+
+    def test_parse_headers_indented_blank_line_is_a_continuation(self):
+        # Multi-line values are written with indented blank lines between
+        # paragraphs. Such a line continues the value; it is not the empty
+        # line that ends the headers, so the fields after it are still read.
+        text = (
+            "License: Heading\n"
+            "        \n"
+            "\t\n"
+            "        Second paragraph\n"
+            "License-Expression: Apache-2.0\n"
+            "\n"
+            "Author: body-not-a-header\n"
+        )
+        headers = _parse_pep658_headers(text)
+        assert headers == {
+            "License": "Heading\n\n\nSecond paragraph",
+            "License-Expression": "Apache-2.0",
+        }
+
+    def test_parse_headers_first_occurrence_of_duplicate_wins(self):
+        # Same answer as the standard library's message lookup: the first
+        # occurrence. A later duplicate is dropped with its continuation
+        # lines, which must not leak into the retained value.
+        text = (
+            "License-Expression: MIT\n"
+            "License-Expression: GPL-3.0-only\n"
+            " WITH Classpath-exception-2.0\n"
+            "Name: pkg\n"
+            "\n"
+        )
+        headers = _parse_pep658_headers(text)
+        assert headers == {"License-Expression": "MIT", "Name": "pkg"}
+
+    def test_parse_headers_leading_continuation_line_ignored(self):
+        # A continuation with no header before it has nothing to extend.
+        headers = _parse_pep658_headers("  orphan\nName: pkg\n\n")
+        assert headers == {"Name": "pkg"}
+
+    def test_parse_headers_drops_value_cut_short_by_the_line_cap(self):
+        # The cap lands in the middle of a folded value: the partial value is
+        # dropped rather than returned as if it were complete.
+        filler = "".join(f"X-Filler-{i}: v\n" for i in range(_PEP658_HEADER_LINES_MAX - 1))
+        text = filler + "License-Expression: MIT\n AND GPL-3.0-only\n\n"
+        headers = _parse_pep658_headers(text)
+        assert "License-Expression" not in headers
+        assert len(headers) == _PEP658_HEADER_LINES_MAX - 1
+
+    def test_parse_headers_keeps_complete_value_ending_at_the_line_cap(self):
+        # Same position, but the next line is a new header, so the value on
+        # the last counted line is complete and is kept.
+        filler = "".join(f"X-Filler-{i}: v\n" for i in range(_PEP658_HEADER_LINES_MAX - 1))
+        text = filler + "License-Expression: MIT\nName: pkg\n\n"
+        headers = _parse_pep658_headers(text)
+        assert headers["License-Expression"] == "MIT"
+        assert "Name" not in headers
 
     def test_parse_headers_caps_iteration_on_oversized_header_section(self):
         # Adversarial: never-blank header section. Cap stops iteration so

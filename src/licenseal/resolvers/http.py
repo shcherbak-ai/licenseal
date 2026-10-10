@@ -243,13 +243,14 @@ _PEP658_HEADER_LINES_MAX = 200
 def fetch_pep658_metadata(url: str, client: httpx.Client) -> dict[str, str] | None:
     """Fetch a wheel's PEP 658 .metadata sidecar; return parsed headers.
 
-    Headers stop at the first blank line. RFC 5322 continuation lines (lines
-    starting with whitespace) are skipped — we only want short, single-line
-    structured fields (``License-Expression``, legacy short ``License:``).
-    Multi-line bodies (e.g. full license text in legacy ``License:`` fields)
-    are intentionally not surfaced; per the no-prose-extraction rule,
-    recovering a license name from a license-text body isn't safe even when
-    licenseal is the one doing the reading.
+    Headers stop at the first empty line. RFC 5322 continuation lines (lines
+    starting with whitespace) are folded into the header they continue, each
+    one marked by a newline in the returned value (see
+    :func:`_parse_pep658_headers`). The caller needs the whole value to decide:
+    a folded ``License-Expression`` is unfolded and validated complete, while a
+    legacy ``License:`` value with any continuation is a license-text body and
+    is refused whole — per the no-prose-extraction rule, the first line of a
+    body must never become the identifier.
     """
     delay = _INITIAL_BACKOFF_SECONDS
     # Override the client default ``Accept: application/json`` — the sidecar
@@ -288,22 +289,43 @@ def fetch_pep658_metadata(url: str, client: httpx.Client) -> dict[str, str] | No
 def _parse_pep658_headers(text: str) -> dict[str, str]:
     """Parse RFC 5322-style PEP 658 metadata headers into ``{name: value}``.
 
-    Stops at the first blank line (end of headers / start of description body)
-    and skips continuation lines. Hard-caps the iteration so adversarial inputs
-    can't balloon memory.
+    Stops at the first empty line (end of headers / start of description body).
+    A line starting with a space or tab continues the preceding header, even
+    when it is otherwise blank: multi-line values are written with indented
+    blank lines between paragraphs, so such a line is part of the value, not
+    the end of the headers. Each continuation line is appended as ``"\\n"`` plus
+    its stripped text, so a value contains a newline exactly when it was
+    folded. Callers must look at the whole value — never just its first line.
+
+    The first occurrence of a repeated header wins; later occurrences are
+    dropped together with their continuation lines. Hard-caps the iteration so
+    adversarial inputs can't balloon memory; a value the cap cuts short is
+    dropped rather than returned incomplete.
     """
     out: dict[str, str] = {}
+    # Header that continuation lines extend; ``None`` after a dropped duplicate.
+    current: str | None = None
     for i, line in enumerate(text.splitlines()):
+        is_continuation = line.startswith((" ", "\t"))
         if i >= _PEP658_HEADER_LINES_MAX:
+            if is_continuation and current is not None:
+                del out[current]
             break
+        if is_continuation:
+            if current is not None:
+                out[current] += "\n" + line.strip()
+            continue
         if not line.strip():
             break
-        if line.startswith((" ", "\t")):
-            continue
         if ":" not in line:
             continue
         key, _, value = line.partition(":")
-        out[key.strip()] = value.strip()
+        key = key.strip()
+        if key in out:
+            current = None
+            continue
+        out[key] = value.strip()
+        current = key
     return out
 
 

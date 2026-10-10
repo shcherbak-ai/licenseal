@@ -221,10 +221,12 @@ def _license_from_pep658(
     mechanism for reading the canonical ``METADATA`` directly.
 
     Prefers ``License-Expression`` (PEP 639, structured SPDX) over the legacy
-    ``License:`` field, and only accepts a short single-line value from the
-    latter (anything longer is almost always a full license text body — those
-    don't survive ``_parse_pep658_headers`` anyway since it skips continuation
-    lines, but the length guard adds a second belt against single-line bodies).
+    ``License:`` field. A folded ``License-Expression`` is unfolded so the
+    complete expression is what gets validated. The legacy field is accepted
+    only as a short single-line value: ``_parse_pep658_headers`` marks every
+    continuation line with a newline, and a value carrying one is a license
+    text body and is rejected whole (its first line must never become the
+    identifier); the length guard covers bodies that landed on a single line.
     Returns ``""`` if no usable identifier is found.
     """
     wheel_url = _extract_wheel_url(data)
@@ -235,24 +237,20 @@ def _license_from_pep658(
         return ""
     expression = headers.get("License-Expression", "")
     if isinstance(expression, str) and expression.strip():
-        return expression.strip()
+        # RFC 5322 unfolding: the continuation lines are part of one value.
+        return expression.replace("\n", " ").strip()
     legacy = headers.get("License", "")
-    if isinstance(legacy, str):
+    # Three guards, parity with the JSON-side ``_extract_raw_license``:
+    # (1) newline reject, checked before stripping so even a blank
+    # continuation line disqualifies the value — a folded legacy field is a
+    # license-text body; (2) length cap — blocks long prose pastes that
+    # landed on a single line; (3) ``_is_junk_license`` rejects short values
+    # that still carry prose markers like "copyright" or "permission is
+    # hereby" — the no-prose-extraction rule covers short scalars that are
+    # actually narrative, not just full license-text bodies.
+    if isinstance(legacy, str) and "\n" not in legacy:
         legacy = legacy.strip()
-        # Three guards, parity with the JSON-side ``_extract_raw_license``:
-        # (1) length cap — blocks long prose pastes that landed on a single
-        # line; (2) explicit newline reject (header parser already skips
-        # continuation lines, but be paranoid); (3) ``_is_junk_license``
-        # rejects short values that still carry prose markers like
-        # "copyright" or "permission is hereby" — the no-prose-extraction
-        # rule covers short scalars that are actually narrative, not just
-        # full license-text bodies.
-        if (
-            legacy
-            and len(legacy) < _LEGACY_LICENSE_MAX_LEN
-            and "\n" not in legacy
-            and not _is_junk_license(legacy)
-        ):
+        if legacy and len(legacy) < _LEGACY_LICENSE_MAX_LEN and not _is_junk_license(legacy):
             return legacy
     return ""
 
