@@ -689,7 +689,8 @@ class TestRequirementsDiscovery:
         (tmp_path / "requirements.txt").write_text(
             textwrap.dedent("""\
             --index-url https://pypi.org/simple
-            -r other.txt
+            -c constraints.txt
+            -e .
             requests>=2.0
             git+https://github.com/user/repo.git
             https://example.com/package.tar.gz

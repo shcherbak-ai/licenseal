@@ -64,6 +64,7 @@ __all__ = [
     "read_xml_bytes",
     "record_parse_failure",
     "record_unexpected_type",
+    "record_unfollowed_reference",
     "record_unread_entries",
     "record_walk_error",
     "rejected_path_reference",
@@ -260,16 +261,26 @@ def record_walk_error(exc: OSError) -> None:
     )
 
 
+def record_unfollowed_reference(manifest: Path, value: str, why: str) -> None:
+    """Record that ``manifest`` names a file that was not read (a gap).
+
+    ``value`` is the reference as written and ``why`` completes "which …":
+    whatever that file declares is missing from the scan, and the gap is on
+    the manifest that points at it.
+    """
+    _record(manifest, f"references {value!r}, which {why}; not followed", is_gap=True)
+
+
 def rejected_path_reference(manifest: Path, value: str) -> bool:
     """Record a gap and return True when ``value`` is not a relative path.
 
     ``value`` is a path written inside ``manifest`` that a parser is about to
-    follow (an MSBuild ``<Import>``, a Go workspace ``use`` directory). Only
-    relative values are followed, ``..`` segments included. A rooted,
-    drive-qualified, UNC (``\\\\host\\share``, ``//host/share``) or device
-    (``\\\\?\\``, ``\\\\.\\``) value is rejected: on Windows the first filesystem
-    call on such a path — ``Path.resolve()`` included — can reach a network
-    share or a device.
+    follow (an MSBuild ``<Import>``, a Go workspace ``use`` directory, a
+    requirements ``-r`` include). Only relative values are followed, ``..``
+    segments included. A rooted, drive-qualified, UNC (``\\\\host\\share``,
+    ``//host/share``) or device (``\\\\?\\``, ``\\\\.\\``) value is rejected: on
+    Windows the first filesystem call on such a path — ``Path.resolve()``
+    included — can reach a network share or a device.
 
     The check is lexical, so callers run it before joining ``value`` to
     anything. Backslashes are normalised first: the verdict is the same on
@@ -277,11 +288,7 @@ def rejected_path_reference(manifest: Path, value: str) -> bool:
     """
     normalized = value.replace("\\", "/")
     if normalized.startswith("/") or normalized[1:2] == ":":
-        _record(
-            manifest,
-            f"references {value!r}, which is not a relative path; not followed",
-            is_gap=True,
-        )
+        record_unfollowed_reference(manifest, value, "is not a relative path")
         return True
     return False
 
