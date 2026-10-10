@@ -6,7 +6,7 @@ import textwrap
 from pathlib import Path
 from unittest.mock import patch
 
-from licenseal.discovery import detect_project_license
+from licenseal.discovery import detect_project_license, discover_all_dependencies
 from licenseal.discovery._walk import walk_project_files
 from licenseal.discovery.python import parse_pep508_dep
 from licenseal.discovery.python.pipfile import discover_pipfile_dependencies
@@ -699,6 +699,76 @@ class TestRequirementsDiscovery:
         assert len(deps) == 1
         assert deps[0].name == "requests"
 
+    def test_trailing_url_comment_keeps_requirement(self, tmp_path):
+        # A URL inside a trailing comment must not trip the URL-requirement
+        # skip: the comment is stripped first, so the pin (and its extras,
+        # which the regex fallback used to lose) survives.
+        (tmp_path / "requirements.txt").write_text(
+            textwrap.dedent("""\
+            pinned-pkg==1.2.3  # https://example.org/
+            extras-pkg[socks]>=2\t# see https://example.org/extras
+              # https://example.org/ on an indented comment-only line
+            plain-pkg
+            """)
+        )
+        deps, _ = discover_all_dependencies(tmp_path)
+        by_name = {d.name: d for d in deps}
+        assert set(by_name) == {"pinned-pkg", "extras-pkg", "plain-pkg"}
+        assert by_name["pinned-pkg"].version_constraint == "==1.2.3"
+        assert by_name["extras-pkg"].version_constraint == ">=2"
+        assert by_name["extras-pkg"].extras == frozenset({"socks"})
+
+    def test_url_requirements_with_fragment_or_comment_still_skipped(self, tmp_path):
+        # ``#`` only starts a comment at the start of a line or after
+        # whitespace. A ``#fragment`` glued to a URL stays part of it, and a
+        # URL requirement carrying a real trailing comment is still a URL.
+        (tmp_path / "requirements.txt").write_text(
+            textwrap.dedent("""\
+            git+https://example.org/user/repo.git#egg=frag-pkg
+            https://example.org/archive-1.0.tar.gz  # pinned archive
+            direct-ref @ https://example.org/direct_ref-1.0-py3-none-any.whl#sha256=abc
+            real-dep==1.0
+            """)
+        )
+        deps, _ = discover_all_dependencies(tmp_path)
+        assert [d.name for d in deps] == ["real-dep"]
+
+    def test_local_path_lines_yield_no_dependency(self, tmp_path):
+        # A local wheel, archive, or directory path is not a requirement: its
+        # first path segment must not be reported as a package name.
+        (tmp_path / "requirements.txt").write_text(
+            textwrap.dedent("""\
+            wheelhouse/wheels/local_pkg-1.0-py3-none-any.whl
+            downloads/local_pkg-1.0.tar.gz
+            libs/local_pkg
+            libs/
+            wheelhouse\\wheels\\local_pkg-1.0-py3-none-any.whl
+            C:\\wheelhouse\\local_pkg-1.0-py3-none-any.whl
+            C:/wheelhouse/local_pkg-1.0-py3-none-any.whl
+            ./relative/local_pkg
+            real-dep==1.0
+            """)
+        )
+        deps, _ = discover_all_dependencies(tmp_path)
+        assert [(d.name, d.version_constraint) for d in deps] == [("real-dep", "==1.0")]
+
+    def test_line_continuation_backslash_is_not_a_path(self, tmp_path):
+        # Hash-pinned files end each requirement line with a continuation
+        # backslash; that trailing backslash must not read as a path separator.
+        (tmp_path / "requirements.txt").write_text(
+            textwrap.dedent("""\
+            spaced-pkg==1.0 \\
+                --hash=sha256:abc
+            glued-pkg==2.0\\
+                --hash=sha256:def
+            """)
+        )
+        deps, _ = discover_all_dependencies(tmp_path)
+        assert [(d.name, d.version_constraint) for d in deps] == [
+            ("spaced-pkg", "==1.0"),
+            ("glued-pkg", "==2.0"),
+        ]
+
     def test_env_markers(self, tmp_path):
         (tmp_path / "requirements.txt").write_text('requests>=2.0; python_version>="3.8"\n')
         deps = discover_requirements_dependencies(tmp_path)
@@ -947,6 +1017,30 @@ class TestPep508FallbackParser:
         name, _, extras = parse_pep508_dep("foo invalid<1.0")
         assert name == "foo"
         assert extras == frozenset()
+
+    def test_path_like_leading_token_returns_empty(self):
+        # The fallback must not name a dependency after the first segment of
+        # a local path, in any manifest that routes through this helper.
+        for path in (
+            "wheelhouse/local_pkg-1.0-py3-none-any.whl",
+            "wheelhouse\\local_pkg-1.0.tar.gz",
+            "C:\\wheelhouse\\local_pkg",
+            "libs/",
+        ):
+            assert parse_pep508_dep(path) == ("", "", frozenset())
+
+    def test_separator_after_leading_token_is_not_a_path(self):
+        # Only the leading whitespace-delimited token is tested: a slash
+        # further along (an unstripped trailing comment) keeps the name.
+        name, spec, _ = parse_pep508_dep("foo>=1.0  # https://example.org/")
+        assert (name, spec) == ("foo", ">=1.0")
+
+    def test_path_rule_leaves_url_tokens_unchanged(self):
+        # The path rule covers local paths only. A bare ``scheme://`` string
+        # (requirements files skip those lines before they get here) parses
+        # exactly as it did without the rule.
+        assert parse_pep508_dep("git+https://example.org/user/repo.git")[0] == "git"
+        assert parse_pep508_dep("https://example.org/archive-1.0.tar.gz")[0] == "https"
 
 
 class TestPipfileDiscovery:

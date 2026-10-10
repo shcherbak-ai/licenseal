@@ -31,7 +31,7 @@ src/licenseal/
     __init__.py               Aggregates all discovery sources
     python/
       pyproject.py            PEP 621 / Poetry / PEP 735
-      requirements.py         requirements*.txt
+      requirements.py         requirements*.txt (pip-style comment stripping; URL / VCS / local-path lines and option lines skipped)
       setup_cfg.py            setup.cfg
       setup_py.py             setup.py (static `ast.parse`, never executed; literal `setup(...)` license / install_requires / extras_require args)
       pipfile.py              Pipfile (Pipenv manifest)

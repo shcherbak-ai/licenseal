@@ -902,6 +902,33 @@ class TestCheckCommand:
         assert result.exit_code == 0
 
     @respx.mock
+    def test_requirement_with_trailing_url_comment_is_checked(self, tmp_path):
+        # A pinned requirement annotated with a URL comment is still a
+        # dependency: it must reach the report and fail the check, not vanish
+        # into an empty, clean scan.
+        (tmp_path / "pyproject.toml").write_text(
+            textwrap.dedent("""\
+            [project]
+            name = "myproject"
+            license = {text = "MIT"}
+            """)
+        )
+        (tmp_path / "requirements.txt").write_text(
+            "gpl-lib==1.0.0  # https://example.org/gpl-lib\n", encoding="utf-8"
+        )
+        _mock_pypi("gpl-lib", "GPL-3.0")
+        out = tmp_path / "report.json"
+
+        result = CliRunner().invoke(
+            main, ["check", "--path", str(tmp_path), "-f", "json", "-o", str(out)]
+        )
+        assert result.exit_code == 1
+        data = json.loads(out.read_text(encoding="utf-8"))
+        assert data["summary"]["total"] == 1
+        assert data["summary"]["violations"] == 1
+        assert data["summary"]["gaps"] == 0
+
+    @respx.mock
     def test_warning_exits_nonzero_in_strict_mode(self, tmp_path):
         (tmp_path / "pyproject.toml").write_text(
             textwrap.dedent("""\

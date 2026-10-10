@@ -9,6 +9,11 @@ from packaging.requirements import InvalidRequirement, Requirement
 # Regex to extract package name from PEP 508 / setup.cfg dependency strings
 DEP_NAME_RE = re.compile(r"^([A-Za-z0-9]([A-Za-z0-9._-]*[A-Za-z0-9])?)")
 VERSION_RE = re.compile(r"([><=!~]+\s*[\d.*]+(?:\s*,\s*[><=!~]+\s*[\d.*]+)*)")
+# A leading token that contains a path separator is a local wheel, archive, or
+# directory path rather than a requirement. A ``scheme://`` URL is not a path
+# and is left as it was. A backslash only counts when more of the token
+# follows it: a lone trailing one is a line continuation.
+_PATH_TOKEN_RE = re.compile(r"(?!\S*://)\S*(?:/|\\\S)")
 
 # Group names that indicate development (not production) dependencies.
 # Used across pyproject.toml optional-dependencies/dependency-groups,
@@ -36,9 +41,10 @@ def parse_pep508_dep(dep_str: str) -> tuple[str, str, frozenset[str]]:
     except InvalidRequirement:
         # Fall back to the regex parser for malformed strings — they were
         # silently dropped before this helper existed, and changing that
-        # would alter discovery behavior on quirky manifests.
+        # would alter discovery behavior on quirky manifests. A path is the
+        # exception: its first segment is a directory, not a package name.
         name_match = DEP_NAME_RE.match(text)
-        if not name_match:
+        if not name_match or _PATH_TOKEN_RE.match(text):
             return "", "", frozenset()
         version_match = VERSION_RE.search(text)
         return (

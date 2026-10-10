@@ -10,6 +10,11 @@ from licenseal.discovery._walk import walk_project_files_matching
 from licenseal.discovery.python import DEV_GROUP_NAMES, parse_pep508_dep
 from licenseal.models import Dependency, DependencyGroup, Ecosystem
 
+# pip's comment rule: ``#`` starts a comment at the start of a line or after
+# whitespace. A ``#fragment`` glued to a URL (``...repo.git#egg=name``) is not
+# a comment and survives.
+_COMMENT_RE = re.compile(r"(^|\s+)#.*$")
+
 
 def _is_dev_file(filename: str) -> bool:
     """Check if a requirements filename indicates dev dependencies."""
@@ -46,9 +51,11 @@ def _parse_requirements_file(
         return deps
 
     for raw_line in text.splitlines():
-        line = raw_line.strip()
-        # Skip comments, empty lines, options, URLs, and -r includes
-        if not line or line.startswith("#") or line.startswith("-"):
+        # Strip the comment before the URL test below, so a URL inside a
+        # trailing comment doesn't drop the requirement it annotates.
+        line = _COMMENT_RE.sub("", raw_line).strip()
+        # Skip comments, empty lines, options, and -r includes
+        if not line or line.startswith("-"):
             continue
         # Skip URL-based deps (git+, http://, etc.)
         if "://" in line or line.startswith("git+"):
