@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import json
 import textwrap
+from dataclasses import replace
 
 import httpx
+import pytest
 import respx
 
 from licenseal.discovery import discover_all_dependencies
@@ -1342,6 +1344,212 @@ class TestTransitiveGroupAttribution:
         assert "react-is-18" not in names
 
 
+def _prod_names(deps: list[Dependency]) -> set[str]:
+    return {d.name for d in deps if d.group == DependencyGroup.PROD}
+
+
+class TestProductionPrecedence:
+    """A package that is a dev dependency and is also reached from a
+    production dependency ships, so it is PROD: on the registry walk, when
+    two lockfiles disagree, and in the Go module graph. Including dev
+    dependencies never turns a PROD package into a DEV one."""
+
+    @staticmethod
+    def _mock_npm_package(name: str, dependencies: dict | None = None) -> None:
+        payload = _npm_version(name, "1.0.0", dependencies=dependencies)
+        respx.get(f"https://registry.npmjs.org/{name}").mock(
+            return_value=httpx.Response(200, json={"versions": {"1.0.0": payload}})
+        )
+        respx.get(f"https://registry.npmjs.org/{name}/1.0.0").mock(
+            return_value=httpx.Response(200, json=payload)
+        )
+
+    @staticmethod
+    def _resolve(tmp_path, *, include_dev: bool) -> list[Dependency]:
+        direct, _ = discover_all_dependencies(tmp_path)
+        with httpx.Client() as client:
+            return resolve_transitive(
+                direct, tmp_path, include_dev=include_dev, max_depth=50, client=client
+            )
+
+    @respx.mock
+    def test_registry_walk_dev_direct_reached_from_prod_is_prod(self, tmp_path):
+        # No lockfile. ``shared-lib`` is declared under devDependencies and is
+        # also a dependency of the production ``runtime-lib``.
+        (tmp_path / "package.json").write_text(
+            json.dumps(
+                {
+                    "name": "app",
+                    "dependencies": {"runtime-lib": "^1.0.0"},
+                    "devDependencies": {"shared-lib": "^1.0.0", "dev-tool": "^1.0.0"},
+                }
+            )
+        )
+        self._mock_npm_package("runtime-lib", {"shared-lib": "^1.0.0"})
+        self._mock_npm_package("shared-lib", {"shared-child": "^1.0.0"})
+        self._mock_npm_package("shared-child")
+        self._mock_npm_package("dev-tool", {"dev-child": "^1.0.0"})
+        self._mock_npm_package("dev-child")
+
+        prod_only = self._resolve(tmp_path, include_dev=False)
+        assert {(d.name, d.group, d.depth) for d in prod_only} == {
+            ("runtime-lib", DependencyGroup.PROD, 0),
+            ("shared-lib", DependencyGroup.PROD, 1),
+            ("shared-child", DependencyGroup.PROD, 2),
+        }
+
+        with_dev = self._resolve(tmp_path, include_dev=True)
+        by_name = {d.name: d for d in with_dev}
+        # The walk emits shared-lib once, as the dev seed; it is PROD because
+        # runtime-lib reaches it, and so is everything below it.
+        assert by_name["shared-lib"].group == DependencyGroup.PROD
+        assert by_name["shared-lib"].depth == 0
+        assert by_name["shared-lib"].direct_ancestors == ()
+        assert by_name["shared-child"].group == DependencyGroup.PROD
+        assert by_name["shared-child"].direct_ancestors == ("runtime-lib", "shared-lib")
+        assert _prod_names(prod_only) <= _prod_names(with_dev)
+        # Control: nothing production reaches dev-tool, so its chain stays DEV.
+        assert by_name["dev-tool"].group == DependencyGroup.DEV
+        assert by_name["dev-child"].group == DependencyGroup.DEV
+
+    @respx.mock
+    def test_registry_walk_unresolved_dev_direct_reached_from_prod_is_prod(self, tmp_path):
+        # Same shape, but the registry has no record of shared-lib, so the
+        # seed is emitted with its spec unresolved. It is still PROD.
+        (tmp_path / "package.json").write_text(
+            json.dumps(
+                {
+                    "name": "app",
+                    "dependencies": {"runtime-lib": "^1.0.0"},
+                    "devDependencies": {"shared-lib": "^1.0.0"},
+                }
+            )
+        )
+        self._mock_npm_package("runtime-lib", {"shared-lib": "^1.0.0"})
+        respx.get("https://registry.npmjs.org/shared-lib").mock(return_value=httpx.Response(404))
+
+        prod_only = self._resolve(tmp_path, include_dev=False)
+        with_dev = self._resolve(tmp_path, include_dev=True)
+        for deps in (prod_only, with_dev):
+            (shared,) = [d for d in deps if d.name == "shared-lib"]
+            assert shared.group == DependencyGroup.PROD
+            assert shared.version_constraint == "^1.0.0"
+
+    @staticmethod
+    def _write_locked_npm_project(directory, section: str, root: str) -> None:
+        """An npm project whose only direct dep ``root`` depends on ``shared-lib``."""
+        directory.mkdir()
+        (directory / "package.json").write_text(
+            json.dumps({"name": directory.name, section: {root: "1.0.0"}})
+        )
+        (directory / "package-lock.json").write_text(
+            json.dumps(
+                {
+                    "name": directory.name,
+                    "lockfileVersion": 3,
+                    "packages": {
+                        "": {"name": directory.name, section: {root: "1.0.0"}},
+                        f"node_modules/{root}": {
+                            "version": "1.0.0",
+                            "dependencies": {"shared-lib": "^1.0.0"},
+                        },
+                        "node_modules/shared-lib": {"version": "1.0.0"},
+                    },
+                }
+            )
+        )
+
+    @pytest.mark.parametrize(
+        ("tools_dir", "app_dir"),
+        # Lockfiles are read in directory order: dev-only first, then PROD first.
+        [("a-tools", "b-app"), ("b-tools", "a-app")],
+    )
+    def test_shared_transitive_across_lockfiles_is_prod_in_either_order(
+        self, tmp_path, tools_dir, app_dir
+    ):
+        # shared-lib is reached only from a dev tool in one subproject's
+        # lockfile and from a production dependency in the other's.
+        self._write_locked_npm_project(tmp_path / tools_dir, "devDependencies", "dev-tool")
+        self._write_locked_npm_project(tmp_path / app_dir, "dependencies", "runtime-lib")
+
+        prod_only = self._resolve(tmp_path, include_dev=False)
+        assert {(d.name, d.group) for d in prod_only} == {
+            ("runtime-lib", DependencyGroup.PROD),
+            ("shared-lib", DependencyGroup.PROD),
+        }
+
+        with_dev = self._resolve(tmp_path, include_dev=True)
+        by_name = {d.name: d for d in with_dev}
+        assert len(with_dev) == 3
+        assert by_name["shared-lib"].group == DependencyGroup.PROD
+        assert by_name["shared-lib"].direct_ancestors == ("dev-tool", "runtime-lib")
+        assert by_name["dev-tool"].group == DependencyGroup.DEV
+        assert _prod_names(prod_only) <= _prod_names(with_dev)
+
+    @respx.mock
+    def test_go_tool_module_required_by_production_module_is_prod(self, tmp_path):
+        # gen-tool and lint-tool are both ``tool`` modules (DEV directs). The
+        # production runtime-lib requires gen-tool in its own go.mod; nothing
+        # production requires lint-tool.
+        (tmp_path / "go.mod").write_text(
+            "module example.com/myproject\n\n"
+            "go 1.24\n\n"
+            "require (\n"
+            "\texample.org/runtime-lib v1.0.0\n"
+            "\texample.org/gen-tool v1.0.0\n"
+            "\texample.org/lint-tool v1.0.0\n"
+            ")\n\n"
+            "tool (\n"
+            "\texample.org/gen-tool/cmd/gen\n"
+            "\texample.org/lint-tool/cmd/lint\n"
+            ")\n",
+            encoding="utf-8",
+        )
+        requires = {
+            "runtime-lib": "gen-tool",
+            "gen-tool": "gen-dep",
+            "gen-dep": None,
+            "lint-tool": "lint-dep",
+            "lint-dep": None,
+        }
+        (tmp_path / "go.sum").write_text(
+            "".join(
+                f"example.org/{name} v1.0.0 h1:h\nexample.org/{name} v1.0.0/go.mod h1:h\n"
+                for name in requires
+            ),
+            encoding="utf-8",
+        )
+        for name, child in requires.items():
+            text = f"module example.org/{name}\n"
+            if child:
+                text += f"require example.org/{child} v1.0.0\n"
+            respx.get(f"https://proxy.golang.org/example.org/{name}/@v/v1.0.0.mod").mock(
+                return_value=httpx.Response(200, text=text)
+            )
+        direct, _ = discover_all_dependencies(tmp_path)
+        assert {d.name for d in direct if d.group == DependencyGroup.DEV} == {
+            "example.org/gen-tool",
+            "example.org/lint-tool",
+        }
+
+        prod_only = self._resolve(tmp_path, include_dev=False)
+        assert {(d.name, d.group, d.depth, d.direct_ancestors) for d in prod_only} == {
+            ("example.org/runtime-lib", DependencyGroup.PROD, 0, ()),
+            ("example.org/gen-tool", DependencyGroup.PROD, 0, ()),
+            ("example.org/gen-dep", DependencyGroup.PROD, 1, ("example.org/runtime-lib",)),
+        }
+
+        with_dev = self._resolve(tmp_path, include_dev=True)
+        assert _prod_names(prod_only) == _prod_names(with_dev)
+        # Control: the tool no production module requires stays DEV.
+        assert {
+            (d.name, d.direct_ancestors) for d in with_dev if d.group == DependencyGroup.DEV
+        } == {
+            ("example.org/lint-tool", ()),
+            ("example.org/lint-dep", ("example.org/lint-tool",)),
+        }
+
+
 class TestRegistrySeedFiltering:
     def test_skips_ecosystem_when_only_dev_seeds_and_no_dev(self, tmp_path):
         # Only a dev dep in this ecosystem; with include_dev=False, registry walk
@@ -1517,6 +1725,68 @@ class TestDedupe:
         d2 = Dependency(name="x", version_constraint="==2.0", ecosystem=Ecosystem.NPM)
         result = _dedupe([d1, d2])
         assert {d.version_constraint for d in result} == {"==1.0", "==2.0"}
+
+    def test_prod_duplicate_wins_group_regardless_of_order(self):
+        dev = Dependency(
+            name="shared",
+            version_constraint="==1.0",
+            ecosystem=Ecosystem.NPM,
+            group=DependencyGroup.DEV,
+            depth=1,
+            direct_ancestors=("dev-tool",),
+        )
+        prod = Dependency(
+            name="shared",
+            version_constraint="==1.0",
+            ecosystem=Ecosystem.NPM,
+            group=DependencyGroup.PROD,
+            depth=1,
+            direct_ancestors=("runtime-lib",),
+        )
+        for order in ([dev, prod], [prod, dev]):
+            (result,) = _dedupe(order)
+            assert result.group == DependencyGroup.PROD
+            assert result.direct_ancestors == ("dev-tool", "runtime-lib")
+
+    def test_prod_transitive_duplicate_promotes_dev_direct(self):
+        # The direct entry wins on depth and stays direct; a PROD duplicate
+        # of the same package still makes it PROD.
+        dev_direct = Dependency(
+            name="shared",
+            version_constraint="==1.0",
+            ecosystem=Ecosystem.NPM,
+            group=DependencyGroup.DEV,
+            depth=0,
+            source="tools/package.json",
+        )
+        prod_transitive = Dependency(
+            name="shared",
+            version_constraint="==1.0",
+            ecosystem=Ecosystem.NPM,
+            group=DependencyGroup.PROD,
+            depth=1,
+            direct_ancestors=("runtime-lib",),
+        )
+        for order in ([dev_direct, prod_transitive], [prod_transitive, dev_direct]):
+            (result,) = _dedupe(order)
+            assert result.group == DependencyGroup.PROD
+            assert result.depth == 0
+            assert result.source == "tools/package.json"
+            assert result.direct_ancestors == ()
+
+    def test_dev_only_duplicates_stay_dev(self):
+        # Control: no PROD duplicate, nothing to promote.
+        dev_a = Dependency(
+            name="shared",
+            version_constraint="==1.0",
+            ecosystem=Ecosystem.NPM,
+            group=DependencyGroup.DEV,
+            depth=1,
+            direct_ancestors=("a",),
+        )
+        dev_b = replace(dev_a, direct_ancestors=("b",))
+        (result,) = _dedupe([dev_a, dev_b])
+        assert result.group == DependencyGroup.DEV
 
     def test_python_pep503_name_normalization_folds_dash_underscore(self):
         # PEP 503 folds dash/underscore/dot variants of the same Python

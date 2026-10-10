@@ -599,7 +599,8 @@ def _resolve_go_transitive(
       4. Apply ``--no-dev`` filter using the reachability result.
 
     Direct go deps carry their group already (PROD by default; DEV when
-    matched by ``tool`` directive in ``go_mod.py``).
+    matched by ``tool`` directive in ``go_mod.py``). A DEV direct that a PROD
+    root also reaches is PROD, like any other module a PROD root reaches.
     """
     direct_module_paths = {d.name for d in direct_go_deps}
     prod_root_names = {d.name.lower() for d in direct_go_deps if d.group == DependencyGroup.PROD}
@@ -668,12 +669,15 @@ def _resolve_go_transitive(
         if lower in prod_root_names:
             group = DependencyGroup.PROD
             ancestors: tuple[str, ...] = ()
+        elif lower in prod_anc:
+            # Checked before DEV-root membership: a ``tool`` module that a
+            # production module also requires ships. It is still a direct
+            # dep, so it carries no ancestors.
+            group = DependencyGroup.PROD
+            ancestors = () if lower in dev_root_names else prod_anc[lower]
         elif lower in dev_root_names:
             group = DependencyGroup.DEV
             ancestors = ()
-        elif lower in prod_anc:
-            group = DependencyGroup.PROD
-            ancestors = prod_anc[lower]
         elif lower in dev_anc:
             group = DependencyGroup.DEV
             ancestors = dev_anc[lower]
@@ -1787,22 +1791,27 @@ def _walk_registry(
         name for name, group in seed_groups.items() if group == DependencyGroup.PROD
     }
 
-    def _attributed_group(transitive: Dependency) -> DependencyGroup:
-        """A transitive is PROD iff any prod seed reaches it; else DEV.
+    def _attributed_group(dep: Dependency) -> DependencyGroup:
+        """A dep is PROD iff any prod seed reaches it; else a transitive is DEV.
 
-        Falls back to the BFS-assigned group when ancestor info is missing
-        (cycle artifacts, disconnected nodes) so we never demote to DEV
-        without evidence.
+        That holds for a seed too: a DEV seed that a PROD seed also pulls in
+        ships with production. The walk emits it once, as the seed, so
+        without this the PROD occurrence would be lost. A seed no prod seed
+        reaches keeps its declared group.
+
+        A transitive falls back to the BFS-assigned group when ancestor info
+        is missing (cycle artifacts, disconnected nodes) so we never demote
+        to DEV without evidence.
         """
-        own_ancestors = ancestors.get(transitive.name.lower(), ())
-        if not own_ancestors:
-            return transitive.group
+        own_ancestors = ancestors.get(dep.name.lower(), ())
         if any(a.lower() in prod_seed_names for a in own_ancestors):
             return DependencyGroup.PROD
+        if dep.depth == 0 or not own_ancestors:
+            return dep.group
         return DependencyGroup.DEV
 
     return [
-        dep
+        replace(dep, group=_attributed_group(dep))
         if dep.depth == 0
         else replace(
             dep,
@@ -2030,6 +2039,11 @@ def _dedupe(deps: list[Dependency]) -> list[Dependency]:
     every duplicate entry are unioned so a dep reached by multiple paths
     accumulates all of them.
 
+    Group follows production precedence: when any duplicate is PROD the
+    winner is PROD, whichever entry came first. Two lockfiles can attribute
+    the same package differently (dev-only in one subproject, shipped by
+    another), and the result must not depend on the order they were read in.
+
     When the same (ecosystem, name) appears with both resolved (``==X.Y.Z``)
     and unresolved specs, the unresolved variants are dropped. They arise
     when the registry walker resolves one occurrence successfully (e.g. from
@@ -2043,12 +2057,15 @@ def _dedupe(deps: list[Dependency]) -> list[Dependency]:
 
     chosen: dict[tuple[Ecosystem, str, str], Dependency] = {}
     merged: dict[tuple[Ecosystem, str, str], set[str]] = {}
+    prod_keys: set[tuple[Ecosystem, str, str]] = set()
     for dep in filtered:
         key = (dep.ecosystem, _canonical_name(dep), dep.version_constraint)
         existing = chosen.get(key)
         if existing is None or existing.depth > dep.depth:
             chosen[key] = dep
         merged.setdefault(key, set()).update(dep.direct_ancestors)
+        if dep.group == DependencyGroup.PROD:
+            prod_keys.add(key)
 
     out: list[Dependency] = []
     used: set[tuple[Ecosystem, str, str]] = set()
@@ -2058,6 +2075,8 @@ def _dedupe(deps: list[Dependency]) -> list[Dependency]:
             continue
         used.add(key)
         winner = chosen[key]
+        if key in prod_keys:
+            winner = replace(winner, group=DependencyGroup.PROD)
         if winner.depth == 0:
             out.append(winner)
         else:

@@ -5065,6 +5065,191 @@ class TestTransitiveFlag:
         assert "└─ " in result.output
 
 
+class TestProductionPrecedence:
+    """A copyleft package that is a dev dependency and is also reached from a
+    production dependency is a production violation. ``--dev`` adds rows; it
+    never turns a violation that ``--no-dev`` reports into a dev-only warning."""
+
+    @staticmethod
+    def _check(tmp_path, *flags: str):
+        out = tmp_path / "report.json"
+        result = CliRunner().invoke(
+            main, ["check", "--path", str(tmp_path), *flags, "-f", "json", "-o", str(out)]
+        )
+        data = json.loads(out.read_text(encoding="utf-8"))
+        rows = {d["name"]: (d["group"], d["verdict"]) for d in data["dependencies"]}
+        return result.exit_code, rows
+
+    @staticmethod
+    def _mock_npm_package(name: str, license_id: str, dependencies: dict | None = None) -> None:
+        payload = {"name": name, "version": "1.0.0", "license": license_id}
+        if dependencies:
+            payload["dependencies"] = dependencies
+        respx.get(f"https://registry.npmjs.org/{name}").mock(
+            return_value=httpx.Response(200, json={"versions": {"1.0.0": payload}})
+        )
+        respx.get(f"https://registry.npmjs.org/{name}/1.0.0").mock(
+            return_value=httpx.Response(200, json=payload)
+        )
+
+    @respx.mock
+    def test_registry_walk_dev_direct_reached_from_prod(self, tmp_path):
+        # No lockfile. shared-gpl is declared under devDependencies and is
+        # also a dependency of the production runtime-lib.
+        (tmp_path / "package.json").write_text(
+            json.dumps(
+                {
+                    "name": "app",
+                    "license": "MIT",
+                    "dependencies": {"runtime-lib": "^1.0.0"},
+                    "devDependencies": {"shared-gpl": "^1.0.0", "dev-gpl": "^1.0.0"},
+                }
+            )
+        )
+        self._mock_npm_package("runtime-lib", "MIT", {"shared-gpl": "^1.0.0"})
+        self._mock_npm_package("shared-gpl", "GPL-3.0-only")
+        self._mock_npm_package("dev-gpl", "GPL-3.0-only")
+
+        exit_code, rows = self._check(tmp_path, "--no-dev", "--no-strict")
+        assert exit_code == 1
+        assert rows == {
+            "runtime-lib": ("prod", "compatible"),
+            "shared-gpl": ("prod", "incompatible"),
+        }
+
+        exit_code, rows = self._check(tmp_path, "--dev", "--no-strict")
+        assert exit_code == 1
+        assert rows == {
+            "runtime-lib": ("prod", "compatible"),
+            "shared-gpl": ("prod", "incompatible"),
+            # Control: a copyleft package only the dev side uses is a warning.
+            "dev-gpl": ("dev", "warning"),
+        }
+
+    @staticmethod
+    def _write_locked_npm_project(directory, section: str, root: str) -> None:
+        """An npm project whose only direct dep ``root`` depends on ``shared-gpl``."""
+        directory.mkdir()
+        (directory / "package.json").write_text(
+            json.dumps({"name": directory.name, section: {root: "1.0.0"}})
+        )
+        (directory / "package-lock.json").write_text(
+            json.dumps(
+                {
+                    "name": directory.name,
+                    "lockfileVersion": 3,
+                    "packages": {
+                        "": {"name": directory.name, section: {root: "1.0.0"}},
+                        f"node_modules/{root}": {
+                            "version": "1.0.0",
+                            "dependencies": {"shared-gpl": "^1.0.0"},
+                        },
+                        "node_modules/shared-gpl": {"version": "1.0.0"},
+                    },
+                }
+            )
+        )
+
+    @respx.mock
+    @pytest.mark.parametrize(
+        ("tools_dir", "app_dir"),
+        # Lockfiles are read in directory order: dev-only first, then PROD first.
+        [("a-tools", "b-app"), ("b-tools", "a-app")],
+    )
+    def test_shared_transitive_across_lockfiles(self, tmp_path, tools_dir, app_dir):
+        # Two subprojects, each with its own lockfile: shared-gpl is reached
+        # only from a dev tool in one and from a production dependency in the
+        # other. The verdict is the same whichever lockfile is read first.
+        (tmp_path / "pyproject.toml").write_text(
+            '[project]\nname = "myproject"\nlicense = {text = "MIT"}\n'
+        )
+        self._write_locked_npm_project(tmp_path / tools_dir, "devDependencies", "dev-tool")
+        self._write_locked_npm_project(tmp_path / app_dir, "dependencies", "runtime-lib")
+        self._mock_npm_package("dev-tool", "MIT")
+        self._mock_npm_package("runtime-lib", "MIT")
+        self._mock_npm_package("shared-gpl", "GPL-3.0-only")
+
+        exit_code, rows = self._check(tmp_path, "--no-dev", "--no-strict")
+        assert exit_code == 1
+        assert rows == {
+            "runtime-lib": ("prod", "compatible"),
+            "shared-gpl": ("prod", "incompatible"),
+        }
+
+        exit_code, rows = self._check(tmp_path, "--dev", "--no-strict")
+        assert exit_code == 1
+        assert rows == {
+            "dev-tool": ("dev", "compatible"),
+            "runtime-lib": ("prod", "compatible"),
+            "shared-gpl": ("prod", "incompatible"),
+        }
+
+    @respx.mock
+    def test_go_tool_module_required_by_production_module(self, tmp_path):
+        # gen-tool and lint-tool are ``tool`` modules. The production
+        # runtime-lib requires gen-tool in its own go.mod, so gen-tool ships
+        # and the default scan reports it; lint-tool stays dev-only.
+        (tmp_path / "pyproject.toml").write_text(
+            '[project]\nname = "myproject"\nlicense = {text = "MIT"}\n'
+        )
+        (tmp_path / "go.mod").write_text(
+            "module example.com/myproject\n\n"
+            "go 1.24\n\n"
+            "require (\n"
+            "\texample.org/runtime-lib v1.0.0\n"
+            "\texample.org/gen-tool v1.0.0\n"
+            "\texample.org/lint-tool v1.0.0\n"
+            ")\n\n"
+            "tool (\n"
+            "\texample.org/gen-tool/cmd/gen\n"
+            "\texample.org/lint-tool/cmd/lint\n"
+            ")\n",
+            encoding="utf-8",
+        )
+        modules = {
+            "runtime-lib": ("MIT", "require example.org/gen-tool v1.0.0\n"),
+            "gen-tool": ("GPL-3.0-only", ""),
+            "lint-tool": ("GPL-3.0-only", ""),
+        }
+        (tmp_path / "go.sum").write_text(
+            "".join(
+                f"example.org/{name} v1.0.0 h1:h\nexample.org/{name} v1.0.0/go.mod h1:h\n"
+                for name in modules
+            ),
+            encoding="utf-8",
+        )
+        responses = []
+        for name, (license_id, requires) in modules.items():
+            respx.get(f"https://proxy.golang.org/example.org/{name}/@v/v1.0.0.mod").mock(
+                return_value=httpx.Response(200, text=f"module example.org/{name}\n{requires}")
+            )
+            key = {"system": "GO", "name": f"example.org/{name}", "version": "v1.0.0"}
+            responses.append(
+                {
+                    "request": {"versionKey": key},
+                    "version": {"versionKey": key, "licenses": [license_id], "links": []},
+                }
+            )
+        respx.post("https://api.deps.dev/v3alpha/versionbatch").mock(
+            return_value=httpx.Response(200, json={"responses": responses, "nextPageToken": ""})
+        )
+
+        exit_code, rows = self._check(tmp_path)
+        assert exit_code == 1
+        assert rows == {
+            "example.org/runtime-lib": ("prod", "compatible"),
+            "example.org/gen-tool": ("prod", "incompatible"),
+        }
+
+        exit_code, rows = self._check(tmp_path, "--dev", "--no-strict")
+        assert exit_code == 1
+        assert rows == {
+            "example.org/runtime-lib": ("prod", "compatible"),
+            "example.org/gen-tool": ("prod", "incompatible"),
+            "example.org/lint-tool": ("dev", "warning"),
+        }
+
+
 class TestRegistryCacheDedupe:
     """The cli wires one `RegistryCache` through both the walker and the
     license-resolution fan-out. URLs the walker has already pulled are served
