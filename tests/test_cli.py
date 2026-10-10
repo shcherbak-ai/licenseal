@@ -6715,6 +6715,174 @@ class TestGoReplaceDirectives:
         }
 
 
+class TestGoDirectRequirementsBesideGoSum:
+    """A copyleft requirement in go.mod fails the check whatever go.sum holds
+    for it. Deleting go.sum must never be what makes a scan correct."""
+
+    _GO_MOD = "module example.com/app\n\ngo 1.22\n\nrequire example.org/needed-gpl v2.0.0\n"
+    _NEEDED = ("example.org/needed-gpl", "v2.0.0")
+
+    @respx.mock
+    @pytest.mark.parametrize(
+        "go_sum",
+        [
+            # Controls: these two always reported the requirement.
+            None,
+            "",
+            # go.sum has rows, none for the requirement.
+            _go_sum(("example.org/stale", "v1.0.0")),
+            # Only the requirement's ``/go.mod`` row.
+            _go_sum(("example.org/stale", "v1.0.0"))
+            + "example.org/needed-gpl v2.0.0/go.mod h1:h\n",
+        ],
+        ids=["no-go.sum", "empty-go.sum", "no-row", "go.mod-row-only"],
+    )
+    def test_copyleft_requirement_fails_the_check(self, tmp_path, go_sum):
+        _mit_project(tmp_path)
+        (tmp_path / "go.mod").write_text(self._GO_MOD, encoding="utf-8")
+        if go_sum is not None:
+            (tmp_path / "go.sum").write_text(go_sum, encoding="utf-8")
+        _mock_go_modules(
+            {self._NEEDED: ("GPL-3.0-only", ""), ("example.org/stale", "v1.0.0"): ("MIT", "")}
+        )
+
+        exit_code, rows = _check_rows(tmp_path)
+        assert exit_code == 1
+        assert rows[self._NEEDED] == ("prod", "incompatible")
+        assert set(rows) - {self._NEEDED} == (
+            {("example.org/stale", "v1.0.0")} if go_sum else set()
+        )
+
+    @respx.mock
+    def test_required_version_is_the_one_checked(self, tmp_path):
+        # go.sum pins v1.9.0, which is MIT; go.mod requires v2.0.0, which is GPL.
+        _mit_project(tmp_path)
+        (tmp_path / "go.mod").write_text(self._GO_MOD, encoding="utf-8")
+        (tmp_path / "go.sum").write_text(
+            _go_sum(("example.org/needed-gpl", "v1.9.0")), encoding="utf-8"
+        )
+        _mock_go_modules(
+            {
+                self._NEEDED: ("GPL-3.0-only", ""),
+                ("example.org/needed-gpl", "v1.9.0"): ("MIT", ""),
+            }
+        )
+
+        exit_code, rows = _check_rows(tmp_path)
+        assert exit_code == 1
+        assert rows == {
+            self._NEEDED: ("prod", "incompatible"),
+            # The go.sum row for the other version is still reported.
+            ("example.org/needed-gpl", "v1.9.0"): ("prod", "compatible"),
+        }
+
+    @respx.mock
+    def test_nested_module_without_a_go_sum_of_its_own(self, tmp_path):
+        # The root module is clean and has a go.sum. The nested module has
+        # none, and requires a GPL module.
+        _mit_project(tmp_path)
+        (tmp_path / "go.mod").write_text(
+            "module example.com/app\n\ngo 1.22\n\nrequire example.org/root-lib v1.0.0\n",
+            encoding="utf-8",
+        )
+        (tmp_path / "go.sum").write_text(
+            _go_sum(("example.org/root-lib", "v1.0.0")), encoding="utf-8"
+        )
+        (tmp_path / "tools").mkdir()
+        (tmp_path / "tools" / "go.mod").write_text(
+            "module example.com/app/tools\n\ngo 1.22\n\nrequire example.org/nested-gpl v1.3.0\n",
+            encoding="utf-8",
+        )
+        _mock_go_modules(
+            {
+                ("example.org/root-lib", "v1.0.0"): ("MIT", ""),
+                ("example.org/nested-gpl", "v1.3.0"): ("GPL-3.0-only", ""),
+            }
+        )
+
+        exit_code, rows = _check_rows(tmp_path)
+        assert exit_code == 1
+        assert rows == {
+            ("example.org/root-lib", "v1.0.0"): ("prod", "compatible"),
+            ("example.org/nested-gpl", "v1.3.0"): ("prod", "incompatible"),
+        }
+
+    @respx.mock
+    @pytest.mark.parametrize("fork_in_go_sum", [True, False])
+    def test_replaced_requirement_is_not_checked_under_its_original_path(
+        self, tmp_path, fork_in_go_sum
+    ):
+        # The GPL module is replaced by an MIT fork, and another requirement
+        # is replaced by a local path. Neither original is requested: the
+        # mocks do not serve them.
+        _mit_project(tmp_path)
+        (tmp_path / "go.mod").write_text(
+            "module example.com/app\n\n"
+            "go 1.22\n\n"
+            "require (\n"
+            "\texample.org/original-gpl v1.2.0\n"
+            "\texample.org/local v0.1.0\n"
+            "\texample.org/plain v1.0.0\n"
+            ")\n\n"
+            "replace (\n"
+            "\texample.org/original-gpl => example.org/fork v1.2.1\n"
+            "\texample.org/local => ../local\n"
+            ")\n",
+            encoding="utf-8",
+        )
+        locked = [("example.org/plain", "v1.0.0")]
+        if fork_in_go_sum:
+            locked.append(("example.org/fork", "v1.2.1"))
+        (tmp_path / "go.sum").write_text(_go_sum(*locked), encoding="utf-8")
+        _mock_go_modules(
+            {
+                ("example.org/fork", "v1.2.1"): ("MIT", ""),
+                ("example.org/plain", "v1.0.0"): ("MIT", ""),
+            }
+        )
+
+        exit_code, rows = _check_rows(tmp_path)
+        assert exit_code == 0
+        assert rows == {
+            ("example.org/fork", "v1.2.1"): ("prod", "compatible"),
+            ("example.org/plain", "v1.0.0"): ("prod", "compatible"),
+        }
+
+    @respx.mock
+    def test_tool_requirement_missing_from_go_sum_stays_dev(self, tmp_path):
+        # A copyleft ``tool`` module go.sum has no row for is added as dev:
+        # the default scan leaves it out, and ``--dev`` reports a warning.
+        _mit_project(tmp_path)
+        (tmp_path / "go.mod").write_text(
+            "module example.com/app\n\n"
+            "go 1.24\n\n"
+            "require (\n"
+            "\texample.org/runtime-lib v1.0.0\n"
+            "\texample.org/gen-gpl v1.0.0\n"
+            ")\n\n"
+            "tool example.org/gen-gpl/cmd/gen\n",
+            encoding="utf-8",
+        )
+        (tmp_path / "go.sum").write_text(
+            _go_sum(("example.org/runtime-lib", "v1.0.0")), encoding="utf-8"
+        )
+        _mock_go_modules(
+            {
+                ("example.org/runtime-lib", "v1.0.0"): ("MIT", ""),
+                ("example.org/gen-gpl", "v1.0.0"): ("GPL-3.0-only", ""),
+            }
+        )
+
+        exit_code, rows = _check_rows(tmp_path)
+        assert exit_code == 0
+        production = {("example.org/runtime-lib", "v1.0.0"): ("prod", "compatible")}
+        assert rows == production
+
+        exit_code, rows = _check_rows(tmp_path, "--dev")
+        assert exit_code == 1
+        assert rows == {**production, ("example.org/gen-gpl", "v1.0.0"): ("dev", "warning")}
+
+
 class TestLockfileWithoutDirectDependencies:
     """A lockfile is scanned even when no manifest yields a direct dependency
     for its ecosystem. Its packages are checked as production, so a copyleft

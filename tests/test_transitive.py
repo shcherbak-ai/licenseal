@@ -36,6 +36,11 @@ def _seed(name: str, ecosystem: Ecosystem, version: str = "") -> Dependency:
     )
 
 
+def _go_direct(name: str, version: str = "v1.0.0") -> Dependency:
+    """A direct Go requirement as discovery emits it: go.mod's version, verbatim."""
+    return Dependency(name=name, version_constraint=version, ecosystem=Ecosystem.GO)
+
+
 # ----------------------------------------------------------------------- helpers
 
 
@@ -3126,7 +3131,7 @@ class TestGoEdgeAwareResolution:
             from licenseal.transitive import _resolve_go_transitive  # noqa: PLC2701
 
             deps = _resolve_go_transitive(
-                direct_go_deps=[_seed("github.com/parent", Ecosystem.GO, "v1.0.0")],
+                direct_go_deps=[_go_direct("github.com/parent")],
                 project_path=tmp_path,
                 exclude_paths=frozenset(),
                 include_dev=False,
@@ -3145,7 +3150,7 @@ class TestGoEdgeAwareResolution:
 
         with httpx.Client() as client:
             deps = _resolve_go_transitive(
-                direct_go_deps=[_seed("github.com/direct", Ecosystem.GO, "v1.0.0")],
+                direct_go_deps=[_go_direct("github.com/direct")],
                 project_path=tmp_path,
                 exclude_paths=frozenset(),
                 include_dev=False,
@@ -3200,7 +3205,7 @@ class TestGoEdgeAwareResolution:
 
         with httpx.Client() as client:
             deps = _resolve_go_transitive(
-                direct_go_deps=[_seed("github.com/parent", Ecosystem.GO, "v1.0.0")],
+                direct_go_deps=[_go_direct("github.com/parent")],
                 project_path=tmp_path,
                 exclude_paths=frozenset(),
                 include_dev=True,
@@ -3231,7 +3236,7 @@ class TestGoEdgeAwareResolution:
 
         with httpx.Client() as client:
             deps = _resolve_go_transitive(
-                direct_go_deps=[_seed("github.com/x", Ecosystem.GO, "v1.0.0")],
+                direct_go_deps=[_go_direct("github.com/x")],
                 project_path=tmp_path,
                 exclude_paths=frozenset(),
                 include_dev=False,
@@ -3256,7 +3261,7 @@ class TestGoEdgeAwareResolution:
 
         with httpx.Client() as client:
             deps = _resolve_go_transitive(
-                direct_go_deps=[_seed("github.com/x", Ecosystem.GO, "v1.0.0")],
+                direct_go_deps=[_go_direct("github.com/x")],
                 project_path=tmp_path,
                 exclude_paths=frozenset(),
                 include_dev=False,
@@ -3329,8 +3334,8 @@ class TestGoEdgeAwareResolution:
         # No go.sum, but direct_go_deps has the same (module, version) twice
         # (e.g. nested go.mod files declaring the same dep). The fallback path
         # dedupes via the same ``seen_entries`` set.
-        seed_a = _seed("github.com/dup", Ecosystem.GO, "v1.0.0")
-        seed_b = _seed("github.com/dup", Ecosystem.GO, "v1.0.0")
+        seed_a = _go_direct("github.com/dup")
+        seed_b = _go_direct("github.com/dup")
         from licenseal.transitive import _resolve_go_transitive  # noqa: PLC2701
 
         with httpx.Client() as client:
@@ -3368,7 +3373,7 @@ class TestGoEdgeAwareResolution:
 
         with httpx.Client() as client:
             deps = _resolve_go_transitive(
-                direct_go_deps=[_seed("github.com/parent", Ecosystem.GO, "v1.0.0")],
+                direct_go_deps=[_go_direct("github.com/parent")],
                 project_path=tmp_path,
                 exclude_paths=frozenset(),
                 include_dev=True,
@@ -3428,7 +3433,7 @@ class TestGoEdgeAwareResolution:
         with httpx.Client() as client:
             deps = _resolve_go_transitive(
                 direct_go_deps=[
-                    _seed("example.com/extdep", Ecosystem.GO, "v1.0.0"),
+                    _go_direct("example.com/extdep"),
                 ],
                 project_path=tmp_path,
                 exclude_paths=frozenset(),
@@ -3470,11 +3475,7 @@ class TestGoEdgeAwareResolution:
         with httpx.Client() as client:
             deps = _resolve_go_transitive(
                 direct_go_deps=[
-                    _seed(
-                        "example.com/root/apps/dashboard",
-                        Ecosystem.GO,
-                        "v0.0.1",
-                    ),
+                    _go_direct("example.com/root/apps/dashboard", "v0.0.1"),
                 ],
                 project_path=tmp_path,
                 exclude_paths=frozenset(),
@@ -3664,6 +3665,224 @@ class TestGoReplaceDirectives:
             ("example.org/gen-tool", ()),
             ("example.org/gen-dep", ("example.org/gen-tool",)),
         }
+
+
+def _go_rows(deps: list[Dependency]) -> set[tuple[str, str, DependencyGroup, int, tuple, str]]:
+    return {
+        (d.name, d.version_constraint, d.group, d.depth, d.direct_ancestors, d.source) for d in deps
+    }
+
+
+class TestGoDirectRequirementsBesideGoSum:
+    """Every requirement in go.mod is a row, at the version it requires,
+    whatever go.sum holds. go.sum adds the modules it lists; it is never
+    proof that a requirement is absent."""
+
+    PROD = DependencyGroup.PROD
+    DEV = DependencyGroup.DEV
+
+    @respx.mock
+    def test_requirement_go_sum_has_no_row_for(self, tmp_path):
+        (tmp_path / "go.mod").write_text(
+            "module example.com/app\n\ngo 1.22\n\nrequire example.org/needed v2.0.0\n",
+            encoding="utf-8",
+        )
+        (tmp_path / "go.sum").write_text(_go_sum(("example.org/stale", "v1.0.0")), encoding="utf-8")
+        _mock_go_proxy({("example.org/needed", "v2.0.0"): "", ("example.org/stale", "v1.0.0"): ""})
+
+        needed = ("example.org/needed", "v2.0.0", self.PROD, 0, (), "go.mod")
+        assert _go_rows(_resolve_tree(tmp_path, include_dev=False)) == {
+            needed,
+            # Nothing requires it: kept as an orphan, as before.
+            ("example.org/stale", "v1.0.0", self.PROD, 1, (), ""),
+        }
+
+        # Control: with no go.sum the requirement was always reported, and it
+        # is reported the same way.
+        (tmp_path / "go.sum").unlink()
+        assert _go_rows(_resolve_tree(tmp_path, include_dev=False)) == {needed}
+
+    @respx.mock
+    def test_nested_module_without_a_go_sum_of_its_own(self, tmp_path):
+        # The root module has a go.sum; the nested tools module does not.
+        (tmp_path / "go.mod").write_text(
+            "module example.com/app\n\ngo 1.22\n\nrequire example.org/root-lib v1.0.0\n",
+            encoding="utf-8",
+        )
+        (tmp_path / "go.sum").write_text(
+            _go_sum(("example.org/root-lib", "v1.0.0"), ("example.org/root-child", "v1.0.0")),
+            encoding="utf-8",
+        )
+        (tmp_path / "tools").mkdir()
+        (tmp_path / "tools" / "go.mod").write_text(
+            "module example.com/app/tools\n\ngo 1.22\n\nrequire example.org/nested-lib v1.3.0\n",
+            encoding="utf-8",
+        )
+        _mock_go_proxy(
+            {
+                ("example.org/root-lib", "v1.0.0"): "require example.org/root-child v1.0.0\n",
+                ("example.org/root-child", "v1.0.0"): "",
+                ("example.org/nested-lib", "v1.3.0"): "require example.org/nested-child v1.0.0\n",
+            }
+        )
+
+        assert _go_rows(_resolve_tree(tmp_path, include_dev=False)) == {
+            ("example.org/root-lib", "v1.0.0", self.PROD, 0, (), "go.mod"),
+            ("example.org/root-child", "v1.0.0", self.PROD, 1, ("example.org/root-lib",), ""),
+            ("example.org/nested-lib", "v1.3.0", self.PROD, 0, (), "tools/go.mod"),
+            # nested-child is in no go.sum, so it is not a row: modules are
+            # never added from a go.mod fetched from the proxy.
+        }
+
+    @respx.mock
+    def test_requirement_listed_only_as_a_go_mod_row(self, tmp_path):
+        # go.sum has the module's ``/go.mod`` hash but not its archive hash.
+        (tmp_path / "go.mod").write_text(
+            "module example.com/app\n\n"
+            "go 1.22\n\n"
+            "require (\n"
+            "\texample.org/built v1.0.0\n"
+            "\texample.org/graph-only v1.4.0\n"
+            ")\n",
+            encoding="utf-8",
+        )
+        (tmp_path / "go.sum").write_text(
+            _go_sum(("example.org/built", "v1.0.0"))
+            + "example.org/graph-only v1.4.0/go.mod h1:h\n",
+            encoding="utf-8",
+        )
+        _mock_go_proxy(
+            {("example.org/built", "v1.0.0"): "", ("example.org/graph-only", "v1.4.0"): ""}
+        )
+
+        assert _go_rows(_resolve_tree(tmp_path, include_dev=False)) == {
+            # Control: the requirement with both rows is unchanged.
+            ("example.org/built", "v1.0.0", self.PROD, 0, (), "go.mod"),
+            ("example.org/graph-only", "v1.4.0", self.PROD, 0, (), "go.mod"),
+        }
+
+    @respx.mock
+    def test_required_version_is_the_direct_dependency(self, tmp_path):
+        # go.mod requires v2.0.0; go.sum pins v1.9.0. Each version's go.mod
+        # requires a different child, and go.sum lists both children.
+        (tmp_path / "go.mod").write_text(
+            "module example.com/app\n\ngo 1.22\n\nrequire example.org/needed v2.0.0\n",
+            encoding="utf-8",
+        )
+        (tmp_path / "go.sum").write_text(
+            _go_sum(
+                ("example.org/needed", "v1.9.0"),
+                ("example.org/new-child", "v1.0.0"),
+                ("example.org/old-child", "v1.0.0"),
+            ),
+            encoding="utf-8",
+        )
+        _mock_go_proxy(
+            {
+                ("example.org/needed", "v1.9.0"): "require example.org/old-child v1.0.0\n",
+                ("example.org/needed", "v2.0.0"): "require example.org/new-child v1.0.0\n",
+                ("example.org/new-child", "v1.0.0"): "",
+                ("example.org/old-child", "v1.0.0"): "",
+            }
+        )
+
+        assert _go_rows(_resolve_tree(tmp_path, include_dev=False)) == {
+            ("example.org/needed", "v2.0.0", self.PROD, 0, (), "go.mod"),
+            # No version is selected among go.sum rows: the other version
+            # stays, but it is not the direct dependency.
+            ("example.org/needed", "v1.9.0", self.PROD, 1, (), ""),
+            # The required version's go.mod supplies the module's edges.
+            ("example.org/new-child", "v1.0.0", self.PROD, 1, ("example.org/needed",), ""),
+            ("example.org/old-child", "v1.0.0", self.PROD, 1, (), ""),
+        }
+
+    @respx.mock
+    @pytest.mark.parametrize(
+        "go_sum_modules",
+        [
+            [("example.org/plain", "v1.0.0")],
+            [("example.org/plain", "v1.0.0"), ("example.org/fork", "v1.2.1")],
+        ],
+        ids=["replacement-not-in-go.sum", "replacement-in-go.sum"],
+    )
+    def test_replaced_requirement_is_not_added_under_its_original_path(
+        self, tmp_path, go_sum_modules
+    ):
+        # Only the replacement and the unreplaced module are served by the
+        # proxy mock: a request for example.org/original or example.org/local
+        # would fail the test.
+        (tmp_path / "go.mod").write_text(
+            "module example.com/app\n\n"
+            "go 1.22\n\n"
+            "require (\n"
+            "\texample.org/original v1.2.0\n"
+            "\texample.org/local v0.1.0\n"
+            "\texample.org/plain v1.0.0\n"
+            ")\n\n"
+            "replace (\n"
+            "\texample.org/original => example.org/fork v1.2.1\n"
+            "\texample.org/local => ../local\n"
+            ")\n",
+            encoding="utf-8",
+        )
+        (tmp_path / "go.sum").write_text(_go_sum(*go_sum_modules), encoding="utf-8")
+        _mock_go_proxy({("example.org/fork", "v1.2.1"): "", ("example.org/plain", "v1.0.0"): ""})
+
+        assert _go_rows(_resolve_tree(tmp_path, include_dev=False)) == {
+            ("example.org/fork", "v1.2.1", self.PROD, 0, (), "go.mod"),
+            ("example.org/plain", "v1.0.0", self.PROD, 0, (), "go.mod"),
+        }
+
+    @respx.mock
+    def test_tool_requirement_missing_from_go_sum_is_dev(self, tmp_path):
+        (tmp_path / "go.mod").write_text(
+            "module example.com/app\n\n"
+            "go 1.24\n\n"
+            "require (\n"
+            "\texample.org/runtime-lib v1.0.0\n"
+            "\texample.org/gen-tool v1.0.0\n"
+            ")\n\n"
+            "tool example.org/gen-tool/cmd/gen\n",
+            encoding="utf-8",
+        )
+        (tmp_path / "go.sum").write_text(
+            _go_sum(("example.org/runtime-lib", "v1.0.0")), encoding="utf-8"
+        )
+        _mock_go_proxy(
+            {("example.org/runtime-lib", "v1.0.0"): "", ("example.org/gen-tool", "v1.0.0"): ""}
+        )
+
+        runtime = ("example.org/runtime-lib", "v1.0.0", self.PROD, 0, (), "go.mod")
+        assert _go_rows(_resolve_tree(tmp_path, include_dev=False)) == {runtime}
+        assert _go_rows(_resolve_tree(tmp_path, include_dev=True)) == {
+            runtime,
+            ("example.org/gen-tool", "v1.0.0", self.DEV, 0, (), "go.mod"),
+        }
+
+    def test_workspace_local_direct_beside_go_sum_is_not_a_row_or_a_root(self, tmp_path):
+        # Discovery filters workspace-local requirements before they get
+        # here; the resolver filters again, so one is neither added beside
+        # the go.sum rows nor used as a root.
+        (tmp_path / "go.mod").write_text("module example.com/app\n", encoding="utf-8")
+        (tmp_path / "sibling").mkdir()
+        (tmp_path / "sibling" / "go.mod").write_text(
+            "module example.com/app/sibling\n", encoding="utf-8"
+        )
+        (tmp_path / "go.sum").write_text(_go_sum(("example.org/lib", "v1.0.0")), encoding="utf-8")
+        from licenseal.transitive import _resolve_go_transitive  # noqa: PLC2701
+
+        with httpx.Client() as client:
+            deps = _resolve_go_transitive(
+                direct_go_deps=[_go_direct("example.com/app/sibling", "v0.1.0")],
+                project_path=tmp_path,
+                exclude_paths=frozenset(),
+                include_dev=False,
+                client=client,
+                max_workers=4,
+                fetcher=lambda u, c: None,
+                go_mod_fetcher=lambda u, c: None,
+            )
+        assert _go_rows(deps) == {("example.org/lib", "v1.0.0", self.PROD, 1, (), "")}
 
 
 class TestJavaTransitiveResolution:

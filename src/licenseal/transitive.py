@@ -596,8 +596,10 @@ def _resolve_go_transitive(
     """Edge-aware Go transitive resolution.
 
     Approach:
-      1. Discover the pinned-module universe from ``go.sum`` (or just the
-         direct deps if no go.sum is present).
+      1. Build the module universe: every ``go.sum`` row, plus every direct
+         requirement from ``go.mod`` at the version it requires, whether or
+         not ``go.sum`` has a row for it. No version is selected among the
+         ``go.sum`` rows of one module.
       2. Fetch each module's ``go.mod`` from ``proxy.golang.org`` to learn
          its direct require edges. Best-effort: proxy fetches that fail
          leave that module as a leaf in the edge graph (no outgoing edges).
@@ -612,8 +614,15 @@ def _resolve_go_transitive(
     Direct go deps carry their group already (PROD by default; DEV when
     matched by ``tool`` directive in ``go_mod.py``). A DEV direct that a PROD
     root also reaches is PROD, like any other module a PROD root reaches.
+
+    A row is a direct dep (depth 0, with its manifest as source) only at the
+    version ``go.mod`` requires. A ``go.sum`` row for another version of a
+    required module is kept as a row of its own, attributed like any module
+    of that name. The modules a direct requires are rows only when ``go.sum``
+    lists them: nothing is added from the proxy.
     """
-    direct_module_paths = {d.name for d in direct_go_deps}
+    # Manifest of each requirement, keyed as go.mod states it.
+    direct_sources = {(d.name, d.version_constraint): d.source for d in direct_go_deps}
     prod_root_names = {d.name.lower() for d in direct_go_deps if d.group == DependencyGroup.PROD}
     dev_root_names = {d.name.lower() for d in direct_go_deps if d.group == DependencyGroup.DEV}
 
@@ -629,7 +638,7 @@ def _resolve_go_transitive(
         project_path, exclude_paths=exclude_paths
     )
 
-    # ---- 1. enumerate the pinned-module universe ----
+    # ---- 1. enumerate the module universe ----
     go_locks = find_go_lockfiles(project_path, exclude_paths=exclude_paths)
     entries: list[tuple[str, str]] = []
     seen_entries: set[tuple[str, str]] = set()
@@ -642,16 +651,20 @@ def _resolve_go_transitive(
                     continue
                 seen_entries.add(mod_ver)
                 entries.append(mod_ver)
-    if not entries:
-        # No go.sum (or empty) — fall back to the direct deps from go.mod.
-        for d in direct_go_deps:
-            if d.name in workspace_local:
-                continue
-            key = (d.name, d.version_constraint)
-            if key in seen_entries:
-                continue
-            seen_entries.add(key)
-            entries.append(key)
+    # Every direct requirement is part of the universe, whatever go.sum holds:
+    # a nested module can have no go.sum of its own, a go.sum can list a
+    # requirement only as a ``/go.mod`` row, or pin another version of it.
+    # Added after the go.sum rows, so that where go.sum has another version
+    # of a required module, the required version's go.mod supplies the
+    # module's edges (see :func:`_fetch_go_edge_graph`).
+    for d in direct_go_deps:
+        if d.name in workspace_local:
+            continue
+        key = (d.name, d.version_constraint)
+        if key in seen_entries:
+            continue
+        seen_entries.add(key)
+        entries.append(key)
     if not entries:
         return []
 
@@ -667,21 +680,17 @@ def _resolve_go_transitive(
     # name_case preserves the original-case module path so the reverse-BFS's
     # ancestor labels match the labels in the report.
     name_case = {mod.lower(): mod for mod, _ in entries}
-    # Direct module paths must be in name_case too (they're always in entries
-    # via the go.sum + direct-fallback above, but be defensive).
-    for d in direct_go_deps:
-        name_case.setdefault(d.name.lower(), d.name)
+    # Every direct is in ``entries`` (step 1) unless it is workspace-local,
+    # and a workspace-local module is not a root.
     prod_roots = {n: name_case[n] for n in prod_root_names if n in name_case}
     dev_roots = {n: name_case[n] for n in dev_root_names if n in name_case}
     prod_anc = compute_direct_ancestors(edges, prod_roots)
     dev_anc = compute_direct_ancestors(edges, dev_roots)
 
-    direct_source_by_name = {d.name.lower(): d.source for d in direct_go_deps if d.source}
-
     out: list[Dependency] = []
     for module_path, version in entries:
         lower = module_path.lower()
-        is_direct = module_path in direct_module_paths
+        is_direct = (module_path, version) in direct_sources
         if lower in prod_root_names:
             group = DependencyGroup.PROD
             ancestors: tuple[str, ...] = ()
@@ -715,7 +724,7 @@ def _resolve_go_transitive(
                 group=group,
                 depth=0 if is_direct else 1,
                 direct_ancestors=ancestors,
-                source=direct_source_by_name.get(lower, "") if is_direct else "",
+                source=direct_sources.get((module_path, version), ""),
             )
         )
     return out
@@ -1708,6 +1717,8 @@ def _fetch_go_edge_graph(
 
     # Propagate the active tethered scope into the go.mod-fetch workers — a bare
     # pool fetches in an empty context and bypasses the egress policy.
+    # Results come back in ``entries`` order: when a module path is listed at
+    # several versions, the last one's requirements are its edges.
     for name, children in map_with_context(_one, entries, max_workers):
         edges[name] = children
     return edges
