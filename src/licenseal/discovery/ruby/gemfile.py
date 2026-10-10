@@ -6,13 +6,18 @@ the source statically with a line-oriented regex + a small state machine for
 ``group :development do ... end`` blocks (with a block-nesting counter so a
 nested ``platforms do`` / ``if`` block doesn't lose the enclosing group).
 
-``git:`` / ``github:`` / ``path:`` gems are emitted with an ``origin`` rather
-than skipped. They are not rubygems.org gems and are never looked up there,
-but emitting them keeps their group and direct-ness — so a git-sourced dev
-tool is still attributed DEV and dropped under ``--no-dev`` instead of leaking
-in as a PROD UNKNOWN. ``Gemfile.lock`` carries no group of its own, so the
-Gemfile is the only place that signal exists. A ``path:`` gem inside the
-scanned directory is the project's own code and is not emitted.
+A gem declared from a git repository or a path is emitted with an ``origin``
+rather than skipped: an inline ``git:`` / ``github:`` / ``path:`` option, in
+the keyword (``git: "…"``) or the hash-rocket (``:git => "…"``) spelling, or
+an enclosing ``git "…" do`` / ``github "…" do`` / ``path "…" do`` block. Such
+a gem is not a rubygems.org gem and is never looked up there, but emitting it
+keeps its group and direct-ness — so a git-sourced dev tool is still
+attributed DEV and dropped under ``--no-dev`` instead of leaking in as a PROD
+UNKNOWN. ``Gemfile.lock`` carries no group of its own, so the Gemfile is the
+only place that signal exists. A path inside the scanned directory is the
+project's own code: a gem declared from one is not emitted. A ``source "…"
+do`` block names another gem server, not a repository or a path; its gems
+stay registry gems.
 
 Group attribution is the load-bearing reason to parse the Gemfile at all —
 ``Gemfile.lock`` carries no dev/prod marker, only the Gemfile does (via
@@ -83,14 +88,25 @@ _GROUP_NAME_RE = re.compile(r""":(\w+)|(['"])(\w+)\2""")
 _WORD_LIST_ARG_RE = re.compile(rf"\*?({_WORD_LIST})")
 _KEYWORD_OPTION_RE = re.compile(r"\w+:(?!:)|:\w+\s*=>")
 
-# Source options of a gem line: where the gem comes from when that is not
-# rubygems.org (``git:``, ``github:``, ``gist:``, ``bitbucket:``, ``path:``)
-# and which revision of a repository (``ref:``, ``tag:``, ``branch:``). The
-# value is captured when it is a string literal.
+# Source options of a gem line or a source block: where the gem comes from
+# when that is not rubygems.org (``git``, ``github``, ``gist``, ``bitbucket``,
+# ``path``) and which revision of a repository (``ref``, ``tag``, ``branch``),
+# in the keyword spelling (``git: "…"``) or the hash-rocket one
+# (``:git => "…"``). The value is captured when it is a string literal.
+_SOURCE_OPTION_NAMES = r"git|github|gist|bitbucket|path|ref|tag|branch"
 _SOURCE_OPTION_RE = re.compile(
-    r"""(?<![\w:])(?P<key>git|github|gist|bitbucket|path|ref|tag|branch):\s*"""
-    r"""(?:(?P<quote>['"])(?P<value>[^'"]*)(?P=quote))?"""
+    rf"""(?<![\w:])(?:(?P<key>{_SOURCE_OPTION_NAMES}):(?!:)|:(?P<rocket>{_SOURCE_OPTION_NAMES})\s*=>)"""
+    r"""\s*(?:(?P<quote>['"])(?P<value>[^'"]*)(?P=quote))?"""
 )
+
+# A block that sets the source of every gem declared inside it:
+# ``git "url" do``, ``github "user/repo", branch: "x" do``, ``path "dir" do``.
+_SOURCE_BLOCK_RE = re.compile(
+    r"^(?P<kind>git|github|gist|bitbucket|path)\b(?P<args>.*?)\bdo\b\s*(?:\|[^|]*\|)?\s*$"
+)
+# The block's first argument when it is a string literal: the repository or
+# the path.
+_FIRST_STRING_RE = re.compile(r"""\s*\(?\s*(?P<quote>['"])(?P<value>[^'"]*)(?P=quote)""")
 
 # The git hosting shorthands Bundler expands, and the host each one names.
 _HOSTED_GIT_OPTIONS = {
@@ -181,34 +197,63 @@ def _parse_inline_groups(rest: str) -> tuple[str, ...]:
     return _group_names(inner) or (value,)
 
 
+def _source_options(text: str) -> dict[str, str | None]:
+    """The source options written in ``text``, each with its string value or ``None``."""
+    return {
+        m.group("key") or m.group("rocket"): m.group("value")
+        for m in _SOURCE_OPTION_RE.finditer(text)
+    }
+
+
+def _source_origin(
+    kind: str,
+    value: str | None,
+    options: dict[str, str | None],
+    gemfile_dir: Path,
+    scan_root: Path,
+) -> str | None:
+    """Origin of one declared source.
+
+    ``kind`` is ``git``, one of the hosting shorthands, or ``path``;
+    ``value`` the repository or path, ``None`` when it is not a string
+    literal; ``options`` the options written beside it, for the revision.
+    ``None`` is a path inside the scanned directory. A source whose value
+    cannot be read still takes the gem off the registry; its origin then
+    says only that the source is not recorded.
+    """
+    if not value:
+        return UNRECORDED
+    if kind == "path":
+        return path_origin(value, gemfile_dir, scan_root)
+    revision = options.get("ref") or options.get("tag") or options.get("branch") or ""
+    host = _HOSTED_GIT_OPTIONS.get(kind)
+    if host is None or "://" in value:
+        return git_origin(value, revision)
+    # ``github: "name"`` is Bundler's shorthand for ``name/name``.
+    if kind != "gist" and "/" not in value:
+        value = f"{value}/{value}"
+    return hosted_git_origin(host, f"{value}.git", revision)
+
+
 def _gem_origin(rest: str, gemfile_dir: Path, scan_root: Path) -> str | None:
     """Origin a gem line's own options declare.
 
-    Empty for a rubygems.org gem, ``None`` for a ``path:`` gem inside the
-    scanned directory. A source option whose value is not a string literal
-    still takes the gem off the registry; its origin then says only that the
-    source is not recorded.
+    Empty for a line with no source option, ``None`` for a ``path`` option
+    inside the scanned directory.
     """
-    options = {m.group("key"): m.group("value") for m in _SOURCE_OPTION_RE.finditer(rest)}
-    revision = options.get("ref") or options.get("tag") or options.get("branch") or ""
-    if "git" in options:
-        url = options["git"]
-        return git_origin(url, revision) if url else UNRECORDED
-    for option, host in _HOSTED_GIT_OPTIONS.items():
-        if option in options:
-            repository = options[option]
-            if not repository:
-                return UNRECORDED
-            if "://" in repository:
-                return git_origin(repository, revision)
-            # ``github: "name"`` is Bundler's shorthand for ``name/name``.
-            if option != "gist" and "/" not in repository:
-                repository = f"{repository}/{repository}"
-            return hosted_git_origin(host, f"{repository}.git", revision)
-    if "path" in options:
-        path = options["path"]
-        return path_origin(path, gemfile_dir, scan_root) if path else UNRECORDED
+    options = _source_options(rest)
+    for kind in ("git", *_HOSTED_GIT_OPTIONS, "path"):
+        if kind in options:
+            return _source_origin(kind, options[kind], options, gemfile_dir, scan_root)
     return ""
+
+
+def _block_origin(kind: str, args: str, gemfile_dir: Path, scan_root: Path) -> str | None:
+    """Origin a ``git`` / ``github`` / ``path`` block gives the gems inside it."""
+    first = _FIRST_STRING_RE.match(args)
+    return _source_origin(
+        kind, first.group("value") if first else None, _source_options(args), gemfile_dir, scan_root
+    )
 
 
 def _join_continuations(lines: list[str]) -> list[str]:
@@ -256,8 +301,11 @@ def _parse_gemfile_text(
     # records the (depth-at-open, group-symbols) of each enclosing ``group``
     # block. Tracking total nesting lets a nested non-group block's ``end``
     # (``platforms do``, an ``if`` guard, …) close without popping the group.
+    # ``source_frames`` records, the same way, the origin each enclosing
+    # ``git`` / ``github`` / ``path`` block gives its gems.
     block_depth = 0
     group_frames: list[tuple[int, tuple[str, ...]]] = []
+    source_frames: list[tuple[int, str | None]] = []
 
     physical_lines = text.splitlines()
     for line in _join_continuations(physical_lines):
@@ -274,12 +322,24 @@ def _parse_gemfile_text(
             group_frames.append((block_depth, _group_names(args)))
             block_depth += 1
             continue
-        # ``end`` — close the innermost block; drop any group frame it closed.
+        # ``end`` — close the innermost block; drop any frame it closed.
         if stripped == "end":
             if block_depth > 0:
                 block_depth -= 1
                 while group_frames and group_frames[-1][0] >= block_depth:
                     group_frames.pop()
+                while source_frames and source_frames[-1][0] >= block_depth:
+                    source_frames.pop()
+            continue
+        # ``git "url" do`` / ``github "user/repo" do`` / ``path "dir" do`` —
+        # every gem inside comes from that repository or path.
+        source_block = _SOURCE_BLOCK_RE.match(stripped)
+        if source_block is not None:
+            origin = _block_origin(
+                source_block.group("kind"), source_block.group("args"), gemfile_dir, scan_root
+            )
+            source_frames.append((block_depth, origin))
+            block_depth += 1
             continue
         # Any other block opener (``platforms do``, ``source ... do``, an
         # ``if`` / ``case`` guard, …) — track its depth so its ``end`` is
@@ -318,8 +378,11 @@ def _parse_gemfile_text(
         # A git / path / github gem is not on rubygems.org: it carries an
         # origin and is never looked up, while its group and direct-ness
         # still feed attribution. A path gem of this project is not a
-        # dependency at all.
+        # dependency at all. The line's own source option decides; without
+        # one, the innermost enclosing source block does.
         origin = _gem_origin(rest, gemfile_dir, scan_root)
+        if origin == "" and source_frames:
+            origin = source_frames[-1][1]
 
         key = (name.lower(), group.value)
         if key in seen:

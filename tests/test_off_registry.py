@@ -2534,3 +2534,276 @@ class TestLockfileCannotClearADeclaredSource:
         assert [(d["name"], d["origin"], d["license"]) for d in data["dependencies"]] == [
             ("git-fork", "", "MIT")
         ]
+
+
+# ------------------------------------------------- Ruby: Gemfile blocks, rockets
+
+
+def _mock_gem_latest(name: str, version: str = "1.0.0", license_id: str = "MIT") -> None:
+    """Answer rubygems.org for an unpinned ``name``: latest version, then that version."""
+    respx.get(f"https://rubygems.org/api/v1/gems/{name}.json").mock(
+        return_value=httpx.Response(
+            200, json={"name": name, "version": version, "licenses": [license_id]}
+        )
+    )
+    _mock_gem(name, version, license_id)
+
+
+class TestRubyGemfileSourceBlocks:
+    """``git … do`` / ``github … do`` / ``path … do`` without a lockfile."""
+
+    _GEMFILE = """\
+        source "https://rubygems.org"
+        gem "regular"
+
+        git "https://tok3n@git.example.org/team/mono.git", branch: "stable" do
+          gem "git-a"
+          gem "git-b", "~> 2.0"
+          group :development do
+            gem "git-dev"
+          end
+          gem "own-option", path: "../own-option"
+        end
+
+        git("https://git.example.org/team/paren.git", :tag => "v3") do |repo|
+          gem "git-paren"
+        end
+
+        github "team/hub" do
+          gem "hub-a"
+        end
+
+        github "team/hub-ref", ref: "abc123" do
+          gem "hub-ref"
+        end
+
+        path "../components" do
+          gem "path-outside"
+        end
+
+        path "engines" do
+          gem "path-inside"
+        end
+
+        git REPO_URL do
+          gem "git-computed"
+        end
+
+        source "https://gems.internal.example.org" do
+          gem "mirrored"
+        end
+
+        platforms :ruby do
+          gem "platform-gem"
+        end
+
+        gem "after-blocks"
+        """
+
+    _FORKS = (
+        "git-a",
+        "git-b",
+        "git-dev",
+        "own-option",
+        "git-paren",
+        "hub-a",
+        "hub-ref",
+        "path-outside",
+        "git-computed",
+    )
+
+    @respx.mock
+    def test_gems_in_a_source_block_are_unknown_without_a_lookup(self, tmp_path):
+        project = tmp_path / "project"
+        _write(project / "Gemfile", self._GEMFILE)
+        # rubygems.org owns every one of these names, under another license.
+        for name in (*self._FORKS, "path-inside"):
+            _mock_gem_latest(name, "9.9.9", "GPL-3.0-only")
+        for name in ("regular", "mirrored", "platform-gem", "after-blocks"):
+            _mock_gem_latest(name)
+        _refuse_everything_else()
+        result, data = _check_json(project, "--dev", "--no-strict")
+        assert result.exit_code == 0
+        mono = "git+https://git.example.org/team/mono.git@stable"
+        assert _origins(data) == {
+            "regular": "",
+            "git-a": mono,
+            "git-b": mono,
+            "git-dev": mono,
+            # The line's own source option wins over the block.
+            "own-option": "../own-option",
+            "git-paren": "git+https://git.example.org/team/paren.git@v3",
+            "hub-a": "git+https://github.com/team/hub.git",
+            "hub-ref": "git+https://github.com/team/hub-ref.git@abc123",
+            "path-outside": "../components",
+            "git-computed": "unrecorded source",
+            # Another gem server is not a repository or a path: its gems, and
+            # the ones after the blocks close, are registry gems.
+            "mirrored": "",
+            "platform-gem": "",
+            "after-blocks": "",
+        }
+        rows = _rows(data)
+        assert all(rows[name]["license"] == "UNKNOWN" for name in self._FORKS)
+        assert all(
+            rows[name]["license"] == "MIT"
+            for name in ("regular", "mirrored", "platform-gem", "after-blocks")
+        )
+        assert rows["git-dev"]["group"] == "dev"
+        assert rows["git-a"]["source"] == "Gemfile"
+        assert _requests_mentioning(*self._FORKS, "path-inside") == []
+        assert _requests_mentioning("mirrored")
+        assert "tok3n" not in json.dumps(data)
+
+    @respx.mock
+    def test_strict_check_fails_until_the_block_gem_is_reviewed(self, tmp_path):
+        _write(
+            tmp_path / "Gemfile",
+            """\
+            github "team/hub", tag: "v1.4.0" do
+              gem "hub-a"
+            end
+            """,
+        )
+        _mock_gem_latest("hub-a", "9.9.9", "MIT")
+        _refuse_everything_else()
+        result, _ = _check_json(tmp_path)
+        assert result.exit_code == 1
+
+        _review_file(
+            tmp_path,
+            """\
+            [[review]]
+            ecosystem = "ruby"
+            package = "hub-a"
+            source = "git+https://github.com/team/hub.git@v1.4.0"
+            license = "MIT"
+            """,
+        )
+        result, data = _check_json(tmp_path)
+        assert result.exit_code == 0
+        assert _rows(data)["hub-a"]["reviewed"] is True
+        assert respx.calls.call_count == 0
+
+    @respx.mock
+    def test_lockfile_supplies_the_commit_for_a_block_gem(self, tmp_path):
+        _write(
+            tmp_path / "Gemfile",
+            """\
+            source "https://rubygems.org"
+            git "https://git.example.org/team/mono.git", branch: "stable" do
+              group :test do
+                gem "git-test"
+              end
+            end
+            """,
+        )
+        _write(
+            tmp_path / "Gemfile.lock",
+            """\
+            GIT
+              remote: https://git.example.org/team/mono.git
+              revision: 0123abcd
+              branch: stable
+              specs:
+                git-test (0.3.0)
+
+            DEPENDENCIES
+              git-test!
+            """,
+        )
+        _refuse_everything_else()
+        _, data = _check_json(tmp_path, "--dev", "--no-strict")
+        row = _rows(data)["git-test"]
+        assert row["origin"] == "git+https://git.example.org/team/mono.git@0123abcd"
+        assert (row["group"], row["resolved_version"], row["source"]) == ("dev", "0.3.0", "Gemfile")
+
+        _, data = _check_json(tmp_path, "--no-strict")
+        assert data["dependencies"] == []
+
+    @respx.mock
+    def test_stale_lockfile_cannot_make_a_block_gem_a_registry_gem(self, tmp_path):
+        _write(
+            tmp_path / "Gemfile",
+            """\
+            source "https://rubygems.org"
+            path "../components" do
+              gem "path-outside"
+            end
+            """,
+        )
+        _write(
+            tmp_path / "Gemfile.lock",
+            """\
+            GEM
+              remote: https://rubygems.org/
+              specs:
+                path-outside (1.0.0)
+
+            DEPENDENCIES
+              path-outside
+            """,
+        )
+        _mock_gem("path-outside", "1.0.0")
+        _refuse_everything_else()
+        result, data = _check_json(tmp_path)
+        assert result.exit_code == 1
+        row = _rows(data)["path-outside"]
+        assert (row["origin"], row["license"]) == ("../components", "UNKNOWN")
+        assert _requests_mentioning("path-outside") == []
+
+
+class TestRubyHashRocketSources:
+    @respx.mock
+    def test_hash_rocket_and_keyword_options_are_read_alike(self, tmp_path):
+        project = tmp_path / "project"
+        _write(
+            project / "Gemfile",
+            """\
+            source "https://rubygems.org"
+            gem "regular", :require => false
+            gem "rocket-git", :git => "https://tok3n@git.example.org/team/rocket-git.git",
+                              :branch => "main"
+            gem "rocket-hub", ">= 1.0", :github => "team/rocket-hub", :ref => "abc"
+            gem "rocket-path", :path => "../rocket-path"
+            gem "rocket-own", :path => "./engines/rocket-own"
+            gem "rocket-computed", :git => REPO, :tag => "v1"
+            gem "rocket-sym-rev", :git => "https://git.example.org/team/sym.git", :branch => :main
+            gem "keyword-git", git: "https://git.example.org/team/keyword-git.git", tag: "v2"
+            gem "mixed", :github => "team/mixed", tag: "v5"
+            gem "rocket-dev", :git => "https://git.example.org/team/rocket-dev.git", :group => :test
+            """,
+        )
+        forks = (
+            "rocket-git",
+            "rocket-hub",
+            "rocket-path",
+            "rocket-computed",
+            "rocket-sym-rev",
+            "keyword-git",
+            "mixed",
+            "rocket-dev",
+        )
+        for name in (*forks, "rocket-own"):
+            _mock_gem_latest(name, "9.9.9", "GPL-3.0-only")
+        _mock_gem_latest("regular")
+        _refuse_everything_else()
+        result, data = _check_json(project, "--dev", "--no-strict")
+        assert result.exit_code == 0
+        assert _origins(data) == {
+            "regular": "",
+            "rocket-git": "git+https://git.example.org/team/rocket-git.git@main",
+            "rocket-hub": "git+https://github.com/team/rocket-hub.git@abc",
+            "rocket-path": "../rocket-path",
+            "rocket-computed": "unrecorded source",
+            "rocket-sym-rev": "git+https://git.example.org/team/sym.git",
+            "keyword-git": "git+https://git.example.org/team/keyword-git.git@v2",
+            "mixed": "git+https://github.com/team/mixed.git@v5",
+            "rocket-dev": "git+https://git.example.org/team/rocket-dev.git",
+        }
+        rows = _rows(data)
+        assert all(rows[name]["license"] == "UNKNOWN" for name in forks)
+        assert rows["regular"]["license"] == "MIT"
+        assert rows["rocket-dev"]["group"] == "dev"
+        assert _requests_mentioning(*forks, "rocket-own") == []
+        assert "tok3n" not in json.dumps(data)
