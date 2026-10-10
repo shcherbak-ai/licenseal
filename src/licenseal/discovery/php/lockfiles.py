@@ -25,9 +25,19 @@ from pathlib import Path
 from typing import Any, cast
 
 from licenseal._graph import compute_direct_ancestors
-from licenseal.discovery._read import load_json
+from licenseal.discovery._read import (
+    load_json,
+    record_unexpected_type,
+    root_table,
+    typed_field,
+)
 from licenseal.discovery._walk import walk_project_files
+from licenseal.discovery.php.composer_json import composer_map
 from licenseal.models import Dependency, DependencyGroup, Ecosystem
+
+# What a gap names when an entry of ``packages`` / ``packages-dev``, or a
+# field inside one, is not the type the lockfile format defines.
+_PACKAGES_ENTRY = 'an entry of "packages"'
 
 # Lockfile lookup key for the per-package license map produced during parse.
 # Lowercased package name + exact resolved version — the Packagist resolver
@@ -118,8 +128,8 @@ def parse_composer_lockfile(
           string values are kept (signals "lockfile knew this entry but
           had no license" → resolver falls back to Packagist).
     """
-    data = load_json(path)
-    if not isinstance(data, dict):
+    data = root_table(path, load_json(path))
+    if data is None:
         return [], {}
 
     raw_packages: list[dict[str, Any]] = []
@@ -135,12 +145,11 @@ def parse_composer_lockfile(
                 if isinstance(n, str):
                     dev_names_set.add(n)
     for field_name in ("packages", "packages-dev"):
-        entries = data.get(field_name)
-        if not isinstance(entries, list):
-            continue
-        for entry in entries:
+        for entry in typed_field(path, data, field_name, list, f'"{field_name}"') or []:
             if isinstance(entry, dict):
                 raw_packages.append(cast("dict[str, Any]", entry))
+            else:
+                record_unexpected_type(path, _PACKAGES_ENTRY)
 
     license_map: LockfileLicenseMap = {}
     edges: dict[str, set[str]] = {}
@@ -149,9 +158,9 @@ def parse_composer_lockfile(
     pending: list[tuple[Dependency, bool]] = []
 
     for entry in raw_packages:
-        name = entry.get("name")
-        version = entry.get("version")
-        if not isinstance(name, str) or not isinstance(version, str):
+        name = typed_field(path, entry, "name", str, _PACKAGES_ENTRY)
+        version = typed_field(path, entry, "version", str, _PACKAGES_ENTRY)
+        if name is None or version is None:
             continue
         if _is_path_source(entry):
             continue
@@ -165,13 +174,10 @@ def parse_composer_lockfile(
 
         # Edge map (lowercased child names) — drop platform requires;
         # they're not Packagist packages.
-        require = entry.get("require")
-        if isinstance(require, dict):
-            children: set[str] = set()
-            for child_name in require:
-                if isinstance(child_name, str) and not _is_platform_require(child_name):
-                    children.add(child_name.lower())
-            edges.setdefault(normalized, set()).update(children)
+        require = composer_map(path, entry, "require", _PACKAGES_ENTRY)
+        edges.setdefault(normalized, set()).update(
+            child.lower() for child in require if not _is_platform_require(child)
+        )
 
         license_map[(normalized, canonical_version)] = _license_array_to_raw(entry.get("license"))
 
@@ -179,7 +185,10 @@ def parse_composer_lockfile(
             continue
         seen.add((normalized, canonical_version))
 
-        is_dev = bool(entry.get("dev", False)) or name in dev_names_set
+        # A ``dev`` flag that is not a boolean is not trusted to move a
+        # package out of the production set.
+        dev_flag = typed_field(path, entry, "dev", bool, _PACKAGES_ENTRY)
+        is_dev = bool(dev_flag) or name in dev_names_set
         is_direct = normalized in direct_names
 
         if is_dev and not include_dev:

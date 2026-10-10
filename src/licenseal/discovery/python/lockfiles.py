@@ -33,7 +33,13 @@ from typing import Any, cast
 from packaging.utils import canonicalize_name
 
 from licenseal._graph import compute_direct_ancestors
-from licenseal.discovery._read import load_json, load_toml
+from licenseal.discovery._read import (
+    load_json,
+    load_toml,
+    record_unexpected_type,
+    root_table,
+    typed_field,
+)
 from licenseal.discovery._walk import walk_project_files
 from licenseal.models import Dependency, DependencyGroup, Ecosystem
 
@@ -164,36 +170,44 @@ def _attribute(
 
 _Entry = tuple[str, tuple[str, ...]]  # (canonical name, requested extras)
 
+# What a gap names when a ``[[package]]`` entry, or a field inside one, is not
+# the type the lockfile format defines.
+_PACKAGE_ENTRY = "an entry of package"
 
-def _entries(field: object) -> list[_Entry]:
+
+def _entries(path: Path, field: object) -> list[_Entry]:
     """Parse a uv.lock dependency list such as ``[{ name = "django", extra = ["argon2"] }]``.
 
-    Malformed entries are skipped.
+    An absent field is an empty list. A value of a type the format does not
+    define is recorded as a gap and read as absent: a field that is not a
+    list is empty, an entry without a string ``name`` is no edge, and an
+    ``extra`` that is not a list of strings keeps only the strings.
     """
+    if field is None:
+        return []
     if not isinstance(field, list):
+        record_unexpected_type(path, _PACKAGE_ENTRY)
         return []
     out: list[_Entry] = []
     for raw in field:
         if not isinstance(raw, dict):
+            record_unexpected_type(path, _PACKAGE_ENTRY)
             continue
         entry = cast("dict[str, Any]", raw)
-        name = entry.get("name")
-        if not isinstance(name, str):
+        name = typed_field(path, entry, "name", str, _PACKAGE_ENTRY)
+        if name is None:
             continue
-        extras = entry.get("extra")
-        requested = (
-            tuple(e for e in extras if isinstance(e, str)) if isinstance(extras, list) else ()
-        )
-        out.append((_canon_name(name), requested))
+        extras = typed_field(path, entry, "extra", list, _PACKAGE_ENTRY) or []
+        if not all(isinstance(e, str) for e in extras):
+            record_unexpected_type(path, _PACKAGE_ENTRY)
+        out.append((_canon_name(name), tuple(e for e in extras if isinstance(e, str))))
     return out
 
 
-def _entries_by_key(field: object) -> dict[str, list[_Entry]]:
-    """``_entries`` for each key of an extras or dependency-groups table."""
-    if not isinstance(field, dict):
-        return {}
-    table = cast("dict[str, Any]", field)
-    return {key: _entries(value) for key, value in table.items()}
+def _entries_by_key(path: Path, table: dict[str, Any], key: str) -> dict[str, list[_Entry]]:
+    """``_entries`` for each key of a package's extras or dependency-groups table."""
+    field = typed_field(path, table, key, dict, _PACKAGE_ENTRY) or {}
+    return {name: _entries(path, value) for name, value in field.items()}
 
 
 def parse_uv_lock(
@@ -215,9 +229,7 @@ def parse_uv_lock(
     prod_root_names = {_canon_name(n) for n in prod_root_names}
     dev_root_names = {_canon_name(n) for n in dev_root_names}
     data = _load_toml(path)
-    packages = data.get("package", [])
-    if not isinstance(packages, list):
-        return []
+    packages = typed_field(path, data, "package", list) or []
 
     raw_pkgs: list[tuple[str, str]] = []  # (name, version)
     name_case: dict[str, str] = {}
@@ -227,9 +239,10 @@ def parse_uv_lock(
     seen: set[tuple[str, str]] = set()
     for raw in packages:
         if not isinstance(raw, dict):
+            record_unexpected_type(path, _PACKAGE_ENTRY)
             continue
         pkg = cast("dict[str, Any]", raw)
-        entries = _entries(pkg.get("dependencies"))
+        entries = _entries(path, pkg.get("dependencies"))
 
         # uv.lock includes the project being scanned as a [[package]] entry
         # itself: source = { editable = "." } for an installable project,
@@ -237,17 +250,17 @@ def parse_uv_lock(
         # with the member's path for workspace members. They are not external
         # deps to license-check, but their dependency tables (including extras
         # and dependency groups) say which extras of their deps get installed.
-        source = pkg.get("source", {})
-        if isinstance(source, dict) and ("virtual" in source or "editable" in source):
+        source = typed_field(path, pkg, "source", dict, _PACKAGE_ENTRY) or {}
+        if "virtual" in source or "editable" in source:
             for table in ("optional-dependencies", "dev-dependencies"):
-                for group_entries in _entries_by_key(pkg.get(table)).values():
+                for group_entries in _entries_by_key(path, pkg, table).values():
                     entries += group_entries
             requested += [(child, extra) for child, extras in entries for extra in extras]
             continue
 
-        name = pkg.get("name")
-        version = pkg.get("version")
-        if not isinstance(name, str) or not isinstance(version, str):
+        name = typed_field(path, pkg, "name", str, _PACKAGE_ENTRY)
+        version = typed_field(path, pkg, "version", str, _PACKAGE_ENTRY)
+        if name is None or version is None:
             continue
 
         normalized = _canon_name(name)
@@ -256,7 +269,7 @@ def parse_uv_lock(
         seen.add((normalized, version))
 
         requested += [(child, extra) for child, extras in entries for extra in extras]
-        for extra, extra_entries in _entries_by_key(pkg.get("optional-dependencies")).items():
+        for extra, extra_entries in _entries_by_key(path, pkg, "optional-dependencies").items():
             optional.setdefault(normalized, {}).setdefault(extra, []).extend(extra_entries)
 
         name_case[normalized] = name
@@ -319,9 +332,7 @@ def parse_poetry_lock(
     prod_root_names = {_canon_name(n) for n in prod_root_names}
     dev_root_names = {_canon_name(n) for n in dev_root_names}
     data = _load_toml(path)
-    packages = data.get("package", [])
-    if not isinstance(packages, list):
-        return []
+    packages = typed_field(path, data, "package", list) or []
 
     raw_pkgs: list[tuple[str, str]] = []
     name_case: dict[str, str] = {}
@@ -329,11 +340,12 @@ def parse_poetry_lock(
     seen: set[tuple[str, str]] = set()
     for raw in packages:
         if not isinstance(raw, dict):
+            record_unexpected_type(path, _PACKAGE_ENTRY)
             continue
         pkg = cast("dict[str, Any]", raw)
-        name = pkg.get("name")
-        version = pkg.get("version")
-        if not isinstance(name, str) or not isinstance(version, str):
+        name = typed_field(path, pkg, "name", str, _PACKAGE_ENTRY)
+        version = typed_field(path, pkg, "version", str, _PACKAGE_ENTRY)
+        if name is None or version is None:
             continue
 
         normalized = _canon_name(name)
@@ -341,11 +353,9 @@ def parse_poetry_lock(
             continue
         seen.add((normalized, version))
 
-        deps_field = pkg.get("dependencies", {})
-        children: list[str] = []
-        if isinstance(deps_field, dict):
-            # tomllib guarantees string keys, so no per-key isinstance check.
-            children = [_canon_name(k) for k in deps_field]
+        deps_field = typed_field(path, pkg, "dependencies", dict, _PACKAGE_ENTRY) or {}
+        # tomllib guarantees string keys, so no per-key isinstance check.
+        children = [_canon_name(k) for k in deps_field]
 
         name_case[normalized] = name
         edges.setdefault(normalized, set()).update(children)
@@ -402,28 +412,30 @@ def parse_pipfile_lock(
     """
     prod_root_names = {_canon_name(n) for n in prod_root_names}
     dev_root_names = {_canon_name(n) for n in dev_root_names}
-    data = load_json(path)
-    if not isinstance(data, dict):
+    data = root_table(path, load_json(path))
+    if data is None:
         return []
 
     out: list[Dependency] = []
+    # Both sections are read whatever ``include_dev`` is, so a malformed
+    # ``develop`` section is on record in either mode; only its rows are gated.
     for section, group in (
         ("default", DependencyGroup.PROD),
         ("develop", DependencyGroup.DEV),
     ):
-        if group == DependencyGroup.DEV and not include_dev:
-            continue
-        entries = data.get(section, {})
-        if not isinstance(entries, dict):
-            continue
+        entry_of = f'an entry of "{section}"'
+        entries = typed_field(path, data, section, dict, f'"{section}"') or {}
         for name, raw in entries.items():
-            if not isinstance(name, str) or not isinstance(raw, dict):
+            if not isinstance(raw, dict):
+                record_unexpected_type(path, entry_of)
                 continue
             meta = cast("dict[str, Any]", raw)
             if any(k in meta for k in _PIPFILE_NON_REGISTRY_KEYS):
                 continue
-            version = meta.get("version")
-            if not isinstance(version, str) or not version:
+            version = typed_field(path, meta, "version", str, entry_of)
+            if not version:
+                continue
+            if group == DependencyGroup.DEV and not include_dev:
                 continue
             normalized = _canon_name(name)
             is_root = normalized in prod_root_names or normalized in dev_root_names

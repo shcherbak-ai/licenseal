@@ -5,9 +5,9 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
-from licenseal.discovery._read import load_toml
+from licenseal.discovery._read import load_toml, record_unexpected_type, typed_field
 from licenseal.discovery._walk import walk_project_files
-from licenseal.discovery.python import DEV_GROUP_NAMES, parse_pep508_dep
+from licenseal.discovery.python import DEV_GROUP_NAMES, parse_pep508_dep, table_spec
 from licenseal.models import Dependency, DependencyGroup, Ecosystem
 
 # PEP 503: collapse runs of `-`, `_`, `.` to a single `-` and lowercase.
@@ -18,34 +18,41 @@ def _pep503_normalize(name: str) -> str:
     return _PEP503_NORMALIZE_RE.sub("-", name).lower()
 
 
-def _poetry_version(spec: str | dict[str, str]) -> str:
-    """Extract version constraint from a Poetry dependency spec."""
-    if isinstance(spec, str):
-        return spec
-    if isinstance(spec, dict):
-        return spec.get("version", "")
-    return ""
+def _project_table(filepath: Path, data: dict) -> dict:
+    """The PEP 621 ``[project]`` table, empty when absent or not a table."""
+    return typed_field(filepath, data, "project", dict) or {}
 
 
-def _poetry_extras(spec: str | dict) -> frozenset[str]:
-    """Extract extras from a Poetry dependency spec.
+def _poetry_table(filepath: Path, data: dict) -> dict:
+    """The ``[tool.poetry]`` table, empty when absent or not a table."""
+    tool = typed_field(filepath, data, "tool", dict) or {}
+    return typed_field(filepath, tool, "poetry", dict, "tool.poetry") or {}
 
-    Poetry's structured form ``{"version" = "^2", "extras" = ["socks"]}``
-    carries extras explicitly. String specs (``"^2.0"``) carry none.
+
+def _string_list(filepath: Path, value: object, section: str, *, entry: bool = False) -> list[str]:
+    """Return the strings of a manifest array of requirement strings.
+
+    ``value`` is ``section`` itself, or one of its entries when ``entry`` is
+    set (the list behind one extra). A value that is not an array, and an
+    item that is not a string, are recorded as gaps: iterating a string here
+    would yield one requirement per character.
     """
-    if isinstance(spec, dict):
-        extras = spec.get("extras")
-        if isinstance(extras, list):
-            return frozenset(e for e in extras if isinstance(e, str))
-    return frozenset()
+    entry_of = f"an entry of {section}"
+    if value is None:
+        return []
+    if not isinstance(value, list):
+        record_unexpected_type(filepath, entry_of if entry else section)
+        return []
+    strings = [item for item in value if isinstance(item, str)]
+    if len(strings) != len(value):
+        record_unexpected_type(filepath, entry_of)
+    return strings
 
 
 def _extract_deps(dep_list: list[str], group: DependencyGroup, source: str) -> list[Dependency]:
     """Convert a list of PEP 508 strings to Dependency objects."""
     deps = []
     for dep_str in dep_list:
-        if not isinstance(dep_str, str):
-            continue
         name, version, extras = parse_pep508_dep(dep_str)
         if name:
             deps.append(
@@ -61,21 +68,55 @@ def _extract_deps(dep_list: list[str], group: DependencyGroup, source: str) -> l
     return deps
 
 
-def _parse_pyproject_deps(data: dict, source: str) -> list[Dependency]:
-    """Extract dependencies from a single parsed pyproject.toml data dict."""
+def _poetry_deps(
+    filepath: Path, table: dict, section: str, group: DependencyGroup, source: str
+) -> list[Dependency]:
+    """Convert a Poetry dependency table (name → spec) to Dependency objects."""
+    deps = []
+    for name, spec in table.items():
+        # A list holds one constraint table per environment: a valid form
+        # with no single version, read as unconstrained.
+        version, extras = (
+            ("", frozenset())
+            if isinstance(spec, list)
+            else table_spec(filepath, spec, f"an entry of {section}")
+        )
+        deps.append(
+            Dependency(
+                name=name,
+                version_constraint=version,
+                ecosystem=Ecosystem.PYTHON,
+                group=group,
+                source=source,
+                extras=extras,
+            )
+        )
+    return deps
+
+
+def _parse_pyproject_deps(filepath: Path, data: dict, source: str) -> list[Dependency]:
+    """Extract dependencies from a single parsed pyproject.toml data dict.
+
+    A section or an entry that is not the type its format defines is
+    recorded as a gap on ``filepath`` and read as absent; every other section
+    is still read.
+    """
     deps: list[Dependency] = []
 
     # PEP 621: [project.dependencies]
-    project = data.get("project", {})
-    deps.extend(_extract_deps(project.get("dependencies", []), DependencyGroup.PROD, source))
+    project = _project_table(filepath, data)
+    prod_deps = _string_list(filepath, project.get("dependencies"), "project.dependencies")
+    deps.extend(_extract_deps(prod_deps, DependencyGroup.PROD, source))
 
     # PEP 621: [project.optional-dependencies]
-    optional = project.get("optional-dependencies", {})
+    optional_section = "project.optional-dependencies"
+    optional = typed_field(filepath, project, "optional-dependencies", dict, optional_section) or {}
     for group_name, group_deps in optional.items():
         group = (
             DependencyGroup.DEV if group_name.lower() in DEV_GROUP_NAMES else DependencyGroup.PROD
         )
-        deps.extend(_extract_deps(group_deps, group, source))
+        extra_deps = _string_list(filepath, group_deps, optional_section, entry=True)
+        deps.extend(_extract_deps(extra_deps, group, source))
 
     # PEP 735: [dependency-groups] (uv, pdm). Two-pass to resolve
     # ``{ include-group = "<other>" }`` directives correctly:
@@ -90,23 +131,25 @@ def _parse_pyproject_deps(data: dict, source: str) -> list[Dependency]:
     #      include edges, building the closure of dev-reachable groups.
     #   3. Classify each group's plain entries as DEV iff its name is in
     #      that closure; everything else stays PROD.
-    dep_groups = data.get("dependency-groups", {})
-    if isinstance(dep_groups, dict) and dep_groups:
+    dep_groups = typed_field(filepath, data, "dependency-groups", dict)
+    if dep_groups:
         group_strings: dict[str, list[str]] = {}
         include_edges: dict[str, set[str]] = {}
         for group_name, entries in dep_groups.items():
-            if not isinstance(group_name, str) or not isinstance(entries, list):
+            if not isinstance(entries, list):
+                record_unexpected_type(filepath, "an entry of dependency-groups")
                 continue
             normalized = group_name.lower()
             strings: list[str] = []
             includes: set[str] = set()
             for entry in entries:
+                inc = entry.get("include-group") if isinstance(entry, dict) else None
                 if isinstance(entry, str):
                     strings.append(entry)
-                elif isinstance(entry, dict):
-                    inc = entry.get("include-group")
-                    if isinstance(inc, str):
-                        includes.add(inc.lower())
+                elif isinstance(inc, str):
+                    includes.add(inc.lower())
+                else:
+                    record_unexpected_type(filepath, "an entry of dependency-groups")
             group_strings[normalized] = strings
             include_edges[normalized] = includes
         dev_reachable: set[str] = set()
@@ -122,41 +165,26 @@ def _parse_pyproject_deps(data: dict, source: str) -> list[Dependency]:
             deps.extend(_extract_deps(strings, group, source))
 
     # Poetry: [tool.poetry.dependencies] and [tool.poetry.group.*.dependencies]
-    tool = data.get("tool", {})
-    poetry = tool.get("poetry", {})
-    poetry_deps = poetry.get("dependencies", {})
-    for name, spec in poetry_deps.items():
-        if name.lower() == "python":
-            continue
-        deps.append(
-            Dependency(
-                name=name,
-                version_constraint=_poetry_version(spec),
-                ecosystem=Ecosystem.PYTHON,
-                group=DependencyGroup.PROD,
-                source=source,
-                extras=_poetry_extras(spec),
-            )
-        )
+    poetry = _poetry_table(filepath, data)
+    poetry_section = "tool.poetry.dependencies"
+    poetry_deps = typed_field(filepath, poetry, "dependencies", dict, poetry_section) or {}
+    # ``python`` is the interpreter constraint, not a package.
+    poetry_deps = {name: spec for name, spec in poetry_deps.items() if name.lower() != "python"}
+    deps.extend(_poetry_deps(filepath, poetry_deps, poetry_section, DependencyGroup.PROD, source))
 
     # Poetry groups
-    poetry_groups = poetry.get("group", {})
+    groups_section = "tool.poetry.group"
+    poetry_groups = typed_field(filepath, poetry, "group", dict, groups_section) or {}
     for group_name, group_data in poetry_groups.items():
         group = (
             DependencyGroup.DEV if group_name.lower() in DEV_GROUP_NAMES else DependencyGroup.PROD
         )
-        group_deps_dict = group_data.get("dependencies", {})
-        for name, spec in group_deps_dict.items():
-            deps.append(
-                Dependency(
-                    name=name,
-                    version_constraint=_poetry_version(spec),
-                    ecosystem=Ecosystem.PYTHON,
-                    group=group,
-                    source=source,
-                    extras=_poetry_extras(spec),
-                )
-            )
+        entry_of = f"an entry of {groups_section}"
+        if not isinstance(group_data, dict):
+            record_unexpected_type(filepath, entry_of)
+            continue
+        group_deps_dict = typed_field(filepath, group_data, "dependencies", dict, entry_of) or {}
+        deps.extend(_poetry_deps(filepath, group_deps_dict, groups_section, group, source))
 
     return deps
 
@@ -196,8 +224,8 @@ def discover_pyproject_dependencies(
         # Paths come from the walker rooted at project_path, so relative_to
         # is safe. ``as_posix`` keeps the JSON output cross-platform.
         source = pj.relative_to(project_path).as_posix()
-        pj_deps = _parse_pyproject_deps(data, source)
-        owner = _pyproject_owner_name(data)
+        pj_deps = _parse_pyproject_deps(pj, data, source)
+        owner = _pyproject_owner_name(pj, data)
         deps.extend(pj_deps)
         owners.extend([owner] * len(pj_deps))
 
@@ -212,15 +240,16 @@ def discover_pyproject_dependencies(
     return kept, len(deps) - len(kept)
 
 
-def _pyproject_owner_name(data: dict) -> str:
-    """Return the PEP 503-normalized name a pyproject.toml declares for itself."""
-    project = data.get("project") or {}
-    name = project.get("name") if isinstance(project, dict) else None
-    if not (isinstance(name, str) and name):
-        poetry = (data.get("tool") or {}).get("poetry") or {}
-        name = poetry.get("name") if isinstance(poetry, dict) else None
-    if isinstance(name, str) and name:
-        return _pep503_normalize(name)
+def _pyproject_owner_name(filepath: Path, data: dict) -> str:
+    """Return the PEP 503-normalized name a pyproject.toml declares for itself.
+
+    PEP 621 ``[project].name`` takes precedence; Poetry's ``[tool.poetry].name``
+    is the legacy form still seen on older packages.
+    """
+    for table in (_project_table(filepath, data), _poetry_table(filepath, data)):
+        name = table.get("name")
+        if isinstance(name, str) and name:
+            return _pep503_normalize(name)
     return ""
 
 
@@ -230,15 +259,9 @@ def _collect_local_python_names(paths: list[Path]) -> set[str]:
         data = load_toml(pj)
         if data is None:
             continue
-        # PEP 621 [project].name takes precedence; Poetry's [tool.poetry].name
-        # is the legacy form still seen on older packages.
-        project = data.get("project") or {}
-        name = project.get("name") if isinstance(project, dict) else None
-        if not (isinstance(name, str) and name):
-            poetry = (data.get("tool") or {}).get("poetry") or {}
-            name = poetry.get("name") if isinstance(poetry, dict) else None
-        if isinstance(name, str) and name:
-            names.add(_pep503_normalize(name))
+        name = _pyproject_owner_name(pj, data)
+        if name:
+            names.add(name)
     return names
 
 
@@ -256,14 +279,20 @@ def detect_project_license_pyproject(
         data = load_toml(pj)
         if data is None:
             continue
-        license_str = _detect_license_in_data(data)
+        license_str = _detect_license_in_data(pj, data)
         if license_str:
             return license_str
     return ""
 
 
-def _detect_license_in_data(data: dict) -> str:
-    project = data.get("project", {})
+def _detect_license_in_data(filepath: Path, data: dict) -> str:
+    """Read the project's license from one parsed pyproject.toml.
+
+    The license fields describe the project, not a dependency: one of the
+    wrong type reads as absent, which leaves the project at the strictest
+    default rather than losing anything from the scan.
+    """
+    project = _project_table(filepath, data)
 
     # PEP 639: license field can be a string (SPDX) or dict with text/file
     license_val = project.get("license")
@@ -271,18 +300,17 @@ def _detect_license_in_data(data: dict) -> str:
         return license_val
     if isinstance(license_val, dict):
         text = license_val.get("text", "")
-        if text:
+        if isinstance(text, str) and text:
             return text
 
     # Fallback: check classifiers
-    classifiers = project.get("classifiers", [])
-    for classifier in classifiers:
-        if classifier.startswith("License :: OSI Approved ::"):
+    classifiers = project.get("classifiers")
+    for classifier in classifiers if isinstance(classifiers, list) else []:
+        if isinstance(classifier, str) and classifier.startswith("License :: OSI Approved ::"):
             return classifier.split("::")[-1].strip()
 
     # Legacy Poetry layout: license lives under [tool.poetry] with no PEP 621.
-    poetry = data.get("tool", {}).get("poetry", {})
-    poetry_license = poetry.get("license")
+    poetry_license = _poetry_table(filepath, data).get("license")
     if isinstance(poetry_license, str) and poetry_license:
         return poetry_license
 

@@ -76,7 +76,7 @@
 | `violations` | int | Count where `verdict == "incompatible"`. |
 | `unknown` | int | Count where `verdict == "unknown"`. |
 | `reviewed` | int | Dependencies with a manual review override applied. Reviewed deps still appear in `warnings` / `violations` / `unknown` (the verdict counters are by classification, not by acceptance state), but the strict-mode CI exit code skips them — the review file `note` is the audit trail. |
-| `gaps` | int | Distinct manifests with an **analysis gap** — unreadable, undecodable, or unparseable files whose dependencies are missing from this report, or manifests that reference another file through a path that was not followed (see [`diagnostics` block](#diagnostics-block)). `total` therefore counts deps from successfully-parsed files only. Non-zero `gaps` fails strict mode. |
+| `gaps` | int | Distinct manifests with an **analysis gap** — unreadable, undecodable, or unparseable files whose dependencies are missing from this report, manifests that reference another file through a path that was not followed, or files holding a value of a type their format does not allow, which was read as absent (see [`diagnostics` block](#diagnostics-block)). `total` therefore counts only the deps that could be read. Non-zero `gaps` fails strict mode. |
 
 ## `diagnostics` block
 
@@ -86,6 +86,7 @@ Each entry is a manifest/lockfile read or parse anomaly surfaced during the scan
 "diagnostics": [
   { "path": "packages/api/requirements.txt", "reason": "could not be read (PermissionError); skipped", "severity": "gap" },
   { "path": "pom.xml", "reason": "is not valid XML; skipped", "severity": "gap" },
+  { "path": "web/package.json", "reason": "\"dependencies\" has an unexpected type; ignored", "severity": "gap" },
   { "path": "requirements-dev.txt", "reason": "decoded as latin-1 (not valid UTF-8); non-ASCII content may be wrong", "severity": "recovered" }
 ]
 ```
@@ -93,8 +94,8 @@ Each entry is a manifest/lockfile read or parse anomaly surfaced during the scan
 | Field | Type | Description |
 | --- | --- | --- |
 | `path` | string | Offending file, project-relative when under the scan root (else absolute). |
-| `reason` | string | Human-readable cause (unreadable, undecodable, unparseable, untraversable directory, a non-relative path reference that was not followed, or latin-1 fallback). A document nested too deeply to parse is reported as not valid in its format. |
-| `severity` | `"gap"` \| `"recovered"` | `gap` = a dependency-bearing file was lost (incomplete analysis — counted in `summary.gaps`, fails `--strict`). `recovered` = decoded with a caveat (latin-1 fallback) but the ASCII dependency lines survived — a warning, not a gap. |
+| `reason` | string | Human-readable cause (unreadable, undecodable, unparseable, untraversable directory, a non-relative path reference that was not followed, a value of an unexpected type, or latin-1 fallback). A document nested too deeply to parse is reported as not valid in its format. A value of an unexpected type is named by its section (`"dependencies"`, `project.optional-dependencies`) or as an entry of it (`an entry of "packages"`), never by the file's own text; several such values in one section are one entry. |
+| `severity` | `"gap"` \| `"recovered"` | `gap` = a dependency-bearing file was lost, or part of it could not be read (incomplete analysis — counted in `summary.gaps`, fails `--strict`). `recovered` = decoded with a caveat (latin-1 fallback) but the ASCII dependency lines survived — a warning, not a gap. |
 
 ## Per-dependency fields
 

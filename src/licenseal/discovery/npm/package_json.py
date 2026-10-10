@@ -4,7 +4,12 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from licenseal.discovery._read import load_json
+from licenseal.discovery._read import (
+    load_json,
+    record_unexpected_type,
+    root_table,
+    typed_field,
+)
 from licenseal.discovery._walk import walk_project_files
 from licenseal.models import Dependency, DependencyGroup, Ecosystem
 from licenseal.resolvers.npm_registry import _unpack_npm_alias  # noqa: PLC2701
@@ -18,6 +23,18 @@ from licenseal.resolvers.npm_registry import _unpack_npm_alias  # noqa: PLC2701
 # fixtures/ or examples/ tree that BASE_SKIP_DIRS hides (so the local-name
 # filter can't catch the dep by name match).
 _WORKSPACE_LOCAL_PREFIXES = ("file:", "link:", "workspace:")
+
+# The sections that declare dependencies, in the order they are read. Peer
+# dependencies are treated as prod. So are optional dependencies: npm installs
+# them by default and tolerates a failed install, but anything that lands in
+# node_modules at runtime is in use under its license. The common case is a
+# platform-specific native binding.
+_DEPENDENCY_SECTIONS = (
+    ("dependencies", DependencyGroup.PROD),
+    ("devDependencies", DependencyGroup.DEV),
+    ("peerDependencies", DependencyGroup.PROD),
+    ("optionalDependencies", DependencyGroup.PROD),
+)
 
 
 def _is_workspace_local_spec(spec: object) -> bool:
@@ -59,39 +76,24 @@ def _parse_package_json(filepath: Path, source: str) -> tuple[list[Dependency], 
     """
     deps: list[Dependency] = []
 
-    data = load_json(filepath)
-    if not isinstance(data, dict):
+    data = root_table(filepath, load_json(filepath))
+    if data is None:
         return deps, ""
 
-    owner_name = data.get("name") if isinstance(data.get("name"), str) else ""
+    declared_name = data.get("name")
+    owner_name = declared_name if isinstance(declared_name, str) else ""
 
-    # Production dependencies
-    for name, version in data.get("dependencies", {}).items():
-        if _is_workspace_local_spec(version):
-            continue
-        _emit_dep(name, version, DependencyGroup.PROD, source, deps)
-
-    # Dev dependencies
-    for name, version in data.get("devDependencies", {}).items():
-        if _is_workspace_local_spec(version):
-            continue
-        _emit_dep(name, version, DependencyGroup.DEV, source, deps)
-
-    # Peer dependencies (treat as prod)
-    for name, version in data.get("peerDependencies", {}).items():
-        if _is_workspace_local_spec(version):
-            continue
-        _emit_dep(name, version, DependencyGroup.PROD, source, deps)
-
-    # Optional dependencies. npm installs them by default; failure to install
-    # is tolerated, but anything that lands in node_modules at runtime is in
-    # use under its license. Group PROD: consumers running `npm install` with
-    # no flags get them. Common case is platform-specific native bindings
-    # (better-sqlite3, sharp, fsevents, esbuild's per-platform binaries).
-    for name, version in data.get("optionalDependencies", {}).items():
-        if _is_workspace_local_spec(version):
-            continue
-        _emit_dep(name, version, DependencyGroup.PROD, source, deps)
+    for section, group in _DEPENDENCY_SECTIONS:
+        entries = typed_field(filepath, data, section, dict, f'"{section}"') or {}
+        for name, spec in entries.items():
+            if not isinstance(spec, str):
+                # The name is still declared, so it stays in the scan with
+                # no constraint rather than disappearing with its spec.
+                record_unexpected_type(filepath, f'an entry of "{section}"')
+                spec = ""
+            if _is_workspace_local_spec(spec):
+                continue
+            _emit_dep(name, spec, group, source, deps)
 
     return deps, owner_name
 
@@ -143,8 +145,8 @@ def discover_npm_dependencies(
 def _collect_local_names(paths: list[Path]) -> set[str]:
     names: set[str] = set()
     for pj in paths:
-        data = load_json(pj)
-        if not isinstance(data, dict):
+        data = root_table(pj, load_json(pj))
+        if data is None:
             continue
         name = data.get("name")
         if isinstance(name, str) and name:
@@ -165,8 +167,8 @@ def detect_project_license_package_json(
     when present, then nested packages depth-first.
     """
     for pj in walk_project_files(project_path, "package.json", exclude_paths=exclude_paths):
-        data = load_json(pj)
-        if not isinstance(data, dict):
+        data = root_table(pj, load_json(pj))
+        if data is None:
             continue
         license_val = data.get("license", "")
         if isinstance(license_val, str) and license_val:

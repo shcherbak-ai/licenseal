@@ -3,8 +3,12 @@
 from __future__ import annotations
 
 import re
+from pathlib import Path
+from typing import Any, cast
 
 from packaging.requirements import Requirement
+
+from licenseal.discovery._read import record_unexpected_type, typed_field
 
 # Everything ``Requirement(text)`` raises on text it cannot parse.
 # ``InvalidRequirement`` is a ``ValueError``. The marker parser adds the rest:
@@ -27,6 +31,28 @@ _PATH_TOKEN_RE = re.compile(r"(?!\S*://)\S*(?:/|\\\S)")
 # Used across pyproject.toml optional-dependencies/dependency-groups,
 # setup.cfg extras_require, and requirements filename patterns.
 DEV_GROUP_NAMES = frozenset({"dev", "test", "tests", "testing", "lint", "ci", "docs"})
+
+
+def table_spec(path: Path, spec: object, what: str) -> tuple[str, frozenset[str]]:
+    """Read a Poetry or Pipfile dependency spec into ``(version, extras)``.
+
+    A spec is a version string, or a table whose ``version`` is a string and
+    whose ``extras`` is a list of strings; both keys are optional. Anything
+    of another type is recorded as a gap on ``path``, named ``what``, and
+    read as absent: the dependency is kept, without the constraint or the
+    extras that could not be read.
+    """
+    if isinstance(spec, str):
+        return spec, frozenset()
+    if not isinstance(spec, dict):
+        record_unexpected_type(path, what)
+        return "", frozenset()
+    table = cast("dict[str, Any]", spec)
+    version = typed_field(path, table, "version", str, what) or ""
+    extras = typed_field(path, table, "extras", list, what) or []
+    if not all(isinstance(extra, str) for extra in extras):
+        record_unexpected_type(path, what)
+    return version, frozenset(extra for extra in extras if isinstance(extra, str))
 
 
 def parse_pep508_dep(dep_str: str) -> tuple[str, str, frozenset[str]]:

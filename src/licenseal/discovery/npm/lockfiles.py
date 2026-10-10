@@ -28,6 +28,9 @@ from licenseal.discovery._read import (
     load_json,
     load_yaml,
     record_parse_failure,
+    record_unexpected_type,
+    root_table,
+    typed_field,
 )
 from licenseal.discovery._walk import walk_project_files
 from licenseal.models import Dependency, DependencyGroup, Ecosystem
@@ -176,7 +179,14 @@ def _finalize(
     return out
 
 
-def _collect_npm_edge_children(meta: dict[str, Any], *, pnpm_references: bool = False) -> list[str]:
+# What a gap names when an entry of a lockfile's package map, or a field inside
+# one, is not the type the lockfile format defines.
+_PACKAGES_ENTRY = 'an entry of "packages"'
+
+
+def _collect_npm_edge_children(
+    path: Path, meta: dict[str, Any], what: str, *, pnpm_references: bool = False
+) -> list[str]:
     """Union dependencies + peerDependencies + optionalDependencies (lowercased names).
 
     Also captures ``transitivePeerDependencies`` (pnpm-lock v9 ``snapshots:``
@@ -186,21 +196,25 @@ def _collect_npm_edge_children(meta: dict[str, Any], *, pnpm_references: bool = 
 
     ``pnpm_references`` is set for pnpm-lock maps, whose values can name the
     real package behind an alias key — see :func:`_pnpm_edge_target`.
+
+    A field of another type holds edges that cannot be read: it is recorded
+    as a gap on ``path``, named ``what``. So is a pnpm map value that is
+    neither a string nor empty, since it cannot say which package it means;
+    the edge then points at its key.
     """
     children: list[str] = []
     for field_name in ("dependencies", "peerDependencies", "optionalDependencies"):
-        deps_dict = meta.get(field_name)
-        if isinstance(deps_dict, dict):
-            for child_name, value in deps_dict.items():
-                if isinstance(child_name, str):
-                    if pnpm_references:
-                        child_name = _pnpm_edge_target(child_name, value)
-                    children.append(child_name.lower())
-    tpd = meta.get("transitivePeerDependencies")
-    if isinstance(tpd, list):
-        for child_name in tpd:
+        deps_dict = typed_field(path, meta, field_name, dict, what) or {}
+        for child_name, value in deps_dict.items():
             if isinstance(child_name, str):
+                if pnpm_references:
+                    if value is not None and not isinstance(value, str):
+                        record_unexpected_type(path, what)
+                    child_name = _pnpm_edge_target(child_name, value)
                 children.append(child_name.lower())
+    for child_name in typed_field(path, meta, "transitivePeerDependencies", list, what) or []:
+        if isinstance(child_name, str):
+            children.append(child_name.lower())
     return children
 
 
@@ -220,24 +234,21 @@ def parse_package_lock_json(
     - **lockfileVersion 1**: nested ``dependencies`` tree where each entry can
       itself contain a nested ``dependencies`` map for sub-resolved versions.
     """
-    data = load_json(path)
-    if not isinstance(data, dict):
+    data = root_table(path, load_json(path))
+    if data is None:
         return []
 
-    if "packages" not in data and isinstance(data.get("dependencies"), dict):
+    if "packages" not in data:
+        tree = typed_field(path, data, "dependencies", dict, '"dependencies"') or {}
         try:
-            return _parse_package_lock_v1(
-                data["dependencies"], prod_root_names, dev_root_names, include_dev
-            )
+            return _parse_package_lock_v1(path, tree, prod_root_names, dev_root_names, include_dev)
         except RecursionError:
             # The tree walk recurses once per nesting level, so a tree the JSON
             # parser accepted can still be too deep to walk.
             record_parse_failure(path, "JSON")
             return []
 
-    packages = data.get("packages")
-    if not isinstance(packages, dict):
-        return []
+    packages = typed_field(path, data, "packages", dict, '"packages"') or {}
 
     # First pass: build the alias→canonical map. npm uses an alias when a dep
     # is declared as ``"alias": "npm:target@spec"``; the entry's key path
@@ -264,12 +275,15 @@ def parse_package_lock_json(
     edges: dict[str, set[str]] = {}
     name_case: dict[str, str] = {}
     for key, raw in packages.items():
-        if key == "" or not isinstance(raw, dict):
+        if key == "":
             # The empty-string key holds the project's own metadata; skip.
             continue
+        if not isinstance(raw, dict):
+            record_unexpected_type(path, _PACKAGES_ENTRY)
+            continue
         meta = cast("dict[str, Any]", raw)
-        version = meta.get("version")
-        if not isinstance(version, str):
+        version = typed_field(path, meta, "version", str, _PACKAGES_ENTRY)
+        if version is None:
             continue
 
         # Only `node_modules/<name>` keys are installed-from-registry. Other
@@ -289,12 +303,11 @@ def parse_package_lock_json(
         if not key_name:
             continue
         # Prefer the declared canonical name when present (npm aliases).
-        declared = meta.get("name")
-        name = declared if isinstance(declared, str) and declared else key_name
+        name = typed_field(path, meta, "name", str, _PACKAGES_ENTRY) or key_name
 
         normalized = name.lower()
         edges.setdefault(normalized, set()).update(
-            _resolve_alias(c) for c in _collect_npm_edge_children(meta)
+            _resolve_alias(c) for c in _collect_npm_edge_children(path, meta, _PACKAGES_ENTRY)
         )
         name_case.setdefault(normalized, name)
 
@@ -320,6 +333,7 @@ def _depth_from_key(key: str) -> int:
 
 
 def _parse_package_lock_v1(
+    path: Path,
     deps_map: dict[str, Any],
     prod_root_names: set[str],
     dev_root_names: set[str],
@@ -336,24 +350,23 @@ def _parse_package_lock_v1(
     seen: set[tuple[str, str]] = set()
     edges: dict[str, set[str]] = {}
     name_case: dict[str, str] = {}
+    entry_of = 'an entry of "dependencies"'
 
     def _walk(current: dict[str, Any], depth: int) -> None:
         for name, raw in current.items():
-            if not isinstance(name, str) or not isinstance(raw, dict):
+            if not isinstance(raw, dict):
+                record_unexpected_type(path, entry_of)
                 continue
             meta = cast("dict[str, Any]", raw)
-            version = meta.get("version")
-            if not isinstance(version, str):
+            version = typed_field(path, meta, "version", str, entry_of)
+            if version is None:
                 continue
 
             normalized = name.lower()
             name_case.setdefault(normalized, name)
 
-            requires = meta.get("requires")
-            if isinstance(requires, dict):
-                edges.setdefault(normalized, set()).update(
-                    n.lower() for n in requires if isinstance(n, str)
-                )
+            requires = typed_field(path, meta, "requires", dict, entry_of) or {}
+            edges.setdefault(normalized, set()).update(n.lower() for n in requires)
 
             if (normalized, version) not in seen:
                 seen.add((normalized, version))
@@ -367,8 +380,8 @@ def _parse_package_lock_v1(
                     )
                 )
 
-            nested = meta.get("dependencies")
-            if isinstance(nested, dict):
+            nested = typed_field(path, meta, "dependencies", dict, entry_of)
+            if nested:
                 _walk(nested, depth + 1)
 
     _walk(deps_map, 1)
@@ -385,20 +398,21 @@ def parse_pnpm_lock(
     include_dev: bool,
 ) -> list[Dependency]:
     """Parse a `pnpm-lock.yaml` into a flat dep list."""
-    data = load_yaml(path)
-    if not isinstance(data, dict):
+    data = root_table(path, load_yaml(path))
+    if data is None:
         return []
 
-    packages = data.get("packages")
-    if not isinstance(packages, dict):
-        return []
+    packages = typed_field(path, data, "packages", dict, '"packages"') or {}
 
     deps: list[Dependency] = []
     seen: set[tuple[str, str]] = set()
     edges: dict[str, set[str]] = {}
     name_case: dict[str, str] = {}
     for key, raw in packages.items():
+        # A package key always holds an ``@``, so YAML never reads a real one
+        # as anything but a string.
         if not isinstance(key, str) or not isinstance(raw, dict):
+            record_unexpected_type(path, _PACKAGES_ENTRY)
             continue
         # pnpm-lock keys for non-registry deps embed the spec after the `@`:
         # ``'pkg@file:../tmp/pkg-0.0.0.tgz'``, ``'pkg@link:../sibling'``,
@@ -419,7 +433,7 @@ def parse_pnpm_lock(
         meta = cast("dict[str, Any]", raw)
         normalized = name.lower()
         edges.setdefault(normalized, set()).update(
-            _collect_npm_edge_children(meta, pnpm_references=True)
+            _collect_npm_edge_children(path, meta, _PACKAGES_ENTRY, pnpm_references=True)
         )
         name_case.setdefault(normalized, name)
 
@@ -443,17 +457,18 @@ def parse_pnpm_lock(
     # that ``_PNPM_KEY_RE`` already strips. Union edges across peer-resolved
     # variants of the same package: for license scanning we want every
     # transitive that any variant reached.
-    snapshots = data.get("snapshots")
-    if isinstance(snapshots, dict):
-        for snap_key, snap_raw in snapshots.items():
-            if not isinstance(snap_key, str) or not isinstance(snap_raw, dict):
-                continue
-            snap_name, _ = _parse_pnpm_package_key(snap_key)
-            if not snap_name:
-                continue
-            edges.setdefault(snap_name.lower(), set()).update(
-                _collect_npm_edge_children(snap_raw, pnpm_references=True)
-            )
+    snapshots_entry = 'an entry of "snapshots"'
+    snapshots = typed_field(path, data, "snapshots", dict, '"snapshots"') or {}
+    for snap_key, snap_raw in snapshots.items():
+        if not isinstance(snap_key, str) or not isinstance(snap_raw, dict):
+            record_unexpected_type(path, snapshots_entry)
+            continue
+        snap_name, _ = _parse_pnpm_package_key(snap_key)
+        if not snap_name:
+            continue
+        edges.setdefault(snap_name.lower(), set()).update(
+            _collect_npm_edge_children(path, snap_raw, snapshots_entry, pnpm_references=True)
+        )
 
     return _finalize(deps, edges, name_case, prod_root_names, dev_root_names, include_dev)
 
@@ -584,12 +599,13 @@ def _parse_yarn_berry(
     include_dev: bool,
 ) -> list[Dependency]:
     try:
-        data = yaml.safe_load(text)
+        data = root_table(path, yaml.safe_load(text))
     except (yaml.YAMLError, RecursionError):
         record_parse_failure(path, "YAML")
         return []
-    if not isinstance(data, dict):
+    if data is None:
         return []
+    entry = "a package entry"
 
     # First pass: collect alias→canonical mappings from any aliased descriptor.
     alias_to_canonical: dict[str, str] = {}
@@ -611,11 +627,16 @@ def _parse_yarn_berry(
     edges: dict[str, set[str]] = {}
     name_case: dict[str, str] = {}
     for key, raw in data.items():
-        if key == "__metadata" or not isinstance(raw, dict):
+        if key == "__metadata":
+            continue
+        # A descriptor key always holds an ``@``, so YAML never reads a real
+        # one as anything but a string.
+        if not isinstance(key, str) or not isinstance(raw, dict):
+            record_unexpected_type(path, entry)
             continue
         meta = cast("dict[str, Any]", raw)
-        version = meta.get("version")
-        if not isinstance(version, str):
+        version = typed_field(path, meta, "version", str, entry)
+        if version is None:
             continue
         # Berry keys: "react@npm:^18, react@npm:18.2.0"
         first = key.split(",")[0].strip()
@@ -624,12 +645,8 @@ def _parse_yarn_berry(
             continue
         normalized = name.lower()
 
-        deps_field = meta.get("dependencies", {})
-        children: list[str] = []
-        if isinstance(deps_field, dict):
-            for child_name in deps_field:
-                if isinstance(child_name, str):
-                    children.append(_resolve_alias(child_name))
+        deps_field = typed_field(path, meta, "dependencies", dict, entry) or {}
+        children = [_resolve_alias(child) for child in deps_field if isinstance(child, str)]
         edges.setdefault(normalized, set()).update(children)
         name_case.setdefault(normalized, name)
 
@@ -843,35 +860,37 @@ def parse_bun_lock(
         return []
     cleaned = _BUN_TRAILING_COMMA_RE.sub(r"\1", raw_text)
     try:
-        data = json.loads(cleaned)
+        data = root_table(path, json.loads(cleaned))
     except (json.JSONDecodeError, RecursionError):
         record_parse_failure(path, "JSON")
         return []
-    if not isinstance(data, dict):
+    if data is None:
         return []
 
-    packages = data.get("packages")
-    if not isinstance(packages, dict):
-        return []
+    packages = typed_field(path, data, "packages", dict, '"packages"') or {}
 
     deps: list[Dependency] = []
     seen: set[tuple[str, str]] = set()
     edges: dict[str, set[str]] = {}
     name_case: dict[str, str] = {}
     for key, raw in packages.items():
-        if not isinstance(key, str) or not isinstance(raw, list) or not raw:
-            continue
         # First element is the resolved "name@version" id; second is URL or
-        # empty; third is the meta dict; fourth is the integrity hash.
-        resolved_id = raw[0] if isinstance(raw[0], str) else ""
+        # empty; third is the meta dict; fourth is the integrity hash. The
+        # tuple is shorter for a non-registry source, so only the id's type
+        # is fixed.
+        if not isinstance(raw, list) or not raw or not isinstance(raw[0], str):
+            record_unexpected_type(path, _PACKAGES_ENTRY)
+            continue
         meta = raw[2] if len(raw) > 2 and isinstance(raw[2], dict) else {}
 
-        name, version = _parse_bun_resolved_id(resolved_id, fallback_key=key)
+        name, version = _parse_bun_resolved_id(raw[0], fallback_key=key)
         if not name or not version:
             continue
 
         normalized = name.lower()
-        edges.setdefault(normalized, set()).update(_collect_npm_edge_children(meta))
+        edges.setdefault(normalized, set()).update(
+            _collect_npm_edge_children(path, meta, _PACKAGES_ENTRY)
+        )
         name_case.setdefault(normalized, name)
 
         # ``name@workspace:path`` is one of the project's own packages, not a

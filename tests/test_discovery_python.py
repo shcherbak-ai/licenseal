@@ -13,7 +13,6 @@ from licenseal.discovery.python import parse_pep508_dep
 from licenseal.discovery.python.pipfile import discover_pipfile_dependencies
 from licenseal.discovery.python.pyproject import (
     _extract_deps,
-    _poetry_version,
     detect_project_license_pyproject,
     discover_pyproject_dependencies,
 )
@@ -1520,7 +1519,26 @@ class TestPoetryDictVersion:
         click_dep = next(d for d in deps if d.name == "click")
         assert click_dep.version_constraint == "^8.0"
 
-    def test_poetry_version_unexpected_type(self):
-        """Unexpected type for spec should return empty string."""
-
-        assert _poetry_version(42) == ""  # type: ignore[arg-type]
+    def test_poetry_spec_of_an_unexpected_type_is_unconstrained_and_a_gap(self, tmp_path):
+        """A spec that is neither a version string, a table, nor a list of
+        tables reads as no constraint. The dependency is kept, the entries
+        beside it are still read, and the unreadable spec is on record."""
+        manifest = tmp_path / "pyproject.toml"
+        manifest.write_text(
+            textwrap.dedent("""\
+            [tool.poetry.dependencies]
+            python = "^3.10"
+            click = 42
+            rich = "^13"
+            """)
+        )
+        with collect_read_diagnostics() as diags:
+            deps, _ = discover_pyproject_dependencies(tmp_path)
+        assert [(d.name, d.version_constraint) for d in deps] == [("click", ""), ("rich", "^13")]
+        assert [(d.path, d.reason, d.is_gap) for d in diags] == [
+            (
+                manifest,
+                "an entry of tool.poetry.dependencies has an unexpected type; ignored",
+                True,
+            )
+        ]

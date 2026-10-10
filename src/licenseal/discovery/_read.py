@@ -19,8 +19,9 @@ sink, partitioned into:
 
 * **gap** (``is_gap=True``) — a manifest that may declare dependencies was lost
   (unreadable, undecodable, unparseable, in a subtree we couldn't enter, or
-  referenced through a path that is not followed). Analysis is *incomplete*;
-  ``--strict`` treats this like an UNKNOWN and fails.
+  referenced through a path that is not followed), or part of one was (a
+  value of a type its format does not allow, read as absent). Analysis is
+  *incomplete*; ``--strict`` treats this like an UNKNOWN and fails.
 * **recovered** (``is_gap=False``) — decoded with a caveat (latin-1 fallback);
   the ASCII dependency lines survived, so analysis is complete but lossy for any
   non-ASCII content. Worth a warning, not a failure.
@@ -39,7 +40,7 @@ import sys
 from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, TypeVar, cast
 
 import yaml
 
@@ -58,9 +59,14 @@ __all__ = [
     "read_bytes",
     "read_xml_bytes",
     "record_parse_failure",
+    "record_unexpected_type",
     "record_walk_error",
     "rejected_path_reference",
+    "root_table",
+    "typed_field",
 ]
+
+_T = TypeVar("_T")
 
 
 # Largest manifest licenseal will read into memory. A real lockfile for a big
@@ -127,6 +133,51 @@ def record_parse_failure(path: Path, fmt: str) -> None:
     internally, so their callers only check for ``None``.
     """
     _record(path, f"is not valid {fmt}; skipped", is_gap=True)
+
+
+def record_unexpected_type(path: Path, what: str) -> None:
+    """Record that ``what`` in ``path`` has a type its format does not allow (a gap).
+
+    A manifest that parses can still put a string where the format wants a
+    table, or a number where it wants a version string. The parser reads such
+    a value as absent and carries on with the rest of the file; this records
+    it, so whatever the value was meant to declare is not lost silently.
+
+    ``what`` comes from the parser's own vocabulary (``project.dependencies``,
+    ``an entry of "packages"``), never from the manifest: one reason per
+    section keeps a file with many bad entries to one line.
+    """
+    _record(path, f"{what} has an unexpected type; ignored", is_gap=True)
+
+
+def typed_field(
+    path: Path, table: dict[str, Any], key: str, kind: type[_T], what: str = ""
+) -> _T | None:
+    """Return ``table[key]`` when it is a ``kind``, else ``None``.
+
+    A missing key and a null value both read as absent: neither can hold a
+    dependency. A value of any other type is recorded as a gap named ``what``
+    (the key itself when omitted).
+    """
+    value = table.get(key)
+    if value is None or isinstance(value, kind):
+        return value
+    record_unexpected_type(path, what or key)
+    return None
+
+
+def root_table(path: Path, data: object) -> dict[str, Any] | None:
+    """Return a parsed document's top level when it is a table, else ``None``.
+
+    ``data`` is what :func:`load_json` or :func:`load_yaml` returned. ``None``
+    is a file that failed to load (already recorded) or an empty document;
+    any other non-table top level is recorded as a gap.
+    """
+    if isinstance(data, dict):
+        return cast("dict[str, Any]", data)
+    if data is not None:
+        record_unexpected_type(path, "the top level")
+    return None
 
 
 def record_walk_error(exc: OSError) -> None:

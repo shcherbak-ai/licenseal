@@ -24,7 +24,12 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from licenseal.discovery._read import load_json
+from licenseal.discovery._read import (
+    load_json,
+    record_unexpected_type,
+    root_table,
+    typed_field,
+)
 from licenseal.discovery._walk import walk_project_files
 from licenseal.discovery.r._lock import SpecInfo, build_lock_dependencies
 from licenseal.models import Dependency
@@ -37,6 +42,14 @@ def find_renv_lockfiles(
 ) -> list[Path]:
     """Return every ``renv.lock`` in the project tree."""
     return walk_project_files(project_path, "renv.lock", exclude_paths=exclude_paths)
+
+
+# What a gap names when an entry of ``Packages``, or a field inside one, is
+# not the type the lockfile format defines.
+_PACKAGES_ENTRY = 'an entry of "Packages"'
+
+# The fields of an entry that are read as strings.
+_ENTRY_STRINGS = ("Package", "Version", "Source", "Repository")
 
 
 def _is_on_cran(entry: dict) -> bool:
@@ -57,31 +70,37 @@ def parse_renv_lock(
     dev_direct_names: set[str],
     include_dev: bool,
 ) -> list[Dependency]:
-    """Parse ``renv.lock`` into Dependencies with edge-aware group attribution."""
-    data = load_json(path)
-    if not isinstance(data, dict):
+    """Parse ``renv.lock`` into Dependencies with edge-aware group attribution.
+
+    A value of a type the format does not define is recorded as a gap and
+    read as absent: a package without a usable ``Version`` is unpinned, one
+    without a usable ``Source`` is off-registry.
+    """
+    data = root_table(path, load_json(path))
+    if data is None:
         return []
-    packages = data.get("Packages")
-    if not isinstance(packages, dict):
-        return []
+    packages = typed_field(path, data, "Packages", dict, '"Packages"') or {}
 
     spec_info: SpecInfo = {}
     edges: dict[str, set[str]] = {}
     for key, entry in packages.items():
         if not isinstance(entry, dict):
+            record_unexpected_type(path, _PACKAGES_ENTRY)
             continue
-        name = str(entry.get("Package") or key).strip()
+        strings = {
+            field: typed_field(path, entry, field, str, _PACKAGES_ENTRY) or ""
+            for field in _ENTRY_STRINGS
+        }
+        name = (strings["Package"] or key).strip()
         if not name:
             continue
         normalized = name.lower()
-        version = str(entry.get("Version", "")).strip()
-        off_registry = not _is_on_cran(entry)
-        reqs = entry.get("Requirements")
-        child_names = (
-            [r.strip() for r in reqs if isinstance(r, str) and r.strip()]
-            if isinstance(reqs, list)
-            else []
-        )
+        version = strings["Version"].strip()
+        off_registry = not _is_on_cran(strings)
+        reqs = typed_field(path, entry, "Requirements", list, _PACKAGES_ENTRY) or []
+        if not all(isinstance(r, str) for r in reqs):
+            record_unexpected_type(path, _PACKAGES_ENTRY)
+        child_names = [r.strip() for r in reqs if isinstance(r, str) and r.strip()]
         spec_info.setdefault(normalized, (name, version, off_registry))
         edges.setdefault(normalized, set()).update(c.lower() for c in child_names)
 

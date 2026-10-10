@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 
 from licenseal.discovery import discover_all_dependencies
+from licenseal.discovery._read import collect_read_diagnostics
 from licenseal.discovery.php.composer_json import (
     _license_field_to_raw,
     detect_project_license_composer_json,
@@ -162,10 +163,17 @@ class TestDiscoverComposerDependencies:
         deps, _ = discover_composer_dependencies(tmp_path)
         assert deps == []
 
-    def test_non_string_require_values_skipped(self, tmp_path):
-        (tmp_path / "composer.json").write_text(json.dumps({"require": {"vendor/pkg": 42}}))
-        deps, _ = discover_composer_dependencies(tmp_path)
-        assert deps == []
+    def test_non_string_require_value_is_unconstrained_and_a_gap(self, tmp_path):
+        # The package is still declared, so it stays in the scan; only the
+        # constraint is unreadable, and that is on record.
+        manifest = tmp_path / "composer.json"
+        manifest.write_text(json.dumps({"require": {"vendor/pkg": 42}}))
+        with collect_read_diagnostics() as diags:
+            deps, _ = discover_composer_dependencies(tmp_path)
+        assert [(d.name, d.version_constraint) for d in deps] == [("vendor/pkg", "")]
+        assert [(d.path, d.reason, d.is_gap) for d in diags] == [
+            (manifest, 'an entry of "require" has an unexpected type; ignored', True)
+        ]
 
 
 class TestDetectProjectLicenseComposerJson:

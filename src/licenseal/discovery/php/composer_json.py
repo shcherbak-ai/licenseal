@@ -27,8 +27,14 @@ UNKNOWN path absorbs them; users can override via ``licenseal.review.toml``.
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 
-from licenseal.discovery._read import load_json
+from licenseal.discovery._read import (
+    load_json,
+    record_unexpected_type,
+    root_table,
+    typed_field,
+)
 from licenseal.discovery._walk import walk_project_files
 from licenseal.models import Dependency, DependencyGroup, Ecosystem
 
@@ -55,27 +61,42 @@ def _license_field_to_raw(value: object) -> str:
     return ""
 
 
+def composer_map(path: Path, table: dict[str, Any], key: str, what: str = "") -> dict[str, Any]:
+    """Return the ``key`` map of a Composer document, empty when absent.
+
+    PHP serialises an empty map as an empty array, so ``[]`` is an empty map
+    here. Any other value that is not an object is recorded as a gap named
+    ``what`` (the quoted key when omitted).
+    """
+    if table.get(key) == []:
+        return {}
+    return typed_field(path, table, key, dict, what or f'"{key}"') or {}
+
+
 def _parse_composer_json(filepath: Path, source: str) -> list[Dependency]:
-    """Parse a single composer.json file into direct Dependencies."""
+    """Parse a single composer.json file into direct Dependencies.
+
+    A section that is not a map, and a constraint that is not a string, are
+    recorded as gaps and read as absent: the section declares nothing, the
+    package is unconstrained. The other section is still read.
+    """
     deps: list[Dependency] = []
-    data = load_json(filepath)
-    if not isinstance(data, dict):
+    data = root_table(filepath, load_json(filepath))
+    if data is None:
         return deps
 
     for field_name, group in (
         ("require", DependencyGroup.PROD),
         ("require-dev", DependencyGroup.DEV),
     ):
-        require = data.get(field_name)
-        if not isinstance(require, dict):
-            continue
-        for name, spec in require.items():
-            if not isinstance(name, str) or not isinstance(spec, str):
-                continue
+        for name, spec in composer_map(filepath, data, field_name).items():
             # No ``/`` means a platform pseudo-package (or a malformed name),
             # never an installable ``vendor/package``.
             if "/" not in name:
                 continue
+            if not isinstance(spec, str):
+                record_unexpected_type(filepath, f'an entry of "{field_name}"')
+                spec = ""
             deps.append(
                 Dependency(
                     name=name,
@@ -123,8 +144,8 @@ def detect_project_license_composer_json(
     SPDX canonicalization.
     """
     for cj in walk_project_files(project_path, "composer.json", exclude_paths=exclude_paths):
-        data = load_json(cj)
-        if not isinstance(data, dict):
+        data = root_table(cj, load_json(cj))
+        if data is None:
             continue
         raw = _license_field_to_raw(data.get("license", ""))
         if raw:
