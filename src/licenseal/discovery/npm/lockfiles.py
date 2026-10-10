@@ -10,6 +10,13 @@ ancestors.
 
 `yarn.lock` v1 uses a custom format; v2 (Berry) uses YAML. Both are handled.
 `pnpm-lock.yaml` is YAML with importer-scoped packages map.
+
+A package a lockfile records as fetched from a git repository, a tarball URL
+that is not a registry's, or a path outside the scanned directory is not a
+registry release. Its row carries an ``origin`` and is never looked up. A
+package fetched from another registry is still a registry row. A workspace
+member, and a path inside the scanned directory, is the project's own code:
+it stays in the edge graph and gets no row.
 """
 
 from __future__ import annotations
@@ -19,6 +26,7 @@ import re
 from dataclasses import replace
 from pathlib import Path
 from typing import Any, cast
+from urllib.parse import unquote
 
 import yaml
 
@@ -37,7 +45,12 @@ from licenseal.discovery._read import (
     typed_field,
 )
 from licenseal.discovery._walk import walk_project_files
-from licenseal.discovery.npm._specs import npm_spec_origin
+from licenseal.discovery.npm._specs import (
+    git_spec_origin,
+    npm_resolved_origin,
+    npm_spec_origin,
+    path_spec,
+)
 from licenseal.models import Dependency, DependencyGroup, Ecosystem
 
 _NPM_LOCKFILES = ("package-lock.json", "pnpm-lock.yaml", "yarn.lock", "bun.lock")
@@ -103,13 +116,15 @@ def parse_npm_lockfile(
     """
     scan_root = scan_root or path.parent
     if path.name == "package-lock.json":
-        return parse_package_lock_json(path, prod_root_names, dev_root_names, include_dev)
+        return parse_package_lock_json(
+            path, prod_root_names, dev_root_names, include_dev, scan_root
+        )
     if path.name == "pnpm-lock.yaml":
         return parse_pnpm_lock(path, prod_root_names, dev_root_names, include_dev, scan_root)
     if path.name == "yarn.lock":
-        return parse_yarn_lock(path, prod_root_names, dev_root_names, include_dev)
+        return parse_yarn_lock(path, prod_root_names, dev_root_names, include_dev, scan_root)
     if path.name == "bun.lock":
-        return parse_bun_lock(path, prod_root_names, dev_root_names, include_dev)
+        return parse_bun_lock(path, prod_root_names, dev_root_names, include_dev, scan_root)
     raise ValueError(f"Unsupported npm lockfile: {path.name}")
 
 
@@ -252,6 +267,7 @@ def parse_package_lock_json(
     prod_root_names: set[str],
     dev_root_names: set[str],
     include_dev: bool,
+    scan_root: Path | None = None,
 ) -> list[Dependency]:
     """Parse a ``package-lock.json`` into a flat dep list.
 
@@ -259,7 +275,12 @@ def parse_package_lock_json(
     - **lockfileVersion >= 2**: flat ``packages`` map keyed by node_modules path.
     - **lockfileVersion 1**: nested ``dependencies`` tree where each entry can
       itself contain a nested ``dependencies`` map for sub-resolved versions.
+
+    An entry whose ``resolved`` is a git URL, a tarball URL outside any
+    registry, or a path outside ``scan_root`` is a row with an origin; so is
+    a version 1 entry whose ``version`` is such a spec.
     """
+    scan_root = scan_root or path.parent
     data = root_table(path, load_json(path))
     if data is None:
         return []
@@ -268,7 +289,9 @@ def parse_package_lock_json(
     if "packages" not in data:
         tree = typed_field(path, data, "dependencies", dict, '"dependencies"') or {}
         try:
-            return _parse_package_lock_v1(path, tree, prod_root_names, dev_root_names, include_dev)
+            return _parse_package_lock_v1(
+                path, tree, prod_root_names, dev_root_names, include_dev, scan_root
+            )
         except RecursionError:
             # The tree walk recurses once per nesting level, so a tree the JSON
             # parser accepted can still be too deep to walk.
@@ -298,7 +321,7 @@ def parse_package_lock_json(
         return alias_to_canonical.get(child.lower(), child).lower()
 
     deps: list[Dependency] = []
-    seen: set[tuple[str, str]] = set()
+    seen: set[tuple[str, str, str]] = set()
     edges: dict[str, set[str]] = {}
     name_case: dict[str, str] = {}
     read = 0
@@ -310,13 +333,29 @@ def parse_package_lock_json(
             record_unexpected_type(path, _PACKAGES_ENTRY)
             continue
         meta = cast("dict[str, Any]", raw)
-        version = typed_field(path, meta, "version", str, _PACKAGES_ENTRY)
-        if version is None:
-            # A workspace member, and a link to one, can carry no version:
-            # that entry is read, it is just not a row.
-            read += "link" in meta or "node_modules/" not in key
-            continue
-        read += 1
+        resolved = typed_field(path, meta, "resolved", str, _PACKAGES_ENTRY) or ""
+        origin: str | None
+        if "link" in meta:
+            # ``node_modules/<name>`` linked to a directory. Inside the
+            # scanned directory that is a workspace member: read, and not a
+            # row. Outside it, it is a path dependency, at the version the
+            # directory's own entry records.
+            read += 1
+            origin = path_origin(resolved, path.parent, scan_root) if resolved else None
+            target = packages.get(resolved)
+            linked_version = target.get("version") if isinstance(target, dict) else None
+            version = linked_version if isinstance(linked_version, str) else ""
+        else:
+            entry_version = typed_field(path, meta, "version", str, _PACKAGES_ENTRY)
+            if entry_version is None:
+                # A workspace member can carry no version: that entry is
+                # read, it is just not a row.
+                read += "node_modules/" not in key
+                continue
+            read += 1
+            version = entry_version
+            integrity = typed_field(path, meta, "integrity", str, _PACKAGES_ENTRY) or ""
+            origin = npm_resolved_origin(resolved, integrity, path.parent, scan_root)
 
         # Only `node_modules/<name>` keys are installed-from-registry. Other
         # shapes are workspace metadata:
@@ -343,17 +382,19 @@ def parse_package_lock_json(
         )
         name_case.setdefault(normalized, name)
 
-        if (normalized, version) in seen:
+        # The project's own code stays in the graph and is not a row.
+        if origin is None or (normalized, version, origin) in seen:
             continue
-        seen.add((normalized, version))
+        seen.add((normalized, version, origin))
 
         deps.append(
             Dependency(
                 name=name,
-                version_constraint=f"=={version}",
+                version_constraint=f"=={version}" if version else "",
                 ecosystem=Ecosystem.NPM,
                 group=DependencyGroup.PROD,  # overwritten by reachability in _finalize
                 depth=_depth_from_key(key),
+                origin=origin,
             )
         )
     record_unread_entries(path, len(packages) - ("" in packages), read)
@@ -371,6 +412,7 @@ def _parse_package_lock_v1(
     prod_root_names: set[str],
     dev_root_names: set[str],
     include_dev: bool,
+    scan_root: Path,
 ) -> list[Dependency]:
     """Walk the legacy lockfileVersion=1 nested ``dependencies`` tree.
 
@@ -378,14 +420,21 @@ def _parse_package_lock_v1(
     edge children, and an optional nested ``dependencies`` map for
     deeper-installed copies (npm's old conflict resolution). Recurses
     depth-first; reachability attribution is delegated to ``_finalize``.
+
+    For a package that is not a registry release, ``version`` holds the spec
+    it was installed from (``git+ssh://…#<commit>``, ``github:user/repo#…``,
+    a tarball URL, ``file:../dir``) instead of a version: that entry is a
+    row with an origin and no version.
     """
     deps: list[Dependency] = []
-    seen: set[tuple[str, str]] = set()
+    seen: set[tuple[str, str, str]] = set()
     edges: dict[str, set[str]] = {}
     name_case: dict[str, str] = {}
     entry_of = 'an entry of "dependencies"'
+    read = 0
 
     def _walk(current: dict[str, Any], depth: int) -> None:
+        nonlocal read
         for name, raw in current.items():
             if not isinstance(raw, dict):
                 record_unexpected_type(path, entry_of)
@@ -394,6 +443,7 @@ def _parse_package_lock_v1(
             version = typed_field(path, meta, "version", str, entry_of)
             if version is None:
                 continue
+            read += 1
 
             normalized = name.lower()
             name_case.setdefault(normalized, name)
@@ -401,15 +451,28 @@ def _parse_package_lock_v1(
             requires = typed_field(path, meta, "requires", dict, entry_of) or {}
             edges.setdefault(normalized, set()).update(n.lower() for n in requires)
 
-            if (normalized, version) not in seen:
-                seen.add((normalized, version))
+            origin: str | None
+            spec_path = path_spec(version)
+            if spec_path is not None:
+                origin, version = path_origin(spec_path, path.parent, scan_root), ""
+            elif npm_spec_origin(version):
+                origin, version = npm_spec_origin(version), ""
+            else:
+                resolved = typed_field(path, meta, "resolved", str, entry_of) or ""
+                integrity = typed_field(path, meta, "integrity", str, entry_of) or ""
+                origin = npm_resolved_origin(resolved, integrity, path.parent, scan_root)
+
+            # The project's own code stays in the graph and is not a row.
+            if origin is not None and (normalized, version, origin) not in seen:
+                seen.add((normalized, version, origin))
                 deps.append(
                     Dependency(
                         name=name,
-                        version_constraint=f"=={version}",
+                        version_constraint=f"=={version}" if version else "",
                         ecosystem=Ecosystem.NPM,
                         group=DependencyGroup.PROD,  # overwritten by reachability
                         depth=depth,
+                        origin=origin,
                     )
                 )
 
@@ -418,7 +481,7 @@ def _parse_package_lock_v1(
                 _walk(nested, depth + 1)
 
     _walk(deps_map, 1)
-    record_unread_entries(path, len(deps_map), len(deps))
+    record_unread_entries(path, len(deps_map), read)
     return _finalize(deps, edges, name_case, prod_root_names, dev_root_names, include_dev)
 
 
@@ -684,9 +747,60 @@ def _pnpm_edge_target(child_name: str, value: object) -> str:
 
 
 _YARN_VERSION_RE = re.compile(r'^\s+version\s+"([^"]+)"')
+_YARN_RESOLVED_RE = re.compile(r'^  resolved\s+"?(?P<resolved>[^"\s]+)"?\s*$')
+_YARN_INTEGRITY_RE = re.compile(r"^  integrity\s+(?P<integrity>\S+)\s*$")
+# The commit a Berry resolution pins a repository to: ``…#commit=<sha>``.
+_BERRY_COMMIT_RE = re.compile(r"(?:^|&)commit=(?P<commit>[^&]+)")
 _YARN_DEP_RE = re.compile(r'^\s{4}"?([^"\s]+)"?\s+"[^"]*"\s*$')
 # The comment a v1 lockfile opens with: ``# yarn lockfile v1``.
 _YARN_CLASSIC_HEADER_RE = re.compile(r"^# yarn lockfile v(\S+)", re.MULTILINE)
+
+
+def _yarn_descriptor_spec(descriptor: str) -> str:
+    """The spec of a ``name@spec`` descriptor, ``@scope/name@spec`` included."""
+    unscoped = descriptor[1:] if descriptor.startswith("@") else descriptor
+    return unscoped.partition("@")[2]
+
+
+def _yarn_spec_origin(spec: str, lock_dir: Path, scan_root: Path) -> str | None:
+    """Origin the spec of a Yarn Classic descriptor declares.
+
+    Empty for a registry spec (a range, a tag, an ``npm:`` alias); ``None``
+    for a path inside ``scan_root``.
+    """
+    spec_path = path_spec(spec)
+    if spec_path is not None:
+        return path_origin(spec_path, lock_dir, scan_root)
+    return npm_spec_origin(spec)
+
+
+def _berry_origin(spec: str, checksum: str, lock_dir: Path, scan_root: Path) -> str | None:
+    """Origin of a Yarn Berry resolution, from the protocol after ``name@``.
+
+    ``npm:``, and a spec with no protocol, is a registry release. ``patch:``
+    is a locally patched package and resolves like the package it patches.
+    ``file:`` / ``portal:`` / ``link:`` are a path, ``None`` when inside
+    ``scan_root``. A resolution with a ``#commit=`` is a repository at that
+    commit, and so is a git URL without one. Any other
+    spec is a direct URL, with ``checksum`` as its hash, or a protocol this
+    parser does not know; both are origins as written.
+    """
+    if spec.startswith("npm:") or not spec:
+        return ""
+    if spec.startswith("patch:"):
+        patched = unquote(spec[len("patch:") :].partition("#")[0])
+        return _berry_origin(_yarn_descriptor_spec(patched), checksum, lock_dir, scan_root)
+    location, _, fragment = spec.partition("#")
+    spec_path = path_spec(location.partition("::")[0])
+    if spec_path is not None:
+        return path_origin(spec_path, lock_dir, scan_root)
+    if ":" not in location:
+        # No protocol at all: a plain version or range.
+        return ""
+    commit = _BERRY_COMMIT_RE.search(fragment)
+    if commit:
+        return git_origin(location, commit.group("commit"))
+    return git_spec_origin(location) or url_origin(location, checksum)
 
 
 def parse_yarn_lock(
@@ -694,6 +808,7 @@ def parse_yarn_lock(
     prod_root_names: set[str],
     dev_root_names: set[str],
     include_dev: bool,
+    scan_root: Path | None = None,
 ) -> list[Dependency]:
     """Parse `yarn.lock` (v1 custom format or v2/Berry YAML) into a flat dep list.
 
@@ -701,7 +816,11 @@ def parse_yarn_lock(
     read at all, are each recorded as a gap and yield nothing. One that
     declares a format version this parser was not written for is read all
     the same, and the unknown version is recorded without being a gap.
+
+    An entry resolved from a git repository, a tarball URL outside any
+    registry, or a path outside ``scan_root`` is a row with an origin.
     """
+    scan_root = scan_root or path.parent
     text = decode_lockfile_text(path)
     if text is None:
         return []
@@ -715,11 +834,13 @@ def parse_yarn_lock(
         if not stripped or stripped.startswith("#"):
             continue
         if stripped.startswith("__metadata"):
-            return _parse_yarn_berry(text, path, prod_root_names, dev_root_names, include_dev)
+            return _parse_yarn_berry(
+                text, path, prod_root_names, dev_root_names, include_dev, scan_root
+            )
         break
     header = _YARN_CLASSIC_HEADER_RE.search(text)
     check_lockfile_version(path, header and header.group(1), _YARN_CLASSIC_VERSIONS)
-    return _parse_yarn_v1(text, path, prod_root_names, dev_root_names, include_dev)
+    return _parse_yarn_v1(text, path, prod_root_names, dev_root_names, include_dev, scan_root)
 
 
 def _parse_yarn_berry(
@@ -728,6 +849,7 @@ def _parse_yarn_berry(
     prod_root_names: set[str],
     dev_root_names: set[str],
     include_dev: bool,
+    scan_root: Path,
 ) -> list[Dependency]:
     try:
         data = root_table(path, yaml.safe_load(text))
@@ -756,7 +878,7 @@ def _parse_yarn_berry(
         return alias_to_canonical.get(child.lower(), child).lower()
 
     deps: list[Dependency] = []
-    seen: set[tuple[str, str]] = set()
+    seen: set[tuple[str, str, str]] = set()
     edges: dict[str, set[str]] = {}
     name_case: dict[str, str] = {}
     workspaces = 0
@@ -786,12 +908,20 @@ def _parse_yarn_berry(
 
         # ``name@workspace:path`` is one of the project's own packages, not a
         # registry package: its edges stay in the graph, but it is no row.
-        if "@workspace:" in first:
+        # So is a package resolved from a path inside the scanned directory.
+        resolution = typed_field(path, meta, "resolution", str, entry) or first
+        checksum = typed_field(path, meta, "checksum", str, entry) or ""
+        origin = (
+            None
+            if "@workspace:" in first
+            else _berry_origin(_yarn_descriptor_spec(resolution), checksum, path.parent, scan_root)
+        )
+        if origin is None:
             workspaces += 1
             continue
-        if (normalized, version) in seen:
+        if (normalized, version, origin) in seen:
             continue
-        seen.add((normalized, version))
+        seen.add((normalized, version, origin))
         deps.append(
             Dependency(
                 name=name,
@@ -799,6 +929,7 @@ def _parse_yarn_berry(
                 ecosystem=Ecosystem.NPM,
                 group=DependencyGroup.PROD,
                 depth=1,
+                origin=origin,
             )
         )
     record_unread_entries(path, len(data) - ("__metadata" in data), len(deps) + workspaces)
@@ -811,8 +942,14 @@ def _parse_yarn_v1(
     prod_root_names: set[str],
     dev_root_names: set[str],
     include_dev: bool,
+    scan_root: Path,
 ) -> list[Dependency]:
-    """Parse the legacy yarn v1 format (custom, not YAML)."""
+    """Parse the legacy yarn v1 format (custom, not YAML).
+
+    Where an entry comes from is read from its ``resolved`` line, and from
+    the spec in its header (``name@github:user/repo``, ``name@file:../dir``)
+    when ``resolved`` does not say.
+    """
     # First pass: scan entry headers for alias→canonical mappings.
     alias_to_canonical: dict[str, str] = {}
     for line in text.splitlines():
@@ -830,24 +967,34 @@ def _parse_yarn_v1(
         return alias_to_canonical.get(child.lower(), child).lower()
 
     deps: list[Dependency] = []
-    seen: set[tuple[str, str]] = set()
+    seen: set[tuple[str, str, str]] = set()
     edges: dict[str, set[str]] = {}
     name_case: dict[str, str] = {}
     current_name: str | None = None
     current_version: str | None = None
+    current_spec = ""
+    current_resolved = ""
+    current_integrity = ""
     in_deps_block = False
     pending_deps: list[str] = []
     entries = 0
+    read = 0
 
     def flush_entry() -> None:
+        nonlocal read
         if current_name is None or current_version is None:
             return
+        read += 1
         normalized = current_name.lower()
         edges.setdefault(normalized, set()).update(pending_deps)
         name_case.setdefault(normalized, current_name)
-        if (normalized, current_version) in seen:
+        origin = npm_resolved_origin(current_resolved, current_integrity, path.parent, scan_root)
+        if origin == "":
+            origin = _yarn_spec_origin(current_spec, path.parent, scan_root)
+        # The project's own code stays in the graph and is not a row.
+        if origin is None or (normalized, current_version, origin) in seen:
             return
-        seen.add((normalized, current_version))
+        seen.add((normalized, current_version, origin))
         deps.append(
             Dependency(
                 name=current_name,
@@ -855,6 +1002,7 @@ def _parse_yarn_v1(
                 ecosystem=Ecosystem.NPM,
                 group=DependencyGroup.PROD,
                 depth=1,
+                origin=origin,
             )
         )
 
@@ -867,7 +1015,9 @@ def _parse_yarn_v1(
             stripped = line.rstrip(":")
             first = stripped.split(",")[0].strip().strip('"')
             current_name = _yarn_name_from_descriptor(first)
+            current_spec = _yarn_descriptor_spec(first)
             current_version = None
+            current_resolved = current_integrity = ""
             in_deps_block = False
             pending_deps = []
             continue
@@ -877,6 +1027,12 @@ def _parse_yarn_v1(
             m = _YARN_VERSION_RE.match(line)
             if m:
                 current_version = m.group(1)
+            in_deps_block = False
+            continue
+        located = _YARN_RESOLVED_RE.match(line) or _YARN_INTEGRITY_RE.match(line)
+        if located:
+            current_resolved = located.groupdict().get("resolved", current_resolved)
+            current_integrity = located.groupdict().get("integrity", current_integrity)
             in_deps_block = False
             continue
         # Optional dependencies are installed too (platform-specific builds
@@ -893,7 +1049,7 @@ def _parse_yarn_v1(
     flush_entry()
     # Every line that starts in the first column is an entry header; one
     # that is not followed by a version line was not read as a package.
-    record_unread_entries(path, entries, len(deps))
+    record_unread_entries(path, entries, read)
     return _finalize(deps, edges, name_case, prod_root_names, dev_root_names, include_dev)
 
 
@@ -977,6 +1133,7 @@ def parse_bun_lock(
     prod_root_names: set[str],
     dev_root_names: set[str],
     include_dev: bool,
+    scan_root: Path | None = None,
 ) -> list[Dependency]:
     """Parse a ``bun.lock`` (JSONC) into a flat dep list.
 
@@ -996,7 +1153,13 @@ def parse_bun_lock(
     ``dependencies`` / ``peerDependencies`` / ``optionalDependencies``
     (whose values are version constraints). The dict at index 2 is what
     drives the edge graph for reachability attribution.
+
+    For a package that is not a registry release, what follows ``name@`` is
+    the spec it was installed from (``github:user/repo#<commit>``, a git or
+    tarball URL, ``file:../dir``): that entry is a row with an origin and no
+    version, or no row when the path is inside ``scan_root``.
     """
+    scan_root = scan_root or path.parent
     raw_text = decode_text(path)
     if raw_text is None:
         return []
@@ -1013,18 +1176,20 @@ def parse_bun_lock(
     packages = typed_field(path, data, "packages", dict, '"packages"') or {}
 
     deps: list[Dependency] = []
-    seen: set[tuple[str, str]] = set()
+    seen: set[tuple[str, str, str]] = set()
     edges: dict[str, set[str]] = {}
     name_case: dict[str, str] = {}
     workspaces = 0
     for key, raw in packages.items():
         # First element is the resolved "name@version" id; second is URL or
-        # empty; third is the meta dict; fourth is the integrity hash. Only
-        # the id must be a string; the meta dict is read when it is there.
+        # empty; third is the meta dict; fourth is the integrity hash. An
+        # entry that is not a registry release has no URL element, so its
+        # meta dict comes second. Only the id must be a string; the meta
+        # dict is read wherever it is.
         if not isinstance(raw, list) or not raw or not isinstance(raw[0], str):
             record_unexpected_type(path, _PACKAGES_ENTRY)
             continue
-        meta = raw[2] if len(raw) > 2 and isinstance(raw[2], dict) else {}
+        meta = next((item for item in raw[1:] if isinstance(item, dict)), {})
 
         name, version = _parse_bun_resolved_id(raw[0], fallback_key=key)
         if not name or not version:
@@ -1038,20 +1203,32 @@ def parse_bun_lock(
 
         # ``name@workspace:path`` is one of the project's own packages, not a
         # registry package: its edges stay in the graph, but it is no row.
+        # So is a package installed from a path inside the scanned directory.
+        origin: str | None
+        spec_path = path_spec(version)
         if version.startswith("workspace:"):
+            origin = None
+        elif spec_path is not None:
+            origin, version = path_origin(spec_path, path.parent, scan_root), ""
+        elif npm_spec_origin(version):
+            origin, version = npm_spec_origin(version), ""
+        else:
+            origin = ""
+        if origin is None:
             workspaces += 1
             continue
-        if (normalized, version) in seen:
+        if (normalized, version, origin) in seen:
             continue
-        seen.add((normalized, version))
+        seen.add((normalized, version, origin))
 
         deps.append(
             Dependency(
                 name=name,
-                version_constraint=f"=={version}",
+                version_constraint=f"=={version}" if version else "",
                 ecosystem=Ecosystem.NPM,
                 group=DependencyGroup.PROD,  # overwritten by reachability in _finalize
                 depth=1,
+                origin=origin,
             )
         )
 
@@ -1063,19 +1240,19 @@ def _parse_bun_resolved_id(resolved_id: str, *, fallback_key: str) -> tuple[str,
     """Parse Bun's ``"name@version"`` resolved id into (name, version).
 
     For scoped names (``@scope/name@1.2.3``) the split must occur at the
-    LAST ``@``, not the first. Falls back to the packages-map key when the
-    resolved id is empty or malformed.
+    second ``@``, not the first; an ``@`` further along belongs to what
+    follows the name (``@scope/name@git+ssh://git@host/…``). Falls back to
+    the packages-map key when the resolved id is empty or malformed.
     """
     text = resolved_id or fallback_key
     if not text:
         return "", ""
-    # Scoped: @scope/name@version → split at the last @ (which separates the
-    # version from the name).
+    # Scoped: @scope/name@version → split at the @ that follows the name.
     if text.startswith("@"):
-        last_at = text.rfind("@")
-        if last_at <= 0:
+        name_end = text.find("@", 1)
+        if name_end < 0:
             return text, ""
-        return text[:last_at], text[last_at + 1 :]
+        return text[:name_end], text[name_end + 1 :]
     # Unscoped: name@version → split at the only @.
     name, sep, version = text.partition("@")
     if not sep:

@@ -216,6 +216,8 @@ class TestNpmSpecOrigin:
             ("git+https://example.org/a/b.git#v1.0", "git+https://example.org/a/b.git@v1.0"),
             ("git+ssh://git@example.org:a/b.git#abc", "git+ssh://example.org:a/b.git@abc"),
             ("git://example.org/a/b.git#semver:^1", "git+git://example.org/a/b.git@semver:^1"),
+            ("ssh://git@example.org/a/b.git#abc", "git+ssh://example.org/a/b.git@abc"),
+            ("git@example.org:a/b.git#v2", "git+example.org:a/b.git@v2"),
             ("https://example.org/a/b.git#abc", "git+https://example.org/a/b.git@abc"),
             ("https://example.org/a/b-1.0.tgz", "https://example.org/a/b-1.0.tgz"),
             ("http://u:p@example.org/b.tgz?x=1", "http://example.org/b.tgz"),
@@ -2807,3 +2809,494 @@ class TestRubyHashRocketSources:
         assert rows["rocket-dev"]["group"] == "dev"
         assert _requests_mentioning(*forks, "rocket-own") == []
         assert "tok3n" not in json.dumps(data)
+
+
+# --------------------------------------------------- npm: lockfiles, path specs
+
+_NPMJS = "https://registry.npmjs.org"
+_GIT_FORK = "git+ssh://git.example.org/team/git-fork.git@0123abcd"
+
+
+def _versions(data: dict) -> dict[str, tuple[str, str]]:
+    return {d["name"]: (d["origin"], d["resolved_version"]) for d in data["dependencies"]}
+
+
+class TestNpmPathSpecs:
+    @respx.mock
+    def test_file_link_and_bare_path_specs_without_a_lockfile(self, tmp_path):
+        project = tmp_path / "project"
+        _npm_manifest(
+            project,
+            {
+                "regular": "^1.0.0",
+                "dir-outside": "file:../dir-outside",
+                "link-outside": "link:../link-outside",
+                "portal-outside": "portal:../portal-outside",
+                "bare-outside": "../bare-outside",
+                "rooted": "/opt/pkgs/rooted",
+                "dir-inside": "file:./packages/dir-inside",
+                "bare-inside": "./packages/bare-inside",
+                "member": "workspace:^",
+                "scp-fork": "git@git.example.org:team/scp-fork.git#v1",
+            },
+        )
+        forks = ("dir-outside", "link-outside", "portal-outside", "bare-outside", "rooted")
+        for name in (*forks, "dir-inside", "bare-inside", "member", "scp-fork"):
+            _mock_npm_package(name, "9.9.9", "GPL-3.0-only")
+        _mock_npm_package("regular", "1.0.0")
+        _refuse_everything_else()
+        result, data = _check_json(project, "--no-strict")
+        assert result.exit_code == 0
+        assert _origins(data) == {
+            "regular": "",
+            "dir-outside": "../dir-outside",
+            "link-outside": "../link-outside",
+            "portal-outside": "../portal-outside",
+            "bare-outside": "../bare-outside",
+            "rooted": "/opt/pkgs/rooted",
+            "scp-fork": "git+git.example.org:team/scp-fork.git@v1",
+        }
+        rows = _rows(data)
+        assert all(rows[name]["license"] == "UNKNOWN" for name in (*forks, "scp-fork"))
+        assert _requests_mentioning(*forks, "inside", "member", "scp-fork") == []
+
+
+class TestNpmLockfilesOffRegistry:
+    """A lockfile entry that was not fetched from a registry is an UNKNOWN row."""
+
+    _SPECS = {
+        "regular": "^1.0.0",
+        "mirrored": "^2.0.0",
+        "git-fork": "git+ssh://git@git.example.org/team/git-fork.git#semver:^1.2.0",
+        "hub-fork": "github:team/hub-fork#main",
+        "tarball-fork": "https://dl.example.org/tarball-fork-1.0.0.tgz",
+        "dir-outside": "file:../dir-outside",
+        "dir-inside": "file:packages/dir-inside",
+    }
+    _FORKS = ("git-fork", "hub-fork", "tarball-fork", "dir-outside")
+
+    def _project(self, tmp_path: Path, **specs: str) -> Path:
+        project = tmp_path / "project"
+        _npm_manifest(project, self._SPECS | specs)
+        # The public registry owns every one of the fork names.
+        for name in (*self._FORKS, "dir-inside", *specs):
+            _mock_npm_package(name, "9.9.9", "GPL-3.0-only")
+        _mock_npm_package("regular", "1.0.0")
+        _mock_npm_package("mirrored", "2.0.0")
+        _mock_npm_package("via-git", "3.0.0")
+        return project
+
+    def _assert_forks_unknown_and_unrequested(self, data: dict, *more: str) -> None:
+        rows = _rows(data)
+        forks = (*self._FORKS, *more)
+        assert all(rows[name]["license"] == "UNKNOWN" for name in forks)
+        assert all(rows[name]["license"] == "MIT" for name in ("regular", "mirrored", "via-git"))
+        # The registry package only the git dependency needs is still reported.
+        assert rows["via-git"]["direct_ancestors"] == ["git-fork"]
+        assert rows["git-fork"]["source"] == "package.json"
+        assert _requests_mentioning(*forks, "dir-inside") == []
+        # Another registry is not an off-registry source: the public one is asked.
+        assert _requests_mentioning("mirrored")
+
+    @respx.mock
+    def test_package_lock_v3(self, tmp_path):
+        project = self._project(
+            tmp_path,
+            **{
+                "tgz-outside": "file:../tgz-outside-0.3.0.tgz",
+                "tgz-inside": "file:vendor-tgz/tgz-inside-0.4.0.tgz",
+                "@team/ghp": "^3.0.0",
+                "bundled": "^5.0.0",
+            },
+        )
+        _mock_npm_package("@team/ghp", "3.0.0")
+        _mock_npm_package("bundled", "5.0.0")
+        registry = f"{_NPMJS}/{{0}}/-/{{0}}-{{1}}.tgz"
+        packages = {
+            "": {"name": "app"},
+            "node_modules/regular": {
+                "version": "1.0.0",
+                "resolved": registry.format("regular", "1.0.0"),
+            },
+            "node_modules/mirrored": {
+                "version": "2.0.0",
+                "resolved": "https://npm.internal.example.org/repo/npm/mirrored/-/mirrored-2.0.0.tgz",
+            },
+            "node_modules/@team/ghp": {
+                "version": "3.0.0",
+                "resolved": "https://npm.pkg.github.com/download/@team/ghp/3.0.0/0a1b2c",
+            },
+            "node_modules/bundled": {"version": "5.0.0", "inBundle": True},
+            "node_modules/git-fork": {
+                "version": "1.2.3",
+                "resolved": "git+ssh://git@git.example.org/team/git-fork.git#0123abcd",
+                "dependencies": {"via-git": "^3.0.0"},
+            },
+            "node_modules/via-git": {
+                "version": "3.0.0",
+                "resolved": registry.format("via-git", "3.0.0"),
+            },
+            "node_modules/hub-fork": {
+                "version": "0.4.0",
+                "resolved": "git+ssh://git@github.com/team/hub-fork.git#4567cdef",
+            },
+            "node_modules/tarball-fork": {
+                "version": "1.0.0",
+                "resolved": "https://dl.example.org/tarball-fork-1.0.0.tgz",
+                "integrity": "sha512-tar",
+            },
+            "node_modules/dir-outside": {"resolved": "../dir-outside", "link": True},
+            "../dir-outside": {"name": "dir-outside", "version": "0.1.0"},
+            "node_modules/dir-inside": {"resolved": "packages/dir-inside", "link": True},
+            "packages/dir-inside": {"name": "dir-inside", "version": "0.2.0"},
+            "node_modules/tgz-outside": {
+                "version": "0.3.0",
+                "resolved": "file:../tgz-outside-0.3.0.tgz",
+                "integrity": "sha512-tgz",
+            },
+            "node_modules/tgz-inside": {
+                "version": "0.4.0",
+                "resolved": "file:vendor-tgz/tgz-inside-0.4.0.tgz",
+            },
+            "node_modules/unresolved-link": {"link": True},
+            "node_modules/untargeted-link": {"resolved": "../untargeted", "link": True},
+        }
+        (project / "package-lock.json").write_text(
+            json.dumps({"lockfileVersion": 3, "packages": packages}), encoding="utf-8"
+        )
+        _refuse_everything_else()
+        result, data = _check_json(project, "--no-strict")
+        assert result.exit_code == 0
+        assert _versions(data) == {
+            "regular": ("", "1.0.0"),
+            "mirrored": ("", "2.0.0"),
+            "@team/ghp": ("", "3.0.0"),
+            "bundled": ("", "5.0.0"),
+            "via-git": ("", "3.0.0"),
+            "git-fork": (_GIT_FORK, "1.2.3"),
+            "hub-fork": ("git+ssh://github.com/team/hub-fork.git@4567cdef", "0.4.0"),
+            "tarball-fork": ("https://dl.example.org/tarball-fork-1.0.0.tgz#sha512-tar", "1.0.0"),
+            # A linked directory outside the project takes its version from
+            # the directory's own entry.
+            "dir-outside": ("../dir-outside", "0.1.0"),
+            "tgz-outside": ("../tgz-outside-0.3.0.tgz", "0.3.0"),
+        }
+        self._assert_forks_unknown_and_unrequested(data, "tgz-outside")
+        assert _requests_mentioning("tgz-inside", "untargeted") == []
+
+    @respx.mock
+    def test_package_lock_v1(self, tmp_path):
+        project = self._project(tmp_path, **{"url-resolved": "^2.0.0"})
+        registry = f"{_NPMJS}/{{0}}/-/{{0}}-{{1}}.tgz"
+        tree = {
+            "regular": {"version": "1.0.0", "resolved": registry.format("regular", "1.0.0")},
+            "mirrored": {
+                "version": "2.0.0",
+                "resolved": "https://npm.internal.example.org/mirrored/-/mirrored-2.0.0.tgz",
+            },
+            "git-fork": {
+                "version": "git+ssh://git@git.example.org/team/git-fork.git#0123abcd",
+                "from": "git-fork@git+ssh://git@git.example.org/team/git-fork.git#semver:^1.2.0",
+                "requires": {"via-git": "^3.0.0"},
+            },
+            "via-git": {"version": "3.0.0", "resolved": registry.format("via-git", "3.0.0")},
+            "hub-fork": {
+                "version": "github:team/hub-fork#4567cdef",
+                "from": "github:team/hub-fork",
+            },
+            "tarball-fork": {
+                "version": "https://dl.example.org/tarball-fork-1.0.0.tgz",
+                "integrity": "sha512-tar",
+            },
+            "dir-outside": {"version": "file:../dir-outside"},
+            "dir-inside": {"version": "file:packages/dir-inside"},
+            "url-resolved": {
+                "version": "2.0.0",
+                "resolved": "https://dl.example.org/url-resolved-2.0.0.tar.gz",
+                "integrity": "sha512-url",
+            },
+        }
+        (project / "package-lock.json").write_text(
+            json.dumps({"lockfileVersion": 1, "dependencies": tree}), encoding="utf-8"
+        )
+        _refuse_everything_else()
+        result, data = _check_json(project, "--no-strict")
+        assert result.exit_code == 0
+        assert _versions(data) == {
+            "regular": ("", "1.0.0"),
+            "mirrored": ("", "2.0.0"),
+            "via-git": ("", "3.0.0"),
+            # In this format the spec stands where the version would.
+            "git-fork": (_GIT_FORK, ""),
+            "hub-fork": ("git+https://github.com/team/hub-fork@4567cdef", ""),
+            "tarball-fork": ("https://dl.example.org/tarball-fork-1.0.0.tgz", ""),
+            "dir-outside": ("../dir-outside", ""),
+            "url-resolved": (
+                "https://dl.example.org/url-resolved-2.0.0.tar.gz#sha512-url",
+                "2.0.0",
+            ),
+        }
+        self._assert_forks_unknown_and_unrequested(data, "url-resolved")
+
+    @respx.mock
+    def test_package_lock_v1_with_only_the_projects_own_code_is_not_a_gap(self, tmp_path):
+        _npm_manifest(tmp_path, {"dir-inside": "file:packages/dir-inside"})
+        (tmp_path / "package-lock.json").write_text(
+            json.dumps(
+                {
+                    "lockfileVersion": 1,
+                    "dependencies": {"dir-inside": {"version": "file:packages/dir-inside"}},
+                }
+            ),
+            encoding="utf-8",
+        )
+        _refuse_everything_else()
+        result, data = _check_json(tmp_path)
+        assert result.exit_code == 0
+        assert (data["dependencies"], data["diagnostics"]) == ([], [])
+
+    @respx.mock
+    def test_yarn_classic(self, tmp_path):
+        project = self._project(tmp_path)
+        _write(
+            project / "yarn.lock",
+            """\
+            # yarn lockfile v1
+
+
+            regular@^1.0.0:
+              version "1.0.0"
+              resolved "https://registry.yarnpkg.com/regular/-/regular-1.0.0.tgz#aaaa"
+              integrity sha512-reg
+
+            mirrored@^2.0.0:
+              version "2.0.0"
+              resolved "https://npm.internal.example.org/mirrored/-/mirrored-2.0.0.tgz#bbbb"
+
+            "git-fork@git+ssh://git@git.example.org/team/git-fork.git#semver:^1.2.0":
+              version "1.2.3"
+              resolved "git+ssh://git@git.example.org/team/git-fork.git#0123abcd"
+              dependencies:
+                via-git "^3.0.0"
+
+            via-git@^3.0.0:
+              version "3.0.0"
+              resolved "https://registry.yarnpkg.com/via-git/-/via-git-3.0.0.tgz#cccc"
+
+            "hub-fork@github:team/hub-fork#main":
+              version "0.4.0"
+              resolved "https://codeload.github.com/team/hub-fork/tar.gz/4567cdef"
+
+            "tarball-fork@https://dl.example.org/tarball-fork-1.0.0.tgz":
+              version "1.0.0"
+              resolved "https://dl.example.org/tarball-fork-1.0.0.tgz#dddd"
+              integrity sha512-tar
+              dependencies:
+                regular "^1.0.0"
+              peerDependenciesMeta:
+                regular "^1.0.0"
+
+            "dir-outside@file:../dir-outside":
+              version "0.1.0"
+
+            "dir-inside@file:packages/dir-inside":
+              version "0.2.0"
+            """,
+        )
+        _refuse_everything_else()
+        result, data = _check_json(project, "--no-strict")
+        assert result.exit_code == 0
+        assert _versions(data) == {
+            "regular": ("", "1.0.0"),
+            "mirrored": ("", "2.0.0"),
+            "via-git": ("", "3.0.0"),
+            "git-fork": (_GIT_FORK, "1.2.3"),
+            # The tarball of the commit the shorthand resolved to.
+            "hub-fork": ("https://codeload.github.com/team/hub-fork/tar.gz/4567cdef", "0.4.0"),
+            "tarball-fork": ("https://dl.example.org/tarball-fork-1.0.0.tgz#sha512-tar", "1.0.0"),
+            # No ``resolved`` line: the spec in the entry's header says where.
+            "dir-outside": ("../dir-outside", "0.1.0"),
+        }
+        self._assert_forks_unknown_and_unrequested(data)
+
+    @respx.mock
+    def test_yarn_berry(self, tmp_path):
+        project = self._project(
+            tmp_path,
+            **{
+                "portal-inside": "portal:packages/portal-inside",
+                "patched": "^4.0.0",
+                "patched-fork": "https://git.example.org/team/patched-fork.git#commit=beef",
+                "scp-fork": "git@git.example.org:team/scp-fork.git",
+                "exec-thing": "exec:./gen.js",
+                "plain": "^6.0.0",
+            },
+        )
+        _mock_npm_package("patched", "4.0.0")
+        _mock_npm_package("plain", "6.0.0")
+        locator = "::locator=app%40workspace%3A."
+        fork_patch = (
+            "patched-fork@patch:patched-fork@https%3A//git.example.org/team/patched-fork.git"
+            "%23commit=beef#./p.patch" + locator
+        )
+        _write(
+            project / "yarn.lock",
+            f"""\
+            __metadata:
+              version: 8
+
+            "regular@npm:^1.0.0":
+              version: 1.0.0
+              resolution: "regular@npm:1.0.0"
+
+            "mirrored@npm:^2.0.0":
+              version: 2.0.0
+              resolution: "mirrored@npm:2.0.0"
+
+            "git-fork@git+ssh://git@git.example.org/team/git-fork.git#semver:^1.2.0":
+              version: 1.2.3
+              resolution: "git-fork@ssh://git@git.example.org/team/git-fork.git#commit=0123abcd"
+              dependencies:
+                via-git: "npm:^3.0.0"
+
+            "via-git@npm:^3.0.0":
+              version: 3.0.0
+              resolution: "via-git@npm:3.0.0"
+
+            "hub-fork@github:team/hub-fork#main":
+              version: 0.4.0
+              resolution: "hub-fork@https://github.com/team/hub-fork.git#commit=4567cdef"
+
+            "tarball-fork@https://dl.example.org/tarball-fork-1.0.0.tgz":
+              version: 1.0.0
+              resolution: "tarball-fork@https://dl.example.org/tarball-fork-1.0.0.tgz"
+              checksum: 10c0/abcdef
+
+            "dir-outside@file:../dir-outside{locator}":
+              version: 0.1.0
+              resolution: "dir-outside@file:../dir-outside#../dir-outside::hash=ab&locator=x"
+
+            "dir-inside@file:packages/dir-inside{locator}":
+              version: 0.2.0
+              resolution: "dir-inside@file:packages/dir-inside#packages/dir-inside::hash=cd"
+
+            "portal-inside@portal:packages/portal-inside{locator}":
+              version: 0.0.0-use.local
+              resolution: "portal-inside@portal:packages/portal-inside{locator}"
+
+            "patched@patch:patched@npm%3A4.0.0#./patches/patched.patch::version=4.0.0":
+              version: 4.0.0
+              resolution: "patched@patch:patched@npm%3A4.0.0#./patches/patched.patch::version=4.0.0"
+
+            "{fork_patch}":
+              version: 0.5.0
+              resolution: "{fork_patch}"
+
+            "scp-fork@git@git.example.org:team/scp-fork.git":
+              version: 0.6.0
+              resolution: "scp-fork@git@git.example.org:team/scp-fork.git#commit=89ab"
+
+            "exec-thing@exec:./gen.js":
+              version: 0.7.0
+              resolution: "exec-thing@exec:./gen.js"
+
+            "plain@^6.0.0":
+              version: 6.0.0
+
+            "app@workspace:.":
+              version: 0.0.0-use.local
+              resolution: "app@workspace:."
+            """,
+        )
+        _refuse_everything_else()
+        result, data = _check_json(project, "--no-strict")
+        assert result.exit_code == 0
+        assert _versions(data) == {
+            "regular": ("", "1.0.0"),
+            "mirrored": ("", "2.0.0"),
+            "via-git": ("", "3.0.0"),
+            "patched": ("", "4.0.0"),
+            "plain": ("", "6.0.0"),
+            "git-fork": (_GIT_FORK, "1.2.3"),
+            "hub-fork": ("git+https://github.com/team/hub-fork.git@4567cdef", "0.4.0"),
+            "tarball-fork": ("https://dl.example.org/tarball-fork-1.0.0.tgz#10c0/abcdef", "1.0.0"),
+            "dir-outside": ("../dir-outside", "0.1.0"),
+            # A patch of a git dependency is that git dependency.
+            "patched-fork": ("git+https://git.example.org/team/patched-fork.git@beef", "0.5.0"),
+            "scp-fork": ("git+git.example.org:team/scp-fork.git@89ab", "0.6.0"),
+            # A protocol the parser does not know is an origin as written.
+            "exec-thing": ("exec:./gen.js", "0.7.0"),
+        }
+        self._assert_forks_unknown_and_unrequested(data, "patched-fork", "scp-fork", "exec-thing")
+        assert _requests_mentioning("portal-inside") == []
+        assert _requests_mentioning("patched") and _requests_mentioning("plain")
+
+    @respx.mock
+    def test_bun_lock(self, tmp_path):
+        project = self._project(tmp_path, **{"@scope/git-scoped": "github:team/git-scoped"})
+        packages = {
+            "regular": ["regular@1.0.0", "", {}, "sha512-reg"],
+            "mirrored": ["mirrored@2.0.0", "https://npm.internal.example.org/", {}, "sha512-mir"],
+            "git-fork": [
+                "git-fork@git+ssh://git@git.example.org/team/git-fork.git#0123abcd",
+                {"dependencies": {"via-git": "^3.0.0"}},
+                "0123abcd",
+            ],
+            "via-git": ["via-git@3.0.0", "", {}, "sha512-via"],
+            "hub-fork": ["hub-fork@github:team/hub-fork#4567cde", {}, "team-hub-fork-4567cde"],
+            "tarball-fork": ["tarball-fork@https://dl.example.org/tarball-fork-1.0.0.tgz", {}],
+            "dir-outside": ["dir-outside@file:../dir-outside", {}],
+            "dir-inside": ["dir-inside@file:packages/dir-inside", {}],
+            "@scope/git-scoped": [
+                "@scope/git-scoped@git+ssh://git@git.example.org/team/git-scoped.git#beef",
+                {},
+                "beef",
+            ],
+            "member": ["member@workspace:packages/member"],
+        }
+        (project / "bun.lock").write_text(
+            json.dumps({"lockfileVersion": 1, "packages": packages}), encoding="utf-8"
+        )
+        _refuse_everything_else()
+        result, data = _check_json(project, "--no-strict")
+        assert result.exit_code == 0
+        assert _versions(data) == {
+            "regular": ("", "1.0.0"),
+            "mirrored": ("", "2.0.0"),
+            "via-git": ("", "3.0.0"),
+            "git-fork": (_GIT_FORK, ""),
+            "hub-fork": ("git+https://github.com/team/hub-fork@4567cde", ""),
+            "tarball-fork": ("https://dl.example.org/tarball-fork-1.0.0.tgz", ""),
+            "dir-outside": ("../dir-outside", ""),
+            # The ``@`` of the git user is not the end of a scoped name.
+            "@scope/git-scoped": ("git+ssh://git.example.org/team/git-scoped.git@beef", ""),
+        }
+        self._assert_forks_unknown_and_unrequested(data, "@scope/git-scoped")
+        assert _requests_mentioning("member") == []
+
+    @respx.mock
+    @pytest.mark.parametrize("lockfile", ["package-lock.json", "yarn.lock"])
+    def test_lockfile_does_not_turn_an_unknown_manifest_row_into_a_clean_one(
+        self, tmp_path, lockfile
+    ):
+        # The manifest says git; the lockfile lists the same name as a plain
+        # registry tarball. The row stays UNKNOWN, with the declared source.
+        _npm_manifest(tmp_path, {"git-fork": "github:team/git-fork#v1.2.0"})
+        tarball = f"{_NPMJS}/git-fork/-/git-fork-1.2.0.tgz"
+        if lockfile == "package-lock.json":
+            packages = {"node_modules/git-fork": {"version": "1.2.0", "resolved": tarball}}
+            content = json.dumps({"lockfileVersion": 3, "packages": packages})
+        else:
+            content = (
+                "# yarn lockfile v1\n\n\ngit-fork@^1.2.0:\n"
+                f'  version "1.2.0"\n  resolved "{tarball}#aa"\n'
+            )
+        (tmp_path / lockfile).write_text(content, encoding="utf-8")
+        _mock_npm_package("git-fork", "1.2.0")
+        _refuse_everything_else()
+        result, data = _check_json(tmp_path)
+        assert result.exit_code == 1
+        row = _rows(data)["git-fork"]
+        assert row["origin"] == "git+https://github.com/team/git-fork@v1.2.0"
+        assert (row["license"], row["resolved_version"]) == ("UNKNOWN", "1.2.0")
+        assert _requests_mentioning("git-fork") == []

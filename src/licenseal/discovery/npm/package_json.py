@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from licenseal.discovery._origin import path_origin
 from licenseal.discovery._read import (
     load_json,
     record_unexpected_type,
@@ -11,19 +12,21 @@ from licenseal.discovery._read import (
     typed_field,
 )
 from licenseal.discovery._walk import walk_project_files
-from licenseal.discovery.npm._specs import npm_spec_origin
+from licenseal.discovery.npm._specs import npm_spec_origin, path_spec
 from licenseal.models import Dependency, DependencyGroup, Ecosystem
 from licenseal.resolvers.npm_registry import _unpack_npm_alias  # noqa: PLC2701
 
-# Specs that point at a workspace-local resource, not a published package:
-# pnpm/yarn ``workspace:^1``, npm ``file:./path``, yarn berry ``link:./path``.
-# There's no registry artifact to license-check, and the workspace's own code
-# is what's being scanned anyway. Skipping them at discovery prevents a noisy
-# UNKNOWN row per fixture/playground sub-package — the only way they show up
-# is when the workspace-local package's own package.json lives under a
-# fixtures/ or examples/ tree that BASE_SKIP_DIRS hides (so the local-name
-# filter can't catch the dep by name match).
-_WORKSPACE_LOCAL_PREFIXES = ("file:", "link:", "workspace:")
+# pnpm / yarn ``workspace:^1`` points at a package of the workspace, not a
+# published one. There's no registry artifact to license-check, and the
+# workspace's own code is what's being scanned anyway. A path spec (npm
+# ``file:./path``, yarn ``link:./path`` / ``portal:./path``) inside the
+# scanned directory is the same thing; skipping both at discovery prevents a
+# noisy UNKNOWN row per fixture/playground sub-package — the only way they
+# show up is when the workspace-local package's own package.json lives under
+# a fixtures/ or examples/ tree that BASE_SKIP_DIRS hides (so the local-name
+# filter can't catch the dep by name match). A path spec that leaves the
+# scanned directory is a dependency with the path as its origin.
+_WORKSPACE_PREFIX = "workspace:"
 
 # The sections that declare dependencies, in the order they are read. Peer
 # dependencies are treated as prod. So are optional dependencies: npm installs
@@ -38,8 +41,18 @@ _DEPENDENCY_SECTIONS = (
 )
 
 
-def _is_workspace_local_spec(spec: object) -> bool:
-    return isinstance(spec, str) and spec.startswith(_WORKSPACE_LOCAL_PREFIXES)
+def _spec_origin(spec: str, manifest_dir: Path, scan_root: Path) -> str | None:
+    """Origin a dependency spec declares.
+
+    Empty for a registry spec; ``None`` for the project's own code, which is a
+    ``workspace:`` spec or a path inside ``scan_root``.
+    """
+    if spec.startswith(_WORKSPACE_PREFIX):
+        return None
+    path = path_spec(spec)
+    if path is not None:
+        return path_origin(path, manifest_dir, scan_root)
+    return npm_spec_origin(spec)
 
 
 def _emit_dep(
@@ -48,6 +61,8 @@ def _emit_dep(
     group: DependencyGroup,
     source: str,
     out: list[Dependency],
+    manifest_dir: Path,
+    scan_root: Path,
 ) -> None:
     """Emit a Dependency, unpacking ``npm:`` aliases to the canonical target.
 
@@ -55,12 +70,15 @@ def _emit_dep(
     is recorded as ``slash`` so the registry lookup hits the real package, not
     the consumer's local alias name (which 404s).
 
-    A spec that points at a git repository or a tarball URL is not a registry
-    spec: the dependency carries its origin and no version constraint, and is
-    never looked up.
+    A spec that points at a git repository, a tarball URL, or a path outside
+    the scanned directory is not a registry spec: the dependency carries its
+    origin and no version constraint, and is never looked up. One that names
+    the project's own code is not emitted.
     """
     target_name, target_spec = _unpack_npm_alias(name, spec)
-    origin = npm_spec_origin(target_spec)
+    origin = _spec_origin(target_spec, manifest_dir, scan_root)
+    if origin is None:
+        return
     out.append(
         Dependency(
             name=target_name,
@@ -73,7 +91,9 @@ def _emit_dep(
     )
 
 
-def _parse_package_json(filepath: Path, source: str) -> tuple[list[Dependency], str]:
+def _parse_package_json(
+    filepath: Path, source: str, scan_root: Path
+) -> tuple[list[Dependency], str]:
     """Parse a single package.json file for dependencies.
 
     Returns ``(deps, owner_name)`` — ``owner_name`` is the package's own
@@ -98,9 +118,7 @@ def _parse_package_json(filepath: Path, source: str) -> tuple[list[Dependency], 
                 # no constraint rather than disappearing with its spec.
                 record_unexpected_type(filepath, f'an entry of "{section}"')
                 spec = ""
-            if _is_workspace_local_spec(spec):
-                continue
-            _emit_dep(name, spec, group, source, deps)
+            _emit_dep(name, spec, group, source, deps, filepath.parent, scan_root)
 
     return deps, owner_name
 
@@ -135,7 +153,7 @@ def discover_npm_dependencies(
         # All paths are under project_path by construction (os.walk root), so
         # relative_to is safe.
         source = pj.relative_to(project_path).as_posix()
-        pj_deps, owner_name = _parse_package_json(pj, source)
+        pj_deps, owner_name = _parse_package_json(pj, source, project_path)
         deps.extend(pj_deps)
         owners.extend([owner_name] * len(pj_deps))
 

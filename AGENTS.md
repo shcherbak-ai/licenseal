@@ -38,9 +38,9 @@ src/licenseal/
       pipfile.py              Pipfile (Pipenv manifest; `git` / `path` / `file` entries → `origin`)
       lockfiles.py            uv.lock, poetry.lock, Pipfile.lock parsers (transitive; edge-aware for uv/poetry, section-based for Pipfile; git / url / out-of-tree path sources → `origin`, alternate-index sources stay registry rows; a lockfile in a declared version the parser does not list is still read, with a non-gap diagnostic)
     npm/
-      package_json.py         package.json (recursive, skips node_modules; filters workspace-internal names; git / hosting-shorthand / tarball-URL specs → `origin`)
-      _specs.py               npm dependency-spec classifier (git URL, `github:` and `user/repo` shorthands, tarball URL → origin)
-      lockfiles.py            package-lock.json (v1 + v2/v3), pnpm-lock.yaml (lockfileVersion 6 and 9), yarn.lock (v1 and Berry), bun.lock parsers (transitive, edge-aware; pnpm non-registry packages → `origin` from `resolution`; a pnpm lockfileVersion below 6 is a gap; a lockfile in any other declared version is still read, with a non-gap diagnostic)
+      package_json.py         package.json (recursive, skips node_modules; filters workspace-internal names; git / hosting-shorthand / tarball-URL specs and out-of-tree `file:` / `link:` / `portal:` paths → `origin`)
+      _specs.py               npm spec and `resolved` classifier (git URL, `github:` and `user/repo` shorthands, tarball URL → origin; path specs; a tarball in the registry layout on any host is a registry package)
+      lockfiles.py            package-lock.json (v1 + v2/v3), pnpm-lock.yaml (lockfileVersion 6 and 9), yarn.lock (v1 and Berry), bun.lock parsers (transitive, edge-aware; packages fetched from git, a non-registry tarball URL, or an out-of-tree path → `origin` (from `resolved`, pnpm / Berry `resolution`, or the spec in a v1 `version` / bun id); a pnpm lockfileVersion below 6 is a gap; a lockfile in any other declared version is still read, with a non-gap diagnostic)
     rust/
       cargo_toml.py           Cargo.toml ([dependencies], target.<cfg>.*; [workspace.dependencies] is a version catalog — entries emitted only when a member references them via `workspace = true`, CPM-style stitching; `git` / `path` dependencies are not emitted, their names are reported separately as Cargo.lock roots)
       lockfiles.py            Cargo.lock parser (transitive, edge-aware; rows for registry-sourced crates only, git / path / local crates stay in the edge graph)
