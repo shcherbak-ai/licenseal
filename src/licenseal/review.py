@@ -20,7 +20,7 @@ from licenseal.analysis.spdx import normalize_license
 from licenseal.models import CompatibilityResult, CompatibilityVerdict, Ecosystem, LicenseInfo
 
 if sys.version_info >= (3, 11):
-    import tomllib
+    import tomllib  # pragma: no cover - Python 3.10 takes the other arm
 else:
     import tomli as tomllib  # ty: ignore[unresolved-import]  # pragma: no cover
 

@@ -44,7 +44,7 @@ from typing import Any
 import yaml
 
 if sys.version_info >= (3, 11):
-    import tomllib
+    import tomllib  # pragma: no cover - Python 3.10 takes the other arm
 else:  # pragma: no cover
     import tomli as tomllib  # ty: ignore[unresolved-import]
 
