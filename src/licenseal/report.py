@@ -572,7 +572,8 @@ _GAP_NOTE = "their dependencies may be missing from this report"
 def _gap_diagnostics(report: AnalysisReport) -> list[ReportDiagnostic]:
     """Diagnostics for manifests the scan could not fully analyze.
 
-    Leaves out recovered reads (a latin-1 fallback): those lost no dependency.
+    Leaves out recovered reads (a latin-1 fallback, a lockfile in an unknown
+    version read on a best-effort basis): those are warnings, not gaps.
     """
     return [d for d in report.read_diagnostics if d.severity == "gap"]
 

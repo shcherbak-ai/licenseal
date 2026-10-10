@@ -24,6 +24,7 @@ import yaml
 
 from licenseal._graph import compute_direct_ancestors
 from licenseal.discovery._read import (
+    check_lockfile_version,
     decode_lockfile_text,
     decode_text,
     load_json,
@@ -33,7 +34,6 @@ from licenseal.discovery._read import (
     record_unread_entries,
     root_table,
     typed_field,
-    unsupported_lockfile_version,
 )
 from licenseal.discovery._walk import walk_project_files
 from licenseal.models import Dependency, DependencyGroup, Ecosystem
@@ -186,14 +186,19 @@ def _finalize(
 # one, is not the type the lockfile format defines.
 _PACKAGES_ENTRY = 'an entry of "packages"'
 
-# The lockfile versions each parser reads (for pnpm, whose versions are
-# ``major.minor``, the majors). A lockfile that declares any other version is
-# a gap rather than a best-effort parse.
-_PACKAGE_LOCK_VERSIONS = frozenset({"1", "2", "3"})
-_PNPM_LOCK_VERSIONS = frozenset({"6", "9"})
-_YARN_CLASSIC_VERSIONS = frozenset({"1"})
-_YARN_BERRY_VERSIONS = frozenset({"4", "5", "6", "7", "8"})
-_BUN_LOCK_VERSIONS = frozenset({"0", "1"})
+# The major lockfile versions each parser was written for. A lockfile that
+# declares another one is still read, with a diagnostic that is not a gap;
+# only a version known to be laid out differently is skipped (see
+# ``_PNPM_UNREADABLE_BELOW``).
+_PACKAGE_LOCK_VERSIONS = frozenset({1, 2, 3})
+_PNPM_LOCK_VERSIONS = frozenset({6, 9})
+_YARN_CLASSIC_VERSIONS = frozenset({1})
+_YARN_BERRY_VERSIONS = frozenset({4, 5, 6, 7, 8, 9, 10})
+_BUN_LOCK_VERSIONS = frozenset({0, 1})
+
+# pnpm lockfiles before version 6 key their packages as ``/name/version``,
+# which matches none of the key forms the parser reads.
+_PNPM_UNREADABLE_BELOW = 6
 
 
 def _collect_npm_edge_children(
@@ -247,10 +252,9 @@ def parse_package_lock_json(
       itself contain a nested ``dependencies`` map for sub-resolved versions.
     """
     data = root_table(path, load_json(path))
-    if data is None or unsupported_lockfile_version(
-        path, data.get("lockfileVersion"), _PACKAGE_LOCK_VERSIONS
-    ):
+    if data is None:
         return []
+    check_lockfile_version(path, data.get("lockfileVersion"), _PACKAGE_LOCK_VERSIONS)
 
     if "packages" not in data:
         tree = typed_field(path, data, "dependencies", dict, '"dependencies"') or {}
@@ -420,15 +424,18 @@ def parse_pnpm_lock(
 ) -> list[Dependency]:
     """Parse a `pnpm-lock.yaml` into a flat dep list.
 
-    Reads ``lockfileVersion`` 6 (``/name@version`` keys) and 9
+    Written for ``lockfileVersion`` 6 (``/name@version`` keys) and 9
     (``name@version`` keys, edges in ``snapshots``). Version 5 keys its
     packages as ``/name/version``, which this parser does not read: such a
     lockfile is a gap, by its declared version or, failing that, because
-    none of its keys can be read.
+    none of its keys can be read. Any other version is read as it stands.
     """
     data = root_table(path, load_yaml(path))
-    if data is None or unsupported_lockfile_version(
-        path, data.get("lockfileVersion"), _PNPM_LOCK_VERSIONS, dotted=True
+    if data is None or not check_lockfile_version(
+        path,
+        data.get("lockfileVersion"),
+        _PNPM_LOCK_VERSIONS,
+        unreadable_below=_PNPM_UNREADABLE_BELOW,
     ):
         return []
 
@@ -609,9 +616,10 @@ def parse_yarn_lock(
 ) -> list[Dependency]:
     """Parse `yarn.lock` (v1 custom format or v2/Berry YAML) into a flat dep list.
 
-    A lockfile with merge-conflict markers, one that declares a format
-    version this parser does not read, and one whose entries cannot be read
-    at all are each recorded as a gap and yield nothing.
+    A lockfile with merge-conflict markers, and one whose entries cannot be
+    read at all, are each recorded as a gap and yield nothing. One that
+    declares a format version this parser was not written for is read all
+    the same, and the unknown version is recorded without being a gap.
     """
     text = decode_lockfile_text(path)
     if text is None:
@@ -629,8 +637,7 @@ def parse_yarn_lock(
             return _parse_yarn_berry(text, path, prod_root_names, dev_root_names, include_dev)
         break
     header = _YARN_CLASSIC_HEADER_RE.search(text)
-    if unsupported_lockfile_version(path, header and header.group(1), _YARN_CLASSIC_VERSIONS):
-        return []
+    check_lockfile_version(path, header and header.group(1), _YARN_CLASSIC_VERSIONS)
     return _parse_yarn_v1(text, path, prod_root_names, dev_root_names, include_dev)
 
 
@@ -649,8 +656,7 @@ def _parse_yarn_berry(
     if data is None:
         return []
     metadata = typed_field(path, data, "__metadata", dict, "__metadata") or {}
-    if unsupported_lockfile_version(path, metadata.get("version"), _YARN_BERRY_VERSIONS):
-        return []
+    check_lockfile_version(path, metadata.get("version"), _YARN_BERRY_VERSIONS)
     entry = "a package entry"
 
     # First pass: collect alias→canonical mappings from any aliased descriptor.
@@ -919,10 +925,9 @@ def parse_bun_lock(
     except (json.JSONDecodeError, RecursionError):
         record_parse_failure(path, "JSON")
         return []
-    if data is None or unsupported_lockfile_version(
-        path, data.get("lockfileVersion"), _BUN_LOCK_VERSIONS
-    ):
+    if data is None:
         return []
+    check_lockfile_version(path, data.get("lockfileVersion"), _BUN_LOCK_VERSIONS)
 
     packages = typed_field(path, data, "packages", dict, '"packages"') or {}
 

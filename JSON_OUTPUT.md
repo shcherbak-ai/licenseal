@@ -76,7 +76,7 @@
 | `violations` | int | Count where `verdict == "incompatible"`. |
 | `unknown` | int | Count where `verdict == "unknown"`. |
 | `reviewed` | int | Dependencies with a manual review override applied. Reviewed deps still appear in `warnings` / `violations` / `unknown` (the verdict counters are by classification, not by acceptance state), but the strict-mode CI exit code skips them — the review file `note` is the audit trail. |
-| `gaps` | int | Distinct manifests with an **analysis gap** — unreadable, undecodable, or unparseable files whose dependencies are missing from this report, manifests that reference another file that was not followed, files holding a value of a type their format does not allow, which was read as absent, or lockfiles that were skipped because they declare an unsupported version, hold no entry that can be read, or contain merge-conflict markers (see [`diagnostics` block](#diagnostics-block)). `total` therefore counts only the deps that could be read. Non-zero `gaps` fails strict mode. |
+| `gaps` | int | Distinct manifests with an **analysis gap** — unreadable, undecodable, or unparseable files whose dependencies are missing from this report, manifests that reference another file that was not followed, files holding a value of a type their format does not allow, which was read as absent, or lockfiles that were skipped because they declare a version known not to be readable, hold no entry that can be read, or contain merge-conflict markers (see [`diagnostics` block](#diagnostics-block)). `total` therefore counts only the deps that could be read. Non-zero `gaps` fails strict mode. |
 
 ## `diagnostics` block
 
@@ -88,15 +88,16 @@ Each entry is a manifest/lockfile read or parse anomaly surfaced during the scan
   { "path": "pom.xml", "reason": "is not valid XML; skipped", "severity": "gap" },
   { "path": "web/package.json", "reason": "\"dependencies\" has an unexpected type; ignored", "severity": "gap" },
   { "path": "web/pnpm-lock.yaml", "reason": "declares a lockfile version that is not supported; skipped", "severity": "gap" },
-  { "path": "requirements-dev.txt", "reason": "decoded as latin-1 (not valid UTF-8); non-ASCII content may be wrong", "severity": "recovered" }
+  { "path": "requirements-dev.txt", "reason": "decoded as latin-1 (not valid UTF-8); non-ASCII content may be wrong", "severity": "recovered" },
+  { "path": "yarn.lock", "reason": "declares a lockfile version newer than the parser knows; read on a best-effort basis", "severity": "recovered" }
 ]
 ```
 
 | Field | Type | Description |
 | --- | --- | --- |
 | `path` | string | Offending file, project-relative when under the scan root (else absolute). |
-| `reason` | string | Human-readable cause (unreadable, undecodable, unparseable, untraversable directory, a reference to another file that was not followed; a value of an unexpected type; a lockfile that declares an unsupported version, holds no entry that can be read, or contains merge-conflict markers; or latin-1 fallback). A reference is not followed when it is not a relative path, or, for a requirements `-r` include, when it is a URL, is not a file, or leaves the scanned directory; the entry is on the file that contains the reference. A document nested too deeply to parse is reported as not valid in its format. A value of an unexpected type is named by its section (`"dependencies"`, `project.optional-dependencies`) or as an entry of it (`an entry of "packages"`), never by the file's own text; several such values in one section are one entry. |
-| `severity` | `"gap"` \| `"recovered"` | `gap` = a dependency-bearing file was lost, or part of it could not be read (incomplete analysis — counted in `summary.gaps`, fails `--strict`). `recovered` = decoded with a caveat (latin-1 fallback) but the ASCII dependency lines survived — a warning, not a gap. |
+| `reason` | string | Human-readable cause (unreadable, undecodable, unparseable, untraversable directory, a reference to another file that was not followed; a value of an unexpected type; a lockfile that declares a version known not to be readable, holds no entry that can be read, or contains merge-conflict markers; or, without being a gap, latin-1 fallback or a lockfile read on a best-effort basis because it declares a version the parser was not written for). A reference is not followed when it is not a relative path, or, for a requirements `-r` include, when it is a URL, is not a file, or leaves the scanned directory; the entry is on the file that contains the reference. A document nested too deeply to parse is reported as not valid in its format. A value of an unexpected type is named by its section (`"dependencies"`, `project.optional-dependencies`) or as an entry of it (`an entry of "packages"`), never by the file's own text; several such values in one section are one entry. |
+| `severity` | `"gap"` \| `"recovered"` | `gap` = a dependency-bearing file was lost, or part of it could not be read (incomplete analysis — counted in `summary.gaps`, fails `--strict`). `recovered` = read with a caveat — a warning, not a gap, and not counted in `summary.gaps`: a file decoded through the latin-1 fallback, whose ASCII dependency lines survived, or a lockfile that declares a version the parser was not written for (newer, or otherwise not on its list) and was read on a best-effort basis. |
 
 ## Per-dependency fields
 

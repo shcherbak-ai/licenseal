@@ -1,10 +1,15 @@
 """A lockfile the parser cannot use is a gap, not an empty result.
 
 Three ways a lockfile parses and still tells the scan nothing: it declares a
-format version the parser was not written for, none of its entries is in a
+format version the parser is known not to read, none of its entries is in a
 form the parser reads, or it holds both sides of an unresolved merge. Each is
 recorded and the lockfile is skipped, which leaves the direct dependencies to
 the registry walk.
+
+A version the parser merely does not know is not one of them. A newer
+version, or any other value that is not on the parser's list, is read as it
+stands and noted without being a gap; if nothing in it can be read, the
+second rule says so.
 
 The other half is what must stay clean: a lockfile with no entries, and one
 that is read in full and then filters down to nothing (dev-only packages
@@ -17,9 +22,11 @@ import json
 import textwrap
 from pathlib import Path
 
+import httpx
 import pytest
 import respx
 
+from licenseal.discovery._read import ReadDiagnostic
 from licenseal.models import DependencyGroup
 from tests._helpers import (
     _assert_gap_fails_only_strict,
@@ -37,6 +44,15 @@ _VERSION = "declares a lockfile version that is not supported; skipped"
 _UNREAD = "holds no entry in a form that can be read; skipped"
 _CONFLICT = "contains merge-conflict markers; skipped"
 _WRONG_TYPE = "{} has an unexpected type; ignored"
+# Recorded without being a gap: the lockfile is read all the same.
+_NEWER = "declares a lockfile version newer than the parser knows; read on a best-effort basis"
+_UNKNOWN = "declares a lockfile version the parser does not know; read on a best-effort basis"
+
+
+def _notes(diags: list[ReadDiagnostic]) -> set[tuple[Path, str, bool]]:
+    """Everything recorded, as ``(path, reason, is_gap)``."""
+    return {(diag.path, diag.reason, diag.is_gap) for diag in diags}
+
 
 _NPM_MANIFEST = {"name": "app", "dependencies": {"a": "^1.0.0"}, "devDependencies": {"d": "^1.0.0"}}
 # What a scan knows when the lockfile pins nothing: the manifest's constraints.
@@ -81,19 +97,44 @@ class TestPnpmLock:
         """
     )
 
-    @pytest.mark.parametrize("version", ["5.4", "'5.3'", "5", "'7.0'", "'10.0'", "true", "[9]"])
-    def test_unsupported_version_is_a_gap(self, tmp_path: Path, version):
+    @pytest.mark.parametrize("version", ["5.4", "'5.3'", "5", "'4'", "3", "0"])
+    def test_version_older_than_6_is_a_gap_whatever_the_file_holds(self, tmp_path: Path, version):
+        # Known not to be read: those versions key packages as /name/version.
+        # The version alone decides, even over entries that could be read.
         lock = _npm(tmp_path, "pnpm-lock.yaml", self._V9.format(version=version))
         rows, diags = _resolve(tmp_path)
         assert rows == _NPM_UNPINNED
         assert _gaps(diags) == {(lock, _VERSION)}
 
     @pytest.mark.parametrize("version", ["'6.0'", "'6.1'", "'9.0'", "9", "6.0"])
-    def test_supported_version_is_read(self, tmp_path: Path, version):
+    def test_known_version_is_read(self, tmp_path: Path, version):
         _npm(tmp_path, "pnpm-lock.yaml", self._V9.format(version=version))
         rows, diags = _resolve(tmp_path)
         assert rows == _NPM_PINNED
         assert diags == []
+
+    @pytest.mark.parametrize("version", ["'10.0'", "'11.2'", "10", "42.0"])
+    def test_newer_version_is_read_and_noted_without_a_gap(self, tmp_path: Path, version):
+        lock = _npm(tmp_path, "pnpm-lock.yaml", self._V9.format(version=version))
+        rows, diags = _resolve(tmp_path)
+        assert rows == _NPM_PINNED
+        assert _notes(diags) == {(lock, _NEWER, False)}
+
+    @pytest.mark.parametrize("version", ["'7.0'", "'8.0'", "latest", "true", "[9]"])
+    def test_version_not_on_the_list_is_read_and_noted_without_a_gap(self, tmp_path: Path, version):
+        # Between two known versions, or not a number at all: nothing says
+        # the lockfile cannot be read, so it is.
+        lock = _npm(tmp_path, "pnpm-lock.yaml", self._V9.format(version=version))
+        rows, diags = _resolve(tmp_path)
+        assert rows == _NPM_PINNED
+        assert _notes(diags) == {(lock, _UNKNOWN, False)}
+
+    def test_newer_version_with_no_readable_entry_is_a_gap(self, tmp_path: Path):
+        # The note says the version is unknown; the gap says what that cost.
+        lock = _npm(tmp_path, "pnpm-lock.yaml", "lockfileVersion: '10.0'\n" + self._V5_PACKAGES)
+        rows, diags = _resolve(tmp_path)
+        assert rows == _NPM_UNPINNED
+        assert _notes(diags) == {(lock, _NEWER, False), (lock, _UNREAD, True)}
 
     def test_version_5_lockfile_is_a_gap_by_its_version(self, tmp_path: Path):
         lock = _npm(tmp_path, "pnpm-lock.yaml", "lockfileVersion: 5.4\n" + self._V5_PACKAGES)
@@ -172,19 +213,44 @@ class TestPackageLock:
         "node_modules/d": {"version": "1.0.0", "dev": True},
     }
 
-    @pytest.mark.parametrize("version", [0, 4, "x", True, [3], 3.5])
-    def test_unsupported_version_is_a_gap(self, tmp_path: Path, version):
+    @pytest.mark.parametrize(
+        ("version", "note"),
+        [
+            (4, _NEWER),
+            (5, _NEWER),
+            ("4", _NEWER),
+            (0, _UNKNOWN),
+            ("x", _UNKNOWN),
+            (True, _UNKNOWN),
+            ([3], _UNKNOWN),
+            # A run of digits no interpreter converts is not a version either.
+            ("1" * 5000, _UNKNOWN),
+        ],
+        ids=["4", "5", "4-string", "0", "word", "boolean", "list", "5000-digits"],
+    )
+    def test_version_not_on_the_list_is_read_and_noted_without_a_gap(
+        self, tmp_path: Path, version, note
+    ):
         lock = _npm(
             tmp_path,
             "package-lock.json",
             json.dumps({"lockfileVersion": version, "packages": self._PACKAGES}),
         )
         rows, diags = _resolve(tmp_path)
+        assert rows == _NPM_PINNED
+        assert _notes(diags) == {(lock, note, False)}
+
+    def test_newer_version_with_no_readable_entry_is_a_gap(self, tmp_path: Path):
+        packages = {"": {"name": "app"}, "node_modules/a": {}, "node_modules/b": {"resolved": "x"}}
+        lock = _npm(
+            tmp_path, "package-lock.json", json.dumps({"lockfileVersion": 4, "packages": packages})
+        )
+        rows, diags = _resolve(tmp_path)
         assert rows == _NPM_UNPINNED
-        assert _gaps(diags) == {(lock, _VERSION)}
+        assert _notes(diags) == {(lock, _NEWER, False), (lock, _UNREAD, True)}
 
     @pytest.mark.parametrize("document", [{"lockfileVersion": 2}, {"lockfileVersion": 3}, {}])
-    def test_supported_or_undeclared_version_is_read(self, tmp_path: Path, document):
+    def test_known_or_undeclared_version_is_read(self, tmp_path: Path, document):
         _npm(tmp_path, "package-lock.json", json.dumps({**document, "packages": self._PACKAGES}))
         rows, diags = _resolve(tmp_path)
         assert rows == _NPM_PINNED
@@ -318,11 +384,23 @@ class TestYarnClassicLock:
         assert rows == _NPM_PINNED
         assert diags == []
 
-    def test_unsupported_header_version_is_a_gap(self, tmp_path: Path):
-        lock = _npm(tmp_path, "yarn.lock", _YARN_V1.replace("lockfile v1", "lockfile v2"))
+    @pytest.mark.parametrize(
+        ("header", "note"),
+        [("lockfile v2", _NEWER), ("lockfile v0", _UNKNOWN), ("lockfile vNext", _UNKNOWN)],
+    )
+    def test_header_version_not_on_the_list_is_read_and_noted_without_a_gap(
+        self, tmp_path: Path, header, note
+    ):
+        lock = _npm(tmp_path, "yarn.lock", _YARN_V1.replace("lockfile v1", header))
+        rows, diags = _resolve(tmp_path)
+        assert rows == _NPM_PINNED
+        assert _notes(diags) == {(lock, note, False)}
+
+    def test_newer_header_version_with_no_readable_entry_is_a_gap(self, tmp_path: Path):
+        lock = _npm(tmp_path, "yarn.lock", '# yarn lockfile v2\n\n\na@^1.0.0:\n  resolved "x"\n')
         rows, diags = _resolve(tmp_path)
         assert rows == _NPM_UNPINNED
-        assert _gaps(diags) == {(lock, _VERSION)}
+        assert _notes(diags) == {(lock, _NEWER, False), (lock, _UNREAD, True)}
 
     def test_lockfile_without_the_header_comment_is_read(self, tmp_path: Path):
         _npm(tmp_path, "yarn.lock", _YARN_V1.split("\n\n\n", 1)[1])
@@ -388,15 +466,37 @@ class TestYarnBerryLock:
         a: "npm:^1.0.0"
     """
 
-    @pytest.mark.parametrize("version", ["3", "9", "8.5", "x", "true", "[8]"])
-    def test_unsupported_version_is_a_gap(self, tmp_path: Path, version):
+    @pytest.mark.parametrize(
+        ("version", "note"),
+        [
+            ("11", _NEWER),
+            ("12", _NEWER),
+            ("3", _UNKNOWN),
+            ("x", _UNKNOWN),
+            ("true", _UNKNOWN),
+            ("[8]", _UNKNOWN),
+        ],
+    )
+    def test_version_not_on_the_list_is_read_and_noted_without_a_gap(
+        self, tmp_path: Path, version, note
+    ):
         lock = _npm(tmp_path, "yarn.lock", self._LOCK.format(version=version))
         rows, diags = _resolve(tmp_path)
-        assert rows == _NPM_UNPINNED
-        assert _gaps(diags) == {(lock, _VERSION)}
+        assert rows == _NPM_PINNED
+        assert _notes(diags) == {(lock, note, False)}
 
-    @pytest.mark.parametrize("version", ["4", "5", "6", "7", "8"])
-    def test_supported_version_is_read(self, tmp_path: Path, version):
+    def test_newer_version_with_no_readable_entry_is_a_gap(self, tmp_path: Path):
+        lock = _npm(
+            tmp_path,
+            "yarn.lock",
+            '__metadata:\n  version: 11\n\n"a@npm:^1.0.0":\n  resolution: "a@npm:1.0.0"\n',
+        )
+        rows, diags = _resolve(tmp_path)
+        assert rows == _NPM_UNPINNED
+        assert _notes(diags) == {(lock, _NEWER, False), (lock, _UNREAD, True)}
+
+    @pytest.mark.parametrize("version", ["4", "5", "6", "7", "8", "9", "10"])
+    def test_known_version_is_read(self, tmp_path: Path, version):
         _npm(tmp_path, "yarn.lock", self._LOCK.format(version=version))
         rows, diags = _resolve(tmp_path)
         assert rows == _NPM_PINNED
@@ -444,19 +544,30 @@ class TestBunLock:
         "d": ["d@1.0.0", "", {}, "sha512-x"],
     }
 
-    @pytest.mark.parametrize("version", [2, 1.5, "x", True])
-    def test_unsupported_version_is_a_gap(self, tmp_path: Path, version):
+    @pytest.mark.parametrize(
+        ("version", "note"), [(2, _NEWER), (3, _NEWER), ("x", _UNKNOWN), (True, _UNKNOWN)]
+    )
+    def test_version_not_on_the_list_is_read_and_noted_without_a_gap(
+        self, tmp_path: Path, version, note
+    ):
         lock = _npm(
             tmp_path,
             "bun.lock",
             json.dumps({"lockfileVersion": version, "packages": self._PACKAGES}),
         )
         rows, diags = _resolve(tmp_path)
+        assert rows == _NPM_PINNED
+        assert _notes(diags) == {(lock, note, False)}
+
+    def test_newer_version_with_no_readable_entry_is_a_gap(self, tmp_path: Path):
+        packages = {"a": ["a", "", {}], "b": ["b", "", {}]}
+        lock = _npm(tmp_path, "bun.lock", json.dumps({"lockfileVersion": 2, "packages": packages}))
+        rows, diags = _resolve(tmp_path)
         assert rows == _NPM_UNPINNED
-        assert _gaps(diags) == {(lock, _VERSION)}
+        assert _notes(diags) == {(lock, _NEWER, False), (lock, _UNREAD, True)}
 
     @pytest.mark.parametrize("document", [{"lockfileVersion": 0}, {"lockfileVersion": 1}, {}])
-    def test_supported_or_undeclared_version_is_read(self, tmp_path: Path, document):
+    def test_known_or_undeclared_version_is_read(self, tmp_path: Path, document):
         _npm(tmp_path, "bun.lock", json.dumps({**document, "packages": self._PACKAGES}))
         rows, diags = _resolve(tmp_path)
         assert rows == _NPM_PINNED
@@ -519,15 +630,37 @@ class TestUvLock:
     version = "8.0.0"
     """
 
-    @pytest.mark.parametrize("version", ["2", "1.5", '"x"', "true", "[1]"])
-    def test_unsupported_version_is_a_gap(self, tmp_path: Path, version):
+    @pytest.mark.parametrize(
+        ("version", "note"),
+        [
+            ("2", _NEWER),
+            ("3", _NEWER),
+            ("0", _UNKNOWN),
+            ('"x"', _UNKNOWN),
+            ("true", _UNKNOWN),
+            ("[1]", _UNKNOWN),
+        ],
+    )
+    def test_version_not_on_the_list_is_read_and_noted_without_a_gap(
+        self, tmp_path: Path, version, note
+    ):
         lock = _py(tmp_path, "uv.lock", f"version = {version}\n" + self._PACKAGES)
         rows, diags = _resolve(tmp_path)
+        assert rows == _PY_PINNED
+        assert _notes(diags) == {(lock, note, False)}
+
+    def test_newer_version_with_no_readable_entry_is_a_gap(self, tmp_path: Path):
+        lock = _py(
+            tmp_path,
+            "uv.lock",
+            'version = 2\n\n[[package]]\nname = "flask"\n\n[[package]]\nname = "pytest"\n',
+        )
+        rows, diags = _resolve(tmp_path)
         assert rows == _PY_UNPINNED
-        assert _gaps(diags) == {(lock, _VERSION)}
+        assert _notes(diags) == {(lock, _NEWER, False), (lock, _UNREAD, True)}
 
     @pytest.mark.parametrize("header", ["version = 1\nrevision = 3\n", ""])
-    def test_supported_or_undeclared_version_is_read(self, tmp_path: Path, header):
+    def test_known_or_undeclared_version_is_read(self, tmp_path: Path, header):
         _py(tmp_path, "uv.lock", header + self._PACKAGES)
         rows, diags = _resolve(tmp_path)
         assert rows == _PY_PINNED
@@ -581,14 +714,29 @@ class TestPoetryLock:
     version = "8.0.0"
     """
 
-    @pytest.mark.parametrize("version", ['"3.0"', '"0.9"', "3", "true"])
-    def test_unsupported_version_is_a_gap(self, tmp_path: Path, version):
+    @pytest.mark.parametrize(
+        ("version", "note"),
+        [('"3.0"', _NEWER), ("3", _NEWER), ('"0.9"', _UNKNOWN), ("true", _UNKNOWN)],
+    )
+    def test_version_not_on_the_list_is_read_and_noted_without_a_gap(
+        self, tmp_path: Path, version, note
+    ):
         lock = _py(
             tmp_path, "poetry.lock", self._PACKAGES + f"\n[metadata]\nlock-version = {version}\n"
         )
         rows, diags = _resolve(tmp_path)
+        assert rows == _PY_PINNED
+        assert _notes(diags) == {(lock, note, False)}
+
+    def test_newer_version_with_no_readable_entry_is_a_gap(self, tmp_path: Path):
+        lock = _py(
+            tmp_path,
+            "poetry.lock",
+            '[[package]]\nname = "flask"\n\n[metadata]\nlock-version = "3.0"\n',
+        )
+        rows, diags = _resolve(tmp_path)
         assert rows == _PY_UNPINNED
-        assert _gaps(diags) == {(lock, _VERSION)}
+        assert _notes(diags) == {(lock, _NEWER, False), (lock, _UNREAD, True)}
 
     @pytest.mark.parametrize(
         "metadata",
@@ -601,7 +749,7 @@ class TestPoetryLock:
         ],
         ids=["1.1", "2.0", "2.1", "no-lock-version", "no-metadata"],
     )
-    def test_supported_or_undeclared_version_is_read(self, tmp_path: Path, metadata):
+    def test_known_or_undeclared_version_is_read(self, tmp_path: Path, metadata):
         _py(tmp_path, "poetry.lock", self._PACKAGES + metadata)
         rows, diags = _resolve(tmp_path)
         assert rows == _PY_PINNED
@@ -643,15 +791,28 @@ class TestPipfileLock:
     }
     _PINNED = {("flask", "==3.0.0", PROD), ("pytest", "==8.0.0", DEV)}
 
-    @pytest.mark.parametrize("spec", [5, 7, 6.5, "x", True])
-    def test_unsupported_spec_version_is_a_gap(self, tmp_path: Path, spec):
+    @pytest.mark.parametrize(
+        ("spec", "note"),
+        [(7, _NEWER), (8, _NEWER), (5, _UNKNOWN), ("x", _UNKNOWN), (True, _UNKNOWN)],
+    )
+    def test_spec_version_not_on_the_list_is_read_and_noted_without_a_gap(
+        self, tmp_path: Path, spec, note
+    ):
         lock = self._project(tmp_path, {"_meta": {"pipfile-spec": spec}, **self._SECTIONS})
         rows, diags = _resolve(tmp_path)
+        assert rows == self._PINNED
+        assert _notes(diags) == {(lock, note, False)}
+
+    def test_newer_spec_version_with_no_readable_entry_is_a_gap(self, tmp_path: Path):
+        lock = self._project(
+            tmp_path, {"_meta": {"pipfile-spec": 7}, "default": {"flask": {"hashes": []}}}
+        )
+        rows, diags = _resolve(tmp_path)
         assert rows == _PY_UNPINNED
-        assert _gaps(diags) == {(lock, _VERSION)}
+        assert _notes(diags) == {(lock, _NEWER, False), (lock, _UNREAD, True)}
 
     @pytest.mark.parametrize("meta", [{"_meta": {"pipfile-spec": 6}}, {"_meta": {}}, {}])
-    def test_supported_or_undeclared_spec_version_is_read(self, tmp_path: Path, meta):
+    def test_known_or_undeclared_spec_version_is_read(self, tmp_path: Path, meta):
         self._project(tmp_path, {**meta, **self._SECTIONS})
         rows, diags = _resolve(tmp_path)
         assert rows == self._PINNED
@@ -985,7 +1146,7 @@ class TestPackratLock:
         return lock
 
     @pytest.mark.parametrize("fmt", ["1.4", "1.1"])
-    def test_supported_format_is_read(self, tmp_path: Path, fmt):
+    def test_known_format_is_read(self, tmp_path: Path, fmt):
         self._lock(tmp_path, _PACKRAT_LOCK.format(fmt=fmt))
         rows, diags = _resolve(tmp_path)
         assert rows == self._PINNED
@@ -997,12 +1158,22 @@ class TestPackratLock:
         assert rows == self._PINNED
         assert diags == []
 
-    @pytest.mark.parametrize("fmt", ["2.0", "0.9", "x"])
-    def test_unsupported_format_is_a_gap(self, tmp_path: Path, fmt):
+    @pytest.mark.parametrize(
+        ("fmt", "note"), [("2.0", _NEWER), ("3", _NEWER), ("0.9", _UNKNOWN), ("x", _UNKNOWN)]
+    )
+    def test_format_not_on_the_list_is_read_and_noted_without_a_gap(
+        self, tmp_path: Path, fmt, note
+    ):
         lock = self._lock(tmp_path, _PACKRAT_LOCK.format(fmt=fmt))
         rows, diags = _resolve(tmp_path)
+        assert rows == self._PINNED
+        assert _notes(diags) == {(lock, note, False)}
+
+    def test_newer_format_with_no_readable_record_is_a_gap(self, tmp_path: Path):
+        lock = self._lock(tmp_path, "PackratFormat: 2.0\n\nSource: CRAN\nVersion: 3.4.0\n")
+        rows, diags = _resolve(tmp_path)
         assert rows == set()
-        assert _gaps(diags) == {(lock, _VERSION)}
+        assert _notes(diags) == {(lock, _NEWER, False), (lock, _UNREAD, True)}
 
     def test_merge_conflict_markers_are_a_gap(self, tmp_path: Path):
         content = _PACKRAT_LOCK.format(fmt="1.4").replace(
@@ -1113,3 +1284,63 @@ class TestCheckCommand:
         assert data["dependencies"] == []
         assert data["summary"]["gaps"] == 0
         assert data["diagnostics"] == []
+
+    @respx.mock
+    @pytest.mark.parametrize(
+        ("lockfile", "content"),
+        [
+            pytest.param(
+                "yarn.lock",
+                '__metadata:\n  version: 11\n\n"left-pad@npm:^1.0.0":\n  version: 1.0.7\n',
+                id="yarn-berry",
+            ),
+            pytest.param(
+                "pnpm-lock.yaml",
+                "lockfileVersion: '10.0'\npackages:\n  left-pad@1.0.7: {}\n"
+                "snapshots:\n  left-pad@1.0.7: {}\n",
+                id="pnpm",
+            ),
+            pytest.param(
+                "package-lock.json",
+                json.dumps(
+                    {
+                        "lockfileVersion": 4,
+                        "packages": {"node_modules/left-pad": {"version": "1.0.7"}},
+                    }
+                ),
+                id="package-lock",
+            ),
+        ],
+    )
+    def test_lockfile_in_a_newer_version_is_read_and_passes_strict(
+        self, tmp_path: Path, lockfile, content
+    ):
+        # The locked version is what is reported, not what the registry would
+        # pick: the registry also has 1.3.0, which is what a walk from the
+        # manifest's ``^1.0.0`` selects. The unknown version is a warning on
+        # stderr and a ``recovered`` entry in the report, and it fails nothing.
+        (tmp_path / "package.json").write_text(
+            json.dumps({"name": "app", "license": "MIT", "dependencies": {"left-pad": "^1.0.0"}})
+        )
+        (tmp_path / lockfile).write_text(content, encoding="utf-8", newline="\n")
+        versions = {v: {"license": "MIT", "version": v} for v in ("1.0.7", "1.3.0")}
+        registry = "https://registry.npmjs.org/left-pad"
+        respx.get(registry).mock(return_value=httpx.Response(200, json={"versions": versions}))
+        respx.get(f"{registry}/latest").mock(
+            return_value=httpx.Response(200, json=versions["1.3.0"])
+        )
+        for version, meta in versions.items():
+            respx.get(f"{registry}/{version}").mock(return_value=httpx.Response(200, json=meta))
+
+        result, data = _check_json(tmp_path, "--strict")
+
+        assert result.exit_code == 0
+        assert f"Warning: {lockfile}: {_NEWER}" in result.output
+        assert "could not be fully analyzed" not in result.output
+        assert [(d["name"], d["resolved_version"]) for d in data["dependencies"]] == [
+            ("left-pad", "1.0.7")
+        ]
+        assert data["summary"]["gaps"] == 0
+        assert data["diagnostics"] == [
+            {"path": lockfile, "reason": _NEWER, "severity": "recovered"}
+        ]

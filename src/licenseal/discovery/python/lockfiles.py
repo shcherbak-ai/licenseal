@@ -34,13 +34,13 @@ from packaging.utils import canonicalize_name
 
 from licenseal._graph import compute_direct_ancestors
 from licenseal.discovery._read import (
+    check_lockfile_version,
     load_json,
     load_toml,
     record_unexpected_type,
     record_unread_entries,
     root_table,
     typed_field,
-    unsupported_lockfile_version,
 )
 from licenseal.discovery._walk import walk_project_files
 from licenseal.models import Dependency, DependencyGroup, Ecosystem
@@ -64,13 +64,13 @@ def _canon_name(name: str) -> str:
 
 _PYTHON_LOCKFILES = ("uv.lock", "poetry.lock", "Pipfile.lock")
 
-# The lockfile versions each parser reads: ``version`` in uv.lock, the major
-# of ``metadata.lock-version`` (``major.minor``) in poetry.lock, and
-# ``_meta.pipfile-spec`` in Pipfile.lock. A lockfile that declares any other
-# version is a gap rather than a best-effort parse.
-_UV_LOCK_VERSIONS = frozenset({"1"})
-_POETRY_LOCK_VERSIONS = frozenset({"1", "2"})
-_PIPFILE_LOCK_VERSIONS = frozenset({"6"})
+# The major lockfile versions each parser was written for: ``version`` in
+# uv.lock, ``metadata.lock-version`` in poetry.lock, ``_meta.pipfile-spec`` in
+# Pipfile.lock. A lockfile that declares another one is still read, with a
+# diagnostic that is not a gap.
+_UV_LOCK_VERSIONS = frozenset({1})
+_POETRY_LOCK_VERSIONS = frozenset({1, 2})
+_PIPFILE_LOCK_VERSIONS = frozenset({6})
 
 
 def find_python_lockfiles(
@@ -239,8 +239,7 @@ def parse_uv_lock(
     prod_root_names = {_canon_name(n) for n in prod_root_names}
     dev_root_names = {_canon_name(n) for n in dev_root_names}
     data = _load_toml(path)
-    if unsupported_lockfile_version(path, data.get("version"), _UV_LOCK_VERSIONS):
-        return []
+    check_lockfile_version(path, data.get("version"), _UV_LOCK_VERSIONS)
     packages = typed_field(path, data, "package", list) or []
 
     raw_pkgs: list[tuple[str, str]] = []  # (name, version)
@@ -348,10 +347,7 @@ def parse_poetry_lock(
     dev_root_names = {_canon_name(n) for n in dev_root_names}
     data = _load_toml(path)
     metadata = typed_field(path, data, "metadata", dict) or {}
-    if unsupported_lockfile_version(
-        path, metadata.get("lock-version"), _POETRY_LOCK_VERSIONS, dotted=True
-    ):
-        return []
+    check_lockfile_version(path, metadata.get("lock-version"), _POETRY_LOCK_VERSIONS)
     packages = typed_field(path, data, "package", list) or []
 
     raw_pkgs: list[tuple[str, str]] = []
@@ -437,8 +433,7 @@ def parse_pipfile_lock(
     if data is None:
         return []
     lock_meta = typed_field(path, data, "_meta", dict, '"_meta"') or {}
-    if unsupported_lockfile_version(path, lock_meta.get("pipfile-spec"), _PIPFILE_LOCK_VERSIONS):
-        return []
+    check_lockfile_version(path, lock_meta.get("pipfile-spec"), _PIPFILE_LOCK_VERSIONS)
 
     out: list[Dependency] = []
     total = read = 0

@@ -21,12 +21,14 @@ sink, partitioned into:
   (unreadable, undecodable, unparseable, in a subtree we couldn't enter, or
   referenced through a path that is not followed), or part of one was (a
   value of a type its format does not allow, read as absent), or a lockfile
-  that parsed could not be used (an unsupported version, no entry in a form
-  the parser reads, merge-conflict markers). Analysis is *incomplete*;
-  ``--strict`` treats this like an UNKNOWN and fails.
-* **recovered** (``is_gap=False``) — decoded with a caveat (latin-1 fallback);
-  the ASCII dependency lines survived, so analysis is complete but lossy for any
-  non-ASCII content. Worth a warning, not a failure.
+  that parsed could not be used (a version known not to be readable, no entry
+  in a form the parser reads, merge-conflict markers). Analysis is
+  *incomplete*; ``--strict`` treats this like an UNKNOWN and fails.
+* **recovered** (``is_gap=False``) — read with a caveat. A file decoded through
+  the latin-1 fallback: the ASCII dependency lines survived, so analysis is
+  complete but lossy for any non-ASCII content. A lockfile that declares a
+  version the parser does not know, read on a best-effort basis. Worth a
+  warning, not a failure.
 
 The CLI drains the sink to stderr after a scan. Outside an active sink
 ``_record`` is a no-op, so unit tests that call parsers directly need no setup.
@@ -54,6 +56,7 @@ else:  # pragma: no cover
 
 __all__ = [
     "ReadDiagnostic",
+    "check_lockfile_version",
     "collect_read_diagnostics",
     "decode_lockfile_text",
     "decode_text",
@@ -70,7 +73,6 @@ __all__ = [
     "rejected_path_reference",
     "root_table",
     "typed_field",
-    "unsupported_lockfile_version",
 ]
 
 _T = TypeVar("_T")
@@ -187,27 +189,48 @@ def root_table(path: Path, data: object) -> dict[str, Any] | None:
     return None
 
 
-def unsupported_lockfile_version(
-    path: Path, declared: object, supported: frozenset[str], *, dotted: bool = False
+# The leading integer of a declared version: ``3``, ``"9.0"``, ``5.4``. Bounded,
+# so a run of digits no interpreter will convert is simply not a version.
+_VERSION_MAJOR_RE = re.compile(r"(\d{1,9})(?!\d)")
+
+
+def check_lockfile_version(
+    path: Path, declared: object, known: frozenset[int], *, unreadable_below: int = 0
 ) -> bool:
-    """Record a gap and return True when a lockfile declares an unsupported version.
+    """Record what a lockfile's declared version means; return whether to read it.
 
     ``declared`` is the version exactly as the lockfile gives it (``3``,
-    ``"9.0"``, ``5.4``) and ``supported`` the versions the parser reads, as
-    strings. A format that numbers its versions ``major.minor`` passes
-    ``dotted`` and lists majors; otherwise the whole value must match. A
-    lockfile that declares no version is not rejected here: what it contains
-    decides (see :func:`record_unread_entries`).
+    ``"9.0"``, ``5.4``), compared by its major. ``known`` holds the majors
+    the parser was written for. ``unreadable_below`` is passed only where an
+    older format is known to be laid out in a way the parser does not read;
+    without it the result is always True.
 
-    A parser that reads a lockfile version it was not written for can come
-    back with part of the packages, or none, and no way to tell. The caller
-    skips the file instead, which leaves the direct dependencies to the
-    registry walk and the lockfile on record.
+    * Not declared, or a known major: read, nothing recorded.
+    * Older than ``unreadable_below``: recorded as a gap, and False is
+      returned so the caller skips the file. The direct dependencies are
+      then left to the registry walk.
+    * Anything else (a newer major, or a value that is not on the list):
+      read on a best-effort basis, with a diagnostic that is not a gap.
+      Lockfile formats mostly stay readable across version bumps, and "not
+      on the list" is not evidence that one does not. When a newer format
+      really cannot be read, :func:`record_unread_entries` records that.
     """
-    version = str(declared)
-    if declared is None or (version.split(".", 1)[0] if dotted else version) in supported:
+    if declared is None:
+        return True
+    match = _VERSION_MAJOR_RE.match(str(declared))
+    major = int(match.group(1)) if match else None
+    if major in known:
+        return True
+    if major is not None and major < unreadable_below:
+        _record(path, "declares a lockfile version that is not supported; skipped", is_gap=True)
         return False
-    _record(path, "declares a lockfile version that is not supported; skipped", is_gap=True)
+    newer = major is not None and major > max(known)
+    which = "newer than the parser knows" if newer else "the parser does not know"
+    _record(
+        path,
+        f"declares a lockfile version {which}; read on a best-effort basis",
+        is_gap=False,
+    )
     return True
 
 

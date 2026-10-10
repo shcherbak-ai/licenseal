@@ -20,18 +20,18 @@ from __future__ import annotations
 from pathlib import Path
 
 from licenseal.discovery._read import (
+    check_lockfile_version,
     decode_lockfile_text,
     record_unread_entries,
-    unsupported_lockfile_version,
 )
 from licenseal.discovery._walk import walk_project_files
 from licenseal.discovery.r._dcf import parse_dcf, parse_package_list
 from licenseal.discovery.r._lock import SpecInfo, build_lock_dependencies
 from licenseal.models import Dependency
 
-# The major ``PackratFormat`` versions this parser reads. A lockfile that
-# declares any other is a gap rather than a best-effort parse.
-_PACKRAT_FORMATS = frozenset({"1"})
+# The major ``PackratFormat`` versions this parser was written for. A lockfile
+# that declares another one is still read, with a diagnostic that is not a gap.
+_PACKRAT_FORMATS = frozenset({1})
 
 
 def find_packrat_lockfiles(
@@ -59,8 +59,7 @@ def parse_packrat_lock(
     # record is where a package goes.
     headers = [record for record in records if "PackratFormat" in record]
     declared = headers[0]["PackratFormat"] if headers else None
-    if unsupported_lockfile_version(path, declared, _PACKRAT_FORMATS, dotted=True):
-        return []
+    check_lockfile_version(path, declared, _PACKRAT_FORMATS)
 
     spec_info: SpecInfo = {}
     edges: dict[str, set[str]] = {}

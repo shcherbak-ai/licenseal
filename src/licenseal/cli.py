@@ -355,8 +355,9 @@ def _echo_read_diagnostics(view: list[ReportDiagnostic]) -> int:
     A *silent* skip is a silent false-negative (a dropped dependency reads as
     "no problem"), so every anomaly is echoed. Returns the number of distinct
     manifests lost to *gaps* (unreadable / unparseable / blind subtree),
-    excluding latin-1 *recoveries* — the caller folds this into the ``--strict``
-    exit decision and a one-line summary.
+    excluding *recoveries* (a latin-1 fallback, a lockfile in an unknown
+    version read on a best-effort basis) — the caller folds this into the
+    ``--strict`` exit decision and a one-line summary.
     """
     gap_paths: set[str] = set()
     for diag in view:
