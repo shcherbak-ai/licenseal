@@ -8,6 +8,7 @@ import threading
 import time
 from collections import Counter
 from collections.abc import Callable
+from functools import partial
 from urllib.parse import quote, urlsplit
 from xml.etree.ElementTree import Element  # nosec B405
 
@@ -96,6 +97,10 @@ class _HostRateLimitWindow:
     response between them, and at most ``max_total_seconds`` of pausing over
     the life of the process. Past either bound ``defer`` declines and the
     caller's ordinary retry budget applies.
+
+    ``defer`` takes an ``on_pause`` callback, called with the pause's length in
+    seconds by the one call that opens a pause — not by the workers that then
+    wait it out, so a pause is reported once.
     """
 
     def __init__(
@@ -116,7 +121,9 @@ class _HostRateLimitWindow:
         if wait > 0:
             time.sleep(wait)
 
-    def defer(self, response: httpx.Response) -> bool:
+    def defer(
+        self, response: httpx.Response, on_pause: Callable[[float], None] | None = None
+    ) -> bool:
         """Return True when the request should be retried after the pause."""
         if response.status_code != 429:
             with self._lock:
@@ -133,7 +140,11 @@ class _HostRateLimitWindow:
             self._stalled_pauses += 1
             self._remaining_seconds -= wait
             self._resume_at = now + wait
-            return True
+        # Outside the lock: the callback writes to the terminal, and the other
+        # workers need the lock to learn that a pause is open.
+        if on_pause is not None:
+            on_pause(wait)
+        return True
 
     def _seconds_until_reset(self, response: httpx.Response) -> float:
         reset = response.headers.get("x-ratelimit-reset", "").strip()
@@ -172,14 +183,61 @@ def _respect_host_rate_limit(url: str) -> None:
         window.acquire()
 
 
-def _defer_to_rate_limit_window(url: str, response: httpx.Response) -> bool:
+class RateLimitReport:
+    """What one scan is told about waiting on a registry's rate limit.
+
+    ``on_pause(host, seconds)`` is called when requests to ``host`` start
+    waiting for its rate-limit window to reset: once per pause, from the
+    worker thread whose response opened it. ``abandoned`` counts, per host,
+    the lookups that were still rate limited when the window's bounded waiting
+    and the ordinary retry budget were both spent, and so returned nothing.
+    """
+
+    def __init__(self, on_pause: Callable[[str, float], None] | None = None) -> None:
+        self._on_pause = on_pause
+        self._lock = threading.Lock()
+        self.abandoned: Counter[str] = Counter()
+
+    def pause_started(self, host: str, seconds: float) -> None:
+        """Report a pause of ``seconds`` that has just opened on ``host``."""
+        if self._on_pause is not None:
+            self._on_pause(host, seconds)
+
+    def lookup_abandoned(self, host: str) -> None:
+        """Count one lookup on ``host`` that ended rate limited."""
+        with self._lock:
+            self.abandoned[host] += 1
+
+
+def _defer_to_rate_limit_window(
+    url: str, response: httpx.Response, rate_limits: RateLimitReport | None = None
+) -> bool:
     """Whether to retry a rate-limited request once its host's window reopens.
 
     Always False for a host without a rate-limit window. Only the JSON GET
-    fetcher asks: it is the only one that reaches such a host.
+    fetcher asks: it is the only one that reaches such a host. A pause this
+    call opens is reported to ``rate_limits``.
     """
-    window = _HOST_RATE_LIMIT_WINDOWS.get((urlsplit(url).hostname or "").lower())
-    return window is not None and window.defer(response)
+    host = (urlsplit(url).hostname or "").lower()
+    window = _HOST_RATE_LIMIT_WINDOWS.get(host)
+    if window is None:
+        return False
+    on_pause = None if rate_limits is None else partial(rate_limits.pause_started, host)
+    return window.defer(response, on_pause)
+
+
+def _note_rate_limited_out(
+    url: str, response: httpx.Response, rate_limits: RateLimitReport | None
+) -> None:
+    """Count a lookup that ends on a 429 from a host with a rate-limit window.
+
+    Called for the last response of a lookup whose retry budget is spent. For
+    such a host that response is a 429 only when the window has also declined
+    to wait any longer.
+    """
+    host = (urlsplit(url).hostname or "").lower()
+    if rate_limits is not None and response.status_code == 429 and host in _HOST_RATE_LIMIT_WINDOWS:
+        rate_limits.lookup_abandoned(host)
 
 
 # Retries are jittered so the worker pool doesn't re-fire in lockstep. Without
@@ -313,7 +371,9 @@ def quote_coordinate(value: str, *, safe: str = "") -> str:
     return quote(value, safe=safe) if has_utf8_encoding(value) else value
 
 
-def fetch_registry_json(url: str, client: httpx.Client) -> dict | None:
+def fetch_registry_json(
+    url: str, client: httpx.Client, *, rate_limits: RateLimitReport | None = None
+) -> dict | None:
     """Fetch a JSON object with brief retries for transient registry failures.
 
     Returns ``None`` for every failed lookup: an error status, an exhausted
@@ -331,6 +391,8 @@ def fetch_registry_json(url: str, client: httpx.Client) -> dict | None:
     A rate-limited response from a host with a rate-limit window (see
     :class:`_HostRateLimitWindow`) is retried once the window reopens without
     spending one of the ``_MAX_ATTEMPTS``; the window bounds its own waiting.
+    ``rate_limits`` is told when such a pause starts, and counts the lookup
+    when it is still rate limited after all of the waiting.
     """
     if not has_utf8_encoding(url):
         return None
@@ -340,10 +402,11 @@ def fetch_registry_json(url: str, client: httpx.Client) -> dict | None:
         try:
             _respect_host_rate_limit(url)
             with client.stream("GET", url) as response:
-                if _defer_to_rate_limit_window(url, response):
+                if _defer_to_rate_limit_window(url, response, rate_limits):
                     continue
                 if response.status_code in _RETRYABLE_STATUS_CODES:
                     if attempt == _MAX_ATTEMPTS - 1:
+                        _note_rate_limited_out(url, response, rate_limits)
                         return None
                     time.sleep(_retry_delay_seconds(response, delay))
                     delay *= 2
@@ -1175,9 +1238,14 @@ class RegistryCache:
     :func:`fetch_registry_json` directly — same signature, same return
     semantics, but repeat URLs are served from memory and concurrent
     requests for the same URL collapse into one.
+
+    ``on_rate_limit_pause(host, seconds)`` is called each time the scan's
+    requests to a host start waiting for its rate limit to reset (see
+    :class:`RateLimitReport`); ``rate_limits.abandoned`` counts the lookups
+    that waiting did not save.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, on_rate_limit_pause: Callable[[str, float], None] | None = None) -> None:
         self._results: dict[str, dict | None] = {}
         self._done: set[str] = set()
         self._events: dict[str, threading.Event] = {}
@@ -1201,6 +1269,10 @@ class RegistryCache:
         # POSTs bypass the per-URL cache and are not counted here — they are
         # bounded at ~⌈deps/100⌉ per ecosystem and never dominate wall-clock.
         self.fetches_by_host: Counter[str] = Counter()
+        # Rate-limit waiting during this scan's fetches. The CLI reads
+        # ``rate_limits.abandoned`` after resolution to explain the lookups
+        # that came back empty because a host was still rate limiting.
+        self.rate_limits = RateLimitReport(on_rate_limit_pause)
 
     def fetch(self, url: str, client: httpx.Client) -> dict | None:
         """Return cached body for ``url`` or fetch it (deduping in-flight calls).
@@ -1211,7 +1283,7 @@ class RegistryCache:
         finishes. Failed fetches are cached as ``None`` so the scan
         doesn't hammer a dead endpoint.
         """
-        return self._fetch(url, client, fetch_registry_json)
+        return self._fetch(url, client, partial(fetch_registry_json, rate_limits=self.rate_limits))
 
     def fetch_text(self, url: str, client: httpx.Client) -> dict | None:
         """Cached text-endpoint variant of :meth:`fetch`.

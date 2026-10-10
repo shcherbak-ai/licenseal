@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import io
 import json
 import textwrap
 import time
@@ -14,6 +15,7 @@ import pytest
 import respx
 import tethered
 from click.testing import CliRunner
+from rich.console import Console
 
 from licenseal import __version__
 from licenseal.cli import (
@@ -5680,6 +5682,131 @@ class TestHexEcosystem:
         # (plus the one-second margin), and never for longer than a window.
         assert rejected == 2
         assert fake_registry_clock.sleeps == [41.0, 60.0]
+        # Each wait is announced on stderr when it starts, once, and nothing
+        # is said about abandoned lookups: there were none.
+        assert [line for line in result.stderr.splitlines() if "rate limit" in line] == [
+            "hex.pm rate limit reached: pausing hex.pm requests for 41s until it resets.",
+            "hex.pm rate limit reached: pausing hex.pm requests for 60s until it resets.",
+        ]
+        assert "abandoned" not in result.stderr
+
+    @staticmethod
+    def _write_locked_mix_project(tmp_path, names: list[str]) -> None:
+        """A Mix project whose mix.lock pins each of ``names`` at 1.0.0."""
+        (tmp_path / "mix.exs").write_text(
+            "defmodule M.MixProject do\n"
+            '  def project, do: [app: :m, deps: deps(), package: [licenses: ["MIT"]]]\n'
+            "  defp deps do\n"
+            "    [" + ", ".join(f'{{:{name}, "~> 1.0"}}' for name in names) + "]\n"
+            "  end\n"
+            "end\n"
+        )
+        (tmp_path / "mix.lock").write_text(
+            "%{\n"
+            + "".join(
+                f'  "{name}": {{:hex, :{name}, "1.0.0", "h", [:mix], [], "hexpm", "h2"}},\n'
+                for name in names
+            )
+            + "}\n"
+        )
+
+    @respx.mock
+    def test_check_says_how_many_hex_lookups_the_rate_limit_cost(
+        self, tmp_path, fake_registry_clock
+    ):
+        # hex.pm answers the first package and rate limits every request after
+        # it, for good. The bounded waiting is used up on the second package;
+        # it and the third come back UNKNOWN, and stderr says why.
+        names = ["pkg_000", "pkg_001", "pkg_002"]
+        self._write_locked_mix_project(tmp_path, names)
+        served = 0
+
+        def hex_pm(request: httpx.Request) -> httpx.Response:
+            nonlocal served
+            served += 1
+            if served > 1:
+                reset = int(fake_registry_clock.time()) + 59
+                return httpx.Response(429, headers={"x-ratelimit-reset": str(reset)})
+            return httpx.Response(
+                200,
+                json={"meta": {"licenses": ["MIT"], "links": {}}, "latest_stable_version": "1.0.0"},
+            )
+
+        respx.get(url__regex=r"^https://hex\.pm/api/packages/pkg_\d+$").mock(side_effect=hex_pm)
+
+        out = tmp_path / "report.json"
+        with patch("licenseal.resolvers.http.random.uniform", return_value=0.1):
+            result = CliRunner().invoke(
+                main,
+                [
+                    "check",
+                    "--path",
+                    str(tmp_path),
+                    "--max-workers",
+                    "1",
+                    "-f",
+                    "json",
+                    "-o",
+                    str(out),
+                ],
+            )
+        assert result.exit_code == 1
+        data = json.loads(out.read_text(encoding="utf-8"))
+        assert {d["name"]: d["license"] for d in data["dependencies"]} == {
+            "pkg_000": "MIT",
+            "pkg_001": "UNKNOWN",
+            "pkg_002": "UNKNOWN",
+        }
+        lines = result.stderr.splitlines()
+        # Three waits in a row with no answer in between, then no more.
+        assert [line for line in lines if "rate limit reached" in line] == [
+            "hex.pm rate limit reached: pausing hex.pm requests for 60s until it resets."
+        ] * 3
+        abandoned = [line for line in lines if "abandoned" in line]
+        assert len(abandoned) == 1
+        assert abandoned[0].startswith(
+            "Warning: 2 hex.pm lookup(s) were abandoned: hex.pm was still rate limiting "
+            "requests after the bounded waiting."
+        )
+        assert "reported as UNKNOWN" in abandoned[0]
+
+    @respx.mock
+    def test_rate_limit_notice_is_printed_whole_above_a_live_progress_display(
+        self, tmp_path, fake_registry_clock, monkeypatch
+    ):
+        # On a terminal the scan draws a transient progress display on stderr
+        # while it resolves. The notice is written through the same console,
+        # so it comes out as one unbroken line rather than inside the display.
+        self._write_locked_mix_project(tmp_path, ["pkg_000", "pkg_001"])
+        reset_at = int(fake_registry_clock.time()) + 40
+
+        def hex_pm(request: httpx.Request) -> httpx.Response:
+            if fake_registry_clock.time() < reset_at:
+                return httpx.Response(429, headers={"x-ratelimit-reset": str(reset_at)})
+            return httpx.Response(
+                200,
+                json={"meta": {"licenses": ["MIT"], "links": {}}, "latest_stable_version": "1.0.0"},
+            )
+
+        respx.get(url__regex=r"^https://hex\.pm/api/packages/pkg_\d+$").mock(side_effect=hex_pm)
+        terminal = io.StringIO()
+        monkeypatch.setattr(
+            "licenseal.cli._STDERR_CONSOLE",
+            Console(file=terminal, force_terminal=True, width=60, legacy_windows=False),
+        )
+
+        result = CliRunner().invoke(
+            main, ["check", "--path", str(tmp_path), "--max-workers", "1", "-f", "json"]
+        )
+        assert result.exit_code == 0
+        drawn = terminal.getvalue()
+        notice = "hex.pm rate limit reached: pausing hex.pm requests for 41s until it resets.\n"
+        assert drawn.count(notice) == 1
+        # The display was live around it: drawn before the notice, moved out
+        # of its way, and drawn again below it.
+        before, _, after = drawn.partition(notice)
+        assert "Resolving licenses" in before
+        assert "Resolving licenses" in after
 
     @respx.mock
     def test_check_resolves_r_dep_via_cran_index(self, tmp_path):

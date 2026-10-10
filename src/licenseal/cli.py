@@ -367,6 +367,24 @@ def _echo_read_diagnostics(view: list[ReportDiagnostic]) -> int:
     return len(gap_paths)
 
 
+def _echo_rate_limit_pause(host: str, seconds: float) -> None:
+    """Say on stderr that requests to ``host`` wait for its rate limit to reset.
+
+    Called from a worker thread, possibly while a progress display is live.
+    The line goes through the console that draws those displays, which prints
+    it above a live one and redraws the display below it; a direct write to
+    stderr would land inside the display. Off a terminal no display is drawn
+    and the line is printed as it is.
+    """
+    _STDERR_CONSOLE.print(
+        f"{host} rate limit reached: pausing {host} requests for "
+        f"{max(1, round(seconds))}s until it resets.",
+        markup=False,
+        highlight=False,
+        soft_wrap=True,
+    )
+
+
 def _resolve_license_infos(
     deps: list[Dependency],
     max_workers: int,
@@ -432,7 +450,7 @@ def _resolve_license_infos(
             # Sharing one cache between the two phases turns the second
             # wave of fetches into in-memory dict lookups. See
             # `licenseal.resolvers.http.RegistryCache`.
-            registry_cache = RegistryCache()
+            registry_cache = RegistryCache(on_rate_limit_pause=_echo_rate_limit_pause)
             if transitive and project_path is not None:
                 # Indeterminate progress: BFS frontier is open-ended, total
                 # only known once the walk terminates. Single in-place line.
@@ -737,6 +755,18 @@ def _resolve_license_infos(
                 for info in pool.map(lambda c, dep: c.run(_resolve, dep), snapshots, deps):
                     results.append(info)
                     resolve_progress.advance(task)
+            # Lookups that ended rate limited after the bounded waiting came
+            # back empty; say so, or their rows read as plain UNKNOWNs. Ahead
+            # of the unreachability gate, so its error is explained as well.
+            for host, count in sorted(registry_cache.rate_limits.abandoned.items()):
+                click.echo(
+                    f"Warning: {count} {host} lookup(s) were abandoned: {host} was still rate "
+                    "limiting requests after the bounded waiting. A package whose license "
+                    "lookup was abandoned is reported as UNKNOWN, and one whose dependency "
+                    "lookup was abandoned is reported without its own dependencies. Re-run "
+                    "the scan later.",
+                    err=True,
+                )
             # Wholesale-unreachability gate. The pool has joined, so the cache
             # counters are final. If every registry request failed and nothing
             # resolved, the scan didn't *run* — abort with a hard error (same

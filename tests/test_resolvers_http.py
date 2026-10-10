@@ -143,6 +143,42 @@ class TestHostRateLimitWindow:
         assert window._stalled_pauses == 1  # noqa: SLF001
         assert window._remaining_seconds == 650.0 - 31.0  # noqa: SLF001
 
+    def test_pause_is_reported_once_by_the_call_that_opens_it(self, fake_registry_clock):
+        # The same full pool: every worker passes a callback, and only the one
+        # whose response opens the pause has it called, with the pause length.
+        window = _window()
+        workers = 16
+        start = threading.Barrier(workers)
+        responses = [_rate_limited(fake_registry_clock, reset_in=30) for _ in range(workers)]
+        reported: list[float] = []
+
+        def hit_limit(response: httpx.Response) -> bool:
+            start.wait()
+            return window.defer(response, reported.append)
+
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            deferred = list(pool.map(hit_limit, responses))
+
+        assert deferred == [True] * workers
+        assert reported == [31.0]
+
+        # The next window's pause is a new pause, reported again.
+        window.acquire()
+        assert window.defer(_rate_limited(fake_registry_clock, reset_in=59), reported.append)
+        assert reported == [31.0, 60.0]
+
+    def test_nothing_is_reported_when_no_pause_opens(self, fake_registry_clock):
+        window = _window(max_stalled=1)
+        reported: list[float] = []
+
+        assert window.defer(httpx.Response(200), reported.append) is False
+        assert window.defer(_rate_limited(fake_registry_clock, reset_in=30), reported.append)
+        window.acquire()
+        # The bound is reached: the window declines, and there is no pause to report.
+        declined = window.defer(_rate_limited(fake_registry_clock, reset_in=30), reported.append)
+        assert declined is False
+        assert reported == [31.0]
+
     def test_host_that_never_lifts_its_limit_stops_being_waited_on(self, fake_registry_clock):
         window = _window(max_stalled=3)
 
@@ -283,6 +319,100 @@ class TestHexPmRateLimitedFetch:
 
         assert results == [{"meta": {"licenses": ["MIT"]}}] * 16
         assert max(fake_registry_clock.sleeps) <= 65.0
+
+    @staticmethod
+    def _reporting_cache() -> tuple[registry_http.RegistryCache, list[tuple[str, float]]]:
+        """A per-scan cache, and the ``(host, seconds)`` pauses it reports."""
+        pauses: list[tuple[str, float]] = []
+        cache = registry_http.RegistryCache(
+            on_rate_limit_pause=lambda host, seconds: pauses.append((host, seconds))
+        )
+        return cache, pauses
+
+    @respx.mock
+    def test_scan_is_told_of_each_pause_as_it_starts(self, fake_registry_clock):
+        respx.get(self._URL).mock(side_effect=self._serve(fake_registry_clock, [429, 429, 200]))
+        cache, pauses = self._reporting_cache()
+        with httpx.Client() as client:
+            data = cache.fetch(self._URL, client)
+
+        assert data == {"meta": {"licenses": ["MIT"]}}
+        assert pauses == [("hex.pm", 60.0), ("hex.pm", 60.0)]
+        # The lookup got through, so nothing was abandoned.
+        assert cache.rate_limits.abandoned == {}
+
+    @respx.mock
+    def test_pool_of_workers_rate_limited_together_report_one_pause(self, fake_registry_clock):
+        reset_at = int(fake_registry_clock.time()) + 30
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            if fake_registry_clock.time() < reset_at:
+                return httpx.Response(429, headers={"x-ratelimit-reset": str(reset_at)})
+            return httpx.Response(200, json={"meta": {"licenses": ["MIT"]}})
+
+        respx.get(url__regex=r"^https://hex\.pm/api/packages/pkg_\d+$").mock(side_effect=handler)
+        urls = [f"https://hex.pm/api/packages/pkg_{i}" for i in range(16)]
+        cache, pauses = self._reporting_cache()
+        with httpx.Client() as client, ThreadPoolExecutor(max_workers=16) as pool:
+            results = list(pool.map(lambda url: cache.fetch(url, client), urls))
+
+        assert results == [{"meta": {"licenses": ["MIT"]}}] * 16
+        # One pause, however many workers waited it out.
+        assert pauses == [("hex.pm", 31.0)]
+        assert cache.rate_limits.abandoned == {}
+
+    @respx.mock
+    def test_lookups_still_rate_limited_after_the_waiting_are_counted(self, fake_registry_clock):
+        # The host never lifts the limit. The first lookup uses up the bounded
+        # waiting and then the ordinary budget; the second finds the waiting
+        # already used up. Both come back empty and both are counted.
+        respx.get(url__regex=r"^https://hex\.pm/api/packages/pkg_[ab]$").mock(
+            return_value=httpx.Response(429)
+        )
+        cache, pauses = self._reporting_cache()
+        with (
+            patch("licenseal.resolvers.http.random.uniform", return_value=0.1),
+            httpx.Client() as client,
+        ):
+            assert cache.fetch(self._URL, client) is None
+            assert cache.rate_limits.abandoned == {"hex.pm": 1}
+            assert cache.fetch("https://hex.pm/api/packages/pkg_b", client) is None
+            # A repeat of a failed lookup is answered from the cache: it is
+            # the same lookup, not another one.
+            assert cache.fetch(self._URL, client) is None
+
+        assert pauses == [("hex.pm", 65.0)] * 3
+        assert cache.rate_limits.abandoned == {"hex.pm": 2}
+
+    @respx.mock
+    def test_lookup_that_fails_for_another_reason_is_not_counted(self, fake_registry_clock):
+        # A server error from the rate-limited host, and a 429 from a host
+        # with no rate-limit window: neither is waiting that ran out.
+        respx.get(self._URL).mock(return_value=httpx.Response(503))
+        other = "https://example.com/data"
+        respx.get(other).mock(return_value=httpx.Response(429))
+        cache, pauses = self._reporting_cache()
+        with (
+            patch("licenseal.resolvers.http.random.uniform", return_value=0.1),
+            httpx.Client() as client,
+        ):
+            assert cache.fetch(self._URL, client) is None
+            assert cache.fetch(other, client) is None
+
+        assert pauses == []
+        assert cache.rate_limits.abandoned == {}
+
+    @respx.mock
+    def test_cache_without_a_pause_callback_still_counts(self, fake_registry_clock):
+        respx.get(self._URL).mock(return_value=httpx.Response(429))
+        cache = registry_http.RegistryCache()
+        with (
+            patch("licenseal.resolvers.http.random.uniform", return_value=0.1),
+            httpx.Client() as client,
+        ):
+            assert cache.fetch(self._URL, client) is None
+
+        assert cache.rate_limits.abandoned == {"hex.pm": 1}
 
     @respx.mock
     def test_other_hosts_keep_the_ordinary_retry_budget(self, fake_registry_clock):
