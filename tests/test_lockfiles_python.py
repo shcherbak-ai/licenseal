@@ -353,6 +353,41 @@ class TestParseUvLock:
         )
         assert {d.name for d in deps} == {"click"}
 
+    @pytest.mark.parametrize(
+        ("prod", "dev"),
+        [(set(), set()), ({"requests"}, {"pytest"})],
+        ids=["no-roots", "roots-not-in-lockfile"],
+    )
+    def test_keeps_every_package_when_no_root_is_in_the_lockfile(self, tmp_path, prod, dev):
+        # None of the discovered direct deps is in this lockfile, so nothing
+        # can be attributed. Every package is kept as PROD with no ancestors
+        # instead of the whole lockfile being dropped as orphans.
+        path = self._write(
+            tmp_path,
+            """\
+            version = 1
+
+            [[package]]
+            name = "myproject"
+            version = "0.1.0"
+            source = { virtual = "." }
+
+            [[package]]
+            name = "click"
+            version = "8.3.3"
+            dependencies = [{ name = "colorama" }]
+
+            [[package]]
+            name = "colorama"
+            version = "0.4.6"
+            """,
+        )
+        deps = parse_uv_lock(path, prod_root_names=prod, dev_root_names=dev, include_dev=False)
+        assert {(d.name, d.group, d.depth, d.direct_ancestors) for d in deps} == {
+            ("click", DependencyGroup.PROD, 1, ()),
+            ("colorama", DependencyGroup.PROD, 1, ()),
+        }
+
     def test_dev_dep_dropped_without_include_dev(self, tmp_path):
         # `pytest` is a dev root; without include_dev, it's dropped.
         path = self._write(
@@ -905,6 +940,40 @@ class TestParsePoetryLock:
             include_dev=False,
         )
         assert {d.name for d in deps} == {"click"}
+
+    def test_keeps_every_package_when_no_root_is_in_the_lockfile(self, tmp_path):
+        # Same lockfile shape, but none of the roots is in it: every package
+        # is kept as PROD with no ancestors, whatever ``category`` says.
+        path = self._write(
+            tmp_path,
+            """\
+            [[package]]
+            name = "click"
+            version = "8.3.3"
+            category = "main"
+
+            [package.dependencies]
+            colorama = "*"
+
+            [[package]]
+            name = "colorama"
+            version = "0.4.6"
+            category = "main"
+
+            [[package]]
+            name = "pytest"
+            version = "8.0.0"
+            category = "dev"
+            """,
+        )
+        deps = parse_poetry_lock(
+            path, prod_root_names={"requests"}, dev_root_names=set(), include_dev=False
+        )
+        assert {(d.name, d.group, d.depth, d.direct_ancestors) for d in deps} == {
+            ("click", DependencyGroup.PROD, 1, ()),
+            ("colorama", DependencyGroup.PROD, 1, ()),
+            ("pytest", DependencyGroup.PROD, 1, ()),
+        }
 
     def test_populates_direct_ancestors_from_dependencies_table(self, tmp_path):
         path = self._write(

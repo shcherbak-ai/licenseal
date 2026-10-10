@@ -178,6 +178,57 @@ class TestParsePackageLockJson:
         groups = {d.name: d.group for d in deps}
         assert groups["jest"] == DependencyGroup.DEV
 
+    @pytest.mark.parametrize(
+        ("prod", "dev"),
+        [(set(), set()), ({"vue"}, {"jest"})],
+        ids=["no-roots", "roots-not-in-lockfile"],
+    )
+    def test_keeps_every_package_when_no_root_is_in_the_lockfile(self, tmp_path, prod, dev):
+        # None of the discovered direct deps is in this lockfile, so nothing
+        # can be attributed. Every installed package is kept as PROD with no
+        # ancestors instead of the whole lockfile being dropped as orphans.
+        path = self._write(
+            tmp_path,
+            {
+                "lockfileVersion": 3,
+                "packages": {
+                    "": {"name": "myapp", "version": "1.0.0"},
+                    "packages/sibling": {"name": "sibling-pkg", "version": "0.1.0"},
+                    "node_modules/react": {
+                        "version": "18.2.0",
+                        "dependencies": {"scheduler": "^0.23.0"},
+                    },
+                    "node_modules/scheduler": {"version": "0.23.0", "dev": True},
+                },
+            },
+        )
+        deps = parse_package_lock_json(
+            path, prod_root_names=prod, dev_root_names=dev, include_dev=False
+        )
+        assert {(d.name, d.group, d.depth, d.direct_ancestors) for d in deps} == {
+            ("react", DependencyGroup.PROD, 1, ()),
+            ("scheduler", DependencyGroup.PROD, 1, ()),
+        }
+
+    def test_orphans_still_dropped_when_a_root_is_in_the_lockfile(self, tmp_path):
+        # Control: with one root present, attribution works and a package no
+        # root reaches is dropped as before.
+        path = self._write(
+            tmp_path,
+            {
+                "lockfileVersion": 3,
+                "packages": {
+                    "": {"name": "myapp", "version": "1.0.0"},
+                    "node_modules/react": {"version": "18.2.0"},
+                    "node_modules/lonely": {"version": "1.0.0"},
+                },
+            },
+        )
+        deps = parse_package_lock_json(
+            path, prod_root_names={"react"}, dev_root_names=set(), include_dev=False
+        )
+        assert [d.name for d in deps] == ["react"]
+
     def test_skips_non_node_modules_workspace_entries(self, tmp_path):
         """Workspace lockfiles include metadata-only entries keyed by
         workspace-relative paths (``packages/foo``) or out-of-tree refs
@@ -1242,6 +1293,63 @@ class TestParseYarnLock:
         names = {d.name for d in deps}
         assert names == {"react", "scheduler"}
 
+    _BERRY_WITH_WORKSPACES = """\
+        __metadata:
+          version: 8
+
+        "my-app@workspace:.":
+          version: 0.0.0-use.local
+          resolution: "my-app@workspace:."
+          dependencies:
+            "@me/lib": "workspace:^"
+          languageName: unknown
+          linkType: soft
+
+        "@me/lib@workspace:packages/lib":
+          version: 0.0.0-use.local
+          resolution: "@me/lib@workspace:packages/lib"
+          dependencies:
+            react: "npm:^18.0.0"
+          languageName: unknown
+          linkType: soft
+
+        "react@npm:^18.0.0":
+          version: 18.2.0
+          resolution: "react@npm:18.2.0"
+          languageName: node
+          linkType: hard
+        """
+
+    @pytest.mark.parametrize("prod", [set(), {"react"}, {"@me/lib"}], ids=str)
+    def test_berry_workspace_entries_are_not_packages(self, tmp_path, prod):
+        # ``name@workspace:path`` entries are the project's own packages.
+        # They are never rows: not when no root is in the lockfile (every
+        # package kept), not when a root is, and not when a root names one.
+        # Their edges still count, so react is reached through @me/lib.
+        path = tmp_path / "yarn.lock"
+        path.write_text(textwrap.dedent(self._BERRY_WITH_WORKSPACES))
+        deps = parse_yarn_lock(path, prod_root_names=prod, dev_root_names=set(), include_dev=False)
+        assert [(d.name, d.version_constraint) for d in deps] == [("react", "==18.2.0")]
+
+    def test_berry_lock_of_a_project_without_dependencies_is_empty(self, tmp_path):
+        path = tmp_path / "yarn.lock"
+        path.write_text(
+            textwrap.dedent(
+                """\
+                __metadata:
+                  version: 8
+
+                "my-app@workspace:.":
+                  version: 0.0.0-use.local
+                  resolution: "my-app@workspace:."
+                  languageName: unknown
+                  linkType: soft
+                """
+            )
+        )
+        deps = parse_yarn_lock(path, prod_root_names=set(), dev_root_names=set(), include_dev=True)
+        assert deps == []
+
     def test_parses_berry_npm_alias(self, tmp_path):
         # Berry alias form: `alias@npm:target@spec`. The dep must be emitted
         # under the canonical target name AND child references from other
@@ -1796,6 +1904,30 @@ class TestParseBunLock:
         assert names["react"].version_constraint == "==18.2.0"
         assert "scheduler" in names
         assert names["scheduler"].direct_ancestors == ("react",)
+
+    @pytest.mark.parametrize("prod", [set(), {"react"}], ids=["no-roots", "root-in-lockfile"])
+    def test_workspace_entries_are_not_packages(self, tmp_path, prod):
+        # ``name@workspace:path`` is one of the project's own packages. It is
+        # never a row: not when no root is in the lockfile (every package
+        # kept), and not when a root is.
+        path = self._write(
+            tmp_path,
+            """\
+            {
+              "lockfileVersion": 1,
+              "workspaces": {
+                "": { "name": "host" },
+                "packages/my-lib": { "name": "my-lib", "dependencies": { "react": "^18.0.0" } },
+              },
+              "packages": {
+                "my-lib": ["my-lib@workspace:packages/my-lib"],
+                "react": ["react@18.2.0", "", {}, "sha512-..."],
+              },
+            }
+            """,
+        )
+        deps = parse_bun_lock(path, prod_root_names=prod, dev_root_names=set(), include_dev=False)
+        assert [(d.name, d.version_constraint) for d in deps] == [("react", "==18.2.0")]
 
     def test_parses_scoped_package(self, tmp_path):
         # Scoped names have multiple `@`; the resolved id split must use

@@ -398,9 +398,10 @@ def _resolve_license_infos(
         # No direct deps AND no transitive walk possible → skip the
         # tethered.scope / progress / threadpool setup entirely. When a
         # transitive walk IS possible we proceed even with zero direct deps:
-        # a lockfile-only project (an R ``renv.lock`` / ``packrat.lock`` with no
-        # DESCRIPTION — common for analysis projects / Shiny apps) has deps to
-        # surface that come solely from the lockfile. The empty list flows
+        # a lockfile is read whether or not a manifest declares anything for
+        # its ecosystem (a lockfile with no manifest beside it, or a manifest
+        # whose dependencies discovery does not read), so a project can have
+        # deps to surface that come solely from a lockfile. The empty list flows
         # cleanly through ``analyze()`` and the renderers, so the caller still
         # emits a valid (empty) report.
         return []
@@ -917,13 +918,6 @@ def check(
                 )
             else:
                 click.echo(f"Found {len(deps)} dependencies. Resolving licenses...", err=True)
-        else:
-            # Zero deps after filtering — common for stdlib-only libraries or
-            # `--no-dev` against a project with only dev-group deps. Skip the
-            # resolution stage but still render the report so callers asking
-            # for `-f json` get a valid (empty-but-well-formed) document and
-            # the detected project license isn't silently dropped.
-            click.echo("No dependencies to resolve.", err=True)
         license_infos = _resolve_license_infos(
             deps,
             max_workers,
@@ -936,6 +930,15 @@ def check(
             exclude_paths=exclude_paths,
             timings=timings,
         )
+        if not license_infos:
+            # Nothing declared in a manifest and nothing in a lockfile —
+            # common for stdlib-only libraries or `--no-dev` against a project
+            # with only dev-group deps. The report is still rendered so callers
+            # asking for `-f json` get a valid (empty-but-well-formed) document
+            # and the detected project license isn't silently dropped. Said
+            # after resolution: zero direct deps is not yet zero deps, since a
+            # lockfile is read even when no manifest declares anything.
+            click.echo("No dependencies to resolve.", err=True)
 
     # Companion line to the per-host traffic summary above it: phases, not
     # hosts. Always at least the discovery entry, so never an empty line.

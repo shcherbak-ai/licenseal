@@ -10,6 +10,8 @@ transitive is `prod` iff it can be reached (via the lockfile's edge graph)
 from a `prod` direct dep, otherwise `dev` if reachable from a `dev` direct
 dep. Anything reachable from neither is dropped — these are typically
 dev-tool chains that no longer have a live root, or stale lockfile entries.
+The exception is a lockfile that contains none of the roots: nothing in it
+can be attributed, so every package is kept as `prod` with no ancestors.
 
 uv.lock keeps the dependencies behind an extra (``django[argon2]`` →
 ``argon2-cffi``) in a separate ``[package.optional-dependencies]`` table.
@@ -123,7 +125,16 @@ def _attribute(
 
     A package is PROD if reachable from any prod root, else DEV if reachable
     from any dev root, else absent (orphan).
+
+    When no root is in the lockfile at all, reachability says nothing about
+    it: every package is PROD with no ancestors.
     """
+    if name_case.keys().isdisjoint(prod_root_names | dev_root_names):
+        # None of the direct deps discovery found is in this lockfile: its
+        # manifest is missing, or declares its dependencies in a form
+        # discovery does not read. Dropping every package as an orphan would
+        # report nothing, so keep them all, conservatively as PROD.
+        return dict.fromkeys(name_case, DependencyGroup.PROD), {}
     prod_roots = {n: name_case[n] for n in prod_root_names if n in name_case}
     dev_roots = {n: name_case[n] for n in dev_root_names if n in name_case}
     prod_anc = compute_direct_ancestors(edges, prod_roots)

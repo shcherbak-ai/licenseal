@@ -701,6 +701,582 @@ class TestLockfileCoveragePartial:
         assert any(name == "pin-project-lite" and depth >= 1 for name, depth in names_by_depth)
 
 
+_CRATES_IO = "registry+https://github.com/rust-lang/crates.io-index"
+
+# One lockfile per supported format, each locking ``alpha`` (which depends on
+# ``beta``) plus, where the format has its own dev marker, a dev-only package.
+# Values: (relative path, content, production package names, dev package names).
+_LOCK_ONLY_FIXTURES = {
+    "uv.lock": (
+        "uv.lock",
+        """\
+        version = 1
+
+        [[package]]
+        name = "alpha"
+        version = "1.0.0"
+        dependencies = [{ name = "beta" }]
+
+        [[package]]
+        name = "beta"
+        version = "2.0.0"
+        """,
+        {"alpha", "beta"},
+        set(),
+    ),
+    "poetry.lock": (
+        "poetry.lock",
+        """\
+        [[package]]
+        name = "alpha"
+        version = "1.0.0"
+
+        [package.dependencies]
+        beta = ">=2"
+
+        [[package]]
+        name = "beta"
+        version = "2.0.0"
+        """,
+        {"alpha", "beta"},
+        set(),
+    ),
+    "Pipfile.lock": (
+        "Pipfile.lock",
+        json.dumps(
+            {
+                "default": {"alpha": {"version": "==1.0.0"}, "beta": {"version": "==2.0.0"}},
+                "develop": {"devtool": {"version": "==3.0.0"}},
+            }
+        ),
+        {"alpha", "beta"},
+        {"devtool"},
+    ),
+    "package-lock.json": (
+        "package-lock.json",
+        json.dumps(
+            {
+                "lockfileVersion": 3,
+                "packages": {
+                    "": {"name": "app"},
+                    "node_modules/alpha": {"version": "1.0.0", "dependencies": {"beta": "^2"}},
+                    "node_modules/beta": {"version": "2.0.0"},
+                },
+            }
+        ),
+        {"alpha", "beta"},
+        set(),
+    ),
+    "package-lock.json v1": (
+        "package-lock.json",
+        json.dumps(
+            {
+                "lockfileVersion": 1,
+                "dependencies": {
+                    "alpha": {"version": "1.0.0", "requires": {"beta": "^2"}},
+                    "beta": {"version": "2.0.0"},
+                },
+            }
+        ),
+        {"alpha", "beta"},
+        set(),
+    ),
+    "pnpm-lock.yaml": (
+        "pnpm-lock.yaml",
+        """\
+        lockfileVersion: '9.0'
+        packages:
+          alpha@1.0.0:
+            resolution: {integrity: sha512-fake==}
+          beta@2.0.0:
+            resolution: {integrity: sha512-fake==}
+        snapshots:
+          alpha@1.0.0:
+            dependencies:
+              beta: 2.0.0
+          beta@2.0.0: {}
+        """,
+        {"alpha", "beta"},
+        set(),
+    ),
+    "yarn.lock classic": (
+        "yarn.lock",
+        """\
+        # yarn lockfile v1
+
+        alpha@^1.0.0:
+          version "1.0.0"
+          dependencies:
+            beta "^2.0.0"
+
+        beta@^2.0.0:
+          version "2.0.0"
+        """,
+        {"alpha", "beta"},
+        set(),
+    ),
+    "yarn.lock berry": (
+        "yarn.lock",
+        """\
+        __metadata:
+          version: 8
+
+        "alpha@npm:^1.0.0":
+          version: 1.0.0
+          resolution: "alpha@npm:1.0.0"
+          dependencies:
+            beta: "npm:^2.0.0"
+          languageName: node
+          linkType: hard
+
+        "beta@npm:^2.0.0":
+          version: 2.0.0
+          resolution: "beta@npm:2.0.0"
+          languageName: node
+          linkType: hard
+
+        "app@workspace:.":
+          version: 0.0.0-use.local
+          resolution: "app@workspace:."
+          dependencies:
+            alpha: "npm:^1.0.0"
+          languageName: unknown
+          linkType: soft
+        """,
+        {"alpha", "beta"},
+        set(),
+    ),
+    "bun.lock": (
+        "bun.lock",
+        """\
+        {
+          "lockfileVersion": 1,
+          "workspaces": { "": { "name": "app" } },
+          "packages": {
+            "alpha": ["alpha@1.0.0", "", { "dependencies": { "beta": "^2.0.0" } }, "sha512-a"],
+            "beta": ["beta@2.0.0", "", {}, "sha512-b"],
+            "app-lib": ["app-lib@workspace:packages/app-lib"],
+          },
+        }
+        """,
+        {"alpha", "beta"},
+        set(),
+    ),
+    "Cargo.lock": (
+        "Cargo.lock",
+        f"""\
+        version = 3
+
+        [[package]]
+        name = "app"
+        version = "0.1.0"
+        dependencies = ["alpha"]
+
+        [[package]]
+        name = "alpha"
+        version = "1.0.0"
+        source = "{_CRATES_IO}"
+        dependencies = ["beta"]
+
+        [[package]]
+        name = "beta"
+        version = "2.0.0"
+        source = "{_CRATES_IO}"
+        """,
+        {"alpha", "beta"},
+        set(),
+    ),
+    "go.sum": (
+        "go.sum",
+        "example.org/alpha v1.0.0 h1:a\n"
+        "example.org/alpha v1.0.0/go.mod h1:a\n"
+        "example.org/beta v2.0.0 h1:b\n"
+        "example.org/beta v2.0.0/go.mod h1:b\n",
+        {"example.org/alpha", "example.org/beta"},
+        set(),
+    ),
+    "gradle.lockfile": (
+        "gradle.lockfile",
+        "# This is a Gradle generated file for dependency locking.\n"
+        "org.example:alpha:1.0.0=compileClasspath,runtimeClasspath\n"
+        "org.example:beta:2.0.0=runtimeClasspath\n"
+        "org.example:devtool:3.0.0=testRuntimeClasspath\n"
+        "empty=annotationProcessor\n",
+        {"org.example:alpha", "org.example:beta"},
+        {"org.example:devtool"},
+    ),
+    "packages.lock.json": (
+        "packages.lock.json",
+        json.dumps(
+            {
+                "version": 1,
+                "dependencies": {
+                    "net8.0": {
+                        "Alpha": {
+                            "type": "Direct",
+                            "resolved": "1.0.0",
+                            "dependencies": {"Beta": "2.0.0"},
+                        },
+                        "Beta": {"type": "Transitive", "resolved": "2.0.0"},
+                    }
+                },
+            }
+        ),
+        {"Alpha", "Beta"},
+        set(),
+    ),
+    "project.assets.json": (
+        "obj/project.assets.json",
+        json.dumps(
+            {
+                "version": 3,
+                "targets": {
+                    "net8.0": {
+                        "Alpha/1.0.0": {"type": "package", "dependencies": {"Beta": "2.0.0"}},
+                        "Beta/2.0.0": {"type": "package"},
+                    }
+                },
+                "project": {"frameworks": {"net8.0": {"dependencies": {"Alpha": {}}}}},
+            }
+        ),
+        {"Alpha", "Beta"},
+        set(),
+    ),
+    "paket.lock": (
+        "paket.lock",
+        "NUGET\n"
+        "  remote: https://api.nuget.org/v3/index.json\n"
+        "    Alpha (1.0.0)\n"
+        "    Beta (2.0.0)\n"
+        "GROUP Test\n"
+        "NUGET\n"
+        "  remote: https://api.nuget.org/v3/index.json\n"
+        "    DevTool (3.0.0)\n",
+        {"Alpha", "Beta"},
+        {"DevTool"},
+    ),
+    "composer.lock": (
+        "composer.lock",
+        json.dumps(
+            {
+                "packages": [
+                    {"name": "acme/alpha", "version": "1.0.0", "require": {"acme/beta": "^2"}},
+                    {"name": "acme/beta", "version": "2.0.0"},
+                ],
+                "packages-dev": [{"name": "acme/devtool", "version": "3.0.0"}],
+            }
+        ),
+        {"acme/alpha", "acme/beta"},
+        {"acme/devtool"},
+    ),
+    "Gemfile.lock": (
+        "Gemfile.lock",
+        "GEM\n"
+        "  remote: https://rubygems.org/\n"
+        "  specs:\n"
+        "    alpha (1.0.0)\n"
+        "      beta (>= 2)\n"
+        "    beta (2.0.0)\n"
+        "\n"
+        "DEPENDENCIES\n"
+        "  alpha\n"
+        "\n",
+        {"alpha", "beta"},
+        set(),
+    ),
+    "mix.lock": (
+        "mix.lock",
+        "%{\n"
+        '  "alpha": {:hex, :alpha, "1.0.0", "aaaa", [:mix], '
+        '[{:beta, "~> 2.0", [hex: :beta, repo: "hexpm", optional: false]}], "hexpm", "bbbb"},\n'
+        '  "beta": {:hex, :beta, "2.0.0", "cccc", [:mix], [], "hexpm", "dddd"},\n'
+        "}\n",
+        {"alpha", "beta"},
+        set(),
+    ),
+    "rebar.lock": (
+        "rebar.lock",
+        '{"1.2.0",\n'
+        '[{<<"alpha">>,{pkg,<<"alpha">>,<<"1.0.0">>},0},\n'
+        ' {<<"beta">>,{pkg,<<"beta">>,<<"2.0.0">>},1}]}.\n'
+        "[\n"
+        "{pkg_hash,[\n"
+        ' {<<"alpha">>, <<"AAAA">>},\n'
+        ' {<<"beta">>, <<"BBBB">>}]}\n'
+        "].\n",
+        {"alpha", "beta"},
+        set(),
+    ),
+}
+
+# A manifest that declares no dependency, with the lockfile its package
+# manager writes for it.
+_NO_DEPENDENCY_PROJECTS = {
+    "empty directory": {},
+    "uv": {
+        "pyproject.toml": '[project]\nname = "app"\nversion = "0.1.0"\ndependencies = []\n',
+        "uv.lock": 'version = 1\n\n[[package]]\nname = "app"\nversion = "0.1.0"\n'
+        'source = { virtual = "." }\n',
+    },
+    "poetry": {
+        "pyproject.toml": '[tool.poetry]\nname = "app"\nversion = "0.1.0"\n',
+        "poetry.lock": 'package = []\n\n[metadata]\nlock-version = "2.0"\n',
+    },
+    "pipenv": {
+        "Pipfile": "[packages]\n\n[dev-packages]\n",
+        "Pipfile.lock": json.dumps({"_meta": {}, "default": {}, "develop": {}}),
+    },
+    "npm": {
+        "package.json": json.dumps({"name": "app", "version": "1.0.0"}),
+        "package-lock.json": json.dumps(
+            {"name": "app", "lockfileVersion": 3, "packages": {"": {"name": "app"}}}
+        ),
+    },
+    "pnpm": {
+        "package.json": json.dumps({"name": "app", "version": "1.0.0"}),
+        "pnpm-lock.yaml": "lockfileVersion: '9.0'\n\nimporters:\n\n  .: {}\n",
+    },
+    "yarn classic": {
+        "package.json": json.dumps({"name": "app", "version": "1.0.0"}),
+        "yarn.lock": "# THIS IS AN AUTOGENERATED FILE. DO NOT EDIT THIS FILE DIRECTLY.\n"
+        "# yarn lockfile v1\n\n\n",
+    },
+    "yarn berry": {
+        "package.json": json.dumps({"name": "app", "version": "1.0.0"}),
+        "yarn.lock": "__metadata:\n  version: 8\n\n"
+        '"app@workspace:.":\n  version: 0.0.0-use.local\n'
+        '  resolution: "app@workspace:."\n  languageName: unknown\n  linkType: soft\n',
+    },
+    "bun": {
+        "package.json": json.dumps({"name": "app", "version": "1.0.0"}),
+        "bun.lock": '{\n  "lockfileVersion": 1,\n  "workspaces": { "": { "name": "app" } },\n'
+        '  "packages": {},\n}\n',
+    },
+    "cargo": {
+        "Cargo.toml": '[package]\nname = "app"\nversion = "0.1.0"\n\n[dependencies]\n',
+        "Cargo.lock": 'version = 3\n\n[[package]]\nname = "app"\nversion = "0.1.0"\n',
+    },
+    "go": {
+        "go.mod": "module example.com/app\n\ngo 1.22\n",
+        "go.sum": "",
+    },
+    "gradle": {
+        "build.gradle": "plugins {\n    id 'java'\n}\n",
+        "gradle.lockfile": "# This is a Gradle generated file for dependency locking.\n"
+        "empty=annotationProcessor,compileClasspath,runtimeClasspath\n",
+    },
+    "nuget": {
+        "App.csproj": '<Project Sdk="Microsoft.NET.Sdk" />\n',
+        "packages.lock.json": json.dumps({"version": 1, "dependencies": {"net8.0": {}}}),
+        "obj/project.assets.json": json.dumps(
+            {"version": 3, "targets": {"net8.0": {}}, "project": {"frameworks": {"net8.0": {}}}}
+        ),
+    },
+    "paket": {
+        "paket.dependencies": "source https://api.nuget.org/v3/index.json\n",
+        "paket.lock": "\n",
+    },
+    "composer": {
+        "composer.json": json.dumps({"name": "acme/app", "require": {}}),
+        "composer.lock": json.dumps({"packages": [], "packages-dev": []}),
+    },
+    "bundler": {
+        "Gemfile": 'source "https://rubygems.org"\n',
+        "Gemfile.lock": "GEM\n  remote: https://rubygems.org/\n  specs:\n\n"
+        "PLATFORMS\n  ruby\n\nDEPENDENCIES\n\nBUNDLED WITH\n   2.5.0\n",
+    },
+    "mix": {
+        "mix.exs": "defmodule App.MixProject do\n  use Mix.Project\n\n"
+        '  def project do\n    [app: :app, version: "0.1.0", deps: deps()]\n  end\n\n'
+        "  defp deps do\n    []\n  end\nend\n",
+        "mix.lock": "%{\n}\n",
+    },
+    "rebar": {
+        "rebar.config": "{erl_opts, [debug_info]}.\n{deps, []}.\n",
+        "rebar.lock": "[].\n",
+    },
+    # Lockfiles that list only the project's own packages.
+    "uv workspace": {
+        "pyproject.toml": '[project]\nname = "root"\nversion = "0.1.0"\ndependencies = []\n\n'
+        '[tool.uv.workspace]\nmembers = ["packages/*"]\n',
+        "packages/member/pyproject.toml": '[project]\nname = "member"\nversion = "0.1.0"\n',
+        "uv.lock": 'version = 1\n\n[[package]]\nname = "root"\nversion = "0.1.0"\n'
+        'source = { virtual = "." }\n\n[[package]]\nname = "member"\nversion = "0.1.0"\n'
+        'source = { editable = "packages/member" }\n',
+    },
+    "npm workspaces": {
+        "package.json": json.dumps({"name": "root", "workspaces": ["packages/*"]}),
+        "packages/member/package.json": json.dumps({"name": "member", "version": "1.0.0"}),
+        "package-lock.json": json.dumps(
+            {
+                "name": "root",
+                "lockfileVersion": 3,
+                "packages": {
+                    "": {"name": "root", "workspaces": ["packages/*"]},
+                    "node_modules/member": {"resolved": "packages/member", "link": True},
+                    "packages/member": {"name": "member", "version": "1.0.0"},
+                },
+            }
+        ),
+    },
+    "cargo workspace": {
+        "Cargo.toml": '[workspace]\nmembers = ["first", "second"]\n',
+        "first/Cargo.toml": '[package]\nname = "first"\nversion = "0.1.0"\n\n'
+        '[dependencies]\nsecond = { path = "../second" }\n',
+        "second/Cargo.toml": '[package]\nname = "second"\nversion = "0.1.0"\n',
+        "Cargo.lock": 'version = 3\n\n[[package]]\nname = "first"\nversion = "0.1.0"\n'
+        'dependencies = ["second"]\n\n[[package]]\nname = "second"\nversion = "0.1.0"\n',
+    },
+    "nuget project reference": {
+        "App.csproj": '<Project Sdk="Microsoft.NET.Sdk">\n  <ItemGroup>\n'
+        '    <ProjectReference Include="..\\Lib\\Lib.csproj" />\n  </ItemGroup>\n</Project>\n',
+        "packages.lock.json": json.dumps(
+            {"version": 1, "dependencies": {"net8.0": {"lib": {"type": "Project"}}}}
+        ),
+    },
+    "bundler gem": {
+        "Gemfile": 'source "https://rubygems.org"\ngemspec\n',
+        "app.gemspec": 'Gem::Specification.new do |spec|\n  spec.name = "app"\n'
+        '  spec.version = "0.1.0"\nend\n',
+        "Gemfile.lock": "PATH\n  remote: .\n  specs:\n    app (0.1.0)\n\n"
+        "GEM\n  remote: https://rubygems.org/\n  specs:\n\n"
+        "PLATFORMS\n  ruby\n\nDEPENDENCIES\n  app!\n\nBUNDLED WITH\n   2.5.0\n",
+    },
+}
+
+
+class TestLockfileWithoutDirectDependencies:
+    """A lockfile is read whenever it exists. When none of its packages is a
+    direct dependency discovery found, they are reported as PROD rather than
+    dropped."""
+
+    @staticmethod
+    def _write_tree(root, files: dict[str, str]) -> None:
+        for relative, content in files.items():
+            path = root / relative
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(textwrap.dedent(content), encoding="utf-8")
+
+    @staticmethod
+    def _resolve(tmp_path, *, include_dev: bool) -> list[Dependency]:
+        direct, _ = discover_all_dependencies(tmp_path)
+        with httpx.Client() as client:
+            return resolve_transitive(
+                direct, tmp_path, include_dev=include_dev, max_depth=50, client=client
+            )
+
+    @respx.mock
+    @pytest.mark.parametrize("fixture", list(_LOCK_ONLY_FIXTURES))
+    def test_lockfile_alone_is_reported(self, tmp_path, fixture):
+        # Nothing but the lockfile: no manifest, so no direct dependency.
+        relative, content, prod_names, dev_names = _LOCK_ONLY_FIXTURES[fixture]
+        self._write_tree(tmp_path, {relative: content})
+        any_request = respx.route().mock(return_value=httpx.Response(500))
+        assert discover_all_dependencies(tmp_path)[0] == []
+
+        prod_only = self._resolve(tmp_path, include_dev=False)
+        assert {d.name for d in prod_only} == prod_names
+        assert {d.group for d in prod_only} == {DependencyGroup.PROD}
+
+        with_dev = self._resolve(tmp_path, include_dev=True)
+        assert _prod_names(with_dev) == prod_names
+        assert {d.name for d in with_dev if d.group == DependencyGroup.DEV} == dev_names
+        # Attributing a lockfile with no roots needs no registry.
+        assert not any_request.called
+
+    @pytest.mark.parametrize(
+        "fixture",
+        [
+            "uv.lock",
+            "poetry.lock",
+            "package-lock.json",
+            "package-lock.json v1",
+            "pnpm-lock.yaml",
+            "yarn.lock classic",
+            "yarn.lock berry",
+            "bun.lock",
+            "Cargo.lock",
+            "go.sum",
+            "packages.lock.json",
+            "project.assets.json",
+        ],
+    )
+    def test_unattributable_packages_have_no_ancestors(self, tmp_path, fixture):
+        # These formats take their roots from discovery only. With none in
+        # the lockfile, every package is a transitive with no ancestors.
+        relative, content, _prod_names, _dev_names = _LOCK_ONLY_FIXTURES[fixture]
+        self._write_tree(tmp_path, {relative: content})
+        deps = self._resolve(tmp_path, include_dev=False)
+        assert {(d.depth, d.direct_ancestors, d.source) for d in deps} == {(1, (), "")}
+
+    @respx.mock
+    def test_lockfile_beside_a_manifest_that_names_none_of_its_packages(self, tmp_path):
+        # Discovery does find direct dependencies for the ecosystem, but the
+        # nested lockfile contains none of them: it is not dropped as orphans.
+        self._write_tree(
+            tmp_path,
+            {
+                "requirements.txt": "requests==2.31.0\n",
+                "service/uv.lock": _LOCK_ONLY_FIXTURES["uv.lock"][1],
+            },
+        )
+        respx.get("https://pypi.org/pypi/requests/2.31.0/json").mock(
+            return_value=httpx.Response(200, json=_pypi_version("requests", "2.31.0"))
+        )
+        deps = self._resolve(tmp_path, include_dev=False)
+        assert {(d.name, d.depth, d.group) for d in deps} == {
+            ("requests", 0, DependencyGroup.PROD),
+            ("alpha", 1, DependencyGroup.PROD),
+            ("beta", 1, DependencyGroup.PROD),
+        }
+
+    def test_orphans_still_dropped_when_a_root_is_in_the_lockfile(self, tmp_path):
+        # Control: the manifest names one of the lockfile's packages, so
+        # reachability works and an unreachable package is dropped as before.
+        self._write_tree(
+            tmp_path,
+            {
+                "pyproject.toml": '[project]\nname = "app"\ndependencies = ["alpha"]\n',
+                "uv.lock": """\
+                    version = 1
+
+                    [[package]]
+                    name = "alpha"
+                    version = "1.0.0"
+                    dependencies = [{ name = "beta" }]
+
+                    [[package]]
+                    name = "beta"
+                    version = "2.0.0"
+
+                    [[package]]
+                    name = "stale"
+                    version = "9.0.0"
+                    """,
+            },
+        )
+        deps = self._resolve(tmp_path, include_dev=False)
+        assert {(d.name, d.depth, d.direct_ancestors) for d in deps} == {
+            ("alpha", 0, ()),
+            ("beta", 1, ("alpha",)),
+        }
+
+    @respx.mock
+    @pytest.mark.parametrize("project", list(_NO_DEPENDENCY_PROJECTS))
+    def test_project_without_dependencies_stays_empty(self, tmp_path, project):
+        # An empty directory, and a manifest with no dependencies next to the
+        # lockfile its package manager writes for it: nothing is reported
+        # and nothing is requested.
+        self._write_tree(tmp_path, _NO_DEPENDENCY_PROJECTS[project])
+        any_request = respx.route().mock(return_value=httpx.Response(500))
+        with collect_read_diagnostics() as diagnostics:
+            assert discover_all_dependencies(tmp_path)[0] == []
+            for include_dev in (False, True):
+                assert self._resolve(tmp_path, include_dev=include_dev) == []
+        assert diagnostics == []
+        assert not any_request.called
+
+
 # ------------------------------------------------------------------ recursion path
 
 

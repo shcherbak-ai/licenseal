@@ -4,7 +4,9 @@ Each parser returns a flat list of `Dependency` objects pinned to exact
 versions. Group attribution is reachability-based: a transitive is `prod`
 iff reachable from a `prod` direct dep through the lockfile's edge graph,
 otherwise `dev` if reachable from a `dev` direct dep, otherwise dropped as
-an orphan.
+an orphan. The exception is a lockfile that contains none of the roots:
+nothing in it can be attributed, so every package is kept as `prod` with no
+ancestors.
 
 `yarn.lock` v1 uses a custom format; v2 (Berry) uses YAML. Both are handled.
 `pnpm-lock.yaml` is YAML with importer-scoped packages map.
@@ -109,7 +111,16 @@ def _attribute(
 
     A package reachable from any prod root is PROD; otherwise if reachable
     from a dev root, DEV; otherwise absent (treated as orphan by callers).
+
+    When no root is in the lockfile at all, reachability says nothing about
+    it: every package is PROD with no ancestors.
     """
+    if name_case.keys().isdisjoint(prod_root_names | dev_root_names):
+        # None of the direct deps discovery found is in this lockfile: its
+        # manifest is missing, or declares its dependencies in a form
+        # discovery does not read. Dropping every package as an orphan would
+        # report nothing, so keep them all, conservatively as PROD.
+        return dict.fromkeys(name_case, DependencyGroup.PROD), {}
     prod_roots = {n: name_case[n] for n in prod_root_names if n in name_case}
     dev_roots = {n: name_case[n] for n in dev_root_names if n in name_case}
     prod_anc = compute_direct_ancestors(edges, prod_roots)
@@ -616,6 +627,10 @@ def _parse_yarn_berry(
         edges.setdefault(normalized, set()).update(children)
         name_case.setdefault(normalized, name)
 
+        # ``name@workspace:path`` is one of the project's own packages, not a
+        # registry package: its edges stay in the graph, but it is no row.
+        if "@workspace:" in first:
+            continue
         if (normalized, version) in seen:
             continue
         seen.add((normalized, version))
@@ -853,6 +868,10 @@ def parse_bun_lock(
         edges.setdefault(normalized, set()).update(_collect_npm_edge_children(meta))
         name_case.setdefault(normalized, name)
 
+        # ``name@workspace:path`` is one of the project's own packages, not a
+        # registry package: its edges stay in the graph, but it is no row.
+        if version.startswith("workspace:"):
+            continue
         if (normalized, version) in seen:
             continue
         seen.add((normalized, version))

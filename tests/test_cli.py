@@ -5483,6 +5483,268 @@ class TestProductionPrecedence:
         }
 
 
+class TestLockfileWithoutDirectDependencies:
+    """A lockfile is scanned even when no manifest yields a direct dependency
+    for its ecosystem. Its packages are checked as production, so a copyleft
+    package in it fails the check instead of passing an empty scan."""
+
+    @staticmethod
+    def _check(tmp_path, *flags: str):
+        out = tmp_path / "report.json"
+        result = CliRunner().invoke(
+            main, ["check", "--path", str(tmp_path), *flags, "-f", "json", "-o", str(out)]
+        )
+        return result, json.loads(out.read_text(encoding="utf-8"))
+
+    @staticmethod
+    def _rows(data: dict) -> dict:
+        return {d["name"]: (d["group"], d["verdict"]) for d in data["dependencies"]}
+
+    @staticmethod
+    def _mock_maven_pom(artifact: str, version: str, license_id: str) -> None:
+        respx.get(
+            "https://repo.maven.apache.org/maven2/org/example/"
+            f"{artifact}/{version}/{artifact}-{version}.pom"
+        ).mock(
+            return_value=httpx.Response(
+                200,
+                text=(
+                    '<project xmlns="http://maven.apache.org/POM/4.0.0">'
+                    f"<groupId>org.example</groupId><artifactId>{artifact}</artifactId>"
+                    f"<version>{version}</version><licenses><license>"
+                    f"<name>{license_id}</name></license></licenses></project>"
+                ),
+            )
+        )
+
+    _CATALOG_BUILD = (
+        "plugins {\n    java\n}\n\n"
+        "dependencies {\n"
+        "    implementation(libs.web)\n"
+        "    runtimeOnly(libs.driver)\n"
+        "    testImplementation(libs.test.kit)\n"
+        "}\n"
+    )
+    _CATALOG_LOCK = (
+        "# This is a Gradle generated file for dependency locking.\n"
+        "org.example:web:1.0.0=compileClasspath,runtimeClasspath\n"
+        "org.example:gpl-driver:2.0.0=runtimeClasspath\n"
+        "org.example:test-kit:3.0.0=testCompileClasspath,testRuntimeClasspath\n"
+        "empty=annotationProcessor\n"
+    )
+
+    @respx.mock
+    def test_gradle_version_catalog_project_is_scanned_from_its_lockfile(self, tmp_path):
+        # Every dependency is declared through a version catalog accessor,
+        # which the build-file heuristic does not read; gradle.lockfile has
+        # the resolved artifacts.
+        (tmp_path / "build.gradle.kts").write_text(self._CATALOG_BUILD, encoding="utf-8")
+        (tmp_path / "gradle.lockfile").write_text(self._CATALOG_LOCK, encoding="utf-8")
+        self._mock_maven_pom("web", "1.0.0", "MIT")
+        self._mock_maven_pom("gpl-driver", "2.0.0", "GPL-3.0-only")
+        self._mock_maven_pom("test-kit", "3.0.0", "MIT")
+        self._mock_maven_pom("extra", "4.0.0", "MIT")
+        catalog_rows = {
+            "org.example:web": ("prod", "compatible"),
+            "org.example:gpl-driver": ("prod", "incompatible"),
+        }
+
+        result, data = self._check(tmp_path)
+        assert result.exit_code == 1
+        assert self._rows(data) == catalog_rows
+        assert (data["summary"]["total"], data["summary"]["violations"]) == (2, 1)
+        assert data["summary"]["gaps"] == 0
+        assert "No dependencies to resolve" not in result.output
+
+        result, data = self._check(tmp_path, "--dev", "--no-strict")
+        assert result.exit_code == 1
+        assert self._rows(data) == {**catalog_rows, "org.example:test-kit": ("dev", "compatible")}
+
+        # Control: one literal coordinate in the build file adds its own row
+        # and changes nothing about the catalog-declared ones.
+        (tmp_path / "build.gradle.kts").write_text(
+            self._CATALOG_BUILD.replace(
+                "dependencies {\n",
+                'dependencies {\n    implementation("org.example:extra:4.0.0")\n',
+            ),
+            encoding="utf-8",
+        )
+        (tmp_path / "gradle.lockfile").write_text(
+            self._CATALOG_LOCK + "org.example:extra:4.0.0=compileClasspath,runtimeClasspath\n",
+            encoding="utf-8",
+        )
+        result, data = self._check(tmp_path)
+        assert result.exit_code == 1
+        assert self._rows(data) == {**catalog_rows, "org.example:extra": ("prod", "compatible")}
+
+    @respx.mock
+    def test_nuget_reference_outside_the_project_file_is_scanned_from_its_lockfile(self, tmp_path):
+        # The only PackageReference lives in Directory.Build.props, which is
+        # read for properties only; packages.lock.json has the resolved graph.
+        (tmp_path / "Directory.Build.props").write_text(
+            "<Project>\n  <ItemGroup>\n"
+            '    <PackageReference Include="GplLib" Version="1.0.0" />\n'
+            "  </ItemGroup>\n</Project>\n",
+            encoding="utf-8",
+        )
+        (tmp_path / "App.csproj").write_text(
+            '<Project Sdk="Microsoft.NET.Sdk">\n  <PropertyGroup>\n'
+            "    <PackageLicenseExpression>MIT</PackageLicenseExpression>\n"
+            "  </PropertyGroup>\n</Project>\n",
+            encoding="utf-8",
+        )
+        (tmp_path / "packages.lock.json").write_text(
+            json.dumps(
+                {
+                    "version": 1,
+                    "dependencies": {
+                        "net8.0": {
+                            "GplLib": {
+                                "type": "Direct",
+                                "resolved": "1.0.0",
+                                "dependencies": {"GplChild": "1.1.0"},
+                            },
+                            "GplChild": {"type": "Transitive", "resolved": "1.1.0"},
+                        }
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+        for name, version, license_id in (
+            ("GplLib", "1.0.0", "GPL-3.0-only"),
+            ("GplChild", "1.1.0", "MIT"),
+        ):
+            lower = name.lower()
+            respx.get(
+                f"https://api.nuget.org/v3-flatcontainer/{lower}/{version}/{lower}.nuspec"
+            ).mock(
+                return_value=httpx.Response(
+                    200,
+                    text=(
+                        '<package xmlns="http://schemas.microsoft.com/packaging/2013/05/nuspec.xsd">'
+                        f"<metadata><id>{name}</id><version>{version}</version>"
+                        f'<license type="expression">{license_id}</license></metadata></package>'
+                    ),
+                )
+            )
+
+        result, data = self._check(tmp_path)
+        assert result.exit_code == 1
+        assert self._rows(data) == {
+            "GplLib": ("prod", "incompatible"),
+            "GplChild": ("prod", "compatible"),
+        }
+        # Nothing discovery found is in the lockfile, so no package can be
+        # attributed to a direct dependency.
+        assert {d["name"]: d.get("direct_ancestors", []) for d in data["dependencies"]} == {
+            "GplLib": [],
+            "GplChild": [],
+        }
+        assert "No dependencies to resolve" not in result.output
+
+    @respx.mock
+    def test_directory_holding_only_lockfiles_is_scanned(self, tmp_path):
+        # No manifest at all: a Cargo.lock and a poetry.lock.
+        registry = "registry+https://github.com/rust-lang/crates.io-index"
+        (tmp_path / "Cargo.lock").write_text(
+            "version = 3\n\n"
+            f'[[package]]\nname = "rust-lib"\nversion = "1.0.0"\nsource = "{registry}"\n'
+            'dependencies = ["rust-gpl"]\n\n'
+            f'[[package]]\nname = "rust-gpl"\nversion = "2.0.0"\nsource = "{registry}"\n',
+            encoding="utf-8",
+        )
+        (tmp_path / "poetry.lock").write_text(
+            '[[package]]\nname = "py-lib"\nversion = "3.0.0"\n\n'
+            '[[package]]\nname = "py-gpl"\nversion = "4.0.0"\n',
+            encoding="utf-8",
+        )
+        for name, version, license_id in (
+            ("rust-lib", "1.0.0", "MIT"),
+            ("rust-gpl", "2.0.0", "GPL-3.0-only"),
+        ):
+            respx.get(f"https://crates.io/api/v1/crates/{name}/{version}").mock(
+                return_value=httpx.Response(
+                    200, json={"version": {"num": version, "license": license_id}}
+                )
+            )
+            respx.get(f"https://crates.io/api/v1/crates/{name}").mock(
+                return_value=httpx.Response(200, json={"crate": {"max_stable_version": version}})
+            )
+        _mock_pypi("py-lib", "MIT", version="3.0.0")
+        _mock_pypi("py-gpl", "GPL-3.0-only", version="4.0.0")
+
+        result, data = self._check(tmp_path)
+        assert result.exit_code == 1
+        assert {
+            d["name"]: (d["ecosystem"], d["group"], d["verdict"]) for d in data["dependencies"]
+        } == {
+            "rust-lib": ("rust", "prod", "compatible"),
+            "rust-gpl": ("rust", "prod", "incompatible"),
+            "py-lib": ("python", "prod", "compatible"),
+            "py-gpl": ("python", "prod", "incompatible"),
+        }
+        assert (data["summary"]["total"], data["summary"]["gaps"]) == (4, 0)
+        assert "No dependencies to resolve" not in result.output
+
+    @respx.mock
+    def test_lockfile_only_scan_of_permissive_packages_passes(self, tmp_path):
+        # Reading a lockfile without a manifest is not a failure in itself.
+        (tmp_path / "package-lock.json").write_text(
+            json.dumps(
+                {
+                    "lockfileVersion": 3,
+                    "packages": {
+                        "": {"name": "app"},
+                        "node_modules/alpha": {"version": "1.0.0"},
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+        _mock_npm("alpha", "MIT")
+
+        result, data = self._check(tmp_path)
+        assert result.exit_code == 0
+        assert self._rows(data) == {"alpha": ("prod", "compatible")}
+
+    @respx.mock
+    @pytest.mark.parametrize(
+        "files",
+        [
+            {},
+            {
+                "package.json": json.dumps({"name": "app", "version": "1.0.0", "license": "MIT"}),
+                "yarn.lock": "__metadata:\n  version: 8\n\n"
+                '"app@workspace:.":\n  version: 0.0.0-use.local\n'
+                '  resolution: "app@workspace:."\n  languageName: unknown\n  linkType: soft\n',
+                "Cargo.toml": '[package]\nname = "app"\nversion = "0.1.0"\n',
+                "Cargo.lock": 'version = 3\n\n[[package]]\nname = "app"\nversion = "0.1.0"\n',
+                "go.mod": "module example.com/app\n\ngo 1.22\n",
+                "go.sum": "",
+                "App.csproj": '<Project Sdk="Microsoft.NET.Sdk" />\n',
+                "packages.lock.json": json.dumps({"version": 1, "dependencies": {"net8.0": {}}}),
+            },
+        ],
+        ids=["empty-directory", "manifests-without-dependencies"],
+    )
+    def test_scan_with_nothing_to_report_stays_clean(self, tmp_path, files):
+        # An empty directory, and manifests that declare no dependency next
+        # to the lockfiles written for them: a clean, empty, strict scan.
+        for relative, content in files.items():
+            (tmp_path / relative).write_text(content, encoding="utf-8")
+        respx.get().mock(return_value=httpx.Response(500))
+
+        result, data = self._check(tmp_path, "--strict")
+        assert result.exit_code == 0
+        assert data["dependencies"] == []
+        assert (data["summary"]["total"], data["summary"]["gaps"]) == (0, 0)
+        assert data["diagnostics"] == []
+        assert "No dependencies to resolve" in result.output
+        # No request of any kind, the deps.dev batch POST included.
+        assert respx.calls.call_count == 0
+
+
 class TestRegistryCacheDedupe:
     """The cli wires one `RegistryCache` through both the walker and the
     license-resolution fan-out. URLs the walker has already pulled are served

@@ -49,7 +49,16 @@ def _attribute(
 
     PROD if reachable from any prod root, else DEV if reachable from a dev
     root, else absent (orphan, dropped by caller).
+
+    When no root is in the lockfile at all, reachability says nothing about
+    it: every package is PROD with no ancestors.
     """
+    if name_case.keys().isdisjoint(prod_root_names | dev_root_names):
+        # None of the direct deps discovery found is in this lockfile: its
+        # manifest is missing, or declares its dependencies in a form
+        # discovery does not read. Dropping every package as an orphan would
+        # report nothing, so keep them all, conservatively as PROD.
+        return dict.fromkeys(name_case, DependencyGroup.PROD), {}
     prod_roots = {n: name_case[n] for n in prod_root_names if n in name_case}
     dev_roots = {n: name_case[n] for n in dev_root_names if n in name_case}
     prod_anc = compute_direct_ancestors(edges, prod_roots)
@@ -84,7 +93,9 @@ def parse_cargo_lock(
     """Parse a `Cargo.lock` into ``(deps_list, all_known_names)``.
 
     Reverse-BFS from prod and dev root sets attributes group + direct
-    ancestors per crate.
+    ancestors per crate. A crate no root reaches is dropped, unless the
+    lockfile contains none of the roots at all: then every registry crate is
+    kept as PROD with no ancestors.
 
     ``all_known_names`` is the lowercased names of every package in the
     lockfile, registry-sourced or not. Callers in ``transitive.py`` use

@@ -171,6 +171,42 @@ class TestParseCargoLock:
         )
         assert [d.name for d in deps] == ["serde"]
 
+    def test_keeps_every_registry_crate_when_no_root_is_in_the_lockfile(self, tmp_path):
+        # None of the discovered direct deps is in this lockfile, so nothing
+        # can be attributed. Every registry crate is kept as PROD with no
+        # ancestors; the local crate is still not a row.
+        path = _write(
+            tmp_path,
+            f"""\
+            version = 3
+
+            [[package]]
+            name = "myapp"
+            version = "0.1.0"
+            dependencies = ["serde"]
+
+            [[package]]
+            name = "serde"
+            version = "1.0.193"
+            source = "{_REGISTRY}"
+            dependencies = ["serde_derive"]
+
+            [[package]]
+            name = "serde_derive"
+            version = "1.0.193"
+            source = "{_REGISTRY}"
+            """,
+        )
+        for prod in (set(), {"tokio"}):
+            deps, known = parse_cargo_lock(
+                path, prod_root_names=prod, dev_root_names=set(), include_dev=False
+            )
+            assert {(d.name, d.group, d.depth, d.direct_ancestors) for d in deps} == {
+                ("serde", DependencyGroup.PROD, 1, ()),
+                ("serde_derive", DependencyGroup.PROD, 1, ()),
+            }
+            assert known == {"myapp", "serde", "serde_derive"}
+
     def test_dev_attribution_via_dev_root(self, tmp_path):
         path = _write(
             tmp_path,

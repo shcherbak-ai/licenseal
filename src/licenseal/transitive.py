@@ -198,7 +198,10 @@ def resolve_transitive(
     seeding only the matching deps.
 
     Lockfile-first per ecosystem. When the lockfile is missing for an
-    ecosystem, fall back to recursive registry resolution.
+    ecosystem, fall back to recursive registry resolution. A lockfile is
+    read whether or not `direct_deps` has an entry for its ecosystem; when
+    none of its packages is a direct dep, they are kept as PROD with no
+    ancestors rather than dropped.
 
     `fetcher` is the URL fetch function the walker (and its child resolvers)
     will use. The CLI passes a :class:`~licenseal.resolvers.http.RegistryCache`-backed
@@ -271,63 +274,67 @@ def resolve_transitive(
             on_wave=on_wave,
         )
 
-    if Ecosystem.PYTHON in ecosystems_present:
-        py_locks = find_python_lockfiles(project_path, exclude_paths=exclude_paths)
-        if py_locks:
-            locked: list[Dependency] = []
-            for py_lock in py_locks:
-                locked.extend(
-                    _stamp_sources(
-                        parse_python_lockfile(
-                            py_lock,
-                            prod_root_names=names_by_group(Ecosystem.PYTHON, DependencyGroup.PROD),
-                            dev_root_names=names_by_group(Ecosystem.PYTHON, DependencyGroup.DEV),
-                            include_dev=include_dev,
-                        )
+    # A lockfile is read whenever it exists, whether or not discovery found a
+    # direct dep for its ecosystem: the manifest beside it can be missing, or
+    # declare its dependencies in a form discovery does not read. What a
+    # lockfile's packages are attributed to when none of them is a discovered
+    # direct dep is each parser's call; none of them drops the whole file.
+    py_locks = find_python_lockfiles(project_path, exclude_paths=exclude_paths)
+    if py_locks:
+        locked: list[Dependency] = []
+        for py_lock in py_locks:
+            locked.extend(
+                _stamp_sources(
+                    parse_python_lockfile(
+                        py_lock,
+                        prod_root_names=names_by_group(Ecosystem.PYTHON, DependencyGroup.PROD),
+                        dev_root_names=names_by_group(Ecosystem.PYTHON, DependencyGroup.DEV),
+                        include_dev=include_dev,
                     )
                 )
-            out.extend(locked)
-            out.extend(_walk_uncovered(Ecosystem.PYTHON, locked, set()))
-            handled.add(Ecosystem.PYTHON)
+            )
+        out.extend(locked)
+        out.extend(_walk_uncovered(Ecosystem.PYTHON, locked, set()))
+        handled.add(Ecosystem.PYTHON)
 
-    if Ecosystem.NPM in ecosystems_present:
-        npm_locks = find_npm_lockfiles(project_path, exclude_paths=exclude_paths)
-        if npm_locks:
-            locked = []
-            for npm_lock in npm_locks:
-                locked.extend(
-                    _stamp_sources(
-                        parse_npm_lockfile(
-                            npm_lock,
-                            prod_root_names=names_by_group(Ecosystem.NPM, DependencyGroup.PROD),
-                            dev_root_names=names_by_group(Ecosystem.NPM, DependencyGroup.DEV),
-                            include_dev=include_dev,
-                        )
+    npm_locks = find_npm_lockfiles(project_path, exclude_paths=exclude_paths)
+    if npm_locks:
+        locked = []
+        for npm_lock in npm_locks:
+            locked.extend(
+                _stamp_sources(
+                    parse_npm_lockfile(
+                        npm_lock,
+                        prod_root_names=names_by_group(Ecosystem.NPM, DependencyGroup.PROD),
+                        dev_root_names=names_by_group(Ecosystem.NPM, DependencyGroup.DEV),
+                        include_dev=include_dev,
                     )
                 )
-            out.extend(locked)
-            out.extend(_walk_uncovered(Ecosystem.NPM, locked, set()))
-            handled.add(Ecosystem.NPM)
+            )
+        out.extend(locked)
+        out.extend(_walk_uncovered(Ecosystem.NPM, locked, set()))
+        handled.add(Ecosystem.NPM)
 
-    if Ecosystem.RUST in ecosystems_present:
-        rust_locks = find_rust_lockfiles(project_path, exclude_paths=exclude_paths)
-        if rust_locks:
-            locked = []
-            rust_known_names: set[str] = set()
-            for rust_lock in rust_locks:
-                lock_deps, lock_known = parse_cargo_lock(
-                    rust_lock,
-                    prod_root_names=names_by_group(Ecosystem.RUST, DependencyGroup.PROD),
-                    dev_root_names=names_by_group(Ecosystem.RUST, DependencyGroup.DEV),
-                    include_dev=include_dev,
-                )
-                locked.extend(_stamp_sources(lock_deps))
-                rust_known_names.update(lock_known)
-            out.extend(locked)
-            out.extend(_walk_uncovered(Ecosystem.RUST, locked, rust_known_names))
-            handled.add(Ecosystem.RUST)
+    rust_locks = find_rust_lockfiles(project_path, exclude_paths=exclude_paths)
+    if rust_locks:
+        locked = []
+        rust_known_names: set[str] = set()
+        for rust_lock in rust_locks:
+            lock_deps, lock_known = parse_cargo_lock(
+                rust_lock,
+                prod_root_names=names_by_group(Ecosystem.RUST, DependencyGroup.PROD),
+                dev_root_names=names_by_group(Ecosystem.RUST, DependencyGroup.DEV),
+                include_dev=include_dev,
+            )
+            locked.extend(_stamp_sources(lock_deps))
+            rust_known_names.update(lock_known)
+        out.extend(locked)
+        out.extend(_walk_uncovered(Ecosystem.RUST, locked, rust_known_names))
+        handled.add(Ecosystem.RUST)
 
-    if Ecosystem.JAVA in ecosystems_present:
+    if Ecosystem.JAVA in ecosystems_present or find_gradle_lockfiles(
+        project_path, exclude_paths=exclude_paths
+    ):
         # Java transitive resolution: lockfile-first (Gradle), else
         # deps.dev ``:dependencies`` walk per direct dep. Maven has no
         # native lockfile, so most Maven projects take the deps.dev
@@ -348,7 +355,11 @@ def resolve_transitive(
         )
         handled.add(Ecosystem.JAVA)
 
-    if Ecosystem.DOTNET in ecosystems_present:
+    if (
+        Ecosystem.DOTNET in ecosystems_present
+        or find_nuget_lockfiles(project_path, exclude_paths=exclude_paths)
+        or find_paket_lockfiles(project_path, exclude_paths=exclude_paths)
+    ):
         # .NET transitive resolution: lockfile-first (NuGet
         # ``packages.lock.json`` / ``project.assets.json`` AND Paket's
         # ``paket.lock``), else deps.dev ``:dependencies`` walk per direct
@@ -368,131 +379,126 @@ def resolve_transitive(
         )
         handled.add(Ecosystem.DOTNET)
 
-    if Ecosystem.PHP in ecosystems_present:
-        # PHP transitive resolution: composer.lock is authoritative when
-        # present — it embeds the full edge graph AND an explicit ``dev``
-        # boolean per entry (no reachability re-inference needed, unlike
-        # npm's multi-tool lockfile soup). Without a lockfile, fall through
-        # to the registry-walk fallback that calls
-        # :func:`fetch_packagist_dependencies` per resolved dep.
-        composer_locks = find_composer_lockfiles(project_path, exclude_paths=exclude_paths)
-        if composer_locks:
-            direct_php_names = {d.name.lower() for d in direct_deps if d.ecosystem == Ecosystem.PHP}
-            direct_source_by_name = {
-                d.name.lower(): d.source
-                for d in direct_deps
-                if d.ecosystem == Ecosystem.PHP and d.source
-            }
-            locked: list[Dependency] = []
-            for composer_lock in composer_locks:
-                lock_deps, _license_map = parse_composer_lockfile(
-                    composer_lock,
-                    direct_names=direct_php_names,
-                    include_dev=include_dev,
-                )
-                for dep in lock_deps:
-                    if dep.depth == 0:
-                        source = direct_source_by_name.get(dep.name.lower(), "")
-                        if source:
-                            locked.append(replace(dep, source=source))
-                        else:
-                            locked.append(dep)
+    # PHP transitive resolution: composer.lock is authoritative when
+    # present — it embeds the full edge graph AND an explicit ``dev``
+    # boolean per entry (no reachability re-inference needed, unlike
+    # npm's multi-tool lockfile soup). Without a lockfile, fall through
+    # to the registry-walk fallback that calls
+    # :func:`fetch_packagist_dependencies` per resolved dep.
+    composer_locks = find_composer_lockfiles(project_path, exclude_paths=exclude_paths)
+    if composer_locks:
+        direct_php_names = {d.name.lower() for d in direct_deps if d.ecosystem == Ecosystem.PHP}
+        direct_source_by_name = {
+            d.name.lower(): d.source
+            for d in direct_deps
+            if d.ecosystem == Ecosystem.PHP and d.source
+        }
+        locked: list[Dependency] = []
+        for composer_lock in composer_locks:
+            lock_deps, _license_map = parse_composer_lockfile(
+                composer_lock,
+                direct_names=direct_php_names,
+                include_dev=include_dev,
+            )
+            for dep in lock_deps:
+                if dep.depth == 0:
+                    source = direct_source_by_name.get(dep.name.lower(), "")
+                    if source:
+                        locked.append(replace(dep, source=source))
                     else:
                         locked.append(dep)
-            out.extend(locked)
-            out.extend(_walk_uncovered(Ecosystem.PHP, locked, set()))
-            handled.add(Ecosystem.PHP)
+                else:
+                    locked.append(dep)
+        out.extend(locked)
+        out.extend(_walk_uncovered(Ecosystem.PHP, locked, set()))
+        handled.add(Ecosystem.PHP)
 
-    if Ecosystem.RUBY in ecosystems_present:
-        # Ruby transitive resolution: Gemfile.lock is authoritative when
-        # present — the GEM/GIT/PATH/DEPENDENCIES grammar carries the
-        # full edge graph in a fully static format. Group attribution
-        # comes from the Gemfile (Gemfile.lock has no dev/prod marker
-        # of its own); we collect the DEV-only direct names from
-        # discovery and propagate via reverse-BFS in the lockfile parser.
-        gemfile_locks = find_gemfile_lockfiles(project_path, exclude_paths=exclude_paths)
-        if gemfile_locks:
-            ruby_workspace = workspace_gemspec_names(project_path, exclude_paths=exclude_paths)
-            direct_ruby_names = {
-                d.name.lower() for d in direct_deps if d.ecosystem == Ecosystem.RUBY
-            }
-            dev_direct_ruby_names = collect_dev_direct_names(
-                [d for d in direct_deps if d.ecosystem == Ecosystem.RUBY]
+    # Ruby transitive resolution: Gemfile.lock is authoritative when
+    # present — the GEM/GIT/PATH/DEPENDENCIES grammar carries the
+    # full edge graph in a fully static format. Group attribution
+    # comes from the Gemfile (Gemfile.lock has no dev/prod marker
+    # of its own); we collect the DEV-only direct names from
+    # discovery and propagate via reverse-BFS in the lockfile parser.
+    gemfile_locks = find_gemfile_lockfiles(project_path, exclude_paths=exclude_paths)
+    if gemfile_locks:
+        ruby_workspace = workspace_gemspec_names(project_path, exclude_paths=exclude_paths)
+        direct_ruby_names = {d.name.lower() for d in direct_deps if d.ecosystem == Ecosystem.RUBY}
+        dev_direct_ruby_names = collect_dev_direct_names(
+            [d for d in direct_deps if d.ecosystem == Ecosystem.RUBY]
+        )
+        direct_source_by_name = {
+            d.name.lower(): d.source
+            for d in direct_deps
+            if d.ecosystem == Ecosystem.RUBY and d.source
+        }
+        locked: list[Dependency] = []
+        for gemfile_lock in gemfile_locks:
+            lock_deps = parse_gemfile_lock(
+                gemfile_lock,
+                direct_names=direct_ruby_names,
+                dev_direct_names=dev_direct_ruby_names,
+                include_dev=include_dev,
             )
-            direct_source_by_name = {
-                d.name.lower(): d.source
-                for d in direct_deps
-                if d.ecosystem == Ecosystem.RUBY and d.source
-            }
-            locked: list[Dependency] = []
-            for gemfile_lock in gemfile_locks:
-                lock_deps = parse_gemfile_lock(
-                    gemfile_lock,
-                    direct_names=direct_ruby_names,
-                    dev_direct_names=dev_direct_ruby_names,
-                    include_dev=include_dev,
-                )
-                # Drop workspace-internal lockfile entries — monorepo
-                # siblings (one in-tree gem referencing another) are not
-                # published gems we'd want to look up.
-                lock_deps = [d for d in lock_deps if d.name.lower() not in ruby_workspace]
-                locked.extend(_attach_ruby_direct_sources(lock_deps, direct_source_by_name))
-            out.extend(locked)
-            out.extend(_walk_uncovered(Ecosystem.RUBY, locked, set()))
-            handled.add(Ecosystem.RUBY)
+            # Drop workspace-internal lockfile entries — monorepo
+            # siblings (one in-tree gem referencing another) are not
+            # published gems we'd want to look up.
+            lock_deps = [d for d in lock_deps if d.name.lower() not in ruby_workspace]
+            locked.extend(_attach_ruby_direct_sources(lock_deps, direct_source_by_name))
+        out.extend(locked)
+        out.extend(_walk_uncovered(Ecosystem.RUBY, locked, set()))
+        handled.add(Ecosystem.RUBY)
 
-    if Ecosystem.HEX in ecosystems_present:
-        # Hex transitive resolution. mix.lock (Elixir) carries the full edge
-        # graph and is parsed edge-aware (reverse-BFS group propagation from
-        # the mix.exs dev-name set). rebar.lock (Erlang) carries only depth
-        # levels — no edges — so it's level/section-based (Pipfile.lock shape).
-        # Both feed one ``Ecosystem.HEX`` graph; dev attribution comes from the
-        # manifest (mix.exs / rebar.config), never the lock.
-        mix_locks = find_mix_lockfiles(project_path, exclude_paths=exclude_paths)
-        rebar_locks = find_rebar_lockfiles(project_path, exclude_paths=exclude_paths)
-        if mix_locks or rebar_locks:
-            hex_workspace = workspace_hex_names(project_path, exclude_paths=exclude_paths)
-            direct_hex_names = {d.name.lower() for d in direct_deps if d.ecosystem == Ecosystem.HEX}
-            dev_direct_hex_names = _collect_hex_dev_direct_names(
-                [d for d in direct_deps if d.ecosystem == Ecosystem.HEX]
-            )
-            direct_source_by_name = {
-                d.name.lower(): d.source
-                for d in direct_deps
-                if d.ecosystem == Ecosystem.HEX and d.source
-            }
+    # Hex transitive resolution. mix.lock (Elixir) carries the full edge
+    # graph and is parsed edge-aware (reverse-BFS group propagation from
+    # the mix.exs dev-name set). rebar.lock (Erlang) carries only depth
+    # levels — no edges — so it's level/section-based (Pipfile.lock shape).
+    # Both feed one ``Ecosystem.HEX`` graph; dev attribution comes from the
+    # manifest (mix.exs / rebar.config), never the lock.
+    mix_locks = find_mix_lockfiles(project_path, exclude_paths=exclude_paths)
+    rebar_locks = find_rebar_lockfiles(project_path, exclude_paths=exclude_paths)
+    if mix_locks or rebar_locks:
+        hex_workspace = workspace_hex_names(project_path, exclude_paths=exclude_paths)
+        direct_hex_names = {d.name.lower() for d in direct_deps if d.ecosystem == Ecosystem.HEX}
+        dev_direct_hex_names = _collect_hex_dev_direct_names(
+            [d for d in direct_deps if d.ecosystem == Ecosystem.HEX]
+        )
+        direct_source_by_name = {
+            d.name.lower(): d.source
+            for d in direct_deps
+            if d.ecosystem == Ecosystem.HEX and d.source
+        }
 
-            def _attach_and_filter(lock_deps: list[Dependency]) -> list[Dependency]:
-                # Drop workspace-internal entries — umbrella siblings aren't
-                # published on hex.pm — then stamp manifest sources.
-                kept = [d for d in lock_deps if d.name.lower() not in hex_workspace]
-                return _attach_hex_direct_sources(kept, direct_source_by_name)
+        def _attach_and_filter(lock_deps: list[Dependency]) -> list[Dependency]:
+            # Drop workspace-internal entries — umbrella siblings aren't
+            # published on hex.pm — then stamp manifest sources.
+            kept = [d for d in lock_deps if d.name.lower() not in hex_workspace]
+            return _attach_hex_direct_sources(kept, direct_source_by_name)
 
-            locked = []
-            for mix_lock in mix_locks:
-                locked.extend(
-                    _attach_and_filter(
-                        parse_mix_lock(
-                            mix_lock,
-                            direct_names=direct_hex_names,
-                            dev_direct_names=dev_direct_hex_names,
-                            include_dev=include_dev,
-                        )
+        locked = []
+        for mix_lock in mix_locks:
+            locked.extend(
+                _attach_and_filter(
+                    parse_mix_lock(
+                        mix_lock,
+                        direct_names=direct_hex_names,
+                        dev_direct_names=dev_direct_hex_names,
+                        include_dev=include_dev,
                     )
                 )
-            for rebar_lock in rebar_locks:
-                locked.extend(
-                    _attach_and_filter(
-                        parse_rebar_lock(
-                            rebar_lock,
-                            dev_direct_names=dev_direct_hex_names,
-                            include_dev=include_dev,
-                        )
+            )
+        for rebar_lock in rebar_locks:
+            locked.extend(
+                _attach_and_filter(
+                    parse_rebar_lock(
+                        rebar_lock,
+                        dev_direct_names=dev_direct_hex_names,
+                        include_dev=include_dev,
                     )
                 )
-            out.extend(locked)
-            out.extend(_walk_uncovered(Ecosystem.HEX, locked, set()))
-            handled.add(Ecosystem.HEX)
+            )
+        out.extend(locked)
+        out.extend(_walk_uncovered(Ecosystem.HEX, locked, set()))
+        handled.add(Ecosystem.HEX)
 
     # R / CRAN transitive resolution. renv.lock / packrat.lock (when present)
     # give the pinned closure; direct deps a lock doesn't cover — and
@@ -519,7 +525,9 @@ def resolve_transitive(
         )
         handled.add(Ecosystem.R)
 
-    if Ecosystem.GO in ecosystems_present:
+    if Ecosystem.GO in ecosystems_present or find_go_lockfiles(
+        project_path, exclude_paths=exclude_paths
+    ):
         # Go's transitive resolution: parse go.sum for the universe of
         # pinned modules; fetch each module's go.mod from proxy.golang.org
         # concurrently to build the edge graph; run reverse-BFS for
@@ -592,6 +600,7 @@ def _resolve_go_transitive(
       2. Fetch each module's ``go.mod`` from ``proxy.golang.org`` to learn
          its direct require edges. Best-effort: proxy fetches that fail
          leave that module as a leaf in the edge graph (no outgoing edges).
+         Skipped when there is no direct dep to attribute anything to.
       3. Build the edge dict (lowercased names) and run
          :func:`compute_direct_ancestors` from PROD-root and DEV-root direct
          deps. Resulting attribution mirrors the npm/Rust/Python lockfile
@@ -646,7 +655,12 @@ def _resolve_go_transitive(
         return []
 
     # ---- 2. fetch each module's go.mod, extract edges ----
-    edges = _fetch_go_edge_graph(entries, client, max_workers, go_mod_fetcher)
+    # Edges only attribute modules to direct deps. With none (a go.sum whose
+    # go.mod is missing or requires nothing), every module is an orphan
+    # whatever the graph says, so nothing is fetched.
+    edges = (
+        _fetch_go_edge_graph(entries, client, max_workers, go_mod_fetcher) if direct_go_deps else {}
+    )
 
     # ---- 3. attribute group + direct_ancestors ----
     # name_case preserves the original-case module path so the reverse-BFS's
