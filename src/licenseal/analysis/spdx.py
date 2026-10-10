@@ -16,6 +16,20 @@ from licenseal.analysis.risk import KNOWN_SPDX_IDS
 # SPDX expressions are far shorter than this.
 _MAX_LICENSE_LENGTH = 1000
 
+# Longest string read as an SPDX expression. Real expressions are far shorter;
+# anything longer is prose.
+_MAX_EXPRESSION_LENGTH = 200
+
+_EXPRESSION_OPERATORS = frozenset({"OR", "AND", "WITH"})
+
+# Whitespace directly inside a paren. It is not part of an expression:
+# ``( MIT OR ISC )`` is ``(MIT OR ISC)``.
+_INNER_PAREN_SPACE_RE = re.compile(r"(?<=\()\s+|\s+(?=\))")
+
+# One operand of an expression that is being salvaged from a malformed
+# string: the SPDX ID character set, with the optional ``+`` suffix.
+_OPERAND_TOKEN_RE = re.compile(r"^[A-Za-z0-9.-]+\+?$")
+
 # Cargo's pre-SPDX convention used `/` as a synonym for `OR` in license fields,
 # producing strings like `MIT/Apache-2.0`. Many older crates still publish this
 # form. Translate it to the SPDX equivalent before further processing.
@@ -976,15 +990,12 @@ def _canonicalize_spdx_operands(expr: str) -> str:
     The result is a fixpoint: canonicalizing it again returns it
     unchanged.
 
-    Best-effort: returns ``expr`` unchanged if its parens are unbalanced.
     Whitespace inside the expression is collapsed to single spaces so
     ``"MIT  OR Apache-2.0"`` canonicalizes the same as the well-spaced
-    form.
+    form. The parens of ``expr`` pair up: a string whose parens do not is
+    never passed on as an expression (:func:`_looks_like_spdx`).
     """
-    expr = " ".join(expr.split())
-    if expr.count("(") != expr.count(")"):
-        return expr
-    return _canon(expr)
+    return _canon(" ".join(expr.split()))
 
 
 def _canon(expr: str) -> str:
@@ -1270,18 +1281,73 @@ def _normalize_license_inner(raw: str) -> str:
 
     # If it looks like a valid SPDX ID already (contains uppercase, hyphens),
     # return as-is
-    if _looks_like_spdx(stripped):
-        return stripped
+    expression = _INNER_PAREN_SPACE_RE.sub("", stripped)
+    if _looks_like_spdx(expression):
+        return expression
 
     return "UNKNOWN"
+
+
+def malformed_expression_conjunction(raw: str) -> str:
+    """Conjunction that stands in for a malformed license expression.
+
+    A string made only of license IDs, the operators ``OR`` / ``AND`` /
+    ``WITH`` and parentheses, but with an operator that lacks an operand or
+    with parentheses that do not pair up, has no reliable reading: nothing
+    says its ``OR`` was meant as a choice. :func:`normalize_license` returns
+    ``UNKNOWN`` for it. This returns what it is judged as instead — every
+    license it names applying together, plus one ``UNKNOWN`` operand for the
+    part that could not be read — so it can be a violation and is never
+    compatible.
+
+    The result is in canonical form. It is ``""`` when ``raw`` is a
+    well-formed expression, is not made of expression tokens (prose is never
+    mined for identifiers), or names no license. A license next to a
+    dangling ``WITH`` is not named: its exception is the missing part.
+    """
+    text = _INNER_PAREN_SPACE_RE.sub("", " ".join(raw.split()))
+    if len(text) > _MAX_EXPRESSION_LENGTH or _looks_like_spdx(text):
+        return ""
+    operands: list[str] = []
+    tokens = text.replace("(", " ").replace(")", " ").split()
+    # Operands sit between ``AND`` / ``OR``; within one, ``WITH`` separates
+    # the license from its exception.
+    for operand in _split_tokens(tokens, frozenset({"AND", "OR"})):
+        parts = _split_tokens(operand, frozenset({"WITH"}))
+        ids = [token for part in parts for token in part]
+        if any(len(part) > 1 for part in parts) or not all(
+            _OPERAND_TOKEN_RE.match(token)
+            and any(c.isupper() or c.isdigit() or c == "-" for c in token)
+            for token in ids
+        ):
+            # Two IDs with no operator between them, or a token that is not
+            # an ID: prose, not an expression.
+            return ""
+        if len(ids) == len(parts) <= 2 and ids[0] not in ("UNKNOWN", "NOASSERTION"):
+            # A license, alone or with its exception.
+            operands.append(" WITH ".join(ids))
+    if not operands:
+        return ""
+    return _canon(" AND ".join([*operands, "UNKNOWN"]))
+
+
+def _split_tokens(tokens: list[str], separators: frozenset[str]) -> list[list[str]]:
+    """Split ``tokens`` into the runs between ``separators``, empty runs included."""
+    runs: list[list[str]] = [[]]
+    for token in tokens:
+        if token in separators:
+            runs.append([])
+        else:
+            runs[-1].append(token)
+    return runs
 
 
 def _looks_like_spdx(value: str) -> bool:
     """Heuristic: does this look like a valid SPDX expression?
 
     An SPDX expression is a sequence of license-ID *leaves* joined by the
-    operators ``OR`` / ``AND`` / ``WITH``. Two shape rules follow from that
-    grammar:
+    operators ``OR`` / ``AND`` / ``WITH``. These shape rules follow from
+    that grammar:
 
     * **Each non-operator token must be ID-shaped** — it must contain an
       uppercase letter, digit, or hyphen. The hyphen/digit branch catches
@@ -1302,19 +1368,25 @@ def _looks_like_spdx(value: str) -> bool:
       passed through, the dangling half becomes an unresolvable ``OR`` arm
       that the classifier drops, and the remaining arm alone decides the
       verdict (``MIT OR GPL-3.0-only AND`` would read as compatible).
+    * **Parentheses pair up around leaves** — a group opens directly before
+      a leaf and closes directly after one, and every ``(`` has its ``)``.
+      A group left open hides the operators inside it from the classifier
+      the same way (``MIT OR (GPL-3.0-only`` would read as compatible).
     """
-    if len(value) > 200:
+    if len(value) > _MAX_EXPRESSION_LENGTH:
         return False
     parts = value.split()
     if not parts:
         return False
-    spdx_keywords = {"OR", "AND", "WITH"}
     prev_was_leaf = False
+    depth = 0
     for tok in parts:
-        # Strip grouping parens before testing the token, so `(MIT` and
-        # `Apache-2.0)` are judged on the ID.
-        bare = tok.strip("()")
-        if bare in spdx_keywords:
+        # Grouping parens are set aside before testing the token, so `(MIT`
+        # and `Apache-2.0)` are judged on the ID.
+        opens = len(tok) - len(tok.lstrip("("))
+        closes = len(tok) - len(tok.rstrip(")"))
+        bare = tok[opens : len(tok) - closes]
+        if bare in _EXPRESSION_OPERATORS:
             if not prev_was_leaf or bare != tok:
                 return False
             prev_was_leaf = False
@@ -1323,12 +1395,16 @@ def _looks_like_spdx(value: str) -> bool:
         leaf = bare.rstrip("+")
         if not any(c.isupper() or c.isdigit() or c == "-" for c in leaf):
             return False
-        if prev_was_leaf:
-            # Two ID leaves with no operator between them ⇒ prose.
+        if prev_was_leaf or "(" in bare or ")" in bare:
+            # Two ID leaves with no operator between them ⇒ prose. A paren
+            # inside a token groups nothing.
+            return False
+        depth += opens - closes
+        if depth < 0:
             return False
         prev_was_leaf = True
     # The last token has to be a leaf: an operator there is dangling.
-    return prev_was_leaf
+    return prev_was_leaf and depth == 0
 
 
 # --- R / CRAN license translation -------------------------------------------

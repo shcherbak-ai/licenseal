@@ -14,6 +14,7 @@ from licenseal.analysis.spdx import (
     _looks_like_spdx,
     and_join_licenses,
     canonical_license_id,
+    malformed_expression_conjunction,
     normalize_license,
     normalize_r_license,
     spdx_from_license_url,
@@ -383,8 +384,8 @@ class TestSpdxOperandCanonicalization:
     Sorts OR/AND children case-insensitively at every nesting level so
     semantically-identical expressions compare as equal strings. Verifies
     the basic sort, paren-aware top-level splitting, WITH-as-leaf
-    semantics, paren wrapping when AND children contain OR, and the
-    defensive passthrough on malformed (unbalanced-paren) input.
+    semantics, paren wrapping when AND children contain OR, and that a
+    string with unbalanced parens is not an expression.
     """
 
     def test_or_children_sorted_alphabetically(self):
@@ -419,13 +420,11 @@ class TestSpdxOperandCanonicalization:
         assert normalize_license("(MIT OR Apache-2.0)") == "Apache-2.0 OR MIT"
         assert normalize_license("(MIT) AND (Apache-2.0)") == "Apache-2.0 AND MIT"
 
-    def test_unbalanced_parens_passes_through_unchanged(self):
-        # Defensive: an expression with unbalanced parens skips
-        # canonicalization entirely (we can't safely split on top-level
-        # operators without knowing depth). The pre-canonicalization
-        # ``_looks_like_spdx`` heuristic still accepts the string, so it
-        # passes through as-is rather than rotating operands or crashing.
-        assert normalize_license("(MIT OR Apache-2.0") == "(MIT OR Apache-2.0"
+    def test_unbalanced_parens_are_unknown(self):
+        # A group that is opened and never closed hides its operators from
+        # every consumer that splits at paren depth 0, so the string is not
+        # passed on as an expression.
+        assert normalize_license("(MIT OR Apache-2.0") == "UNKNOWN"
 
     @pytest.mark.parametrize(
         "bare",
@@ -465,11 +464,15 @@ class TestSpdxOperandCanonicalization:
     def test_redundant_parens_with_inner_whitespace_stripped(self):
         assert normalize_license("( ( MIT OR Apache-2.0 ) )") == "Apache-2.0 OR MIT"
 
-    def test_unbalanced_wrap_with_matching_ends_passes_through_unchanged(self):
+    def test_unbalanced_wrap_with_matching_ends_is_unknown(self):
         # Opens twice, closes once: the first and last characters look like
-        # an outer wrap, but the parens don't balance — leave the string
-        # alone rather than peel one side of a malformed expression.
-        assert normalize_license("((MIT)") == "((MIT)"
+        # an outer wrap, but the parens don't balance — no side of it is
+        # peeled, and the string is not an expression.
+        assert normalize_license("((MIT)") == "UNKNOWN"
+
+    def test_space_inside_a_paren_is_not_part_of_the_expression(self):
+        assert normalize_license("( MIT OR ISC ) AND Zlib") == "(ISC OR MIT) AND Zlib"
+        assert normalize_license("Zlib AND (\tMIT OR ISC  )") == "(ISC OR MIT) AND Zlib"
 
     def test_whitespace_collapsed_in_canonicalization(self):
         # Multiple spaces between operands should canonicalize the same
@@ -529,6 +532,26 @@ class TestDanglingOperators:
         assert normalize_license(raw) == "UNKNOWN"
 
     @pytest.mark.parametrize(
+        "raw",
+        [
+            # A group that is never closed, or closed without being opened.
+            "(MIT OR Apache-2.0",
+            "MIT OR (GPL-3.0-only",
+            "MIT OR Apache-2.0)",
+            "MIT) OR (GPL-3.0-only",
+            "((MIT OR ISC) AND Zlib",
+            # A paren that is not at the edge of a leaf.
+            "MIT OR X(AND)GPL-3.0-only",
+            "MIT( OR )GPL-3.0-only",
+            "MIT OR GPL(-3.0-only",
+            # Nothing inside.
+            "MIT OR ()",
+        ],
+    )
+    def test_parens_that_do_not_pair_up_are_unknown(self, raw):
+        assert normalize_license(raw) == "UNKNOWN"
+
+    @pytest.mark.parametrize(
         "raw, expected",
         [
             ("MIT AND Apache-2.0", "Apache-2.0 AND MIT"),
@@ -542,12 +565,114 @@ class TestDanglingOperators:
             ),
             # An unrecognized leaf in a well-formed expression is not dangling.
             ("MIT OR CustomLicense", "CustomLicense OR MIT"),
-            # Unbalanced parens alone still pass through.
-            ("(MIT OR Apache-2.0", "(MIT OR Apache-2.0"),
+            # Nested groups that pair up.
+            ("((MIT OR ISC) AND Zlib) OR 0BSD", "(ISC OR MIT) AND Zlib OR 0BSD"),
         ],
     )
     def test_well_formed_expression_is_the_control(self, raw, expected):
         assert normalize_license(raw) == expected
+
+
+class TestMalformedExpressionConjunction:
+    """A malformed expression is judged as every license it names applying
+    together, plus one operand that could not be read."""
+
+    @pytest.mark.parametrize(
+        "raw, expected",
+        [
+            # Dangling operators: the operators are not trusted, so a choice
+            # is not read out of them.
+            ("MIT AND GPL-3.0-only AND", "GPL-3.0-only AND MIT AND UNKNOWN"),
+            ("MIT OR GPL-3.0-only AND", "GPL-3.0-only AND MIT AND UNKNOWN"),
+            ("AND GPL-3.0-only OR MIT", "GPL-3.0-only AND MIT AND UNKNOWN"),
+            ("MIT OR AND GPL-3.0-only", "GPL-3.0-only AND MIT AND UNKNOWN"),
+            ("MIT OR OR GPL-3.0-only", "GPL-3.0-only AND MIT AND UNKNOWN"),
+            ("MIT AND", "MIT AND UNKNOWN"),
+            ("OR MIT", "MIT AND UNKNOWN"),
+            ("MIT OR (AND)", "MIT AND UNKNOWN"),
+            ("(MIT AND) OR Apache-2.0", "Apache-2.0 AND MIT AND UNKNOWN"),
+            # Parens that do not pair up.
+            ("(MIT OR Apache-2.0", "Apache-2.0 AND MIT AND UNKNOWN"),
+            ("MIT OR (GPL-3.0-only", "GPL-3.0-only AND MIT AND UNKNOWN"),
+            ("MIT) OR (GPL-3.0-only", "GPL-3.0-only AND MIT AND UNKNOWN"),
+            ("MIT OR (GPL-3.0-only AND", "GPL-3.0-only AND MIT AND UNKNOWN"),
+            ("((MIT)", "MIT AND UNKNOWN"),
+            ("MIT OR ()", "MIT AND UNKNOWN"),
+            # A license with its exception is one operand.
+            (
+                "GPL-2.0-only WITH Classpath-exception-2.0 AND MIT AND",
+                "GPL-2.0-only WITH Classpath-exception-2.0 AND MIT AND UNKNOWN",
+            ),
+            # A dangling WITH leaves its license unnamed: the exception is
+            # the part that is missing.
+            ("MIT OR GPL-3.0-only WITH", "MIT AND UNKNOWN"),
+            ("MIT OR WITH GPL-3.0-only", "MIT AND UNKNOWN"),
+            ("MIT OR GPL-3.0-only WITH AND Zlib", "MIT AND UNKNOWN AND Zlib"),
+            ("MIT AND Apache-2.0 WITH LLVM-exception WITH", "MIT AND UNKNOWN"),
+            # Each operand is rewritten like any other leaf.
+            ("GPL-2.0 AND MIT AND", "GPL-2.0-only AND MIT AND UNKNOWN"),
+            ("GPL-2.0+ OR MIT OR", "GPL-2.0-or-later AND MIT AND UNKNOWN"),
+            ("LicenseRef-custom OR (MIT", "MIT AND Proprietary AND UNKNOWN"),
+            # Repeated and unread operands are named once.
+            ("MIT AND MIT AND", "MIT AND UNKNOWN"),
+            ("MIT AND UNKNOWN AND", "MIT AND UNKNOWN"),
+            # Whitespace does not matter.
+            ("  MIT\tAND   GPL-3.0-only  AND ", "GPL-3.0-only AND MIT AND UNKNOWN"),
+        ],
+    )
+    def test_malformed_expression_becomes_a_conjunction(self, raw, expected):
+        assert normalize_license(raw) == "UNKNOWN"
+        assert malformed_expression_conjunction(raw) == expected
+        # The conjunction is itself a well-formed, canonical expression.
+        assert normalize_license(expected) == expected
+        assert malformed_expression_conjunction(expected) == ""
+
+    @pytest.mark.parametrize(
+        "raw",
+        [
+            # Well-formed expressions, recognized or not.
+            "MIT",
+            "MIT OR GPL-3.0-only",
+            "(MIT OR ISC) AND Zlib",
+            "( MIT OR ISC ) AND Zlib",
+            "MIT OR CustomLicense",
+            "Apache-2.0 WITH Commons-Clause",
+            "UNKNOWN",
+            "NOASSERTION",
+            # Nothing declared.
+            "",
+            "   ",
+            # Prose: a token that is not an ID, or two IDs side by side.
+            "MIT AND see the license file AND",
+            "MIT AND see AND",
+            "MIT AND Foo_Bar AND",
+            "MIT AND, Apache-2.0",
+            "MIT / AND",
+            "Dual Licensed - GNU AFFERO GPL 3.0 AND",
+            "MIT Apache-2.0 AND",
+            "MIT WITH Foo Bar AND",
+            "MIT or GPL-3.0-only or",
+            "(MIT) (Apache-2.0",
+            # Malformed, but no license is named.
+            "AND",
+            "OR AND",
+            "()",
+            "MIT WITH",
+            "WITH MIT",
+            "UNKNOWN AND",
+            "NOASSERTION OR",
+        ],
+    )
+    def test_anything_else_has_no_conjunction(self, raw):
+        assert malformed_expression_conjunction(raw) == ""
+
+    def test_expression_over_the_length_limit_has_no_conjunction(self):
+        raw = " AND ".join(["MIT"] * 50) + " AND"
+        assert len(raw) > 200
+        assert normalize_license(raw) == "UNKNOWN"
+        assert malformed_expression_conjunction(raw) == ""
+        shorter = " AND ".join(["MIT"] * 5) + " AND"
+        assert malformed_expression_conjunction(shorter) == "MIT AND UNKNOWN"
 
 
 class TestOversizedLicenseString:
@@ -828,9 +953,8 @@ class TestLicenseRefLeaves:
     def test_reference_followed_by_prose_is_not_an_expression(self):
         assert normalize_license("LicenseRef-custom plus other terms") == "UNKNOWN"
 
-    def test_unbalanced_expression_is_left_alone(self):
-        raw = "LicenseRef-custom OR (MIT"
-        assert normalize_license(raw) == raw
+    def test_unbalanced_expression_is_unknown(self):
+        assert normalize_license("LicenseRef-custom OR (MIT") == "UNKNOWN"
 
 
 class TestNormalizeIdempotence:
@@ -923,7 +1047,7 @@ class TestNormalizeIdempotence:
             "https://spdx.org/licenses/GPL-2.0+",
             "GPL-2.0 WITH Classpath-exception-2.0",
             "MPL-2.0+ OR Apache-2.0",
-            # Unbalanced parens pass through.
+            # Unbalanced parens.
             "(MIT OR Apache-2.0",
             "((MIT)",
             "LicenseRef-custom OR (MIT",
@@ -1196,3 +1320,16 @@ class TestSpdxLooksLike:
         assert _looks_like_spdx("MIT AND OR Apache-2.0") is False
         assert _looks_like_spdx("MIT OR (AND)") is False
         assert _looks_like_spdx("(MIT AND) OR Apache-2.0") is False
+
+    def test_parens_pair_up_around_leaves(self):
+        assert _looks_like_spdx("(MIT OR ISC) AND (Zlib OR 0BSD)") is True
+        assert _looks_like_spdx("((MIT OR ISC) AND Zlib) OR 0BSD") is True
+        assert _looks_like_spdx("((MIT))") is True
+        # Left open, closed before it opens, or closed twice.
+        assert _looks_like_spdx("(MIT OR ISC") is False
+        assert _looks_like_spdx("MIT) OR (ISC") is False
+        assert _looks_like_spdx("(MIT OR ISC))") is False
+        # Inside a token, or around nothing.
+        assert _looks_like_spdx("MIT OR IS(C") is False
+        assert _looks_like_spdx("MIT OR IS)C") is False
+        assert _looks_like_spdx("MIT OR ()") is False

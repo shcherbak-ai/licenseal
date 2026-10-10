@@ -8727,7 +8727,8 @@ class TestDeprecatedIdExitCode:
 
 class TestDanglingOperatorExitCode:
     """A PEP 639 expression with a dangling operator is UNKNOWN and fails
-    strict mode, instead of passing on its well-formed half."""
+    strict mode, instead of passing on its well-formed half. It is a
+    violation when a license it names is one."""
 
     @staticmethod
     def _check(tmp_path, expression: str):
@@ -8760,16 +8761,22 @@ class TestDanglingOperatorExitCode:
         return result.exit_code, data["dependencies"][0]
 
     @pytest.mark.parametrize(
-        "expression",
-        ["MIT OR GPL-3.0-only AND", "AND GPL-3.0-only OR MIT", "MIT OR AND GPL-3.0-only"],
+        "expression, verdict",
+        [
+            ("MIT OR GPL-3.0-only AND", "incompatible"),
+            ("AND GPL-3.0-only OR MIT", "incompatible"),
+            ("MIT OR AND GPL-3.0-only", "incompatible"),
+            ("MIT OR Apache-2.0 AND", "unknown"),
+            ("MIT OR AND", "unknown"),
+        ],
     )
     @respx.mock
-    def test_dangling_operator_fails_strict(self, tmp_path, expression):
+    def test_dangling_operator_fails_strict(self, tmp_path, expression, verdict):
         exit_code, dep = self._check(tmp_path, expression)
         assert exit_code == 1
         assert dep["license"] == "UNKNOWN"
         assert dep["license_raw"] == expression
-        assert dep["verdict"] == "unknown"
+        assert dep["verdict"] == verdict
 
     @respx.mock
     def test_well_formed_expression_passes_strict(self, tmp_path):

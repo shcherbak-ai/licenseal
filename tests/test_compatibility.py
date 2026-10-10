@@ -482,32 +482,35 @@ class TestLicenseRefOperandOrder:
         assert report.project_license == "AGPL-3.0-only OR Proprietary"
 
 
-class TestDanglingOperatorVerdict:
-    """A license string with a dangling operator is UNKNOWN. It must not come
-    back compatible because its well-formed half happens to be electable."""
+class TestMalformedExpressionVerdict:
+    """A license string with a dangling operator or parens that do not pair
+    up is judged as every license it names applying together, plus one
+    operand that could not be read. It can be a violation; it is never
+    compatible because its well-formed half happens to be electable."""
 
     @staticmethod
-    def _check(project: str, raw: str):
-        li = _make_license_info(normalize_license(raw), name="dep")
+    def _check(project: str, raw: str, group: DependencyGroup = DependencyGroup.PROD):
+        li = _make_license_info(normalize_license(raw), name="dep", group=group)
         li.license_raw = raw
         return check_compatibility(project, li)
 
     @pytest.mark.parametrize(
         "project, raw",
         [
-            ("MIT", "MIT OR GPL-3.0-only AND"),
-            ("MIT", "AND GPL-3.0-only OR MIT"),
             ("MIT", "MIT OR GPL-3.0-only WITH"),
             ("MIT", "MIT OR AND"),
-            ("MIT", "MIT OR AND GPL-3.0-only"),
-            ("MIT", "GPL-3.0-only AND OR MIT"),
-            ("MIT", "MIT OR (GPL-3.0-only AND"),
-            ("GPL-3.0-only", "GPL-2.0-only AND OR GPL-3.0-only"),
             ("MIT", "MIT AND"),
-            ("MIT", "MIT AND GPL-3.0-only AND"),
+            ("MIT", "(MIT OR Apache-2.0"),
+            ("MIT", "MIT OR (Apache-2.0"),
+            ("MIT", "LGPL-3.0-only AND MIT AND"),
+            ("GPL-3.0-only", "MIT OR GPL-3.0-only AND"),
+            ("GPL-2.0-only", "GPL-2.0-only OR (MIT"),
+            # Nothing it names is recognized, or it names nothing.
+            ("MIT", "CustomLicense AND"),
+            ("MIT", "OR AND"),
         ],
     )
-    def test_dangling_operator_is_unknown_under_any_project(self, project, raw):
+    def test_malformed_expression_without_a_violation_is_unknown(self, project, raw):
         result = self._check(project, raw)
         assert result.verdict == CompatibilityVerdict.UNKNOWN
         assert result.risk_level == RiskLevel.UNKNOWN
@@ -515,6 +518,89 @@ class TestDanglingOperatorVerdict:
             f"dep declares '{raw}' which did not resolve to a recognized license — "
             "manual review required"
         )
+
+    @pytest.mark.parametrize(
+        "project, raw, judged_as, risk",
+        [
+            ("MIT", "MIT AND GPL-3.0-only AND", "GPL-3.0-only AND MIT AND UNKNOWN", "strong"),
+            # The operators of a malformed string are not trusted: its ``OR``
+            # is not read as a choice.
+            ("MIT", "MIT OR GPL-3.0-only AND", "GPL-3.0-only AND MIT AND UNKNOWN", "strong"),
+            ("MIT", "AND GPL-3.0-only OR MIT", "GPL-3.0-only AND MIT AND UNKNOWN", "strong"),
+            ("MIT", "MIT OR AND GPL-3.0-only", "GPL-3.0-only AND MIT AND UNKNOWN", "strong"),
+            ("MIT", "GPL-3.0-only AND OR MIT", "GPL-3.0-only AND MIT AND UNKNOWN", "strong"),
+            ("MIT", "MIT OR (GPL-3.0-only AND", "GPL-3.0-only AND MIT AND UNKNOWN", "strong"),
+            ("MIT", "MIT OR (GPL-3.0-only", "GPL-3.0-only AND MIT AND UNKNOWN", "strong"),
+            ("MIT", "MIT) OR (AGPL-3.0-only", "AGPL-3.0-only AND MIT AND UNKNOWN", "network"),
+            ("MPL-2.0", "(GPL-2.0-only", "GPL-2.0-only AND UNKNOWN", "strong"),
+        ],
+    )
+    def test_malformed_expression_naming_a_violation_is_a_violation(
+        self, project, raw, judged_as, risk
+    ):
+        result = self._check(project, raw)
+        assert result.verdict == CompatibilityVerdict.INCOMPATIBLE
+        risk_level, label = {
+            "strong": (
+                RiskLevel.STRONG_COPYLEFT,
+                "strong copyleft license — derivative works must be released under the "
+                "same (or a compatible) license",
+            ),
+            "network": (
+                RiskLevel.NETWORK_COPYLEFT,
+                "network copyleft license — copyleft extends to network use (SaaS)",
+            ),
+        }[risk]
+        assert result.risk_level == risk_level
+        assert result.reason == (
+            f"dep declares '{raw}', which is not a well-formed license expression and is "
+            f"judged as every license it names applying together — dep uses {judged_as} "
+            f"({label}), which is incompatible with your {project} project license"
+        )
+        # The dependency still reports the license as it was detected.
+        assert result.license_info.license_id == "UNKNOWN"
+        assert result.license_info.license_raw == raw
+
+    def test_pair_level_violation_in_a_malformed_expression_is_a_violation(self):
+        result = self._check("GPL-3.0-only", "GPL-2.0-only AND OR GPL-3.0-only")
+        assert result.verdict == CompatibilityVerdict.INCOMPATIBLE
+        assert "is not a well-formed license expression" in result.reason
+        assert "GPL-2.0-only code cannot be combined into a GPL-3.0-only work" in result.reason
+        apache = self._check("GPL-2.0-only", "(Apache-2.0 WITH LLVM-exception OR MIT")
+        assert apache.verdict == CompatibilityVerdict.INCOMPATIBLE
+        assert "GPLv2-incompatible" in apache.reason
+
+    def test_dev_dependency_with_a_malformed_expression_stays_unknown(self):
+        # The violation is downgraded for a dev dependency, and the operand
+        # that could not be read then routes it to review.
+        result = self._check("MIT", "MIT AND GPL-3.0-only AND", group=DependencyGroup.DEV)
+        assert result.verdict == CompatibilityVerdict.UNKNOWN
+        assert result.risk_level == RiskLevel.UNKNOWN
+        assert result.reason == (
+            "dep declares 'MIT AND GPL-3.0-only AND' which did not resolve to a recognized "
+            "license — manual review required"
+        )
+
+    def test_long_malformed_expression_is_truncated_in_the_reason(self):
+        raw = " AND ".join(["GPL-3.0-only", "MIT", "ISC", "Zlib", "0BSD", "BSD-2-Clause"]) * 2
+        raw += " AND"
+        assert 80 < len(raw) <= 200
+        result = self._check("MIT", raw)
+        assert result.verdict == CompatibilityVerdict.INCOMPATIBLE
+        assert f"declares '{raw[:79]}…', which is not" in result.reason
+
+    def test_review_of_a_malformed_expression_is_judged_as_written(self):
+        li = _make_license_info("UNKNOWN", name="dep")
+        li.license_raw = "MIT OR GPL-3.0-only AND"
+        li.reviewed_license_id = "GPL-3.0-only OR MIT"
+        assert check_compatibility("MIT", li).verdict == CompatibilityVerdict.COMPATIBLE
+
+    def test_unknown_license_without_a_declared_string_is_unchanged(self):
+        li = _make_license_info("UNKNOWN", name="dep")
+        li.license_raw = None  # type: ignore[assignment]
+        result = check_compatibility("MIT", li)
+        assert result.verdict == CompatibilityVerdict.UNKNOWN
+        assert result.reason == "dep has no license information — manual review required"
 
     def test_completed_expression_is_the_control(self):
         # The same strings with the missing operand supplied classify normally.
@@ -526,6 +612,20 @@ class TestDanglingOperatorVerdict:
     def test_unknown_leaf_in_a_well_formed_or_stays_electable(self):
         result = self._check("MIT", "MIT OR CustomLicense")
         assert result.verdict == CompatibilityVerdict.COMPATIBLE
+
+    @pytest.mark.parametrize(
+        "license_id", ["GPL-3.0-only AND UNKNOWN", "GPL-3.0-only AND CustomLicense"]
+    )
+    def test_violation_beside_an_unknown_operand_stays_a_violation(self, license_id):
+        # The well-formed counterpart of the malformed strings above.
+        for project in ("MIT", "Apache-2.0", "MPL-2.0", "Proprietary"):
+            result = check_compatibility(project, _make_license_info(license_id, name="dep"))
+            assert result.verdict == CompatibilityVerdict.INCOMPATIBLE, project
+            assert result.risk_level == RiskLevel.STRONG_COPYLEFT
+        # No operand is a violation under a GPL project, so the unknown one
+        # decides.
+        result = check_compatibility("GPL-3.0-only", _make_license_info(license_id, name="dep"))
+        assert result.verdict == CompatibilityVerdict.UNKNOWN
 
     def test_project_license_with_a_dangling_operator_is_unknown(self):
         assert analyze("MIT OR AND", []).project_license == "UNKNOWN"
@@ -1517,6 +1617,63 @@ class TestOrArmVerdictDrivesTheExitCode:
         assert data["project_license"] == "GPL-2.0-only"
         assert data["dependencies"][0]["verdict"] == verdict
         assert data["dependencies"][0]["risk"] == risk
+
+
+class TestMalformedExpressionDrivesTheExitCode:
+    """``licenseal check`` on an MIT project: a malformed license expression
+    in a registry field fails the check when a license it names is a
+    violation, with or without ``--no-strict``."""
+
+    @pytest.mark.parametrize(
+        "declared, extra_args, exit_code, verdict, risk",
+        [
+            ("MIT AND GPL-3.0-only AND", [], 1, "incompatible", "strong-copyleft"),
+            ("MIT AND GPL-3.0-only AND", ["--no-strict"], 1, "incompatible", "strong-copyleft"),
+            ("MIT OR (GPL-3.0-only", ["--no-strict"], 1, "incompatible", "strong-copyleft"),
+            # Well-formed controls.
+            ("MIT AND GPL-3.0-only", ["--no-strict"], 1, "incompatible", "strong-copyleft"),
+            ("MIT OR GPL-3.0-only", [], 0, "compatible", "permissive"),
+            # Malformed without a violation: review, which --no-strict passes.
+            ("MIT AND Apache-2.0 AND", [], 1, "unknown", "unknown"),
+            ("MIT AND Apache-2.0 AND", ["--no-strict"], 0, "unknown", "unknown"),
+            ("MIT OR (Apache-2.0", [], 1, "unknown", "unknown"),
+        ],
+    )
+    @respx.mock
+    def test_check_exit_code(self, tmp_path, declared, extra_args, exit_code, verdict, risk):
+        (tmp_path / "pyproject.toml").write_text(
+            textwrap.dedent("""\
+            [project]
+            name = "myproject"
+            license = "MIT"
+            dependencies = ["some-lib"]
+            """)
+        )
+        payload = {
+            "info": {
+                "license": declared,
+                "version": "1.0.0",
+                "classifiers": [],
+                "requires_dist": [],
+            }
+        }
+        for url in (
+            "https://pypi.org/pypi/some-lib/json",
+            "https://pypi.org/pypi/some-lib/1.0.0/json",
+        ):
+            respx.get(url).mock(return_value=httpx.Response(200, json=payload))
+
+        result = CliRunner().invoke(
+            main, ["check", "--path", str(tmp_path), "-f", "json", *extra_args]
+        )
+        assert result.exit_code == exit_code
+        dependency = json.loads(result.output[result.output.index("{") :])["dependencies"][0]
+        assert dependency["license_raw"] == declared
+        assert dependency["verdict"] == verdict
+        assert dependency["risk"] == risk
+        if verdict != "compatible" and normalize_license(declared) == "UNKNOWN":
+            # A malformed string is reported as the unknown license it is.
+            assert dependency["license"] == "UNKNOWN"
 
 
 class TestDualLicensedProjectRow:

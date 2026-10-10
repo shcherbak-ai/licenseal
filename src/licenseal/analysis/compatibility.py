@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from typing import NamedTuple
 
 from licenseal.analysis.risk import (
@@ -11,7 +12,11 @@ from licenseal.analysis.risk import (
     classify_risk,
     split_exception,
 )
-from licenseal.analysis.spdx import canonical_license_id, normalize_license
+from licenseal.analysis.spdx import (
+    canonical_license_id,
+    malformed_expression_conjunction,
+    normalize_license,
+)
 from licenseal.models import (
     AnalysisReport,
     CompatibilityResult,
@@ -460,6 +465,25 @@ def _check_compat(
     dep_license = license_info.effective_license_id
     is_dev = license_info.dependency.group == DependencyGroup.DEV
 
+    # A declared string that is a malformed expression did not normalize, but
+    # the licenses it names still bind: it is judged as all of them applying
+    # together with one unreadable operand. That reading can only turn up a
+    # violation — with the unreadable operand in it, it is never compatible —
+    # so anything short of one keeps the plain unknown-license result below.
+    if license_info.is_unknown:
+        conjunction = malformed_expression_conjunction(license_info.license_raw or "")
+        if conjunction:
+            judged = _check_compat(
+                project_spdx, project_risk, replace(license_info, license_id=conjunction)
+            )
+            if judged.verdict == CompatibilityVerdict.INCOMPATIBLE:
+                return CompatibilityResult(
+                    license_info=license_info,
+                    risk_level=judged.risk_level,
+                    verdict=judged.verdict,
+                    reason=_malformed_expression_reason(license_info, judged.reason),
+                )
+
     # Proprietary deps short-circuit the matrix: every proprietary license
     # carries custom commercial terms (paid use, no-redistribution, royalties,
     # field-of-use limits) that licenseal cannot reason about. A human must
@@ -573,6 +597,36 @@ def _unresolved_and_reason(license_info: LicenseInfo, unresolved: list[str]) -> 
     )
 
 
+def _malformed_expression_reason(license_info: LicenseInfo, judged_reason: str) -> str:
+    """Reason for a violation found in a malformed license expression.
+
+    ``judged_reason`` is the reason for the conjunction the string was judged
+    as, which names that conjunction and the conflict.
+    """
+    name = license_info.dependency.name
+    return (
+        f"{name} declares '{_shown_raw(license_info)}', which is not a well-formed license "
+        f"expression and is judged as every license it names applying together — "
+        f"{judged_reason}"
+    )
+
+
+def _shown_raw(license_info: LicenseInfo) -> str:
+    """The declared license string, fit for a one-line reason.
+
+    ``license_raw`` is unbounded — PyPI's free-text ``license`` field (and
+    some other registries) can hold a whole single-line license body — and a
+    reason is printed verbatim into the terminal table, the markdown report,
+    and the JSON. Whitespace is collapsed and the length capped so a giant
+    value can't wreck the layout; the full string always remains in the
+    report's own ``license_raw`` field.
+    """
+    raw = " ".join((license_info.license_raw or "").split())
+    if len(raw) > 80:
+        raw = raw[:79] + "…"
+    return raw
+
+
 def _proprietary_reason(license_info: LicenseInfo, is_dev: bool) -> str:
     name = license_info.dependency.name
     base = (
@@ -621,16 +675,8 @@ def _build_reason(
         # Metadata WAS present, it just didn't normalize to a recognized
         # license. Surface the raw string so a reviewer can resolve it at a
         # glance instead of being told (falsely) there's nothing there.
-        # license_raw is unbounded — PyPI's free-text ``license`` field (and
-        # some other registries) can hold a whole single-line license body —
-        # and this reason is printed verbatim into the terminal table, the
-        # markdown report, and the JSON. Collapse whitespace and cap length so
-        # a giant value can't wreck the layout; the full string always remains
-        # in the report's own ``license_raw`` field.
-        raw = " ".join((license_info.license_raw or "").split())
+        raw = _shown_raw(license_info)
         if raw:
-            if len(raw) > 80:
-                raw = raw[:79] + "…"
             return (
                 f"{dep_name} declares '{raw}' which did not resolve to a recognized "
                 f"license — manual review required"
