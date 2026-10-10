@@ -1536,9 +1536,12 @@ def _looks_like_spdx(value: str) -> bool:
 #
 # R's ``DESCRIPTION`` ``License:`` field is not SPDX. Its grammar:
 #   * ``|`` separates alternatives the user may choose between (disjunction).
-#   * ``+ file LICEN[CS]E`` points at a bundled file carrying the extra terms R
-#     requires (e.g. the MIT copyright stub). When a recognized token precedes
-#     it we keep the token; a bare ``file LICENSE`` is opaque to a metadata-only
+#   * ``+ file LICEN[CS]E`` points at a bundled file with terms that go with
+#     the license before it. For the template licenses (MIT, BSD) the file is
+#     the year and copyright holder the template asks for. For any other
+#     license it restricts or extends that license, and the file is never
+#     read: a dependency's license then carries an ``UNKNOWN`` operand beside
+#     the named one. A bare ``file LICENSE`` is opaque to a metadata-only
 #     scanner → UNKNOWN (manual review), per the no-prose-extraction rule.
 #   * ``(>= N)`` / ``(== N)`` version constraints sit in parens after the name.
 #   * tokens use R abbreviations (``GPL-2``, ``BSD_3_clause``, ``Unlimited``)
@@ -1581,15 +1584,33 @@ def _r_spdx_version(ver: str) -> str:
     return ver if "." in ver else f"{ver}.0"
 
 
-def _translate_r_operand(operand: str) -> str:
-    """Translate one ``|``-separated R license alternative to an SPDX ID."""
-    operand = operand.strip()
-    if not operand:
-        return "UNKNOWN"
-    # ``<token> + file LICENSE`` — keep the structured token, drop the file ref.
-    if "+" in operand:
-        operand = operand.split("+", 1)[0].strip()
-    # Bare ``file LICENSE`` / ``file LICENCE`` (or an empty head) is opaque.
+# Licenses CRAN ships as templates. ``+ file LICENSE`` after one of them
+# names the file that fills the template in, not further terms.
+_R_TEMPLATE_LICENSES: frozenset[str] = frozenset({"MIT", "BSD-2-Clause", "BSD-3-Clause"})
+
+
+def _translate_r_operand(operand: str, *, file_terms_bind: bool) -> str:
+    """Translate one ``|``-separated R license alternative to an SPDX expression.
+
+    In ``<license> + file LICENSE`` the license is translated and the file
+    is never read. With ``file_terms_bind``, the file's terms are kept as an
+    ``UNKNOWN`` operand beside a license that is not a template license.
+    """
+    name, plus, _ = operand.partition("+")
+    license_id = _translate_r_license_name(name.strip())
+    if (
+        plus
+        and file_terms_bind
+        and license_id != "UNKNOWN"
+        and license_id not in _R_TEMPLATE_LICENSES
+    ):
+        return normalize_license(and_join_licenses([license_id, "UNKNOWN"]))
+    return license_id
+
+
+def _translate_r_license_name(operand: str) -> str:
+    """Translate the license name of one R license alternative to an SPDX ID."""
+    # Bare ``file LICENSE`` / ``file LICENCE`` (or an empty name) is opaque.
     if not operand or _R_FILE_RE.match(operand):
         return "UNKNOWN"
     fam_match = _R_GPL_FAMILY_RE.match(operand)
@@ -1611,7 +1632,7 @@ def _translate_r_operand(operand: str) -> str:
     return _normalize_part(operand)
 
 
-def normalize_r_license(raw: str) -> str:
+def normalize_r_license(raw: str, *, file_terms_bind: bool = False) -> str:
     """Normalize an R ``DESCRIPTION`` ``License:`` string to an SPDX expression.
 
     R's ``|`` is a user-choice disjunction → ``OR``. Alternatives that resolve
@@ -1619,10 +1640,19 @@ def normalize_r_license(raw: str) -> str:
     are dropped when at least one alternative resolves cleanly — the user may
     elect the known branch. When every alternative is UNKNOWN the whole field
     is UNKNOWN (manual review).
+
+    ``file_terms_bind`` is for a dependency's license: ``<license> + file
+    LICENSE`` on a license other than MIT or BSD becomes ``<license> AND
+    UNKNOWN``, because the file adds terms nobody read. Without it the
+    result is the named license alone, which is what the project's own
+    license needs — the terms a project adds for its users do not change
+    which dependencies it can take.
     """
     if not raw or not raw.strip():
         return "UNKNOWN"
-    operands = [_translate_r_operand(part) for part in raw.split("|")]
+    operands = [
+        _translate_r_operand(part, file_terms_bind=file_terms_bind) for part in raw.split("|")
+    ]
     known = [op for op in operands if op != "UNKNOWN"]
     if not known:
         return "UNKNOWN"

@@ -154,6 +154,11 @@ Frame the per-dep question by combining verdict, risk, and project context. The 
   - All apply, confirmed → the `AND` expression is the real license, and `reason` already shows its verdict. When that verdict is a violation or a warning, walk the matching INCOMPATIBLE / WARNING pattern for the license that causes it, and write the `AND` expression as a review entry only if that pattern makes it reviewable; otherwise leave it unreviewed.
   - Not confirmed → leave unreviewed.
 
+- **UNKNOWN — R package whose license adds a file** (`ecosystem` is `r`, `license` is `<license> AND UNKNOWN`, and `license_raw` reads `<license> + file LICENSE`):
+  - The named license **is** identified. On CRAN, `+ file LICENSE` after a license other than MIT or BSD means the package's `LICENSE` file restricts or extends that license, and licenseal never reads the file. Ask: *"{name} declares '{license_raw}'. Open its LICENSE file from {actionability.investigate_url} — what does it add to the named license?"*
+  - It adds nothing that limits the project's use (a copyright-holder list, an attribution notice) → reviewable with the named license as `license` and `note` saying what the file contains. It adds a restriction → reviewable only when the user confirms the project's use stays inside it, with that recorded in `note`. Unread → leave unreviewed.
+  - If the verdict is `incompatible` instead, the named license is itself the violation: walk it under the INCOMPATIBLE patterns above.
+
 - **UNKNOWN — source-available (SSPL-*, BUSL-*, Elastic-*, FSL-*, Parity-*, PolyForm-*)**:
   - `context.commercial` = no **or** `context.competing` = no → source-available terms typically allow non-competing use. Ask: *"{license} restricts competing commercial use. You said this is [non-commercial / non-competing] — confirm and mark as reviewed?"*
   - `context.commercial` = yes **and** `context.competing` = yes → real incompatibility. Recommend removal / alternative.

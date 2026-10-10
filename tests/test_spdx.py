@@ -1655,6 +1655,47 @@ class TestNormalizeRLicense:
     def test_normalize_r_license(self, raw, expected):
         assert normalize_r_license(raw) == expected
 
+    @pytest.mark.parametrize(
+        "raw, expected",
+        [
+            # The template licenses: the file fills the template in.
+            ("MIT + file LICENSE", "MIT"),
+            ("BSD_2_clause + file LICENSE", "BSD-2-Clause"),
+            ("BSD_3_clause + file LICENCE", "BSD-3-Clause"),
+            # Any other license: the file's terms are an operand nobody read.
+            ("GPL-2 + file LICENSE", "GPL-2.0-only AND UNKNOWN"),
+            ("GPL (>= 2) + file LICENSE", "GPL-2.0-or-later AND UNKNOWN"),
+            ("LGPL-2.1 + file LICENSE", "LGPL-2.1-only AND UNKNOWN"),
+            ("Apache License (== 2.0) + file LICENSE", "Apache-2.0 AND UNKNOWN"),
+            ("Zlib + file LICENSE", "UNKNOWN AND Zlib"),
+            ("MIT or ISC + file LICENSE", "(ISC OR MIT) AND UNKNOWN"),
+            # Per alternative.
+            ("GPL-2 + file LICENSE | MIT + file LICENSE", "GPL-2.0-only AND UNKNOWN OR MIT"),
+            ("GPL-2 | GPL-3 + file LICENSE", "GPL-2.0-only OR GPL-3.0-only AND UNKNOWN"),
+            # No license is named, with or without the file.
+            ("file LICENSE", "UNKNOWN"),
+            ("+ file LICENSE", "UNKNOWN"),
+            ("Unlimited + file LICENSE", "UNKNOWN"),
+            ("GPL (>= 3) | file LICENCE", "GPL-3.0-or-later"),
+            # Without the file nothing changes.
+            ("GPL-2", "GPL-2.0-only"),
+            ("Apache License (== 2.0)", "Apache-2.0"),
+        ],
+    )
+    def test_file_terms_on_a_dependency_license(self, raw, expected):
+        assert normalize_r_license(raw, file_terms_bind=True) == expected
+
+    @pytest.mark.parametrize(
+        "raw, expected",
+        [
+            ("GPL-2 + file LICENSE", "GPL-2.0-only"),
+            ("LGPL-2.1 + file LICENSE", "LGPL-2.1-only"),
+            ("Apache License (== 2.0) + file LICENSE", "Apache-2.0"),
+        ],
+    )
+    def test_project_license_is_the_named_license(self, raw, expected):
+        assert normalize_r_license(raw) == expected
+
     def test_plain_cddl_and_gpl_without_cpe_not_rewritten(self):
         # Without the classpath-exception, the AND is NOT the Sun/Oracle
         # convention — the operator is kept.

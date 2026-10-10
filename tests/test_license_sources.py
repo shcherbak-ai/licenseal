@@ -746,3 +746,77 @@ class TestDepsDevNonStandardBesideALicense:
         assert dep["verdict"] == "unknown"
         code, _ = _check(tmp_path, "--no-strict")
         assert code == 0
+
+
+class TestCranFileLicenseTerms:
+    """``<license> + file LICENSE`` in the CRAN index: the file is never
+    fetched, and on a license other than MIT or BSD its terms stay in the
+    result as an unknown operand."""
+
+    @staticmethod
+    def _r_project(tmp_path, project_license: str = "MIT + file LICENSE") -> None:
+        (tmp_path / "DESCRIPTION").write_text(
+            f"Package: app\nVersion: 0.1.0\nLicense: {project_license}\nImports: dep\n"
+        )
+
+    @staticmethod
+    def _mock_index(declared: str) -> None:
+        respx.get("https://cran.r-project.org/src/contrib/PACKAGES").mock(
+            return_value=httpx.Response(
+                200, text=f"Package: dep\nVersion: 1.0.0\nLicense: {declared}\n"
+            )
+        )
+
+    @pytest.mark.parametrize(
+        "declared, extra_args, exit_code, license_id, verdict",
+        [
+            ("MIT + file LICENSE", [], 0, "MIT", "compatible"),
+            ("BSD_3_clause + file LICENSE", [], 0, "BSD-3-Clause", "compatible"),
+            ("Apache License (== 2.0)", [], 0, "Apache-2.0", "compatible"),
+            (
+                "Apache License (== 2.0) + file LICENSE",
+                [],
+                1,
+                "Apache-2.0 AND UNKNOWN",
+                "unknown",
+            ),
+            (
+                "Apache License (== 2.0) + file LICENSE",
+                ["--no-strict"],
+                0,
+                "Apache-2.0 AND UNKNOWN",
+                "unknown",
+            ),
+            # A license that is a violation without the file is one with it.
+            (
+                "GPL-3 + file LICENSE",
+                ["--no-strict"],
+                1,
+                "GPL-3.0-only AND UNKNOWN",
+                "incompatible",
+            ),
+        ],
+    )
+    @respx.mock
+    def test_check_exit_code(self, tmp_path, declared, extra_args, exit_code, license_id, verdict):
+        self._r_project(tmp_path)
+        self._mock_index(declared)
+        code, dep = _check(tmp_path, *extra_args)
+        assert code == exit_code
+        assert dep["license"] == license_id
+        assert dep["license_raw"] == declared
+        assert dep["verdict"] == verdict
+
+    @respx.mock
+    def test_project_license_with_a_file_is_its_named_license(self, tmp_path):
+        # The terms a project adds for its own users do not change which
+        # dependencies it can take.
+        self._r_project(tmp_path, "GPL-3 + file LICENSE")
+        self._mock_index("GPL-3")
+        result = CliRunner().invoke(
+            main, ["check", "--path", str(tmp_path), "--no-transitive", "-f", "json"]
+        )
+        assert result.exit_code == 0
+        data = json.loads(result.output[result.output.index("{") :])
+        assert data["project_license"] == "GPL-3.0-only"
+        assert data["dependencies"][0]["verdict"] == "compatible"

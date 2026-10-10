@@ -5,10 +5,12 @@ from __future__ import annotations
 import textwrap
 
 import httpx
+import pytest
 import respx
 
+from licenseal.analysis.compatibility import check_compatibility
 from licenseal.discovery.r._lock import _OFF_REGISTRY_MARKER
-from licenseal.models import Dependency, Ecosystem
+from licenseal.models import CompatibilityVerdict, Dependency, Ecosystem
 from licenseal.resolvers.cran import (
     _CRAN_INDEX_URL,
     _extract_pinned_version,
@@ -162,6 +164,87 @@ class TestResolveRLicense:
         assert info.license_id == "UNKNOWN"
         assert info.license_raw == ""
         assert info.from_registry is True
+
+    @staticmethod
+    def _resolve_declared(declared: str):
+        """Resolve a package whose index record declares ``declared``, through the cache."""
+        respx.get(_CRAN_INDEX_URL).mock(
+            return_value=httpx.Response(
+                200, text=f"Package: pkg\nVersion: 1.0\nLicense: {declared}\n"
+            )
+        )
+        cache = RegistryCache()
+        with httpx.Client() as client:
+            index = fetch_cran_index(client, fetcher=cache.fetch_text)
+        return resolve_r_license(_r_dep("pkg"), index)
+
+    @pytest.mark.parametrize(
+        "declared, license_id, verdict",
+        [
+            # The file is the template CRAN requires for these: no extra terms.
+            ("MIT + file LICENSE", "MIT", CompatibilityVerdict.COMPATIBLE),
+            ("BSD_2_clause + file LICENSE", "BSD-2-Clause", CompatibilityVerdict.COMPATIBLE),
+            ("BSD_3_clause + file LICENCE", "BSD-3-Clause", CompatibilityVerdict.COMPATIBLE),
+            # On any other license the file adds terms nobody read.
+            (
+                "Apache License (== 2.0) + file LICENSE",
+                "Apache-2.0 AND UNKNOWN",
+                CompatibilityVerdict.UNKNOWN,
+            ),
+            (
+                "LGPL (>= 2.1) + file LICENSE",
+                "LGPL-2.1-or-later AND UNKNOWN",
+                CompatibilityVerdict.UNKNOWN,
+            ),
+            (
+                "Artistic-2.0 + file LICENSE",
+                "Artistic-2.0 AND UNKNOWN",
+                CompatibilityVerdict.UNKNOWN,
+            ),
+            # A license that is a violation by itself stays one.
+            ("GPL-3 + file LICENSE", "GPL-3.0-only AND UNKNOWN", CompatibilityVerdict.INCOMPATIBLE),
+            (
+                "AGPL (>= 3) + file LICENSE",
+                "AGPL-3.0-or-later AND UNKNOWN",
+                CompatibilityVerdict.INCOMPATIBLE,
+            ),
+            # Controls: the same licenses without the file.
+            ("Apache License (== 2.0)", "Apache-2.0", CompatibilityVerdict.COMPATIBLE),
+            ("GPL-3", "GPL-3.0-only", CompatibilityVerdict.INCOMPATIBLE),
+            # An alternative without extra terms is still electable.
+            (
+                "Apache License (== 2.0) + file LICENSE | MIT + file LICENSE",
+                "Apache-2.0 AND UNKNOWN OR MIT",
+                CompatibilityVerdict.COMPATIBLE,
+            ),
+            (
+                "LGPL-3 + file LICENSE | Artistic-2.0 + file LICENSE",
+                "Artistic-2.0 AND UNKNOWN OR LGPL-3.0-only AND UNKNOWN",
+                CompatibilityVerdict.UNKNOWN,
+            ),
+            # Nothing named before the file: opaque, as before.
+            ("file LICENSE", "UNKNOWN", CompatibilityVerdict.UNKNOWN),
+            ("Unlimited + file LICENSE", "UNKNOWN", CompatibilityVerdict.UNKNOWN),
+        ],
+    )
+    @respx.mock
+    def test_file_license_terms_on_a_dependency(self, declared, license_id, verdict):
+        info = self._resolve_declared(declared)
+        assert info.license_id == license_id
+        assert info.license_raw == declared
+        assert check_compatibility("MIT", info).verdict == verdict
+
+    @respx.mock
+    def test_file_license_terms_route_a_compatible_license_to_review(self):
+        # GPL-3.0-only alone suits a GPL-3.0-only project; the unread terms
+        # beside it still have to be reviewed.
+        info = self._resolve_declared("GPL-3 + file LICENSE")
+        result = check_compatibility("GPL-3.0-only", info)
+        assert result.verdict == CompatibilityVerdict.UNKNOWN
+        assert result.reason == (
+            "pkg uses GPL-3.0-only AND UNKNOWN; the consumer cannot avoid UNKNOWN, which "
+            "did not resolve to a recognized license — manual review required"
+        )
 
     def test_not_in_index_unknown(self):
         info = resolve_r_license(_r_dep("nonexistent"), _index())

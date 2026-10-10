@@ -12,7 +12,10 @@ The index carries only *current* versions. R licenses are version-stable, so a
 package's current license (the pinned version is still what's reported). A
 package absent from the index (archived, or off-CRAN such as Bioconductor /
 GitHub) resolves to UNKNOWN. R's ``License`` grammar is translated to SPDX by
-:func:`~licenseal.analysis.spdx.normalize_r_license`.
+:func:`~licenseal.analysis.spdx.normalize_r_license`. The ``LICENSE`` file a
+``+ file LICENSE`` spec points at is never fetched: on a license other than
+MIT or BSD its terms are reported as an ``UNKNOWN`` operand joined to that
+license with ``AND``.
 """
 
 from __future__ import annotations
@@ -135,7 +138,10 @@ def resolve_r_license(dep: Dependency, index: CranIndex) -> LicenseInfo:
     pinned = _extract_pinned_version(dep.version_constraint)
     return LicenseInfo(
         dependency=dep,
-        license_id=normalize_r_license(raw) if raw else "UNKNOWN",
+        # ``<license> + file LICENSE`` on a license other than MIT / BSD
+        # says further terms apply. The file is never fetched, so those
+        # terms stay in the license as an operand that did not resolve.
+        license_id=normalize_r_license(raw, file_terms_bind=True) if raw else "UNKNOWN",
         license_raw=raw,
         resolved_version=pinned or record.get("Version", "").strip(),
         from_registry=True,
