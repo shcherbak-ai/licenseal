@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import contextlib
 import json
+import time
 from unittest.mock import call, patch
 
 import httpx
@@ -2465,6 +2466,44 @@ class TestNpmLegacyLicensesField:
         assert (
             _extract_legacy_licenses([{"type": ""}, {"type": "   "}, {"url": "no type here"}]) == ""
         )
+
+
+class TestOversizedRegistryLicense:
+    """A registry ``license`` field over the length cap resolves to UNKNOWN at
+    once and keeps its raw value. Fetched through ``RegistryCache.fetch``."""
+
+    @staticmethod
+    def _resolve(license_value: str):
+        respx.get("https://registry.npmjs.org/big/1.0.0").mock(
+            return_value=httpx.Response(200, json={"license": license_value, "version": "1.0.0"})
+        )
+        cache = RegistryCache()
+        with httpx.Client() as client:
+            # CPU time of the resolve alone: client setup and machine load
+            # stay out of the measurement.
+            started = time.process_time()
+            info = resolve_npm_license(_npm_dep("big", "1.0.0"), client, fetcher=cache.fetch)
+            return info, time.process_time() - started
+
+    @respx.mock
+    def test_oversized_license_is_unknown_with_its_raw_value_untouched(self):
+        # A slash and a distant whitespace run: quadratic to normalize.
+        oversized = "MIT /x" + " " * 50_000 + "y"
+        info, cpu_seconds = self._resolve(oversized)
+        assert info.license_id == "UNKNOWN"
+        assert info.license_raw == oversized
+        assert info.from_registry is True
+        assert cpu_seconds < 1.0
+        result = check_compatibility("MIT", info)
+        assert result.verdict == CompatibilityVerdict.UNKNOWN
+        # The reason quotes a bounded excerpt, not the whole value.
+        assert len(result.reason) < 200
+
+    @respx.mock
+    def test_same_shape_under_the_cap_is_the_control(self):
+        info, _ = self._resolve("MIT / Apache-2.0")
+        assert info.license_id == "Apache-2.0 OR MIT"
+        assert info.license_raw == "MIT / Apache-2.0"
 
 
 class TestRegistryCacheTrimEdges:

@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import time
+
 import pytest
 
 from licenseal.analysis.spdx import (
     _CLASSIFIER_MAP,
     _LICENSE_URL_PREFIXES,
+    _MAX_LICENSE_LENGTH,
     _NORMALIZATION_MAP,
     _looks_like_spdx,
     and_join_licenses,
@@ -477,6 +480,59 @@ class TestSpdxOperandCanonicalization:
         assert normalize_license("MIT") == "MIT"
         expr = "Apache-2.0 WITH LLVM-exception"
         assert normalize_license(expr) == expr
+
+
+class TestOversizedLicenseString:
+    """A license string over the length cap is not normalized, so a hostile
+    registry field cannot stall the scan."""
+
+    def test_string_at_the_cap_is_still_normalized(self):
+        raw = "MIT" + " " * (_MAX_LICENSE_LENGTH - 3)
+        assert len(raw) == _MAX_LICENSE_LENGTH
+        assert normalize_license(raw) == "MIT"
+
+    def test_string_over_the_cap_is_unknown(self):
+        raw = "MIT" + " " * (_MAX_LICENSE_LENGTH - 2)
+        assert len(raw) == _MAX_LICENSE_LENGTH + 1
+        assert normalize_license(raw) == "UNKNOWN"
+
+    def test_long_recognizable_shapes_are_unknown_over_the_cap(self):
+        padding = "x" * _MAX_LICENSE_LENGTH
+        # Each would resolve if it were short (see the controls below).
+        assert normalize_license(f"LicenseRef-{padding}") == "UNKNOWN"
+        assert normalize_license(f"SEE LICENSE IN {padding}") == "UNKNOWN"
+        assert normalize_license(f"proprietary {padding}") == "UNKNOWN"
+        assert normalize_license(", ".join(["MIT"] * _MAX_LICENSE_LENGTH)) == "UNKNOWN"
+
+    def test_short_recognizable_shapes_are_the_control(self):
+        assert normalize_license("LicenseRef-x") == "Proprietary"
+        assert normalize_license("SEE LICENSE IN x") == "Proprietary"
+        assert normalize_license("proprietary x") == "Proprietary"
+        assert normalize_license(", ".join(["MIT"] * 5)) == "MIT"
+
+    @pytest.mark.parametrize(
+        "raw",
+        [
+            # A slash, then a long whitespace run that is not next to it.
+            pytest.param("/x" + " " * 50_000 + "y", id="slash-then-spaces"),
+            pytest.param("MIT / Apache-2.0" + "\t" * 50_000 + "z", id="slash-list-then-tabs"),
+            # Deeply nested redundant parens.
+            pytest.param("(" * 8_000 + "MIT" + ")" * 8_000, id="nested-parens"),
+        ],
+    )
+    def test_quadratic_inputs_return_at_once(self, raw):
+        # Without the cap each of these burns several seconds of CPU. CPU
+        # time, not wall-clock, so a loaded machine cannot fail the bound.
+        started = time.process_time()
+        assert normalize_license(raw) == "UNKNOWN"
+        assert time.process_time() - started < 1.0
+
+    def test_r_license_alternative_over_the_cap_is_dropped(self):
+        oversized = "/x" + " " * 50_000 + "y"
+        started = time.process_time()
+        assert normalize_r_license(oversized) == "UNKNOWN"
+        assert normalize_r_license(f"GPL-2 | {oversized}") == "GPL-2.0-only"
+        assert time.process_time() - started < 1.0
 
 
 class TestNestedAndRepeatedOperands:

@@ -6685,6 +6685,38 @@ class TestDeprecatedIdExitCode:
         assert dep["verdict"] == "incompatible"
 
 
+class TestOversizedLicenseExitCode:
+    """A registry license string over the length cap is reported UNKNOWN with
+    its raw value intact: strict fails on it, ``--no-strict`` passes."""
+
+    @respx.mock
+    def test_oversized_license_is_unknown_and_keeps_its_raw_value(self, tmp_path):
+        (tmp_path / "package.json").write_text(
+            json.dumps(
+                {
+                    "name": "myapp",
+                    "version": "0.1.0",
+                    "license": "MIT",
+                    "dependencies": {"big": "1.0.0"},
+                }
+            )
+        )
+        oversized = "MIT /x" + " " * 50_000 + "y"
+        _mock_npm("big", oversized, "1.0.0")
+        args = ["check", "--path", str(tmp_path), "--no-transitive", "-f", "json"]
+        runner = CliRunner()
+        strict = runner.invoke(main, args)
+        lenient = runner.invoke(main, [*args, "--no-strict"])
+        assert strict.exit_code == 1
+        assert lenient.exit_code == 0
+        data = json.loads(lenient.output[lenient.output.index("{") :])
+        dep = data["dependencies"][0]
+        assert dep["license"] == "UNKNOWN"
+        assert dep["license_raw"] == oversized
+        assert dep["verdict"] == "unknown"
+        assert len(dep["reason"]) < 200
+
+
 class TestCustomReferenceExitCode:
     """A ``LicenseRef-*`` operand in a PEP 639 expression must not turn a
     copyleft violation into an UNKNOWN that ``--no-strict`` lets through."""

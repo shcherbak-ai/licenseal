@@ -8,6 +8,14 @@ from urllib.parse import urlsplit
 
 from licenseal.analysis.risk import KNOWN_SPDX_IDS
 
+# Longest license string that is normalized; a longer one is UNKNOWN and
+# goes to manual review. A registry field is bounded only by the
+# response-size cap, and two steps below take quadratic time on a hostile
+# string: `_SLASH_OR_RE` on a slash plus a long whitespace run, and peeling
+# deeply nested redundant parens. Identifiers, aliases, classifiers and
+# SPDX expressions are far shorter than this.
+_MAX_LICENSE_LENGTH = 1000
+
 # Cargo's pre-SPDX convention used `/` as a synonym for `OR` in license fields,
 # producing strings like `MIT/Apache-2.0`. Many older crates still publish this
 # form. Translate it to the SPDX equivalent before further processing.
@@ -1140,7 +1148,7 @@ def normalize_license(raw: str) -> str:
 
 def _normalize_license_inner(raw: str) -> str:
     """Source-string-to-SPDX mapping without operand canonicalization."""
-    if not raw:
+    if not raw or len(raw) > _MAX_LICENSE_LENGTH:
         return "UNKNOWN"
 
     stripped = raw.strip()
