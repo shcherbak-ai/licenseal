@@ -13,7 +13,7 @@ from licenseal.discovery.dotnet.directory_build_props import (
     closest_build_props,
     find_directory_build_props,
 )
-from licenseal.models import Ecosystem
+from licenseal.models import DependencyGroup, Ecosystem
 from tests._helpers import _NON_RELATIVE_PATH_VALUES, _record_path_io
 
 
@@ -277,6 +277,264 @@ class TestClosestBuildProps:
         }
         result = closest_build_props(tmp_path / "src" / "App.csproj", build_props)
         assert result == {}
+
+
+def _dotnet_rows(project: Path) -> list[tuple[str, str, DependencyGroup, str]]:
+    """``(name, version, group, source)`` of every .NET dep discovery finds on disk."""
+    deps, _ = discover_all_dependencies(project)
+    return [
+        (d.name, d.version_constraint, d.group, d.source)
+        for d in deps
+        if d.ecosystem == Ecosystem.DOTNET
+    ]
+
+
+def _project(*references: str) -> str:
+    return (
+        '<Project Sdk="Microsoft.NET.Sdk">\n  <ItemGroup>\n'
+        + "".join(f"    {reference}\n" for reference in references)
+        + "  </ItemGroup>\n</Project>\n"
+    )
+
+
+class TestDirectoryBuildPackageReferences:
+    """``<PackageReference>`` items declared in ``Directory.Build.props`` /
+    ``.targets`` are direct dependencies, read from files on disk through the
+    aggregator, with versions stitched like a project file's references.
+    """
+
+    def test_references_in_props_and_targets_are_direct_dependencies(self, tmp_path):
+        _write(
+            tmp_path / "Directory.Build.props",
+            _project(
+                '<PackageReference Include="Shared.Lib" Version="1.0.0" />',
+                '<PackageReference Include="Shared.Tool" Version="2.0.0" PrivateAssets="all" />',
+            ),
+        )
+        _write(
+            tmp_path / "Directory.Build.targets",
+            _project(
+                '<PackageReference Include="Late.Lib" Version="3.0.0" />',
+                '<PackageReference Include="Late.Tool"><Version>4.0.0</Version>'
+                "<PrivateAssets>all</PrivateAssets></PackageReference>",
+            ),
+        )
+        _write(
+            tmp_path / "src" / "App" / "App.csproj",
+            _project('<PackageReference Include="Own.Lib" Version="5.0.0" />'),
+        )
+        assert _dotnet_rows(tmp_path) == [
+            ("Own.Lib", "5.0.0", DependencyGroup.PROD, "src/App/App.csproj"),
+            ("Shared.Lib", "1.0.0", DependencyGroup.PROD, "Directory.Build.props"),
+            ("Shared.Tool", "2.0.0", DependencyGroup.DEV, "Directory.Build.props"),
+            ("Late.Lib", "3.0.0", DependencyGroup.PROD, "Directory.Build.targets"),
+            ("Late.Tool", "4.0.0", DependencyGroup.DEV, "Directory.Build.targets"),
+        ]
+
+    def test_reference_is_emitted_without_a_project_file_beneath(self, tmp_path):
+        # The projects the file applies to can be of a kind discovery does
+        # not read; the reference is reported either way.
+        _write(
+            tmp_path / "native" / "Directory.Build.props",
+            _project('<PackageReference Include="Shared.Lib" Version="1.0.0" />'),
+        )
+        assert _dotnet_rows(tmp_path) == [
+            ("Shared.Lib", "1.0.0", DependencyGroup.PROD, "native/Directory.Build.props")
+        ]
+
+    def test_cpm_versions_and_property_tokens_are_stitched(self, tmp_path):
+        # Versionless references take the Central Package Management version;
+        # $(Property) tokens expand from the file itself, from the other
+        # Directory.Build file beside it, from a file it imports, and from an
+        # ancestor's Directory.Build.props.
+        _write(
+            tmp_path / "Directory.Packages.props",
+            _project(
+                '<PackageVersion Include="Cpm.Lib" Version="1.0.0" />',
+                '<PackageVersion Include="Cpm.Nested" Version="1.5.0" />',
+            ),
+        )
+        _write(
+            tmp_path / "eng" / "Versions.props",
+            "<Project><PropertyGroup><ImportedVersion>2.0.0</ImportedVersion>"
+            "</PropertyGroup></Project>",
+        )
+        _write(
+            tmp_path / "Directory.Build.props",
+            """<Project>
+  <Import Project="eng\\Versions.props" />
+  <PropertyGroup>
+    <OwnVersion>3.0.0</OwnVersion>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="Cpm.Lib" />
+    <PackageReference Include="Own.Lib" Version="$(OwnVersion)" />
+    <PackageReference Include="Imported.Lib" Version="$(ImportedVersion)" />
+    <PackageReference Include="Sibling.Lib" Version="$(TargetsVersion)" />
+    <PackageReference Include="Missing.Lib" Version="$(NotDeclared)" />
+    <PackageReference Include="Unmanaged.Lib" />
+  </ItemGroup>
+</Project>""",
+        )
+        _write(
+            tmp_path / "Directory.Build.targets",
+            "<Project><PropertyGroup><TargetsVersion>4.0.0</TargetsVersion>"
+            "</PropertyGroup></Project>",
+        )
+        _write(
+            tmp_path / "src" / "Directory.Build.targets",
+            _project(
+                '<PackageReference Include="Cpm.Nested" />',
+                '<PackageReference Include="Ancestor.Lib" Version="$(OwnVersion)" />',
+            ),
+        )
+        assert _dotnet_rows(tmp_path) == [
+            ("Cpm.Lib", "1.0.0", DependencyGroup.PROD, "Directory.Build.props"),
+            ("Own.Lib", "3.0.0", DependencyGroup.PROD, "Directory.Build.props"),
+            ("Imported.Lib", "2.0.0", DependencyGroup.PROD, "Directory.Build.props"),
+            ("Sibling.Lib", "4.0.0", DependencyGroup.PROD, "Directory.Build.props"),
+            ("Missing.Lib", "$(NotDeclared)", DependencyGroup.PROD, "Directory.Build.props"),
+            ("Unmanaged.Lib", "", DependencyGroup.PROD, "Directory.Build.props"),
+            ("Cpm.Nested", "1.5.0", DependencyGroup.PROD, "src/Directory.Build.targets"),
+            ("Ancestor.Lib", "3.0.0", DependencyGroup.PROD, "src/Directory.Build.targets"),
+        ]
+
+    def test_references_in_imported_files_are_emitted(self, tmp_path):
+        # A Directory.Build file's <Import> chain is part of it: references
+        # in the imported files are reported under the importing
+        # Directory.Build file, with that file's property scope.
+        _write(
+            tmp_path / "eng" / "Analyzers.props",
+            _project(
+                '<PackageReference Include="Nested.Analyzer" Version="1.0.0" PrivateAssets="all" />'
+            ),
+        )
+        _write(
+            tmp_path / "eng" / "Packages.props",
+            """<Project>
+  <Import Project="Analyzers.props" />
+  <ItemGroup>
+    <PackageReference Include="Imported.Lib" Version="$(ImportedVersion)" />
+  </ItemGroup>
+</Project>""",
+        )
+        _write(
+            tmp_path / "Directory.Build.props",
+            """<Project>
+  <Import Project="eng/Packages.props" />
+  <PropertyGroup>
+    <ImportedVersion>2.0.0</ImportedVersion>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="Own.Lib" Version="3.0.0" />
+  </ItemGroup>
+</Project>""",
+        )
+        assert _dotnet_rows(tmp_path) == [
+            ("Nested.Analyzer", "1.0.0", DependencyGroup.DEV, "Directory.Build.props"),
+            ("Imported.Lib", "2.0.0", DependencyGroup.PROD, "Directory.Build.props"),
+            ("Own.Lib", "3.0.0", DependencyGroup.PROD, "Directory.Build.props"),
+        ]
+
+    def test_choose_branches_in_a_build_file_are_unioned(self, tmp_path):
+        _write(
+            tmp_path / "Directory.Build.targets",
+            """<Project>
+  <Choose>
+    <When Condition="'$(TargetFrameworkIdentifier)' == '.NETFramework'">
+      <ItemGroup>
+        <PackageReference Include="Framework.Lib" Version="1.0.0" />
+      </ItemGroup>
+    </When>
+    <Otherwise>
+      <ItemGroup>
+        <PackageReference Include="Core.Lib" Version="2.0.0" />
+      </ItemGroup>
+    </Otherwise>
+  </Choose>
+</Project>""",
+        )
+        assert _dotnet_rows(tmp_path) == [
+            ("Framework.Lib", "1.0.0", DependencyGroup.PROD, "Directory.Build.targets"),
+            ("Core.Lib", "2.0.0", DependencyGroup.PROD, "Directory.Build.targets"),
+        ]
+
+    def test_production_reference_wins_over_a_dev_one_for_the_same_package(self, tmp_path):
+        # Dev in the Directory.Build file and production in a project, and
+        # the other way round: either way the package ships.
+        _write(
+            tmp_path / "Directory.Build.props",
+            _project(
+                '<PackageReference Include="Dev.Above" Version="1.0.0" PrivateAssets="all" />',
+                '<PackageReference Include="Prod.Above" Version="2.0.0" />',
+            ),
+        )
+        _write(
+            tmp_path / "App.csproj",
+            _project(
+                '<PackageReference Include="Dev.Above" Version="1.0.0" />',
+                '<PackageReference Include="Prod.Above" Version="2.0.0" PrivateAssets="all" />',
+            ),
+        )
+        assert _dotnet_rows(tmp_path) == [
+            ("Dev.Above", "1.0.0", DependencyGroup.PROD, "App.csproj"),
+            ("Prod.Above", "2.0.0", DependencyGroup.PROD, "Directory.Build.props"),
+        ]
+
+    def test_reference_named_like_an_in_tree_project_is_filtered(self, tmp_path):
+        _write(tmp_path / "Local.Lib" / "Local.Lib.csproj", '<Project Sdk="Microsoft.NET.Sdk" />')
+        _write(
+            tmp_path / "Directory.Build.props",
+            _project(
+                '<PackageReference Include="Local.Lib" Version="1.0.0" />',
+                '<PackageReference Include="Published.Lib" Version="2.0.0" />',
+            ),
+        )
+        deps, counts = discover_all_dependencies(tmp_path)
+        assert [d.name for d in deps] == ["Published.Lib"]
+        assert counts["dotnet"] == 1
+
+    def test_unreadable_build_file_is_a_gap_and_the_rest_is_read(self, tmp_path, monkeypatch):
+        _write(
+            tmp_path / "Directory.Build.props",
+            _project('<PackageReference Include="Hidden.Lib" Version="1.0.0" />'),
+        )
+        _write(
+            tmp_path / "Directory.Build.targets",
+            _project('<PackageReference Include="Read.Lib" Version="2.0.0" />'),
+        )
+        original = Path.read_bytes
+
+        def explode(self, *args, **kwargs):
+            if self.name == "Directory.Build.props":
+                raise OSError("denied")
+            return original(self, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "read_bytes", explode)
+        with collect_read_diagnostics() as diags:
+            rows = _dotnet_rows(tmp_path)
+        assert rows == [("Read.Lib", "2.0.0", DependencyGroup.PROD, "Directory.Build.targets")]
+        assert {(d.path, d.is_gap) for d in diags} == {(tmp_path / "Directory.Build.props", True)}
+
+    def test_malformed_build_file_and_malformed_import_are_gaps(self, tmp_path):
+        _write(tmp_path / "Directory.Build.targets", "<Project><ItemGroup>")
+        _write(tmp_path / "eng" / "Broken.props", "<Project><broken")
+        _write(
+            tmp_path / "Directory.Build.props",
+            """<Project>
+  <Import Project="eng/Broken.props" />
+  <ItemGroup>
+    <PackageReference Include="Own.Lib" Version="1.0.0" />
+  </ItemGroup>
+</Project>""",
+        )
+        with collect_read_diagnostics() as diags:
+            rows = _dotnet_rows(tmp_path)
+        assert rows == [("Own.Lib", "1.0.0", DependencyGroup.PROD, "Directory.Build.props")]
+        assert {(d.path, d.reason) for d in diags if d.is_gap} == {
+            (tmp_path / "Directory.Build.targets", "is not valid XML; skipped"),
+            ((tmp_path / "eng" / "Broken.props").resolve(), "is not valid XML; skipped"),
+        }
 
 
 class TestImportFollowing:
@@ -688,4 +946,6 @@ class TestImportPathConfinement:
         assert [(d.name, d.version_constraint) for d in dotnet] == [
             ("Example.Lib", "$(LibVersion)")
         ]
-        assert [d.path for d in diags if d.is_gap] == [tmp_path / "Directory.Build.props"]
+        # The file is read once for its properties and once for its
+        # references, so both passes record the same gap.
+        assert {d.path for d in diags if d.is_gap} == {tmp_path / "Directory.Build.props"}

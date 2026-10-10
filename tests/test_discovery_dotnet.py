@@ -4,6 +4,9 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
+from licenseal.discovery import discover_all_dependencies
 from licenseal.discovery.dotnet import (
     detect_project_license_csproj,
     discover_csproj_dependencies,
@@ -106,6 +109,39 @@ class TestIsDevPackageRef:
 
     def test_no_attrs_stays_prod(self):
         assert _is_dev_package_ref(None, private_assets="", condition="") is False
+
+    @pytest.mark.parametrize(
+        "cond",
+        [
+            "'$(Configuration)'=='Debug'",
+            "  '$(configuration)' == 'DEBUG'  ",
+            "'$(Configuration)' == 'Test'",
+            "'$(IsTestProject)' == 'True'",
+            "$(IsTestProject) == 'true'",
+        ],
+    )
+    def test_whole_dev_condition_ignores_case_and_spacing(self, cond):
+        assert _is_dev_package_ref(None, private_assets="", condition=cond) is True
+
+    @pytest.mark.parametrize(
+        "cond",
+        [
+            # Restored in Release too, in either operand order.
+            "'$(Configuration)' == 'Debug' Or '$(Configuration)' == 'Release'",
+            "'$(Configuration)' == 'Release' Or '$(Configuration)' == 'Debug'",
+            "'$(IsTestProject)' == 'true' Or '$(IsPackable)' == 'true'",
+            # The negation of a dev comparison.
+            "!('$(Configuration)' == 'Debug')",
+            "'$(Configuration)' != 'Debug'",
+            # A dev comparison narrowed by a second one is still not matched:
+            # only the listed whole conditions are.
+            "'$(Configuration)' == 'Debug' And '$(TargetFramework)' == 'net8.0'",
+            "'$(Configuration)|$(Platform)' == 'Debug|AnyCPU'",
+            "'$(Configuration)' == 'Debugging'",
+        ],
+    )
+    def test_condition_that_only_contains_a_dev_comparison_stays_prod(self, cond):
+        assert _is_dev_package_ref(None, private_assets="", condition=cond) is False
 
 
 # ---------------------------------------------------------------------------
@@ -310,6 +346,169 @@ class TestParseCsprojSdkStyle:
         data = _parse_csproj(text, source_path=tmp_path / "App.csproj")
         assert data is not None
         assert data.package_refs[0].version == ""
+
+    def test_private_assets_child_element_classifies_as_dev(self, tmp_path):
+        # The element form is the same metadata as the attribute form. An
+        # empty attribute does not hide the element, and any value other than
+        # ``all`` stays PROD in either form.
+        text = """<Project Sdk="Microsoft.NET.Sdk">
+  <ItemGroup>
+    <PackageReference Include="ElementAll" Version="1.0.0">
+      <PrivateAssets>All</PrivateAssets>
+    </PackageReference>
+    <PackageReference Include="EmptyAttribute" Version="1.0.0" PrivateAssets="">
+      <PrivateAssets>all</PrivateAssets>
+    </PackageReference>
+    <PackageReference Include="ElementPartial" Version="1.0.0">
+      <PrivateAssets>analyzers;build</PrivateAssets>
+    </PackageReference>
+    <PackageReference Include="AttributeAll" Version="1.0.0" PrivateAssets="all" />
+  </ItemGroup>
+</Project>"""
+        data = _parse_csproj(text, source_path=tmp_path / "App.csproj")
+        assert data is not None
+        assert {ref.package_id: ref.group for ref in data.package_refs} == {
+            "ElementAll": DependencyGroup.DEV,
+            "EmptyAttribute": DependencyGroup.DEV,
+            "ElementPartial": DependencyGroup.PROD,
+            "AttributeAll": DependencyGroup.DEV,
+        }
+
+
+# ---------------------------------------------------------------------------
+# <Choose> / <When> / <Otherwise>, item metadata and Condition — from disk
+# ---------------------------------------------------------------------------
+
+
+class TestChooseBranchesAndReferenceMetadata:
+    def test_references_of_every_choose_branch_are_unioned(self, tmp_path):
+        # Branch conditions are not evaluated: each branch's references are
+        # emitted, a nested <Choose> included, with the project's properties
+        # and the per-reference DEV rules applied as outside a <Choose>.
+        _write(
+            tmp_path / "App.csproj",
+            """<Project Sdk="Microsoft.NET.Sdk">
+  <Choose>
+    <When Condition="'$(TargetFramework)' == 'net48'">
+      <ItemGroup>
+        <PackageReference Include="Legacy.Lib" Version="1.0.0" />
+        <PackageReference Include="Token.Lib" Version="$(TokenVersion)" />
+        <ProjectReference Include="..\\Sibling\\Sibling.csproj" />
+      </ItemGroup>
+    </When>
+    <When Condition="'$(TargetFramework)' == 'net6.0'">
+      <Choose>
+        <When Condition="'$(OS)' == 'Windows_NT'">
+          <ItemGroup>
+            <PackageReference Include="Nested.Lib" Version="2.0.0" />
+          </ItemGroup>
+        </When>
+      </Choose>
+    </When>
+    <Otherwise>
+      <ItemGroup>
+        <PackageReference Include="Modern.Lib" Version="3.0.0" />
+        <PackageReference Include="Tool.Lib" Version="4.0.0" PrivateAssets="all" />
+      </ItemGroup>
+    </Otherwise>
+  </Choose>
+  <PropertyGroup>
+    <TokenVersion>5.0.0</TokenVersion>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="Plain.Lib" Version="6.0.0" />
+  </ItemGroup>
+</Project>""",
+        )
+        deps, _ = discover_all_dependencies(tmp_path)
+        assert [(d.name, d.version_constraint, d.group, d.source) for d in deps] == [
+            ("Plain.Lib", "6.0.0", DependencyGroup.PROD, "App.csproj"),
+            ("Legacy.Lib", "1.0.0", DependencyGroup.PROD, "App.csproj"),
+            ("Token.Lib", "5.0.0", DependencyGroup.PROD, "App.csproj"),
+            ("Modern.Lib", "3.0.0", DependencyGroup.PROD, "App.csproj"),
+            ("Tool.Lib", "4.0.0", DependencyGroup.DEV, "App.csproj"),
+            ("Nested.Lib", "2.0.0", DependencyGroup.PROD, "App.csproj"),
+        ]
+        data = _parse_csproj(
+            (tmp_path / "App.csproj").read_bytes(), source_path=tmp_path / "App.csproj"
+        )
+        assert data is not None
+        assert data.project_refs == ["..\\Sibling\\Sibling.csproj"]
+
+    def test_property_set_inside_a_branch_stays_out_of_the_project_scope(self, tmp_path):
+        # Which branch a build takes is unknown, so a branch's own
+        # <PropertyGroup> neither fills a version token nor renames the
+        # project. The token stays literal for the resolver to report.
+        _write(
+            tmp_path / "App.csproj",
+            """<Project Sdk="Microsoft.NET.Sdk">
+  <Choose>
+    <When Condition="'$(UseOld)' == 'true'">
+      <PropertyGroup>
+        <LibVersion>1.0.0</LibVersion>
+        <PackageId>Renamed.In.Branch</PackageId>
+      </PropertyGroup>
+      <ItemGroup>
+        <PackageReference Include="Branch.Lib" Version="$(LibVersion)" />
+      </ItemGroup>
+    </When>
+    <Otherwise>
+      <PropertyGroup>
+        <LibVersion>2.0.0</LibVersion>
+      </PropertyGroup>
+    </Otherwise>
+  </Choose>
+  <ItemGroup>
+    <PackageReference Include="Root.Lib" Version="$(LibVersion)" />
+  </ItemGroup>
+</Project>""",
+        )
+        deps, _ = discover_all_dependencies(tmp_path)
+        assert {(d.name, d.version_constraint) for d in deps} == {
+            ("Branch.Lib", "$(LibVersion)"),
+            ("Root.Lib", "$(LibVersion)"),
+        }
+        assert _discover_workspace_local_project_ids(tmp_path) == {"App"}
+
+    def test_choose_nested_past_the_recursion_limit_is_read(self, tmp_path):
+        depth = 5_000
+        _write(
+            tmp_path / "App.csproj",
+            '<Project Sdk="Microsoft.NET.Sdk">'
+            + "<Choose><When>" * depth
+            + '<ItemGroup><PackageReference Include="Deep.Lib" Version="1.0.0" /></ItemGroup>'
+            + "</When></Choose>" * depth
+            + "</Project>",
+        )
+        deps, _ = discover_all_dependencies(tmp_path)
+        assert [(d.name, d.version_constraint) for d in deps] == [("Deep.Lib", "1.0.0")]
+
+    def test_reference_restored_in_debug_or_release_is_production(self, tmp_path):
+        # The Condition names Debug, but the reference is restored in Release
+        # as well, so it ships. The whole-condition forms beside it are DEV.
+        _write(
+            tmp_path / "App.csproj",
+            """<Project Sdk="Microsoft.NET.Sdk">
+  <ItemGroup>
+    <PackageReference Include="Either.Lib" Version="1.0.0"
+        Condition="'$(Configuration)' == 'Debug' Or '$(Configuration)' == 'Release'" />
+    <PackageReference Include="Debug.Lib" Version="2.0.0"
+        Condition="'$(Configuration)' == 'Debug'" />
+    <PackageReference Include="Test.Lib" Version="3.0.0"
+        Condition="'$(IsTestProject)' == 'true'" />
+    <PackageReference Include="Element.Lib" Version="4.0.0">
+      <PrivateAssets>all</PrivateAssets>
+    </PackageReference>
+  </ItemGroup>
+</Project>""",
+        )
+        deps, _ = discover_all_dependencies(tmp_path)
+        assert {d.name: d.group for d in deps} == {
+            "Either.Lib": DependencyGroup.PROD,
+            "Debug.Lib": DependencyGroup.DEV,
+            "Test.Lib": DependencyGroup.DEV,
+            "Element.Lib": DependencyGroup.DEV,
+        }
 
 
 # ---------------------------------------------------------------------------

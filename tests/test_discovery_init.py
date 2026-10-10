@@ -353,6 +353,49 @@ class TestDotnetIntegration:
         dotnet = [d for d in deps if d.ecosystem == Ecosystem.DOTNET]
         assert dotnet[0].version_constraint == "$(MissingProp)"
 
+    def test_cpm_and_build_props_stitch_into_choose_branch_references(self, tmp_path):
+        # References inside <Choose> branches go through the same two
+        # passes as the ones in the project body.
+        self._write(
+            tmp_path / "Directory.Packages.props",
+            """<Project>
+  <ItemGroup>
+    <PackageVersion Include="Central.Lib" Version="1.0.0" />
+  </ItemGroup>
+</Project>""",
+        )
+        self._write(
+            tmp_path / "Directory.Build.props",
+            """<Project>
+  <PropertyGroup>
+    <TokenVersion>2.0.0</TokenVersion>
+  </PropertyGroup>
+</Project>""",
+        )
+        self._write(
+            tmp_path / "src" / "App.csproj",
+            """<Project Sdk="Microsoft.NET.Sdk">
+  <Choose>
+    <When Condition="'$(TargetFramework)' == 'net48'">
+      <ItemGroup>
+        <PackageReference Include="Central.Lib" />
+      </ItemGroup>
+    </When>
+    <Otherwise>
+      <ItemGroup>
+        <PackageReference Include="Token.Lib" Version="$(TokenVersion)" />
+      </ItemGroup>
+    </Otherwise>
+  </Choose>
+</Project>""",
+        )
+        deps, _ = discover_all_dependencies(tmp_path)
+        dotnet = [d for d in deps if d.ecosystem == Ecosystem.DOTNET]
+        assert [(d.name, d.version_constraint, d.source) for d in dotnet] == [
+            ("Central.Lib", "1.0.0", "src/App.csproj"),
+            ("Token.Lib", "2.0.0", "src/App.csproj"),
+        ]
+
     def test_paket_discovery_wires_in(self, tmp_path):
         self._write(tmp_path / "paket.dependencies", "nuget Newtonsoft.Json ~> 13.0\n")
         deps, _ = discover_all_dependencies(tmp_path)

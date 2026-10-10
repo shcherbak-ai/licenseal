@@ -4576,6 +4576,109 @@ class TestDotnetEcosystem:
             assert exit_code == 1
             assert {name: (d["group"], d["verdict"]) for name, d in rows.items()} == expected
 
+    @respx.mock
+    def test_reference_outside_the_project_body_fails_the_default_check(self, tmp_path):
+        # The copyleft references are declared in Directory.Build.props and in
+        # a <Choose> branch, not in the project body. With no lockfile they
+        # are still dependencies of the project, so the default scan reports
+        # both and fails.
+        build_props = tmp_path / "Directory.Build.props"
+        build_props.write_text(
+            "<Project>\n  <ItemGroup>\n"
+            '    <PackageReference Include="SharedGpl" Version="1.0.0" />\n'
+            "  </ItemGroup>\n</Project>\n",
+            encoding="utf-8",
+        )
+        choose = (
+            "  <Choose>\n"
+            "    <When Condition=\"'$(TargetFramework)' == 'net48'\">\n"
+            "      <ItemGroup>\n"
+            '        <PackageReference Include="BranchGpl" Version="2.0.0" />\n'
+            "      </ItemGroup>\n"
+            "    </When>\n"
+            "    <Otherwise>\n"
+            "      <ItemGroup>\n"
+            '        <PackageReference Include="OtherLib" Version="3.0.0" />\n'
+            "      </ItemGroup>\n"
+            "    </Otherwise>\n"
+            "  </Choose>\n"
+        )
+        project = (
+            '<Project Sdk="Microsoft.NET.Sdk">\n'
+            "  <PropertyGroup>\n"
+            "    <PackageLicenseExpression>MIT</PackageLicenseExpression>\n"
+            "  </PropertyGroup>\n"
+            "{choose}"
+            "  <ItemGroup>\n"
+            '    <PackageReference Include="ProdLib" Version="4.0.0" />\n'
+            "  </ItemGroup>\n"
+            "</Project>\n"
+        )
+        (tmp_path / "App.csproj").write_text(project.format(choose=choose), encoding="utf-8")
+        self._mock_nuspec("SharedGpl", "1.0.0", "GPL-3.0-only")
+        self._mock_nuspec("BranchGpl", "2.0.0", "GPL-3.0-only")
+        self._mock_nuspec("OtherLib", "3.0.0", "MIT")
+        self._mock_nuspec("ProdLib", "4.0.0", "MIT")
+
+        exit_code, rows = self._check(tmp_path)
+        assert exit_code == 1
+        assert {name: (d["group"], d["verdict"], d["source"]) for name, d in rows.items()} == {
+            "SharedGpl": ("prod", "incompatible", "Directory.Build.props"),
+            "BranchGpl": ("prod", "incompatible", "App.csproj"),
+            "OtherLib": ("prod", "compatible", "App.csproj"),
+            "ProdLib": ("prod", "compatible", "App.csproj"),
+        }
+
+        # Control: the project body alone passes.
+        build_props.unlink()
+        (tmp_path / "App.csproj").write_text(project.format(choose=""), encoding="utf-8")
+        exit_code, rows = self._check(tmp_path)
+        assert exit_code == 0
+        assert set(rows) == {"ProdLib"}
+
+    @respx.mock
+    def test_condition_and_private_assets_decide_the_default_check(self, tmp_path):
+        # EitherGpl is restored in Debug and in Release, so it ships and the
+        # default scan fails on it. DebugGpl (a Debug-only Condition) and
+        # ElementGpl (PrivateAssets as a child element) are dev references:
+        # left out by default, warnings under --dev.
+        self._write_project(
+            tmp_path,
+            '    <PackageReference Include="ProdLib" Version="1.0.0" />\n'
+            '    <PackageReference Include="EitherGpl" Version="2.0.0"\n'
+            "        Condition=\"'$(Configuration)' == 'Debug' Or "
+            "'$(Configuration)' == 'Release'\" />\n"
+            '    <PackageReference Include="DebugGpl" Version="3.0.0"\n'
+            "        Condition=\"'$(Configuration)' == 'Debug'\" />\n"
+            '    <PackageReference Include="ElementGpl" Version="4.0.0">\n'
+            "      <PrivateAssets>all</PrivateAssets>\n"
+            "    </PackageReference>\n",
+            None,
+        )
+        self._mock_nuspec("ProdLib", "1.0.0", "MIT")
+        self._mock_nuspec("EitherGpl", "2.0.0", "GPL-3.0-only")
+        dev_routes = [
+            self._mock_nuspec("DebugGpl", "3.0.0", "GPL-3.0-only"),
+            self._mock_nuspec("ElementGpl", "4.0.0", "GPL-3.0-only"),
+        ]
+
+        exit_code, rows = self._check(tmp_path)
+        assert exit_code == 1
+        assert {name: (d["group"], d["verdict"]) for name, d in rows.items()} == {
+            "ProdLib": ("prod", "compatible"),
+            "EitherGpl": ("prod", "incompatible"),
+        }
+        assert not any(route.called for route in dev_routes)
+
+        exit_code, rows = self._check(tmp_path, "--dev", "--no-strict")
+        assert exit_code == 1
+        assert {name: (d["group"], d["verdict"]) for name, d in rows.items()} == {
+            "ProdLib": ("prod", "compatible"),
+            "EitherGpl": ("prod", "incompatible"),
+            "DebugGpl": ("dev", "warning"),
+            "ElementGpl": ("dev", "warning"),
+        }
+
     _PAKET_LOCK = (
         "RESTRICTION: || (== net6.0) (== netstandard2.0)\n"
         "NUGET\n"
@@ -6311,16 +6414,18 @@ class TestLockfileWithoutDirectDependencies:
 
     @respx.mock
     def test_nuget_reference_outside_the_project_file_is_scanned_from_its_lockfile(self, tmp_path):
-        # The only PackageReference lives in Directory.Build.props, which is
-        # read for properties only; packages.lock.json has the resolved graph.
-        (tmp_path / "Directory.Build.props").write_text(
+        # The only PackageReference lives in a props file the project imports
+        # itself, and a project file's imports are not followed;
+        # packages.lock.json has the resolved graph.
+        (tmp_path / "Dependencies.props").write_text(
             "<Project>\n  <ItemGroup>\n"
             '    <PackageReference Include="GplLib" Version="1.0.0" />\n'
             "  </ItemGroup>\n</Project>\n",
             encoding="utf-8",
         )
         (tmp_path / "App.csproj").write_text(
-            '<Project Sdk="Microsoft.NET.Sdk">\n  <PropertyGroup>\n'
+            '<Project Sdk="Microsoft.NET.Sdk">\n  <Import Project="Dependencies.props" />\n'
+            "  <PropertyGroup>\n"
             "    <PackageLicenseExpression>MIT</PackageLicenseExpression>\n"
             "  </PropertyGroup>\n</Project>\n",
             encoding="utf-8",

@@ -1,4 +1,4 @@
-"""Parse ``Directory.Build.props`` for inheritable MSBuild properties.
+"""Parse ``Directory.Build.props`` for inheritable MSBuild properties and items.
 
 ``Directory.Build.props`` is MSBuild's repo-wide property mechanism — a
 single file at the workspace root (or per-subtree) supplies properties
@@ -41,10 +41,17 @@ overrides; it occasionally carries property definitions too but the
 canonical home for properties is ``.props``. We support both filenames
 because property declarations there are valid MSBuild and appear in
 real-world repos.
+
+Either file can also declare ``<PackageReference>`` items — a package
+every project beneath it references (analyzers, source-link tooling, a
+shared library). :func:`discover_directory_build_dependencies` emits those
+as direct dependencies; the aggregator stitches their versions the same
+way it does for a project file's references.
 """
 
 from __future__ import annotations
 
+from collections.abc import Iterator
 from pathlib import Path
 
 from defusedxml import ElementTree as DefusedET
@@ -55,9 +62,20 @@ from licenseal.discovery._read import (
     rejected_path_reference,
 )
 from licenseal.discovery._walk import walk_project_files_matching
-from licenseal.discovery.dotnet.csproj import _strip_ns
+from licenseal.discovery.dotnet.csproj import (
+    _dependencies_from_refs,
+    _discover_workspace_local_project_ids,
+    _parse_csproj,
+    _strip_ns,
+)
+from licenseal.models import Dependency
 
 _PROPS_FILENAMES = ("Directory.Build.props", "Directory.Build.targets")
+
+
+def _is_build_file(name: str) -> bool:
+    """True for the two file names MSBuild imports into every project beneath them."""
+    return name in _PROPS_FILENAMES
 
 
 def _parse_directory_build_props(raw: str | bytes) -> dict[str, str] | None:
@@ -154,13 +172,12 @@ def find_directory_build_props(
     """
     out: dict[Path, dict[str, str]] = {}
 
-    def _match(name: str) -> bool:
-        return name in _PROPS_FILENAMES
-
     # Two-pass so that within the same directory, ``.props`` wins over
     # ``.targets`` (the more-common ordering).
     by_dir: dict[Path, dict[str, dict[str, str]]] = {}
-    for path in walk_project_files_matching(project_path, _match, exclude_paths=exclude_paths):
+    for path in walk_project_files_matching(
+        project_path, _is_build_file, exclude_paths=exclude_paths
+    ):
         raw = read_xml_bytes(path)
         if raw is None:
             continue
@@ -173,7 +190,7 @@ def find_directory_build_props(
         # take precedence on collision (MSBuild's import-before-self
         # semantics — Imports execute first, the file's own
         # PropertyGroups overwrite).
-        imported_props = _resolve_imports(path, raw, depth=0)
+        imported_props = _resolve_imports(path, raw)
         merged_props = {**imported_props, **props}
         by_dir.setdefault(path.parent, {})[path.name] = merged_props
 
@@ -190,20 +207,19 @@ def find_directory_build_props(
     return out
 
 
-def _resolve_imports(
+def _iter_imported_files(
     importing_path: Path,
     importing_data: str | bytes,
     *,
-    depth: int,
+    depth: int = 0,
     visited: frozenset[Path] = frozenset(),
-) -> dict[str, str]:
+) -> Iterator[tuple[Path, bytes]]:
     """Recursively follow ``<Import Project="..."/>`` chains.
 
-    Returns the union of all ``<PropertyGroup>`` properties from the
-    transitively-imported files. Closer (deeper-imported) properties
-    win over farther in the same way Python's chained ``dict.update``
-    works in the caller — but within the import-chain itself, leaf
-    files are written first, then earlier links overwrite.
+    Yields ``(path, raw)`` for every transitively-imported file that could
+    be read, in MSBuild's evaluation order: an imported file's own imports
+    come before the file itself, and the imports of one file come in the
+    order they are listed.
 
     Cycle defense: ``visited`` tracks already-loaded paths; a re-entry
     short-circuits. Depth defense: caps at :data:`_MAX_IMPORT_DEPTH`.
@@ -220,48 +236,100 @@ def _resolve_imports(
     filesystem.
     """
     if depth >= _MAX_IMPORT_DEPTH:
-        return {}
-    import_paths = _parse_imports(importing_data)
-    if not import_paths:
-        return {}
-    accumulated: dict[str, str] = {}
-    for raw in import_paths:
+        return
+    for project in _parse_imports(importing_data):
         # MSBuild property tokens in import paths can't be safely
         # resolved here (we'd need the full importing-file's scope
         # which itself depends on imports — chicken/egg). Skip any
         # path that still contains ``$(``.
-        if "$(" in raw:
+        if "$(" in project:
             continue
         # Only relative imports are followed. The check is lexical and
         # precedes ``resolve()``, which is itself filesystem I/O.
-        if rejected_path_reference(importing_path, raw):
+        if rejected_path_reference(importing_path, project):
             continue
         # MSBuild paths use Windows-style backslashes in many real
         # files; convert for cross-platform resolution.
-        normalized = raw.replace("\\", "/")
+        normalized = project.replace("\\", "/")
         candidate = (importing_path.parent / normalized).resolve()
         if candidate in visited or not candidate.is_file():
             continue
         raw = read_xml_bytes(candidate)
         if raw is None:
             continue
-        sub_props = _parse_directory_build_props(raw)
-        if sub_props is None:
-            record_parse_failure(candidate, "XML")
-            continue
-        # Recurse for nested imports inside the imported file.
-        nested = _resolve_imports(
+        # Nested imports inside the imported file come first.
+        yield from _iter_imported_files(
             candidate,
             raw,
             depth=depth + 1,
             visited=visited | {candidate},
         )
-        # Nested-imported values flow in first; the imported file's own
-        # values overwrite. The result then merges into ``accumulated``
-        # — later-listed imports win over earlier ones in the same file
-        # (matches MSBuild's evaluation order).
-        accumulated.update({**nested, **sub_props})
+        yield candidate, raw
+
+
+def _resolve_imports(importing_path: Path, importing_data: str | bytes) -> dict[str, str]:
+    """Return the union of all ``<PropertyGroup>`` properties from imported files.
+
+    Files are merged in the order :func:`_iter_imported_files` yields them,
+    so nested-imported values flow in first, the imported file's own values
+    overwrite them, and later-listed imports win over earlier ones in the
+    same file (matches MSBuild's evaluation order).
+    """
+    accumulated: dict[str, str] = {}
+    for candidate, raw in _iter_imported_files(importing_path, importing_data):
+        sub_props = _parse_directory_build_props(raw)
+        if sub_props is None:
+            record_parse_failure(candidate, "XML")
+            continue
+        accumulated.update(sub_props)
     return accumulated
+
+
+def discover_directory_build_dependencies(
+    project_path: Path,
+    *,
+    exclude_paths: frozenset[Path] = frozenset(),
+) -> tuple[list[Dependency], int]:
+    """Discover ``<PackageReference>`` items of ``Directory.Build.props`` / ``.targets``.
+
+    MSBuild imports these files into every project beneath their directory,
+    so a reference declared in one — or in a file it ``<Import>``s — is a
+    direct dependency of those projects. Each reference is emitted once,
+    with the ``Directory.Build`` file as its source (also for a reference
+    that sits in an imported file), whether or not a project file lies
+    beneath it. The file is parsed like a project file, so ``<Choose>``
+    branches, ``PrivateAssets`` and ``Condition`` are read the same way.
+
+    Versions are left as declared: the aggregator fills a missing one from
+    Central Package Management and expands ``$(Property)`` tokens against
+    the property scope of the ``Directory.Build`` file's directory.
+
+    Returns ``(deps, filtered_count)`` like
+    :func:`.csproj.discover_csproj_dependencies`.
+    """
+    workspace_local = _discover_workspace_local_project_ids(
+        project_path, exclude_paths=exclude_paths
+    )
+    out: list[Dependency] = []
+    filtered = 0
+    for path in walk_project_files_matching(
+        project_path, _is_build_file, exclude_paths=exclude_paths
+    ):
+        raw = read_xml_bytes(path)
+        if raw is None:
+            continue
+        source = path.relative_to(project_path).as_posix()
+        for file_path, file_raw in (*_iter_imported_files(path, raw), (path, raw)):
+            data = _parse_csproj(file_raw, source_path=file_path)
+            if data is None:
+                record_parse_failure(file_path, "XML")
+                continue
+            deps, dropped = _dependencies_from_refs(
+                data.package_refs, source=source, workspace_local=workspace_local
+            )
+            out.extend(deps)
+            filtered += dropped
+    return out, filtered
 
 
 def closest_build_props(

@@ -5,7 +5,8 @@ produce .NET artifacts pulled from the same registry (``api.nuget.org``).
 The distinction matters only at discovery time:
 
 * **NuGet** is the canonical package manager. Direct dependencies live in
-  ``.csproj`` / ``.fsproj`` / ``.vbproj`` files (modern SDK-style XML) or
+  ``.csproj`` / ``.fsproj`` / ``.vbproj`` files (modern SDK-style XML), in
+  the ``Directory.Build.props`` / ``.targets`` files above them, or in
   legacy ``packages.config`` XML. Versions can be centralized via
   ``Directory.Packages.props`` (Central Package Management). Resolved
   graphs live in ``packages.lock.json`` (opt-in committed lockfile,
@@ -35,6 +36,7 @@ from licenseal.discovery.dotnet.csproj import (
 )
 from licenseal.discovery.dotnet.directory_build_props import (
     closest_build_props,
+    discover_directory_build_dependencies,
     find_directory_build_props,
 )
 from licenseal.discovery.dotnet.directory_packages_props import (
@@ -64,6 +66,7 @@ __all__ = [
     "closest_cpm_data",
     "detect_project_license_csproj",
     "discover_csproj_dependencies",
+    "discover_directory_build_dependencies",
     "discover_packages_config_dependencies",
     "discover_paket_dependencies",
     "find_directory_build_props",

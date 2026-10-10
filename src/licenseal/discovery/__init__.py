@@ -10,6 +10,7 @@ from licenseal.discovery.dotnet import (
     closest_build_props,
     detect_project_license_csproj,
     discover_csproj_dependencies,
+    discover_directory_build_dependencies,
     discover_packages_config_dependencies,
     discover_paket_dependencies,
     find_directory_build_props,
@@ -197,14 +198,19 @@ def _discover_all_dependencies(
     # declare ``<PackageReference Include="X" />`` without a Version
     # attribute) and potentially-literal ``$(Property)`` tokens (when a
     # property is supplied by an ancestor ``Directory.Build.props``). We
-    # stitch both layers here so each parser stays self-contained.
+    # stitch both layers here so each parser stays self-contained. The
+    # references a ``Directory.Build.props`` / ``.targets`` declares itself
+    # go through the same stitching, after the project files' own.
     csproj_deps, csproj_filtered = discover_csproj_dependencies(
+        project_path, exclude_paths=exclude_paths
+    )
+    build_file_deps, build_file_filtered = discover_directory_build_dependencies(
         project_path, exclude_paths=exclude_paths
     )
     cpm_files = find_directory_packages_props(project_path, exclude_paths=exclude_paths)
     build_props_files = find_directory_build_props(project_path, exclude_paths=exclude_paths)
     csproj_deps = _stitch_dotnet_versions(
-        csproj_deps,
+        csproj_deps + build_file_deps,
         project_path=project_path,
         cpm_files=cpm_files,
         build_props_files=build_props_files,
@@ -301,7 +307,7 @@ def _discover_all_dependencies(
         "rust": rust_filtered,
         "go": go_filtered,
         "java": maven_filtered,
-        "dotnet": csproj_filtered,
+        "dotnet": csproj_filtered + build_file_filtered,
         "php": php_filtered,
         "ruby": ruby_filtered,
         "hex": hex_filtered,
@@ -344,9 +350,12 @@ def _stitch_dotnet_versions(
        override more-distant ones; unresolved tokens remain literal and
        the resolver routes the dep to UNKNOWN.
 
-    Deps from non-csproj .NET sources (``packages.config``,
-    ``paket.dependencies``) are untouched — they don't participate in
-    CPM or Directory.Build.props inheritance.
+    ``deps`` holds the references of project files and of
+    ``Directory.Build.props`` / ``.targets`` files; for the latter both
+    lookups start at the ``Directory.Build`` file's own directory. Deps
+    from the other .NET sources (``packages.config``,
+    ``paket.dependencies``) are never passed in — they don't participate
+    in CPM or Directory.Build.props inheritance.
     """
     if not cpm_files and not build_props_files:
         return deps
@@ -356,8 +365,8 @@ def _stitch_dotnet_versions(
         if dep.ecosystem != Ecosystem.DOTNET or not dep.source:
             out.append(dep)
             continue
-        # Reconstruct the absolute csproj path from the dep's source
-        # field (relative posix path).
+        # Reconstruct the declaring file's absolute path from the dep's
+        # source field (relative posix path).
         csproj_path = project_path / dep.source
         new_version = dep.version_constraint
 

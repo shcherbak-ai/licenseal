@@ -6652,6 +6652,155 @@ class TestNugetLockfileGraph:
             "SiblingChild": ("ProdLib",),
         }
 
+    def test_directory_build_references_root_the_lockfile_graph(self, tmp_path):
+        # SharedLib and the PrivateAssets="all" SharedTool are declared in
+        # Directory.Build files, not in the project. They are roots like the
+        # project's own reference: the tool's chain is dev, and the library's
+        # child is attributed to it.
+        _write(tmp_path / "App.csproj", _csproj(("ProdLib", "1.0.0", False)))
+        _write(tmp_path / "Directory.Build.props", _csproj(("SharedTool", "2.0.0", True)))
+        _write(tmp_path / "Directory.Build.targets", _csproj(("SharedLib", "3.0.0", False)))
+        _write(
+            tmp_path / "packages.lock.json",
+            _nuget_lock(
+                {
+                    "ProdLib": ("Direct", "1.0.0", []),
+                    "SharedTool": ("Direct", "2.0.0", ["ToolChild"]),
+                    "ToolChild": ("Transitive", "2.1.0", []),
+                    "SharedLib": ("Direct", "3.0.0", ["LibChild"]),
+                    "LibChild": ("Transitive", "3.1.0", []),
+                }
+            ),
+        )
+        prod_only = self._resolve(tmp_path, include_dev=False)
+        assert {
+            name: (d.group, d.depth, d.direct_ancestors, d.source) for name, d in prod_only.items()
+        } == {
+            "ProdLib": (DependencyGroup.PROD, 0, (), "App.csproj"),
+            "SharedLib": (DependencyGroup.PROD, 0, (), "Directory.Build.targets"),
+            "LibChild": (DependencyGroup.PROD, 1, ("SharedLib",), ""),
+        }
+        with_dev = self._resolve(tmp_path, include_dev=True)
+        assert {name: (d.group, d.direct_ancestors, d.source) for name, d in with_dev.items()} == {
+            "ProdLib": (DependencyGroup.PROD, (), "App.csproj"),
+            "SharedLib": (DependencyGroup.PROD, (), "Directory.Build.targets"),
+            "LibChild": (DependencyGroup.PROD, ("SharedLib",), ""),
+            "SharedTool": (DependencyGroup.DEV, (), "Directory.Build.props"),
+            "ToolChild": (DependencyGroup.DEV, ("SharedTool",), ""),
+        }
+
+
+class TestDotnetReferencesOutsideTheProjectBody:
+    """From files on disk, with no lockfile: references declared in a
+    ``Directory.Build`` file or inside a ``<Choose>`` branch are walked on the
+    registry like the references in a project's body."""
+
+    @staticmethod
+    def _mock_nuspec(name: str, version: str, child: str = ""):
+        dependency = f'<dependency id="{child}" version="1.0.0" />' if child else ""
+        lower = name.lower()
+        return respx.get(
+            f"https://api.nuget.org/v3-flatcontainer/{lower}/{version}/{lower}.nuspec"
+        ).mock(
+            return_value=httpx.Response(
+                200,
+                text=(
+                    '<package xmlns="http://schemas.microsoft.com/packaging/2013/05/nuspec.xsd">'
+                    f"<metadata><id>{name}</id><version>{version}</version>"
+                    f"<dependencies>{dependency}</dependencies></metadata></package>"
+                ),
+            )
+        )
+
+    @staticmethod
+    def _resolve(tmp_path, *, include_dev: bool) -> dict[str, Dependency]:
+        direct, _ = discover_all_dependencies(tmp_path)
+        with httpx.Client() as client:
+            deps = resolve_transitive(
+                direct, tmp_path, include_dev=include_dev, max_depth=50, client=client
+            )
+        assert len({d.name for d in deps}) == len(deps)
+        return {d.name: d for d in deps}
+
+    @respx.mock
+    def test_build_file_and_choose_references_are_walked(self, tmp_path):
+        _write(
+            tmp_path / "Directory.Build.props",
+            """<Project>
+  <PropertyGroup>
+    <SharedVersion>1.0.0</SharedVersion>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="SharedLib" Version="$(SharedVersion)" />
+    <PackageReference Include="SharedTool" Version="2.0.0" PrivateAssets="all" />
+  </ItemGroup>
+</Project>""",
+        )
+        _write(
+            tmp_path / "src" / "App.csproj",
+            """<Project Sdk="Microsoft.NET.Sdk">
+  <Choose>
+    <When Condition="'$(TargetFramework)' == 'net48'">
+      <ItemGroup>
+        <PackageReference Include="BranchLib" Version="3.0.0" />
+      </ItemGroup>
+    </When>
+    <Otherwise>
+      <ItemGroup>
+        <PackageReference Include="OtherLib" Version="4.0.0" />
+      </ItemGroup>
+    </Otherwise>
+  </Choose>
+  <ItemGroup>
+    <PackageReference Include="EitherLib" Version="5.0.0"
+        Condition="'$(Configuration)' == 'Debug' Or '$(Configuration)' == 'Release'" />
+    <PackageReference Include="ElementTool" Version="6.0.0">
+      <PrivateAssets>all</PrivateAssets>
+    </PackageReference>
+  </ItemGroup>
+</Project>""",
+        )
+        production = {
+            "SharedLib": ("1.0.0", "SharedChild", "Directory.Build.props"),
+            "BranchLib": ("3.0.0", "BranchChild", "src/App.csproj"),
+            "OtherLib": ("4.0.0", "OtherChild", "src/App.csproj"),
+            "EitherLib": ("5.0.0", "EitherChild", "src/App.csproj"),
+        }
+        development = {
+            "SharedTool": ("2.0.0", "SharedToolChild", "Directory.Build.props"),
+            "ElementTool": ("6.0.0", "ElementToolChild", "src/App.csproj"),
+        }
+        dev_routes = []
+        for name, (version, child, _) in production.items():
+            self._mock_nuspec(name, version, child)
+            self._mock_nuspec(child, "1.0.0")
+        for name, (version, child, _) in development.items():
+            dev_routes.append(self._mock_nuspec(name, version, child))
+            dev_routes.append(self._mock_nuspec(child, "1.0.0"))
+
+        def expected(declared: dict, group: DependencyGroup) -> dict:
+            rows = {}
+            for name, (version, child, source) in declared.items():
+                rows[name] = (f"=={version}", group, 0, (), source)
+                rows[child] = ("==1.0.0", group, 1, (name,), "")
+            return rows
+
+        prod_only = self._resolve(tmp_path, include_dev=False)
+        assert {
+            name: (d.version_constraint, d.group, d.depth, d.direct_ancestors, d.source)
+            for name, d in prod_only.items()
+        } == expected(production, DependencyGroup.PROD)
+        assert not any(route.called for route in dev_routes)
+
+        with_dev = self._resolve(tmp_path, include_dev=True)
+        assert {
+            name: (d.version_constraint, d.group, d.depth, d.direct_ancestors, d.source)
+            for name, d in with_dev.items()
+        } == {
+            **expected(production, DependencyGroup.PROD),
+            **expected(development, DependencyGroup.DEV),
+        }
+
 
 _PAKET_FIXTURE = Path(__file__).parent / "fixtures" / "paket" / "trailing_options"
 

@@ -47,11 +47,23 @@ mapping):
 
 * Plain ``<PackageReference Include="X" Version="Y" />`` → PROD
 * ``PrivateAssets="all"`` (won't be propagated to consumers, typically
-  analyzers + test frameworks like xunit/nunit/MSTest) → DEV
-* ``Condition="…Configuration…Debug…"`` or ``Condition="…IsTestProject…"``
-  patterns → DEV (heuristic — full MSBuild condition evaluation is out of
-  scope, same trade-off Trivy and license-checker tools make)
+  analyzers + test frameworks like xunit/nunit/MSTest), written as an
+  attribute or as a ``<PrivateAssets>all</PrivateAssets>`` child element
+  → DEV
+* A ``Condition`` that is, as a whole, a Debug / Test configuration or an
+  IsTestProject comparison (``'$(Configuration)' == 'Debug'``) → DEV
+  (heuristic — full MSBuild condition evaluation is out of scope, same
+  trade-off Trivy and license-checker tools make). A condition that only
+  contains such a comparison (``… Or '$(Configuration)' == 'Release'``)
+  is PROD.
 * ``IncludeAssets="all"`` and other normal usage attributes → PROD
+
+``<Choose>`` blocks: the items of every ``<When>`` / ``<Otherwise>`` branch
+are read, nested ``<Choose>`` blocks included. Branch conditions are not
+evaluated, so the references of all branches are unioned (the posture the
+lockfile parsers take for target frameworks). A ``<PropertyGroup>`` inside
+a branch is not read: which branch a build takes is unknown, so its values
+never reach the project's property scope.
 
 ``<ProjectReference>`` elements point at other in-tree ``.csproj`` files
 and are NOT NuGet dependencies. They are emitted by the workspace-local
@@ -72,6 +84,7 @@ elsewhere and licenseal cannot fabricate it).
 from __future__ import annotations
 
 import re
+from collections import deque
 from dataclasses import dataclass, field
 from pathlib import Path
 from xml.etree.ElementTree import Element  # nosec B405
@@ -96,15 +109,19 @@ _PROPERTY_RE = re.compile(r"\$\(([^)]+)\)")
 # intentionally NOT included — they don't carry NuGet PackageReferences.
 _PROJECT_EXTENSIONS = (".csproj", ".fsproj", ".vbproj")
 
-# Heuristic substrings in MSBuild ``Condition="…"`` attributes that mark
-# a package as DEV-only. The full MSBuild condition grammar is out of
-# scope; we recognize the common test/debug patterns and conservatively
-# leave everything else PROD.
-_DEV_CONDITION_HINTS = (
-    "configuration)' == 'debug'",
-    "configuration)' == 'test'",
-    "istestproject)' == 'true'",
-    "istestproject) == 'true'",
+# MSBuild ``Condition="…"`` values that mark a package as DEV-only, in the
+# form they are compared in: lowercased, spaces removed. The full MSBuild
+# condition grammar is out of scope; we recognize the common test/debug
+# comparisons and conservatively leave everything else PROD. The match is on
+# the whole condition — one of these combined with anything else (``Or``,
+# ``And``, a second comparison) is not a DEV condition.
+_DEV_CONDITIONS = frozenset(
+    {
+        "'$(configuration)'=='debug'",
+        "'$(configuration)'=='test'",
+        "'$(istestproject)'=='true'",
+        "$(istestproject)=='true'",
+    }
 )
 
 
@@ -168,15 +185,14 @@ def _is_dev_package_ref(
 
     ``PrivateAssets="all"`` is the canonical signal for analyzer +
     test-framework packages (xunit, nunit, MSTest, StyleCop.Analyzers,
-    SonarAnalyzer, etc.) that don't flow to consumers. ``Condition``
-    patterns matching Debug or IsTestProject also mark DEV; everything
-    else is PROD.
+    SonarAnalyzer, etc.) that don't flow to consumers. A ``Condition``
+    that is exactly one of the Debug / Test / IsTestProject comparisons
+    also marks DEV; everything else is PROD.
     """
     del package_ref_el  # placeholder; structural hints currently only via attrs
     if private_assets.strip().lower() == "all":
         return True
-    cond_normalized = condition.lower().replace(" ", "")
-    return any(hint.replace(" ", "") in cond_normalized for hint in _DEV_CONDITION_HINTS)
+    return condition.lower().replace(" ", "") in _DEV_CONDITIONS
 
 
 def _parse_property_group(group_el: Element, into: dict[str, str]) -> None:
@@ -194,6 +210,30 @@ def _parse_property_group(group_el: Element, into: dict[str, str]) -> None:
             into[name] = value
 
 
+def _read_metadata(item_el: Element, name: str) -> str:
+    """Return item metadata ``name`` from its attribute or its child element.
+
+    Two shapes are allowed by MSBuild for any metadata of an item:
+
+    1. ``<PackageReference Include="X" Version="1.2.3" />`` — attribute form.
+    2. ``<PackageReference Include="X"><Version>1.2.3</Version></PackageReference>``
+       — nested-element form (used when a property must be expanded across
+       multiple lines, or to keep a stable XML for diff-friendly history).
+
+    Both are tried in order. Returns the empty string when neither carries
+    a value.
+    """
+    attr = (item_el.get(name) or "").strip()
+    if attr:
+        return attr
+    for child in item_el:
+        if _strip_ns(child.tag) == name:
+            text = (child.text or "").strip()
+            if text:
+                return text
+    return ""
+
+
 def _read_version(
     package_ref_el: Element,
     *,
@@ -201,31 +241,46 @@ def _read_version(
 ) -> str:
     """Extract the ``Version`` for a ``<PackageReference>``.
 
-    Two shapes are allowed by MSBuild:
-
-    1. ``<PackageReference Include="X" Version="1.2.3" />`` — attribute form.
-    2. ``<PackageReference Include="X"><Version>1.2.3</Version></PackageReference>``
-       — nested-element form (used when a property must be expanded across
-       multiple lines, or to keep a stable XML for diff-friendly history).
-
-    Both are tried in order. Property tokens are expanded against the
-    project's own ``<PropertyGroup>`` blocks; ancestor
-    ``Directory.Build.props`` properties are handled separately.
+    Property tokens are expanded against the project's own
+    ``<PropertyGroup>`` blocks; ancestor ``Directory.Build.props``
+    properties are handled separately.
 
     Returns the empty string when no version is declared — that's the
     Central Package Management case (a sibling ``Directory.Packages.props``
     supplies the version). The CPM stitching layer fills the gap; this
     parser intentionally leaves it for that layer to handle.
     """
-    attr = package_ref_el.get("Version", "") or ""
-    if attr.strip():
-        return _expand_properties(attr.strip(), properties)
-    for child in package_ref_el:
-        if _strip_ns(child.tag) == "Version":
-            text = (child.text or "").strip()
-            if text:
-                return _expand_properties(text, properties)
-    return ""
+    return _expand_properties(_read_metadata(package_ref_el, "Version"), properties)
+
+
+def _parse_item_group(group_el: Element, data: _CsprojData) -> None:
+    """Collect the package and project references of one ``<ItemGroup>``."""
+    for item in group_el:
+        item_local = _strip_ns(item.tag)
+        if item_local == "PackageReference":
+            pkg_id = (item.get("Include") or "").strip()
+            if not pkg_id:
+                continue
+            group = (
+                DependencyGroup.DEV
+                if _is_dev_package_ref(
+                    item,
+                    private_assets=_read_metadata(item, "PrivateAssets"),
+                    condition=item.get("Condition") or "",
+                )
+                else DependencyGroup.PROD
+            )
+            data.package_refs.append(
+                _CsprojDep(
+                    package_id=pkg_id,
+                    version=_read_version(item, properties=data.properties),
+                    group=group,
+                )
+            )
+        elif item_local == "ProjectReference":
+            ref = (item.get("Include") or "").strip()
+            if ref:
+                data.project_refs.append(ref)
 
 
 def _parse_csproj(raw: str | bytes, *, source_path: Path) -> _CsprojData | None:
@@ -247,40 +302,22 @@ def _parse_csproj(raw: str | bytes, *, source_path: Path) -> _CsprojData | None:
     # projects).
     data.project_id = source_path.stem
 
-    for child in root:
-        local = _strip_ns(child.tag)
-        if local == "PropertyGroup":
-            _parse_property_group(child, data.properties)
-        elif local == "ItemGroup":
-            for item in child:
-                item_local = _strip_ns(item.tag)
-                if item_local == "PackageReference":
-                    pkg_id = (item.get("Include") or "").strip()
-                    if not pkg_id:
-                        continue
-                    version = _read_version(item, properties=data.properties)
-                    private_assets = item.get("PrivateAssets") or ""
-                    condition = item.get("Condition") or ""
-                    group = (
-                        DependencyGroup.DEV
-                        if _is_dev_package_ref(
-                            item,
-                            private_assets=private_assets,
-                            condition=condition,
-                        )
-                        else DependencyGroup.PROD
-                    )
-                    data.package_refs.append(
-                        _CsprojDep(
-                            package_id=pkg_id,
-                            version=version,
-                            group=group,
-                        )
-                    )
-                elif item_local == "ProjectReference":
-                    ref = (item.get("Include") or "").strip()
-                    if ref:
-                        data.project_refs.append(ref)
+    # The root's children first, in document order, then the ``<When>`` /
+    # ``<Otherwise>`` branches of each ``<Choose>`` (a branch can nest another
+    # ``<Choose>``). A queue rather than recursion: nesting depth comes from
+    # the file. Every branch is read, so the references of all of them are
+    # unioned; only the root's own ``<PropertyGroup>`` blocks set properties.
+    containers = deque([root])
+    while containers:
+        container = containers.popleft()
+        for child in container:
+            local = _strip_ns(child.tag)
+            if local == "PropertyGroup" and container is root:
+                _parse_property_group(child, data.properties)
+            elif local == "ItemGroup":
+                _parse_item_group(child, data)
+            elif local == "Choose":
+                containers.extend(child)
 
     # Promote authored-package license metadata from PropertyGroup into
     # explicit fields. Only ``<PackageLicenseExpression>`` carries SPDX
@@ -345,6 +382,36 @@ def _walk_project_files(
     return walk_project_files_matching(project_path, _match, exclude_paths=exclude_paths)
 
 
+def _dependencies_from_refs(
+    refs: list[_CsprojDep],
+    *,
+    source: str,
+    workspace_local: set[str],
+) -> tuple[list[Dependency], int]:
+    """Turn the ``<PackageReference>`` items of one file into ``Dependency`` rows.
+
+    ``source`` is the declaring file's path relative to the scan root.
+    Returns ``(deps, filtered_count)``; a reference whose ID is an in-tree
+    project's is filtered rather than emitted.
+    """
+    out: list[Dependency] = []
+    filtered = 0
+    for ref in refs:
+        if ref.package_id in workspace_local:
+            filtered += 1
+            continue
+        out.append(
+            Dependency(
+                name=ref.package_id,
+                version_constraint=ref.version,
+                ecosystem=Ecosystem.DOTNET,
+                group=ref.group,
+                source=source,
+            )
+        )
+    return out, filtered
+
+
 def discover_csproj_dependencies(
     project_path: Path,
     *,
@@ -379,20 +446,13 @@ def discover_csproj_dependencies(
         if data is None:
             record_parse_failure(project_file, "XML")
             continue
-        source = project_file.relative_to(project_path).as_posix()
-        for ref in data.package_refs:
-            if ref.package_id in workspace_local:
-                filtered += 1
-                continue
-            out.append(
-                Dependency(
-                    name=ref.package_id,
-                    version_constraint=ref.version,
-                    ecosystem=Ecosystem.DOTNET,
-                    group=ref.group,
-                    source=source,
-                )
-            )
+        deps, dropped = _dependencies_from_refs(
+            data.package_refs,
+            source=project_file.relative_to(project_path).as_posix(),
+            workspace_local=workspace_local,
+        )
+        out.extend(deps)
+        filtered += dropped
 
     return out, filtered
 
