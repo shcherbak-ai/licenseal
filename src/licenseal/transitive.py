@@ -36,8 +36,9 @@ from licenseal._concurrency import map_with_context
 from licenseal._graph import compute_direct_ancestors
 from licenseal.discovery._read import read_xml_bytes, record_parse_failure
 from licenseal.discovery.dotnet import (
-    discover_nuget_lockfile_dependencies,
+    find_nuget_lockfiles,
     find_paket_lockfiles,
+    parse_nuget_lockfile,
     parse_paket_lock,
 )
 from licenseal.discovery.dotnet.csproj import (
@@ -863,9 +864,11 @@ def _resolve_dotnet_transitive(
 
     1. **Lockfile-first** — ``packages.lock.json`` and ``project.assets.json``
        (NuGet) plus ``paket.lock`` (Paket). The lockfile parsers union
-       across TFMs per the locked-in plan decision; each lockfile carries
-       enough edge data for ``compute_direct_ancestors`` to attribute
-       group + ancestors via reachability.
+       across TFMs per the locked-in plan decision. Each NuGet lockfile
+       carries its own edges, so ``parse_nuget_lockfile`` attributes group
+       + ancestors per lockfile by reachability from the direct deps of the
+       whole scan (PROD wins over DEV; unreachable → PROD). ``paket.lock``
+       entries take their group from the Paket group they are listed in.
 
     2. **Recursive nuspec walk** — for direct .NET deps not covered by
        any lockfile (a ``.csproj`` project where ``dotnet restore``
@@ -899,39 +902,29 @@ def _resolve_dotnet_transitive(
     covered_names: set[str] = set()
 
     # ---- NuGet lockfile path ----
-    nuget_lockfile_deps, _ = discover_nuget_lockfile_dependencies(
-        project_path, exclude_paths=exclude_paths
-    )
-    direct_dotnet_names_lower = {d.name.lower() for d in direct_dotnet_deps}
-    for dep in nuget_lockfile_deps:
-        if dep.name.lower() in workspace_local_lower:
-            continue
-        lower = dep.name.lower()
-        if lower in direct_dotnet_names_lower:
-            matching_direct = next(d for d in direct_dotnet_deps if d.name.lower() == lower)
-            if not include_dev and matching_direct.group == DependencyGroup.DEV:
+    # Each lockfile is attributed on its own edges, against the direct deps of
+    # the whole scan. A workspace-local entry stays in the graph the parser
+    # walks (its children are reached through it) but is not emitted.
+    direct_prod_names = {
+        d.name.lower() for d in direct_dotnet_deps if d.group == DependencyGroup.PROD
+    }
+    direct_dev_names = {
+        d.name.lower() for d in direct_dotnet_deps if d.group == DependencyGroup.DEV
+    }
+    for nuget_lock in find_nuget_lockfiles(project_path, exclude_paths=exclude_paths):
+        for dep in parse_nuget_lockfile(
+            nuget_lock,
+            prod_root_names=direct_prod_names,
+            dev_root_names=direct_dev_names,
+            include_dev=include_dev,
+        ):
+            lower = dep.name.lower()
+            if lower in workspace_local_lower:
                 continue
             covered_names.add(lower)
-            out.append(
-                Dependency(
-                    name=dep.name,
-                    version_constraint=dep.version_constraint,
-                    ecosystem=Ecosystem.DOTNET,
-                    group=matching_direct.group,
-                    source=matching_direct.source,
-                )
-            )
-        else:
-            covered_names.add(lower)
-            out.append(
-                Dependency(
-                    name=dep.name,
-                    version_constraint=dep.version_constraint,
-                    ecosystem=Ecosystem.DOTNET,
-                    group=DependencyGroup.PROD,
-                    depth=1,
-                )
-            )
+            if dep.depth == 0:
+                dep = replace(dep, source=direct_source_by_name.get(lower, ""))
+            out.append(dep)
 
     # ---- Paket lockfile path ----
     for paket_lock in find_paket_lockfiles(project_path, exclude_paths=exclude_paths):

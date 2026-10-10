@@ -5680,6 +5680,221 @@ class TestResolveTransitiveDotnetDispatch:
         assert "Newtonsoft.Json" in names
 
 
+def _csproj(*references: tuple[str, str, bool]) -> str:
+    """A project file with one ``(name, version, private_assets)`` reference each."""
+    items = "".join(
+        f'    <PackageReference Include="{name}" Version="{version}"'
+        + (' PrivateAssets="all"' if private else "")
+        + " />\n"
+        for name, version, private in references
+    )
+    return f'<Project Sdk="Microsoft.NET.Sdk">\n  <ItemGroup>\n{items}  </ItemGroup>\n</Project>\n'
+
+
+def _nuget_lock(*tfms: dict) -> str:
+    """A ``packages.lock.json`` with one ``{name: (type, version, [children])}`` map per TFM."""
+    return json.dumps(
+        {
+            "version": 1,
+            "dependencies": {
+                f"tfm{index}": {
+                    name: {
+                        "type": entry_type,
+                        "resolved": version,
+                        "dependencies": dict.fromkeys(children, "1.0.0"),
+                    }
+                    for name, (entry_type, version, children) in packages.items()
+                }
+                for index, packages in enumerate(tfms)
+            },
+        }
+    )
+
+
+class TestNugetLockfileGraph:
+    """From files on disk: a NuGet lockfile's edges decide group and ancestors,
+    rooted at the ``PackageReference`` items discovery found."""
+
+    @staticmethod
+    def _resolve(tmp_path, *, include_dev: bool) -> dict[str, Dependency]:
+        direct, _ = discover_all_dependencies(tmp_path)
+
+        def no_registry_walk(*args, **kwargs):
+            raise AssertionError("the lockfile covers every direct dependency")
+
+        with httpx.Client() as client:
+            deps = resolve_transitive(
+                direct,
+                tmp_path,
+                include_dev=include_dev,
+                max_depth=50,
+                client=client,
+                pom_fetcher=no_registry_walk,
+            )
+        assert len({d.name for d in deps}) == len(deps)
+        return {d.name: d for d in deps}
+
+    def test_dev_only_chain_is_dev(self, tmp_path):
+        # DevTool is a PrivateAssets="all" reference; DevChild is reached
+        # only through it.
+        _write(
+            tmp_path / "App.csproj",
+            _csproj(("ProdLib", "1.0.0", False), ("DevTool", "2.0.0", True)),
+        )
+        _write(
+            tmp_path / "packages.lock.json",
+            _nuget_lock(
+                {
+                    "ProdLib": ("Direct", "1.0.0", ["ProdChild"]),
+                    "ProdChild": ("Transitive", "1.1.0", []),
+                    "DevTool": ("Direct", "2.0.0", ["DevChild"]),
+                    "DevChild": ("Transitive", "2.1.0", []),
+                }
+            ),
+        )
+        prod_only = self._resolve(tmp_path, include_dev=False)
+        assert {name: (d.group, d.depth, d.direct_ancestors) for name, d in prod_only.items()} == {
+            "ProdLib": (DependencyGroup.PROD, 0, ()),
+            "ProdChild": (DependencyGroup.PROD, 1, ("ProdLib",)),
+        }
+
+        with_dev = self._resolve(tmp_path, include_dev=True)
+        assert {name: (d.group, d.depth, d.direct_ancestors) for name, d in with_dev.items()} == {
+            "ProdLib": (DependencyGroup.PROD, 0, ()),
+            "ProdChild": (DependencyGroup.PROD, 1, ("ProdLib",)),
+            "DevTool": (DependencyGroup.DEV, 0, ()),
+            "DevChild": (DependencyGroup.DEV, 1, ("DevTool",)),
+        }
+        assert with_dev["DevTool"].source == "App.csproj"
+
+    def test_dev_direct_that_production_depends_on_is_prod(self, tmp_path):
+        # SharedLib is a PrivateAssets="all" reference and also a dependency
+        # of the production ProdLib, so it ships, and so does its own child.
+        _write(
+            tmp_path / "App.csproj",
+            _csproj(("ProdLib", "1.0.0", False), ("SharedLib", "3.0.0", True)),
+        )
+        _write(
+            tmp_path / "packages.lock.json",
+            _nuget_lock(
+                {
+                    "ProdLib": ("Direct", "1.0.0", ["SharedLib"]),
+                    "SharedLib": ("Direct", "3.0.0", ["SharedChild"]),
+                    "SharedChild": ("Transitive", "3.1.0", []),
+                }
+            ),
+        )
+        expected = {
+            "ProdLib": (DependencyGroup.PROD, 0, ()),
+            "SharedLib": (DependencyGroup.PROD, 0, ()),
+            "SharedChild": (DependencyGroup.PROD, 1, ("ProdLib",)),
+        }
+        for include_dev in (False, True):
+            deps = self._resolve(tmp_path, include_dev=include_dev)
+            assert {
+                name: (d.group, d.depth, d.direct_ancestors) for name, d in deps.items()
+            } == expected
+            assert deps["SharedLib"].source == "App.csproj"
+
+    def test_shared_transitive_across_target_frameworks(self, tmp_path):
+        # Shared is reached only from the dev tool under one target framework
+        # and from the production library under the other; TfmOnlyChild
+        # hangs off the dev tool under the second framework only.
+        _write(
+            tmp_path / "App.csproj",
+            _csproj(("ProdLib", "1.0.0", False), ("DevTool", "2.0.0", True)),
+        )
+        _write(
+            tmp_path / "packages.lock.json",
+            _nuget_lock(
+                {
+                    "DevTool": ("Direct", "2.0.0", ["Shared"]),
+                    "ProdLib": ("Direct", "1.0.0", []),
+                    "Shared": ("Transitive", "3.0.0", []),
+                },
+                {
+                    "DevTool": ("Direct", "2.0.0", ["TfmOnlyChild"]),
+                    "ProdLib": ("Direct", "1.0.0", ["Shared"]),
+                    "Shared": ("Transitive", "3.0.0", []),
+                    "TfmOnlyChild": ("Transitive", "4.0.0", []),
+                },
+            ),
+        )
+        prod_only = self._resolve(tmp_path, include_dev=False)
+        assert {name: (d.group, d.direct_ancestors) for name, d in prod_only.items()} == {
+            "ProdLib": (DependencyGroup.PROD, ()),
+            "Shared": (DependencyGroup.PROD, ("ProdLib",)),
+        }
+        with_dev = self._resolve(tmp_path, include_dev=True)
+        assert with_dev["Shared"].group == DependencyGroup.PROD
+        assert with_dev["TfmOnlyChild"].group == DependencyGroup.DEV
+        assert with_dev["TfmOnlyChild"].direct_ancestors == ("DevTool",)
+
+    @pytest.mark.parametrize(
+        ("tools_dir", "app_dir"),
+        # Lockfiles are read in directory order: dev-only first, then PROD first.
+        [("a-tools", "b-app"), ("b-tools", "a-app")],
+    )
+    def test_shared_transitive_across_projects(self, tmp_path, tools_dir, app_dir):
+        # Two projects, each with its own lockfile. Shared is reached only
+        # from a dev tool in one and from a production library in the other.
+        _write(tmp_path / tools_dir / "Tools.csproj", _csproj(("DevTool", "2.0.0", True)))
+        _write(
+            tmp_path / tools_dir / "packages.lock.json",
+            _nuget_lock(
+                {
+                    "DevTool": ("Direct", "2.0.0", ["Shared", "DevChild"]),
+                    "Shared": ("Transitive", "3.0.0", []),
+                    "DevChild": ("Transitive", "2.1.0", []),
+                }
+            ),
+        )
+        _write(tmp_path / app_dir / "App.csproj", _csproj(("ProdLib", "1.0.0", False)))
+        _write(
+            tmp_path / app_dir / "packages.lock.json",
+            _nuget_lock(
+                {
+                    "ProdLib": ("Direct", "1.0.0", ["Shared"]),
+                    "Shared": ("Transitive", "3.0.0", []),
+                }
+            ),
+        )
+        prod_only = self._resolve(tmp_path, include_dev=False)
+        assert {name: (d.group, d.direct_ancestors) for name, d in prod_only.items()} == {
+            "ProdLib": (DependencyGroup.PROD, ()),
+            "Shared": (DependencyGroup.PROD, ("ProdLib",)),
+        }
+        with_dev = self._resolve(tmp_path, include_dev=True)
+        assert {name: (d.group, d.direct_ancestors) for name, d in with_dev.items()} == {
+            "ProdLib": (DependencyGroup.PROD, ()),
+            "Shared": (DependencyGroup.PROD, ("DevTool", "ProdLib")),
+            "DevTool": (DependencyGroup.DEV, ()),
+            "DevChild": (DependencyGroup.DEV, ("DevTool",)),
+        }
+
+    def test_workspace_project_in_lockfile_is_traversed_but_not_reported(self, tmp_path):
+        # A lockfile entry named like an in-tree project is not a published
+        # package, so it is not reported; its children are still reached
+        # through it.
+        _write(tmp_path / "App.csproj", _csproj(("ProdLib", "1.0.0", False)))
+        _write(tmp_path / "Sibling" / "Sibling.csproj", '<Project Sdk="Microsoft.NET.Sdk" />')
+        _write(
+            tmp_path / "packages.lock.json",
+            _nuget_lock(
+                {
+                    "ProdLib": ("Direct", "1.0.0", ["Sibling"]),
+                    "Sibling": ("Transitive", "1.0.0", ["SiblingChild"]),
+                    "SiblingChild": ("Transitive", "1.1.0", []),
+                }
+            ),
+        )
+        deps = self._resolve(tmp_path, include_dev=False)
+        assert {name: d.direct_ancestors for name, d in deps.items()} == {
+            "ProdLib": (),
+            "SiblingChild": ("ProdLib",),
+        }
+
+
 class TestResolveVersionPhp:
     """Direct unit tests for _resolve_version PHP branches.
 

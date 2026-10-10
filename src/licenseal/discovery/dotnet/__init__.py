@@ -44,8 +44,8 @@ from licenseal.discovery.dotnet.directory_packages_props import (
     lookup_version,
 )
 from licenseal.discovery.dotnet.lockfiles import (
-    discover_nuget_lockfile_dependencies,
     find_nuget_lockfiles,
+    parse_nuget_lockfile,
     parse_packages_lock_json,
     parse_project_assets_json,
 )
@@ -64,7 +64,6 @@ __all__ = [
     "closest_cpm_data",
     "detect_project_license_csproj",
     "discover_csproj_dependencies",
-    "discover_nuget_lockfile_dependencies",
     "discover_packages_config_dependencies",
     "discover_paket_dependencies",
     "find_directory_build_props",
@@ -72,6 +71,7 @@ __all__ = [
     "find_nuget_lockfiles",
     "find_paket_lockfiles",
     "lookup_version",
+    "parse_nuget_lockfile",
     "parse_packages_lock_json",
     "parse_paket_lock",
     "parse_project_assets_json",

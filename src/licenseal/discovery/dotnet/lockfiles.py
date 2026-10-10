@@ -24,19 +24,21 @@ surfaced. The conservative posture is correct for license-scanning —
 a GPL'd Windows-only library on a project that also targets Android
 still matters for license-compliance even if Android builds skip it.
 
-Edge data carried by both formats lets the transitive walker run
-``_graph.compute_direct_ancestors`` for reachability-based group
-attribution. Direct entries (``type: "Direct"`` in ``packages.lock.json``)
-become roots; Transitive entries carry their ``dependencies`` list as
-edges back to the roots.
+Both formats carry each package's ``dependencies`` map. That is the edge
+graph :func:`parse_nuget_lockfile` runs ``_graph.compute_direct_ancestors``
+over for reachability-based group and ancestor attribution.
 
 Group attribution:
 
 * The lockfile itself does NOT carry dev/prod metadata — that lives in
-  the source ``.csproj``. The transitive walker takes the dev/prod set
-  from the discovery layer and propagates via reachability. This module
-  emits everything as PROD; the walker is responsible for the
-  dev-reachability downgrade.
+  the source ``.csproj``. The transitive walker passes in the names of the
+  PROD and DEV direct dependencies discovery found, and those are the
+  roots. A lockfile's own ``type: "Direct"`` marker is parsed but adds no
+  roots.
+* A package reachable from a PROD root is PROD. That includes a DEV root
+  (``PrivateAssets="all"``) that a production package also depends on. A
+  package reachable only from DEV roots is DEV. A package reachable from
+  no root is PROD with no ancestors.
 """
 
 from __future__ import annotations
@@ -46,6 +48,7 @@ from collections.abc import Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from licenseal._graph import compute_direct_ancestors
 from licenseal.discovery._read import decode_text, record_parse_failure
 from licenseal.discovery._walk import walk_project_files
 from licenseal.models import Dependency, DependencyGroup, Ecosystem
@@ -122,7 +125,7 @@ def parse_packages_lock_json(text: str) -> list[_LockEntry] | None:
     is a ``{package_name → entry}`` map. We union across all TFMs and
     dedupe on ``(name_lower, version)``: if the same package@version
     appears in multiple TFMs (the common case for cross-platform deps),
-    one entry covers them all.
+    one entry covers them all, carrying the edges of every TFM.
     """
     try:
         data = json.loads(text)
@@ -133,12 +136,29 @@ def parse_packages_lock_json(text: str) -> list[_LockEntry] | None:
     return list(_iter_packages_lock_entries(data))
 
 
+def _add_entry(entries: dict[tuple[str, str], _LockEntry], entry: _LockEntry) -> None:
+    """Record ``entry``, merging it into an earlier sighting of the same package@version.
+
+    A package resolved under several target frameworks can depend on
+    different packages in each, so the edges are unioned (and the entry is
+    direct if any sighting is). Keeping only the first sighting would leave
+    the other frameworks' children with no inbound edge.
+    """
+    key = (entry.name.lower(), entry.version)
+    seen = entries.get(key)
+    if seen is None:
+        entries[key] = entry
+        return
+    seen.is_direct = seen.is_direct or entry.is_direct
+    seen.edges = tuple(dict.fromkeys((*seen.edges, *entry.edges)))
+
+
 def _iter_packages_lock_entries(data: dict) -> Iterable[_LockEntry]:
-    """Yield deduped ``_LockEntry`` from a parsed ``packages.lock.json``."""
-    seen: set[tuple[str, str]] = set()
+    """Return deduped ``_LockEntry`` from a parsed ``packages.lock.json``."""
+    entries: dict[tuple[str, str], _LockEntry] = {}
     deps_by_tfm = data.get("dependencies")
     if not isinstance(deps_by_tfm, dict):
-        return
+        return ()
     for tfm_value in deps_by_tfm.values():
         if not isinstance(tfm_value, dict):
             continue
@@ -148,19 +168,19 @@ def _iter_packages_lock_entries(data: dict) -> Iterable[_LockEntry]:
             version = str(entry.get("resolved") or "").strip()
             if not version:
                 continue
-            key = (package_name.lower(), version)
-            if key in seen:
-                continue
-            seen.add(key)
             entry_type = str(entry.get("type") or "").strip().lower()
             is_direct = entry_type in ("direct", "directreference")
             edges = _extract_edges(entry.get("dependencies"))
-            yield _LockEntry(
-                name=package_name,
-                version=version,
-                is_direct=is_direct,
-                edges=edges,
+            _add_entry(
+                entries,
+                _LockEntry(
+                    name=package_name,
+                    version=version,
+                    is_direct=is_direct,
+                    edges=edges,
+                ),
             )
+    return entries.values()
 
 
 def _extract_edges(raw: object) -> tuple[str, ...]:
@@ -246,11 +266,11 @@ def _collect_assets_direct_names(data: dict) -> set[str]:
 
 
 def _iter_assets_entries(data: dict, *, direct_names: set[str]) -> Iterable[_LockEntry]:
-    """Yield deduped ``_LockEntry`` from a parsed ``project.assets.json``."""
-    seen: set[tuple[str, str]] = set()
+    """Return deduped ``_LockEntry`` from a parsed ``project.assets.json``."""
+    entries: dict[tuple[str, str], _LockEntry] = {}
     targets = data.get("targets")
     if not isinstance(targets, dict):
-        return
+        return ()
     for tfm_value in targets.values():
         if not isinstance(tfm_value, dict):
             continue
@@ -267,75 +287,95 @@ def _iter_assets_entries(data: dict, *, direct_names: set[str]) -> Iterable[_Loc
             name, _, version = coord.partition("/")
             if not name or not version:
                 continue
-            key = (name.lower(), version)
-            if key in seen:
-                continue
-            seen.add(key)
             edges = _extract_edges(entry.get("dependencies"))
-            yield _LockEntry(
-                name=name,
-                version=version,
-                is_direct=name.lower() in direct_names,
-                edges=edges,
+            _add_entry(
+                entries,
+                _LockEntry(
+                    name=name,
+                    version=version,
+                    is_direct=name.lower() in direct_names,
+                    edges=edges,
+                ),
             )
+    return entries.values()
 
 
-def _entries_to_dependencies(
-    entries: Iterable[_LockEntry],
+def parse_nuget_lockfile(
+    path: Path,
     *,
-    source: str,
+    prod_root_names: set[str],
+    dev_root_names: set[str],
+    include_dev: bool,
 ) -> list[Dependency]:
-    """Convert :class:`_LockEntry` items into :class:`Dependency` rows.
+    """Parse one NuGet lockfile into dependencies with group + ancestor attribution.
 
-    All entries emerge as PROD; the transitive walker applies dev-
-    reachability downgrades based on the source ``.csproj``'s group
-    attribution.
+    ``prod_root_names`` / ``dev_root_names`` are the lowercased names of the
+    direct dependencies discovery found across the whole scan. The
+    lockfile's edges decide every package's group by reachability:
+
+    * a PROD root, or reachable from one → PROD. A DEV root that a PROD
+      root reaches is PROD too: production wins.
+    * otherwise a DEV root, or reachable from one → DEV, dropped when
+      ``include_dev`` is false.
+    * reachable from no root → PROD with no ancestors, the conservative
+      default.
+
+    A root is depth 0 with no ancestors. Any other package is depth 1 and
+    lists the roots of its own group that reach it. Edges are keyed by name,
+    so they are unioned across the versions of a package the lockfile holds.
+
+    An unreadable file yields nothing; an unparseable one is also recorded
+    as an analysis gap.
     """
+    text = decode_text(path)
+    if text is None:
+        return []
+    if path.name == _PACKAGES_LOCK:
+        entries = parse_packages_lock_json(text)
+    else:
+        entries = parse_project_assets_json(text)
+    if entries is None:
+        record_parse_failure(path, "JSON")
+        return []
+
+    name_case: dict[str, str] = {}
+    edges: dict[str, set[str]] = {}
+    for entry in entries:
+        lower = entry.name.lower()
+        name_case.setdefault(lower, entry.name)
+        edges.setdefault(lower, set()).update(entry.edges)
+    prod_anc = compute_direct_ancestors(
+        edges, {n: name_case[n] for n in prod_root_names if n in name_case}
+    )
+    dev_anc = compute_direct_ancestors(
+        edges, {n: name_case[n] for n in dev_root_names if n in name_case}
+    )
+
     out: list[Dependency] = []
     for entry in entries:
+        lower = entry.name.lower()
+        is_root = lower in prod_root_names or lower in dev_root_names
+        if lower in prod_root_names or lower in prod_anc:
+            group = DependencyGroup.PROD
+            ancestors = prod_anc.get(lower, ())
+        elif is_root or lower in dev_anc:
+            group = DependencyGroup.DEV
+            ancestors = dev_anc.get(lower, ())
+        else:
+            group = DependencyGroup.PROD
+            ancestors = ()
+
+        if group == DependencyGroup.DEV and not include_dev:
+            continue
+
         out.append(
             Dependency(
                 name=entry.name,
                 version_constraint=entry.version,
                 ecosystem=Ecosystem.DOTNET,
-                group=DependencyGroup.PROD,
-                source=source,
+                group=group,
+                depth=0 if is_root else 1,
+                direct_ancestors=() if is_root else ancestors,
             )
         )
     return out
-
-
-def discover_nuget_lockfile_dependencies(
-    project_path: Path,
-    *,
-    exclude_paths: frozenset[Path] = frozenset(),
-) -> tuple[list[Dependency], int]:
-    """Discover deps from every NuGet lockfile under ``project_path``.
-
-    Returns ``(deps, filtered_count)``. ``filtered_count`` is always 0
-    here — workspace-local filtering happens at the .csproj layer (a
-    lockfile's resolved graph never contains in-tree project references
-    as packages since those have ``"type": "project"`` in
-    ``project.assets.json`` and are filtered during parse).
-
-    Dedup across lockfiles is by ``(name_lower, version, source)``: each
-    lockfile is its own source-of-truth (a multi-project workspace can
-    have one lockfile per project, all pulling overlapping deps; we
-    keep each manifestation tied to its origin so the report carries the
-    right ``source`` field).
-    """
-    out: list[Dependency] = []
-    for lock_path in find_nuget_lockfiles(project_path, exclude_paths=exclude_paths):
-        text = decode_text(lock_path)
-        if text is None:
-            continue
-        if lock_path.name == _PACKAGES_LOCK:
-            entries = parse_packages_lock_json(text)
-        else:
-            entries = parse_project_assets_json(text)
-        if entries is None:
-            record_parse_failure(lock_path, "JSON")
-            continue
-        source = lock_path.relative_to(project_path).as_posix()
-        out.extend(_entries_to_dependencies(entries, source=source))
-    return out, 0

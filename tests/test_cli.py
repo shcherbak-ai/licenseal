@@ -3897,6 +3897,153 @@ class TestDotnetEcosystem:
             "https://www.nuget.org/packages/Newtonsoft.Json/13.0.1"
         )
 
+    @staticmethod
+    def _write_project(tmp_path, references: str, lock: dict | None) -> None:
+        (tmp_path / "App.csproj").write_text(
+            '<Project Sdk="Microsoft.NET.Sdk">\n'
+            "  <PropertyGroup>\n"
+            "    <PackageLicenseExpression>MIT</PackageLicenseExpression>\n"
+            "  </PropertyGroup>\n"
+            f"  <ItemGroup>\n{references}  </ItemGroup>\n"
+            "</Project>\n",
+            encoding="utf-8",
+        )
+        if lock is not None:
+            (tmp_path / "packages.lock.json").write_text(
+                json.dumps({"version": 1, "dependencies": {"net8.0": lock}}), encoding="utf-8"
+            )
+
+    @staticmethod
+    def _mock_nuspec(name: str, version: str, license_id: str, dependencies: dict | None = None):
+        """Mock the flatcontainer ``.nuspec`` of one package; return the route."""
+        children = "".join(
+            f'<dependency id="{child}" version="{child_version}" />'
+            for child, child_version in (dependencies or {}).items()
+        )
+        return respx.get(
+            f"https://api.nuget.org/v3-flatcontainer/{name.lower()}/{version}/{name.lower()}.nuspec"
+        ).mock(
+            return_value=httpx.Response(
+                200,
+                text=(
+                    '<?xml version="1.0" encoding="utf-8"?>\n'
+                    '<package xmlns="http://schemas.microsoft.com/packaging/2013/05/nuspec.xsd">'
+                    f"<metadata><id>{name}</id><version>{version}</version>"
+                    f'<license type="expression">{license_id}</license>'
+                    f'<dependencies><group targetFramework="net8.0">{children}</group>'
+                    "</dependencies></metadata></package>"
+                ),
+            )
+        )
+
+    @staticmethod
+    def _check(tmp_path, *flags: str):
+        out = tmp_path / "report.json"
+        result = CliRunner().invoke(
+            main, ["check", "--path", str(tmp_path), *flags, "-f", "json", "-o", str(out)]
+        )
+        data = json.loads(out.read_text(encoding="utf-8"))
+        return result.exit_code, {d["name"]: d for d in data["dependencies"]}
+
+    @respx.mock
+    def test_lockfile_dev_only_chain_is_left_out_by_default(self, tmp_path):
+        # DevTool is a PrivateAssets="all" reference and the copyleft DevChild
+        # is reached only through it in packages.lock.json. The default scan
+        # leaves the whole chain out; --dev reports it as dev, under DevTool.
+        self._write_project(
+            tmp_path,
+            '    <PackageReference Include="ProdLib" Version="1.0.0" />\n'
+            '    <PackageReference Include="DevTool" Version="2.0.0" PrivateAssets="all" />\n',
+            {
+                "ProdLib": {
+                    "type": "Direct",
+                    "resolved": "1.0.0",
+                    "dependencies": {"ProdChild": "1.1.0"},
+                },
+                "ProdChild": {"type": "Transitive", "resolved": "1.1.0"},
+                "DevTool": {
+                    "type": "Direct",
+                    "resolved": "2.0.0",
+                    "dependencies": {"DevChild": "2.1.0"},
+                },
+                "DevChild": {"type": "Transitive", "resolved": "2.1.0"},
+            },
+        )
+        self._mock_nuspec("ProdLib", "1.0.0", "MIT")
+        self._mock_nuspec("ProdChild", "1.1.0", "MIT")
+        dev_routes = [
+            self._mock_nuspec("DevTool", "2.0.0", "MIT"),
+            self._mock_nuspec("DevChild", "2.1.0", "GPL-3.0-only"),
+        ]
+
+        exit_code, rows = self._check(tmp_path)
+        assert exit_code == 0
+        assert {name: (d["group"], d["verdict"]) for name, d in rows.items()} == {
+            "ProdLib": ("prod", "compatible"),
+            "ProdChild": ("prod", "compatible"),
+        }
+        assert rows["ProdChild"]["direct_ancestors"] == ["ProdLib"]
+        assert not any(route.called for route in dev_routes)
+
+        exit_code, rows = self._check(tmp_path, "--dev", "--no-strict")
+        assert exit_code == 0
+        assert {name: (d["group"], d["verdict"]) for name, d in rows.items()} == {
+            "ProdLib": ("prod", "compatible"),
+            "ProdChild": ("prod", "compatible"),
+            "DevTool": ("dev", "compatible"),
+            "DevChild": ("dev", "warning"),
+        }
+        assert rows["DevChild"]["direct_ancestors"] == ["DevTool"]
+
+    @respx.mock
+    def test_lockfile_dev_direct_that_production_depends_on_is_checked(self, tmp_path):
+        # SharedGpl is a PrivateAssets="all" reference and also a dependency
+        # of the production ProdLib, so it ships: the default scan reports it
+        # as a production violation, with or without the lockfile.
+        references = (
+            '    <PackageReference Include="ProdLib" Version="1.0.0" />\n'
+            '    <PackageReference Include="SharedGpl" Version="3.0.0" PrivateAssets="all" />\n'
+        )
+        self._write_project(
+            tmp_path,
+            references,
+            {
+                "ProdLib": {
+                    "type": "Direct",
+                    "resolved": "1.0.0",
+                    "dependencies": {"SharedGpl": "3.0.0"},
+                },
+                "SharedGpl": {
+                    "type": "Direct",
+                    "resolved": "3.0.0",
+                    "dependencies": {"SharedChild": "3.1.0"},
+                },
+                "SharedChild": {"type": "Transitive", "resolved": "3.1.0"},
+            },
+        )
+        self._mock_nuspec("ProdLib", "1.0.0", "MIT", {"SharedGpl": "3.0.0"})
+        self._mock_nuspec("SharedGpl", "3.0.0", "GPL-3.0-only", {"SharedChild": "3.1.0"})
+        self._mock_nuspec("SharedChild", "3.1.0", "MIT")
+        expected = {
+            "ProdLib": ("prod", "compatible"),
+            "SharedGpl": ("prod", "incompatible"),
+            "SharedChild": ("prod", "compatible"),
+        }
+
+        for flags in ((), ("--dev", "--no-strict")):
+            exit_code, rows = self._check(tmp_path, *flags)
+            assert exit_code == 1
+            assert {name: (d["group"], d["verdict"]) for name, d in rows.items()} == expected
+            assert rows["SharedGpl"]["source"] == "App.csproj"
+            assert rows["SharedChild"]["direct_ancestors"] == ["ProdLib"]
+
+        # Control: the same graph without the lockfile, read from the
+        # registry, gives the same answer.
+        (tmp_path / "packages.lock.json").unlink()
+        exit_code, rows = self._check(tmp_path)
+        assert exit_code == 1
+        assert {name: (d["group"], d["verdict"]) for name, d in rows.items()} == expected
+
 
 class TestPhpEcosystem:
     @respx.mock

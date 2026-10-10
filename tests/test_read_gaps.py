@@ -11,7 +11,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from licenseal.discovery._read import collect_read_diagnostics
-from licenseal.discovery.dotnet.lockfiles import discover_nuget_lockfile_dependencies
+from licenseal.discovery.dotnet.lockfiles import parse_nuget_lockfile
 from licenseal.discovery.java.pom_xml import (
     detect_project_license_pom_xml,
     discover_pom_xml_dependencies,
@@ -43,18 +43,34 @@ class TestPomGaps:
 
 
 class TestNugetLockfileGaps:
+    @staticmethod
+    def _parse(lock: Path):
+        return parse_nuget_lockfile(
+            lock, prod_root_names=set(), dev_root_names=set(), include_dev=True
+        )
+
     def test_unreadable_packages_lock_recorded(self, tmp_path: Path, monkeypatch):
-        (tmp_path / "packages.lock.json").write_text("{}", encoding="utf-8")
+        lock = tmp_path / "packages.lock.json"
+        lock.write_text("{}", encoding="utf-8")
         monkeypatch.setattr(Path, "read_bytes", _raise_oserror)
         with collect_read_diagnostics() as diags:
-            deps, _ = discover_nuget_lockfile_dependencies(tmp_path)
+            deps = self._parse(lock)
         assert deps == []
         assert any(d.is_gap and "could not be read" in d.reason for d in diags)
 
     def test_malformed_packages_lock_recorded(self, tmp_path: Path):
-        (tmp_path / "packages.lock.json").write_text("{ not json", encoding="utf-8")
+        lock = tmp_path / "packages.lock.json"
+        lock.write_text("{ not json", encoding="utf-8")
         with collect_read_diagnostics() as diags:
-            deps, _ = discover_nuget_lockfile_dependencies(tmp_path)
+            deps = self._parse(lock)
+        assert deps == []
+        assert any(d.is_gap and "not valid JSON" in d.reason for d in diags)
+
+    def test_malformed_project_assets_recorded(self, tmp_path: Path):
+        lock = tmp_path / "project.assets.json"
+        lock.write_text("{ not json", encoding="utf-8")
+        with collect_read_diagnostics() as diags:
+            deps = self._parse(lock)
         assert deps == []
         assert any(d.is_gap and "not valid JSON" in d.reason for d in diags)
 
