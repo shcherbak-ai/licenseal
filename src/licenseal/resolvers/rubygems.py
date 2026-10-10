@@ -26,7 +26,7 @@ from dataclasses import replace
 
 import httpx
 
-from licenseal.analysis.spdx import normalize_license
+from licenseal.analysis.spdx import read_license_array
 from licenseal.discovery.ruby.lockfiles import is_off_registry_marker
 from licenseal.models import Dependency, DependencyGroup, Ecosystem, LicenseInfo
 from licenseal.resolvers.http import Fetcher, fetch_registry_json
@@ -76,25 +76,18 @@ def _extract_pinned_version(version_constraint: str) -> str | None:
     return None
 
 
-def _license_field_to_raw(value: object) -> str:
-    """Normalize the registry ``licenses`` field into a single raw string.
+def _license_entries(value: object) -> list[str]:
+    """Entries of the registry ``licenses`` field.
 
-    rubygems.org always returns ``licenses`` as an array of strings; we
-    follow the same disjunctive convention as PHP — multi-element arrays
-    are OR-joined (the publisher offered the consumer a choice). Bare-
+    rubygems.org always returns ``licenses`` as an array of strings. A bare
     string is accepted defensively even though the v2/v1 endpoints never
     emit it.
     """
     if isinstance(value, str):
-        return value.strip()
-    if isinstance(value, list):
-        items = [v.strip() for v in value if isinstance(v, str) and v.strip()]
-        if not items:
-            return ""
-        if len(items) == 1:
-            return items[0]
-        return " OR ".join(items)
-    return ""
+        value = [value]
+    if not isinstance(value, list):
+        return []
+    return [v.strip() for v in value if isinstance(v, str) and v.strip()]
 
 
 def _extract_repository_url(entry: dict) -> str:
@@ -161,32 +154,24 @@ def resolve_ruby_license(
 
     if pinned is not None:
         data = fetcher(_rubygems_version_url(name, pinned), client)
-        if not isinstance(data, dict):
-            return _unknown(dep, from_registry=False)
-        raw = _license_field_to_raw(data.get("licenses"))
-        return LicenseInfo(
-            dependency=dep,
-            license_id=normalize_license(raw) if raw else "UNKNOWN",
-            license_raw=raw,
-            repository_url=_extract_repository_url(data),
-            homepage_url=_extract_homepage_url(data),
-            resolved_version=_resolved_version_from_entry(data) or pinned,
-            from_registry=True,
-        )
-
-    # Unpinned: latest-version fallback.
-    data = fetcher(_rubygems_gem_url(name), client)
+    else:
+        # Unpinned: latest-version fallback.
+        data = fetcher(_rubygems_gem_url(name), client)
     if not isinstance(data, dict):
         return _unknown(dep, from_registry=False)
-    raw = _license_field_to_raw(data.get("licenses"))
+    # A gemspec's ``licenses`` array does not say whether its entries are
+    # alternatives or all apply, so both readings are kept.
+    entries = _license_entries(data.get("licenses"))
+    license_id, all_apply_license_id = read_license_array(entries)
     return LicenseInfo(
         dependency=dep,
-        license_id=normalize_license(raw) if raw else "UNKNOWN",
-        license_raw=raw,
+        license_id=license_id,
+        license_raw=", ".join(entries),
         repository_url=_extract_repository_url(data),
         homepage_url=_extract_homepage_url(data),
-        resolved_version=_resolved_version_from_entry(data),
+        resolved_version=_resolved_version_from_entry(data) or (pinned or ""),
         from_registry=True,
+        all_apply_license_id=all_apply_license_id,
     )
 
 

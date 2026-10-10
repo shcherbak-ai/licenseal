@@ -17,7 +17,7 @@ from typing import Any
 
 import httpx
 
-from licenseal.analysis.spdx import normalize_license
+from licenseal.analysis.spdx import all_apply_reading, normalize_license
 from licenseal.discovery.php.lockfiles import LockfileLicenseMap
 from licenseal.models import Dependency, DependencyGroup, Ecosystem, LicenseInfo
 from licenseal.resolvers.http import Fetcher, fetch_registry_json
@@ -106,7 +106,12 @@ def _extract_homepage_url(entry: dict) -> str:
 
 
 def _license_field_to_raw(value: object) -> str:
-    """Same shape rule as composer.json — bare string or OR-joined array."""
+    """Same shape rule as composer.json — bare string or OR-joined array.
+
+    Composer's schema defines a ``license`` array as a choice between its
+    entries, so the join states it. A comma or slash inside one string is
+    not part of that schema and stays a list with no defined meaning.
+    """
     if isinstance(value, str):
         return value.strip()
     if isinstance(value, list):
@@ -248,6 +253,7 @@ def resolve_php_license(
                 license_raw=raw,
                 resolved_version=pinned,
                 from_registry=True,
+                all_apply_license_id=all_apply_reading(raw),
             )
 
     data = fetcher(_packagist_url(name), client)
@@ -280,6 +286,7 @@ def resolve_php_license(
         homepage_url=_extract_homepage_url(entry),
         resolved_version=resolved_version,
         from_registry=True,
+        all_apply_license_id=all_apply_reading(raw),
     )
 
 

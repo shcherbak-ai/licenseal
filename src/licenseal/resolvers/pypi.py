@@ -9,7 +9,7 @@ from packaging.markers import Marker
 from packaging.requirements import Requirement
 from packaging.version import Version
 
-from licenseal.analysis.spdx import normalize_license
+from licenseal.analysis.spdx import all_apply_reading, normalize_license
 from licenseal.discovery.python import REQUIREMENT_PARSE_ERRORS
 from licenseal.models import Dependency, DependencyGroup, Ecosystem, LicenseInfo
 from licenseal.resolvers.deps_dev import resolve_via_deps_dev_stable_get
@@ -404,6 +404,8 @@ def resolve_python_license(
         homepage_url=homepage_url,
         resolved_version=resolved_version,
         from_registry=True,
+        # PyPI metadata does not define ``,`` or ``/`` between licenses.
+        all_apply_license_id=all_apply_reading(raw_license),
     )
 
 

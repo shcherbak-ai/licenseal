@@ -30,7 +30,7 @@ from dataclasses import replace
 
 import httpx
 
-from licenseal.analysis.spdx import normalize_license
+from licenseal.analysis.spdx import read_license_array
 from licenseal.discovery.hex.mix_lock import is_off_registry_marker
 from licenseal.models import Dependency, DependencyGroup, Ecosystem, LicenseInfo
 from licenseal.resolvers.http import Fetcher, fetch_registry_json
@@ -69,24 +69,17 @@ def _extract_pinned_version(version_constraint: str) -> str | None:
     return None
 
 
-def _license_field_to_raw(value: object) -> str:
-    """Collapse ``meta.licenses`` into a single raw string.
+def _license_entries(value: object) -> list[str]:
+    """Entries of ``meta.licenses``.
 
-    hex.pm emits an array; multi-element arrays are OR-joined (disjunctive —
-    the publisher offers a choice, the same convention as RubyGems / Composer).
-    A bare string is accepted defensively even though the API always emits an
-    array.
+    hex.pm emits an array of strings. A bare string is accepted defensively
+    even though the API always emits an array.
     """
-    if isinstance(value, list):
-        items = [v.strip() for v in value if isinstance(v, str) and v.strip()]
-        if not items:
-            return ""
-        if len(items) == 1:
-            return items[0]
-        return " OR ".join(items)
     if isinstance(value, str):
-        return value.strip()
-    return ""
+        value = [value]
+    if not isinstance(value, list):
+        return []
+    return [v.strip() for v in value if isinstance(v, str) and v.strip()]
 
 
 def _extract_repository_url(links: object) -> str:
@@ -162,16 +155,20 @@ def resolve_hex_license(
     meta = data.get("meta")
     if not isinstance(meta, dict):
         meta = {}
-    raw = _license_field_to_raw(meta.get("licenses"))
+    # ``meta.licenses`` does not say whether its entries are alternatives or
+    # all apply, so both readings are kept.
+    entries = _license_entries(meta.get("licenses"))
+    license_id, all_apply_license_id = read_license_array(entries)
     pinned = _extract_pinned_version(dep.version_constraint)
     return LicenseInfo(
         dependency=dep,
-        license_id=normalize_license(raw) if raw else "UNKNOWN",
-        license_raw=raw,
+        license_id=license_id,
+        license_raw=", ".join(entries),
         repository_url=_extract_repository_url(meta.get("links")),
         homepage_url=_extract_homepage_url(meta.get("links")),
         resolved_version=pinned or _latest_version(data),
         from_registry=True,
+        all_apply_license_id=all_apply_license_id,
     )
 
 

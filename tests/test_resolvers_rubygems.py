@@ -6,10 +6,18 @@ import json
 from pathlib import Path
 
 import httpx
+import pytest
 import respx
 
+from licenseal.analysis.compatibility import check_compatibility
 from licenseal.discovery.ruby.lockfiles import _OFF_REGISTRY_MARKER
-from licenseal.models import Dependency, DependencyGroup, Ecosystem
+from licenseal.models import (
+    CompatibilityVerdict,
+    Dependency,
+    DependencyGroup,
+    Ecosystem,
+    RiskLevel,
+)
 from licenseal.resolvers.http import (
     _RUBYGEMS_GEM_KEEP,
     _RUBYGEMS_VERSION_KEEP,
@@ -22,7 +30,7 @@ from licenseal.resolvers.rubygems import (
     _extract_homepage_url,
     _extract_pinned_version,
     _extract_repository_url,
-    _license_field_to_raw,
+    _license_entries,
     _rubygems_gem_url,
     _rubygems_version_url,
     fetch_rubygems_dependencies,
@@ -88,24 +96,160 @@ class TestUrls:
         assert _rubygems_gem_url("rails") == "https://rubygems.org/api/v1/gems/rails.json"
 
 
-class TestLicenseFieldToRaw:
+class TestLicenseEntries:
     def test_array_single(self):
-        assert _license_field_to_raw(["MIT"]) == "MIT"
+        assert _license_entries(["MIT"]) == ["MIT"]
 
-    def test_array_multi_joined(self):
-        assert _license_field_to_raw(["MIT", "Apache-2.0"]) == "MIT OR Apache-2.0"
+    def test_array_multi_keeps_every_entry(self):
+        assert _license_entries(["MIT", " Apache-2.0 "]) == ["MIT", "Apache-2.0"]
 
     def test_bare_string(self):
         # Defensive: rubygems.org always emits arrays, but the helper
         # accepts strings for shape parity with PHP.
-        assert _license_field_to_raw("MIT") == "MIT"
+        assert _license_entries("MIT") == ["MIT"]
 
     def test_empty_array(self):
-        assert _license_field_to_raw([]) == ""
+        assert _license_entries([]) == []
+
+    def test_blank_and_non_string_entries_are_skipped(self):
+        assert _license_entries(["", "  ", 5, None, "MIT"]) == ["MIT"]
 
     def test_unsupported_type(self):
-        assert _license_field_to_raw(None) == ""
-        assert _license_field_to_raw({"x": 1}) == ""
+        assert _license_entries(None) == []
+        assert _license_entries({"x": 1}) == []
+
+
+class TestLicensesArrayReadings:
+    """A gemspec ``licenses`` array does not say whether its entries are
+    alternatives: the resolver keeps both readings, through the cache."""
+
+    @staticmethod
+    def _resolve(licenses, version: str = "==1.0.0"):
+        url = _rubygems_version_url("multi", "1.0.0") if version else _rubygems_gem_url("multi")
+        # The per-version endpoint names the version ``number``, the latest
+        # endpoint ``version``.
+        respx.get(url).mock(
+            return_value=httpx.Response(
+                200,
+                json={"name": "multi", "number": "1.0.0", "version": "1.0.0", "licenses": licenses},
+            )
+        )
+        cache = RegistryCache()
+        with httpx.Client() as client:
+            return resolve_ruby_license(_ruby_dep("multi", version), client, fetcher=cache.fetch)
+
+    @respx.mock
+    def test_two_licenses_keep_both_readings(self):
+        info = self._resolve(["MIT", "GPL-3.0-only"])
+        assert info.license_id == "GPL-3.0-only OR MIT"
+        assert info.all_apply_license_id == "GPL-3.0-only AND MIT"
+        # The array as received, without an operator it does not state.
+        assert info.license_raw == "MIT, GPL-3.0-only"
+        result = check_compatibility("MIT", info)
+        assert result.verdict == CompatibilityVerdict.UNKNOWN
+        assert result.risk_level == RiskLevel.PERMISSIVE
+        assert result.reason == (
+            "multi lists several licenses without stating whether they are alternatives: "
+            "read as a choice (GPL-3.0-only OR MIT) the verdict is compatible, read as all "
+            "applying (GPL-3.0-only AND MIT) it is incompatible — confirm which holds and "
+            "record that expression in licenseal.review.toml"
+        )
+
+    @respx.mock
+    def test_unpinned_lookup_keeps_both_readings(self):
+        info = self._resolve(["MIT", "GPL-3.0-only"], version="")
+        assert info.license_id == "GPL-3.0-only OR MIT"
+        assert info.all_apply_license_id == "GPL-3.0-only AND MIT"
+        assert info.resolved_version == "1.0.0"
+
+    @respx.mock
+    def test_readings_that_agree_report_the_choice_reading(self):
+        info = self._resolve(["MIT", "Apache-2.0"])
+        assert info.license_id == "Apache-2.0 OR MIT"
+        assert info.all_apply_license_id == "Apache-2.0 AND MIT"
+        result = check_compatibility("MIT", info)
+        assert result.verdict == CompatibilityVerdict.COMPATIBLE
+        assert result.reason == "Apache-2.0 OR MIT is permissive license"
+        assert result.license_info is info
+
+    @pytest.mark.parametrize("licenses", [["Ruby", "BSD-2-Clause"], ["BSD-2-Clause", "Ruby"]])
+    @respx.mock
+    def test_ruby_with_its_bsd_alternative_is_a_choice(self, licenses):
+        # The Ruby license itself offers the 2-clause BSD license as an
+        # alternative, so this pair has a defined meaning.
+        info = self._resolve(licenses)
+        assert info.license_id == "BSD-2-Clause OR Ruby"
+        assert info.all_apply_license_id == ""
+        assert check_compatibility("MIT", info).verdict == CompatibilityVerdict.COMPATIBLE
+
+    @pytest.mark.parametrize(
+        "licenses, choice, all_apply",
+        [
+            (["MIT", "Ruby"], "MIT OR Ruby", "MIT AND Ruby"),
+            (
+                ["Ruby", "BSD-2-Clause", "GPL-2.0-only"],
+                "BSD-2-Clause OR GPL-2.0-only OR Ruby",
+                "BSD-2-Clause AND GPL-2.0-only AND Ruby",
+            ),
+        ],
+    )
+    @respx.mock
+    def test_any_other_list_with_ruby_keeps_both_readings(self, licenses, choice, all_apply):
+        info = self._resolve(licenses)
+        assert info.license_id == choice
+        assert info.all_apply_license_id == all_apply
+        assert check_compatibility("MIT", info).verdict == CompatibilityVerdict.UNKNOWN
+
+    @respx.mock
+    def test_ruby_alone_is_unchanged(self):
+        info = self._resolve(["Ruby"])
+        assert info.license_id == "Ruby"
+        assert info.all_apply_license_id == ""
+        assert check_compatibility("MIT", info).verdict == CompatibilityVerdict.UNKNOWN
+
+    @respx.mock
+    def test_entries_are_normalized_one_by_one(self):
+        info = self._resolve(["MIT License", "Apache License 2.0"])
+        assert info.license_id == "Apache-2.0 OR MIT"
+        assert info.license_raw == "MIT License, Apache License 2.0"
+
+    @respx.mock
+    def test_unrecognized_entry_is_an_entry_of_the_list(self):
+        info = self._resolve(["MIT", "Acme house terms"])
+        assert info.license_id == "MIT OR UNKNOWN"
+        assert info.all_apply_license_id == "MIT AND UNKNOWN"
+        assert check_compatibility("MIT", info).verdict == CompatibilityVerdict.UNKNOWN
+
+    @respx.mock
+    def test_repeated_license_is_one_license(self):
+        info = self._resolve(["MIT", "MIT License"])
+        assert info.license_id == "MIT"
+        assert info.all_apply_license_id == ""
+
+    @respx.mock
+    def test_single_entry_holding_a_list_keeps_both_readings(self):
+        info = self._resolve(["MIT/GPL-3.0-only"])
+        assert info.license_id == "GPL-3.0-only OR MIT"
+        assert info.all_apply_license_id == "GPL-3.0-only AND MIT"
+
+    @respx.mock
+    def test_reviewed_license_is_judged_as_written(self):
+        info = self._resolve(["MIT", "GPL-3.0-only"])
+        info.reviewed_license_id = "GPL-3.0-only OR MIT"
+        assert check_compatibility("MIT", info).verdict == CompatibilityVerdict.COMPATIBLE
+        info.reviewed_license_id = "GPL-3.0-only AND MIT"
+        assert check_compatibility("MIT", info).verdict == CompatibilityVerdict.INCOMPATIBLE
+
+    @respx.mock
+    def test_dev_dependency_is_judged_under_both_readings_too(self):
+        info = self._resolve(["MIT", "GPL-3.0-only"])
+        info.dependency.group = DependencyGroup.DEV
+        result = check_compatibility("MIT", info)
+        # Compatible as a choice; as a conjunction, a violation that is
+        # downgraded to a warning for a dev dependency.
+        assert result.verdict == CompatibilityVerdict.UNKNOWN
+        assert "the verdict is compatible" in result.reason
+        assert "it is warning" in result.reason
 
 
 class TestExtractUrls:

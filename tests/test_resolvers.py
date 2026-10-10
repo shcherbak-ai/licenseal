@@ -3609,12 +3609,11 @@ class TestDepsDevLicensesToSpdx:
         # real one wins.
         assert _licenses_to_spdx(["MIT", "non-standard"]) == "MIT"
 
-    def test_rubygems_uses_or_for_multi_element(self):
-        # RubyGems' gemspec ``licenses = [...]`` convention is disjunctive
-        # (consumer picks one), same as Composer. Multi-element arrays
-        # should join with OR for the ``RUBYGEMS`` system.
+    def test_rubygems_multi_element_is_a_list_without_an_operator(self):
+        # A gemspec ``licenses = [...]`` array does not say whether its
+        # entries are alternatives, so the raw string states no operator.
         assert (
-            _licenses_to_spdx(["BSD-2-Clause", "Ruby"], system="RUBYGEMS") == "BSD-2-Clause OR Ruby"
+            _licenses_to_spdx(["BSD-2-Clause", "Ruby"], system="RUBYGEMS") == "BSD-2-Clause, Ruby"
         )
 
     def test_rubygems_single_element_unchanged(self):
@@ -3639,12 +3638,15 @@ class TestDepsDevLicensesToSpdx:
             == "AGPL-3.0-only AND (Apache-2.0 OR GPL-2.0-only)"
         )
 
-    def test_disjunctive_join_needs_no_group(self):
-        # ``AND`` binds tighter than ``OR``, so an ``AND`` entry keeps its
-        # meaning when the entries are OR-joined bare.
-        assert (
-            _licenses_to_spdx(["MIT AND ISC", "Ruby"], system="RUBYGEMS") == "MIT AND ISC OR Ruby"
+    def test_rubygems_entry_that_is_an_expression_stays_one_entry(self):
+        assert _licenses_to_spdx(["MIT AND ISC", "Ruby"], system="RUBYGEMS") == "MIT AND ISC, Ruby"
+        info = _license_info_from_version_object(
+            _go_dep(), "1.0.0", {"licenses": ["MIT AND ISC", "Ruby"]}, system="RUBYGEMS"
         )
+        # ``AND`` binds tighter than ``OR``, so the entry keeps its meaning
+        # in the choice reading; in the other, all three apply.
+        assert info.license_id == "ISC AND MIT OR Ruby"
+        assert info.all_apply_license_id == "ISC AND MIT AND Ruby"
 
 
 class TestDepsDevMultiEntryGrouping:
@@ -3752,6 +3754,34 @@ class TestDepsDevMultiEntryGrouping:
             _go_dep(), "1.0.0", {"licenses": ["LGPL-3.0", "GPL-3.0"]}, system="RUBYGEMS"
         )
         assert info.license_id == "GPL-3.0-only OR LGPL-3.0-only"
+        assert info.all_apply_license_id == "GPL-3.0-only AND LGPL-3.0-only"
+        assert info.license_raw == "LGPL-3.0, GPL-3.0"
+
+    @pytest.mark.parametrize(
+        "system, licenses, license_id, all_apply",
+        [
+            # A gemspec array: both readings, as from rubygems.org.
+            ("RUBYGEMS", ["MIT", "GPL-3.0-only"], "GPL-3.0-only OR MIT", "GPL-3.0-only AND MIT"),
+            ("RUBYGEMS", ["BSD-2-Clause", "Ruby"], "BSD-2-Clause OR Ruby", ""),
+            ("RUBYGEMS", ["MIT"], "MIT", ""),
+            ("RUBYGEMS", [], "UNKNOWN", ""),
+            # One entry holding a list: both readings, unless the system
+            # defines the separator.
+            ("PYPI", ["MIT/GPL-3.0-only"], "GPL-3.0-only OR MIT", "GPL-3.0-only AND MIT"),
+            ("NPM", ["MIT, GPL-3.0-only"], "GPL-3.0-only OR MIT", "GPL-3.0-only AND MIT"),
+            ("CARGO", ["MIT/GPL-3.0-only"], "GPL-3.0-only OR MIT", ""),
+            ("CARGO", ["MIT, GPL-3.0-only"], "GPL-3.0-only OR MIT", "GPL-3.0-only AND MIT"),
+            # An expression, and an array that is a conjunction, have one reading.
+            ("PYPI", ["MIT OR GPL-3.0-only"], "GPL-3.0-only OR MIT", ""),
+            ("PYPI", ["MIT", "GPL-3.0-only"], "GPL-3.0-only AND MIT", ""),
+        ],
+    )
+    def test_license_list_readings_per_system(self, system, licenses, license_id, all_apply):
+        info = _license_info_from_version_object(
+            _go_dep(), "1.0.0", {"licenses": licenses}, system=system
+        )
+        assert info.license_id == license_id
+        assert info.all_apply_license_id == all_apply
 
     @pytest.mark.parametrize(
         "licenses, expected",

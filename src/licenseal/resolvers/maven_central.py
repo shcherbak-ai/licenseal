@@ -44,6 +44,7 @@ from typing import cast
 import httpx
 
 from licenseal.analysis.spdx import (
+    all_apply_reading,
     and_join_licenses,
     normalize_license,
     spdx_from_license_url,
@@ -436,14 +437,23 @@ def resolve_maven_central_license(
         # than the free-form name. This is genuinely additional data
         # licenseal's direct POM fetch makes available — ``deps.dev``'s
         # API surfaces only the name.
+        #
+        # A ``<name>`` that is a comma- or slash-separated list does not
+        # say whether its entries are alternatives. ``normalized_parts``
+        # reads each such name as a choice and ``all_apply_parts`` reads it
+        # as every entry applying; the two differ only when a name is a
+        # list.
         normalized_parts: list[str] = []
+        all_apply_parts: list[str] = []
         for name, url in licenses:
             primary = normalize_license(name) if name else "UNKNOWN"
+            all_apply = all_apply_reading(name) or primary
             if primary in ("UNKNOWN", "Proprietary") and url:
                 from_url = spdx_from_license_url(url)
                 if from_url:
-                    primary = normalize_license(from_url)
+                    primary = all_apply = normalize_license(from_url)
             normalized_parts.append(primary)
+            all_apply_parts.append(all_apply)
         raw = _license_string_from_pom(licenses)
         if all(part == "UNKNOWN" for part in normalized_parts):
             # Every license entry (name + url) was unparseable; deps.dev's
@@ -478,6 +488,11 @@ def resolve_maven_central_license(
             license_raw=raw,
             resolved_version=pinned,
             from_registry=True,
+            all_apply_license_id=(
+                normalize_license(and_join_licenses(all_apply_parts))
+                if all_apply_parts != normalized_parts
+                else ""
+            ),
         )
 
     # POM chain exhausted without licenses → deps.dev fallback.

@@ -8,8 +8,9 @@ from pathlib import Path
 import httpx
 import respx
 
+from licenseal.analysis.compatibility import check_compatibility
 from licenseal.discovery.hex.mix_lock import _OFF_REGISTRY_MARKER
-from licenseal.models import Dependency, DependencyGroup, Ecosystem
+from licenseal.models import CompatibilityVerdict, Dependency, DependencyGroup, Ecosystem
 from licenseal.resolvers.hex import (
     _extract_homepage_url,
     _extract_pinned_version,
@@ -17,7 +18,7 @@ from licenseal.resolvers.hex import (
     _hex_package_url,
     _hex_release_url,
     _latest_version,
-    _license_field_to_raw,
+    _license_entries,
     fetch_hex_dependencies,
     resolve_hex_license,
 )
@@ -78,22 +79,25 @@ class TestUrls:
         )
 
 
-class TestLicenseFieldToRaw:
+class TestLicenseEntries:
     def test_array_single(self):
-        assert _license_field_to_raw(["MIT"]) == "MIT"
+        assert _license_entries(["MIT"]) == ["MIT"]
 
-    def test_array_multi_or_joined(self):
-        assert _license_field_to_raw(["MIT", "Apache-2.0"]) == "MIT OR Apache-2.0"
+    def test_array_multi_keeps_every_entry(self):
+        assert _license_entries(["MIT", " Apache-2.0 "]) == ["MIT", "Apache-2.0"]
 
     def test_empty_array(self):
-        assert _license_field_to_raw([]) == ""
+        assert _license_entries([]) == []
 
     def test_bare_string(self):
-        assert _license_field_to_raw("MIT") == "MIT"
+        assert _license_entries("MIT") == ["MIT"]
+
+    def test_blank_and_non_string_entries_are_skipped(self):
+        assert _license_entries(["", "  ", 5, None, "MIT"]) == ["MIT"]
 
     def test_unsupported_type(self):
-        assert _license_field_to_raw(None) == ""
-        assert _license_field_to_raw(42) == ""
+        assert _license_entries(None) == []
+        assert _license_entries(42) == []
 
 
 class TestExtractUrls:
@@ -183,16 +187,44 @@ class TestResolveHexLicense:
             info = resolve_hex_license(_hex_dep("phoenix", ""), client)
         assert info.resolved_version == "1.7.14"  # latest_stable_version
 
-    @respx.mock
-    def test_dual_license_or_joined(self):
-        respx.get(_hex_package_url("dual")).mock(
-            return_value=httpx.Response(
-                200, json={"meta": {"licenses": ["MIT", "Apache-2.0"], "links": {}}}
-            )
+    @staticmethod
+    def _resolve_licenses(licenses):
+        respx.get(_hex_package_url("multi")).mock(
+            return_value=httpx.Response(200, json={"meta": {"licenses": licenses, "links": {}}})
         )
+        cache = RegistryCache()
         with httpx.Client() as client:
-            info = resolve_hex_license(_hex_dep("dual", "==1.0.0"), client)
-        assert info.license_raw == "MIT OR Apache-2.0"
+            return resolve_hex_license(_hex_dep("multi", "==1.0.0"), client, fetcher=cache.fetch)
+
+    @respx.mock
+    def test_two_licenses_whose_readings_agree_report_the_choice(self):
+        # ``meta.licenses`` does not say whether its entries are
+        # alternatives; both readings are kept, and here they agree.
+        info = self._resolve_licenses(["MIT", "Apache-2.0"])
+        assert info.license_id == "Apache-2.0 OR MIT"
+        assert info.all_apply_license_id == "Apache-2.0 AND MIT"
+        assert info.license_raw == "MIT, Apache-2.0"
+        assert check_compatibility("MIT", info).verdict == CompatibilityVerdict.COMPATIBLE
+
+    @respx.mock
+    def test_two_licenses_whose_readings_differ_are_unknown(self):
+        info = self._resolve_licenses(["Apache-2.0", "GPL-3.0-only"])
+        assert info.license_id == "Apache-2.0 OR GPL-3.0-only"
+        assert info.all_apply_license_id == "Apache-2.0 AND GPL-3.0-only"
+        result = check_compatibility("MIT", info)
+        assert result.verdict == CompatibilityVerdict.UNKNOWN
+        assert "without stating whether they are alternatives" in result.reason
+        # Under a project that can take every entry, the readings agree.
+        assert check_compatibility("GPL-3.0-only", info).verdict == (
+            CompatibilityVerdict.COMPATIBLE
+        )
+
+    @respx.mock
+    def test_single_license_has_one_reading(self):
+        info = self._resolve_licenses(["GPL-3.0-only"])
+        assert info.license_id == "GPL-3.0-only"
+        assert info.all_apply_license_id == ""
+        assert check_compatibility("MIT", info).verdict == CompatibilityVerdict.INCOMPATIBLE
 
     @respx.mock
     def test_empty_licenses_unknown_from_registry(self):

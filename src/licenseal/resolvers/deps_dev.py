@@ -40,9 +40,11 @@ import httpx
 
 from licenseal._concurrency import map_with_context
 from licenseal.analysis.spdx import (
+    all_apply_reading,
     and_join_licenses,
     collapse_bundled_license_pairs,
     normalize_license,
+    read_license_array,
 )
 from licenseal.models import Dependency, LicenseInfo
 from licenseal.resolvers.http import (
@@ -130,18 +132,16 @@ def _extract_pinned_version(version_constraint: str) -> str | None:
     return spec
 
 
-# Systems whose publisher convention treats a multi-element ``licenses``
-# array as disjunctive (consumer picks one). RubyGems' gemspec ``licenses
-# = [...]`` follows the same convention as Composer's composer.json
-# ``license`` array — the publisher offers a choice. Gems bundled with the
-# Ruby standard library are the common case: they declare
-# ``["BSD-2-Clause", "Ruby"]``, and an independent license scanner reports
-# that array as a choice between the two as well.
-_DISJUNCTIVE_MULTI_LICENSE_SYSTEMS: frozenset[str] = frozenset({"RUBYGEMS"})
+# Systems whose ``licenses`` array repeats a registry field that does not
+# say whether its entries are alternatives or all apply. For RubyGems the
+# array is the gemspec's ``licenses = [...]``, the same field rubygems.org
+# serves, so it is read the same way: under both readings
+# (:func:`~licenseal.analysis.spdx.read_license_array`).
+_UNDEFINED_LIST_SYSTEMS: frozenset[str] = frozenset({"RUBYGEMS"})
 
 
 def _licenses_to_spdx(licenses_field: object, *, system: str = "") -> str:
-    """Collapse the response's ``licenses`` array into a single SPDX expression.
+    """Join the response's ``licenses`` array into the string reported as ``license_raw``.
 
     deps.dev's documented contract is to return ONE entry per version that
     holds the full SPDX expression — including operators::
@@ -156,9 +156,9 @@ def _licenses_to_spdx(licenses_field: object, *, system: str = "") -> str:
     in practice. The multi-entry branch below is retained as defensive
     code, with per-system join semantics:
 
-    * For systems whose publisher convention treats multi-element license
-      arrays as **disjunctive** (RubyGems, per gemspec convention; the same
-      shape as Composer's ``license`` array) — join with ``OR``.
+    * For a system in ``_UNDEFINED_LIST_SYSTEMS`` (RubyGems) the array is a
+      list with no stated meaning — join with ``, `` and leave the reading
+      to the caller.
     * For every other system, join with ``AND`` (the conservative /
       more-restrictive choice; the user can override via
       ``licenseal.review.toml``). An entry that is itself an ``OR``
@@ -189,8 +189,8 @@ def _licenses_to_spdx(licenses_field: object, *, system: str = "") -> str:
         return ""
     if len(collected) == 1:
         return collected[0]
-    if system in _DISJUNCTIVE_MULTI_LICENSE_SYSTEMS:
-        return " OR ".join(collected)
+    if system in _UNDEFINED_LIST_SYSTEMS:
+        return ", ".join(collected)
     return and_join_licenses(collected)
 
 
@@ -251,11 +251,12 @@ def _license_info_from_version_object(
     * the batch v3alpha response, inside each ``responses[i].version``
 
     ``system`` is the deps.dev system token (``PYPI`` / ``NPM`` / ``CARGO`` /
-    ``GO`` / ``MAVEN`` / ``NUGET`` / ``RUBYGEMS``). Passed through to
-    :func:`_licenses_to_spdx` so multi-element ``licenses`` arrays use the
-    correct join semantics per publisher convention (OR for RubyGems'
-    disjunctive gemspec convention; AND elsewhere as the conservative
-    default).
+    ``GO`` / ``MAVEN`` / ``NUGET`` / ``RUBYGEMS``). It decides how the
+    ``licenses`` array is read: a RubyGems array is a list with no stated
+    meaning and keeps both readings; any other array with several entries
+    is a conjunction; a single entry is the expression it holds, where a
+    comma- or slash-separated list keeps both readings too, except ``/`` in
+    a Cargo license, which Cargo documents as a choice.
 
     When the version object is missing or has no ``licenses``, returns an
     UNKNOWN result. ``from_registry=True`` is preserved on a real response
@@ -272,12 +273,18 @@ def _license_info_from_version_object(
 
     licenses = version_object.get("licenses")
     raw_license = _licenses_to_spdx(licenses, system=system)
-    normalized = normalize_license(raw_license)
-    if len(_license_entries(licenses)) > 1 and system not in _DISJUNCTIVE_MULTI_LICENSE_SYSTEMS:
+    entries = _license_entries(licenses)
+    all_apply_license_id = ""
+    if system in _UNDEFINED_LIST_SYSTEMS:
+        normalized, all_apply_license_id = read_license_array(entries)
+    elif len(entries) > 1:
         # Several entries are the license texts the matcher found side by
         # side. Two such pairs do not both bind; an entry that is itself an
         # expression is never rewritten.
-        normalized = collapse_bundled_license_pairs(normalized)
+        normalized = collapse_bundled_license_pairs(normalize_license(raw_license))
+    else:
+        normalized = normalize_license(raw_license)
+        all_apply_license_id = all_apply_reading(raw_license, slash_is_choice=system == "CARGO")
     repo_url = _repo_url_from_links(version_object.get("links"))
 
     # ``versionKey.version`` echoes the version we asked for; prefer it over
@@ -297,6 +304,7 @@ def _license_info_from_version_object(
         repository_url=repo_url,
         resolved_version=response_version,
         from_registry=True,
+        all_apply_license_id=all_apply_license_id,
     )
 
 

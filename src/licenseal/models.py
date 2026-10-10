@@ -157,6 +157,13 @@ class LicenseInfo:
     homepage_url: str = ""
     resolved_version: str = ""
     from_registry: bool = False
+    # Set when the source lists several licenses without saying whether they
+    # are alternatives or all apply (a RubyGems / Hex ``licenses`` array, a
+    # comma- or slash-separated list in one license string). ``license_id``
+    # then holds the list read as a choice — the reading reports show — and
+    # this holds it read as every entry applying. Compatibility is judged
+    # under both. Empty when the source defines what its list means.
+    all_apply_license_id: str = ""
 
     @property
     def detected_license_id(self) -> str:

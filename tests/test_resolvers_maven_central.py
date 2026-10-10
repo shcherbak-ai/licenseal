@@ -1641,6 +1641,33 @@ class TestMultiLicensePomGrouping:
         assert check_compatibility("MIT", info).verdict == CompatibilityVerdict.COMPATIBLE
 
     @respx.mock
+    def test_entry_that_is_a_list_keeps_both_readings(self):
+        # A POM defines its ``<license>`` entries as all applying, but not a
+        # ``/`` or ``,`` inside one ``<name>``.
+        info = self._resolve("MIT/Apache-2.0")
+        assert info.all_apply_license_id == "Apache-2.0 AND MIT"
+        result = check_compatibility("GPL-2.0-only", info)
+        assert result.verdict == CompatibilityVerdict.UNKNOWN
+        assert "without stating whether they are alternatives" in result.reason
+
+    @respx.mock
+    def test_list_entry_beside_another_entry_keeps_both_readings(self):
+        info = self._resolve("MIT/Apache-2.0", "GPL-2.0-only")
+        assert info.license_id == "(Apache-2.0 OR MIT) AND GPL-2.0-only"
+        assert info.all_apply_license_id == "Apache-2.0 AND GPL-2.0-only AND MIT"
+        # As a choice the project takes MIT; with all applying, Apache-2.0
+        # conflicts with GPL-2.0-only.
+        result = check_compatibility("GPL-2.0-only", info)
+        assert result.verdict == CompatibilityVerdict.UNKNOWN
+        assert "the verdict is compatible" in result.reason
+        assert "it is incompatible" in result.reason
+
+    @respx.mock
+    def test_entries_with_one_reading_each_have_no_second_reading(self):
+        for names in (("MIT OR Apache-2.0", "GPLv3"), ("MIT License",), ("MIT", "ISC")):
+            assert self._resolve(*names).all_apply_license_id == "", names
+
+    @respx.mock
     def test_plain_entries_join_without_a_group(self):
         info = self._resolve("MIT License", "Apache License, Version 2.0")
         assert info.license_id == "MIT AND Apache-2.0"

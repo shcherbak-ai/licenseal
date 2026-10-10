@@ -1147,14 +1147,116 @@ def normalize_license(raw: str) -> str:
     expression are kept as written: ``GPL-3.0-only AND LGPL-3.0-only`` is
     both licenses.
 
+    A comma- or slash-separated list of licenses is returned as a choice
+    (``OR``). Nothing in such a string says its entries are alternatives,
+    so a caller whose source does not define the separator also asks for
+    :func:`all_apply_reading` and has the license judged under both.
+
     Normalizing a result again returns it unchanged, for any result
     within the expression length limit of :func:`_looks_like_spdx`.
     """
     return _canonicalize_spdx_operands(_normalize_license_inner(raw))
 
 
-def _normalize_license_inner(raw: str) -> str:
-    """Source-string-to-SPDX mapping without operand canonicalization."""
+# Pairs that are alternatives by the license's own terms, in whatever list
+# they arrive. The Ruby license offers the 2-clause BSD license as an
+# alternative to its own conditions.
+_ALTERNATIVES_BY_OWN_TERMS: frozenset[frozenset[str]] = frozenset(
+    {frozenset({"BSD-2-Clause", "Ruby"})}
+)
+
+
+def license_list_items(raw: str, *, slash_is_choice: bool = False) -> tuple[str, ...]:
+    """Entries of a license list whose source does not say what the list means.
+
+    ``raw`` is one license string. When :func:`normalize_license` reads it
+    as a comma- or slash-separated list, the normalized entries are
+    returned, sorted. Returns ``()`` when ``raw`` is not such a list, when
+    ``slash_is_choice`` is set and the separator is ``/`` (a source that
+    documents ``/`` as a choice), and for a list that is one license or a
+    pair in :data:`_ALTERNATIVES_BY_OWN_TERMS`.
+    """
+    found: list[tuple[str, list[str]]] = []
+    _normalize_license_inner(raw, found)
+    if not found or (found[0][0] == "/" and slash_is_choice):
+        return ()
+    return _unconfirmed_alternatives(found[0][1])
+
+
+def _unconfirmed_alternatives(items: Iterable[str]) -> tuple[str, ...]:
+    """Distinct ``items``, sorted, when they are a list with no defined meaning.
+
+    ``()`` for a single license and for a pair that is a choice by the
+    license's own terms.
+    """
+    distinct = sorted(set(items), key=str.lower)
+    if len(distinct) < 2 or frozenset(distinct) in _ALTERNATIVES_BY_OWN_TERMS:
+        return ()
+    return tuple(distinct)
+
+
+def all_apply_reading(raw: str, *, slash_is_choice: bool = False) -> str:
+    """``raw`` read with every entry of its license list applying.
+
+    The counterpart of :func:`normalize_license`, which reads the same list
+    as a choice. ``""`` when ``raw`` is not a list with an undefined meaning
+    (:func:`license_list_items`).
+    """
+    items = license_list_items(raw, slash_is_choice=slash_is_choice)
+    return normalize_license(and_join_licenses(items)) if items else ""
+
+
+def read_license_array(entries: Iterable[str]) -> tuple[str, str]:
+    """Both readings of a license array whose source does not define it.
+
+    For a registry field that is an array of license strings with no stated
+    relation between them. Returns ``(license_id, all_apply_license_id)``:
+    the entries as a choice, and the entries all applying. The second is
+    ``""`` when the array holds one license, or a pair that is a choice by
+    the license's own terms. An entry that is itself a comma- or
+    slash-separated list contributes its items.
+    """
+    items: list[str] = []
+    for entry in entries:
+        items.extend(license_list_items(entry) or (normalize_license(entry),))
+    if not items:
+        return "UNKNOWN", ""
+    alternatives = _unconfirmed_alternatives(items)
+    return (
+        _canonicalize_spdx_operands(" OR ".join(items)),
+        normalize_license(and_join_licenses(alternatives)) if alternatives else "",
+    )
+
+
+def _normalize_part(raw: str) -> str:
+    """Normalize one part of a string that was split on a separator or connector.
+
+    A part is not split further into a license list: a list nested in
+    another construct has no single reading.
+    """
+    return _canonicalize_spdx_operands(_normalize_license_inner(raw, part=True))
+
+
+def _is_license_list(text: str) -> bool:
+    """True when commas and slashes in ``text`` can separate a license list.
+
+    Not when a connector is present too (``MIT/Apache-2.0 and
+    GPL-3.0-only``: the separator's precedence against the connector is
+    anyone's guess), and not in a URL, whose slashes are path separators.
+    """
+    lowered = text.lower()
+    return "://" not in text and " or " not in lowered and " and " not in lowered
+
+
+def _normalize_license_inner(
+    raw: str, found: list[tuple[str, list[str]]] | None = None, *, part: bool = False
+) -> str:
+    """Source-string-to-SPDX mapping without operand canonicalization.
+
+    When ``raw`` is read as a license list, its separator and normalized
+    entries are appended to ``found``. With ``part`` set, ``raw`` is a piece
+    of a larger string and is never read as a list.
+    """
     if not raw or len(raw) > _MAX_LICENSE_LENGTH:
         return "UNKNOWN"
 
@@ -1165,11 +1267,9 @@ def _normalize_license_inner(raw: str) -> str:
     # ``pyproject.toml`` and a few Maven ``<license><name>`` slots that
     # mistakenly hold the URL). Route through the URL-prefix table.
     if _looks_like_url(stripped):
-        spdx = spdx_from_license_url(stripped)
-        if spdx:
-            return spdx
-        # Unrecognized URL — fall through; nothing else below handles a
-        # URL shape, so the function returns "UNKNOWN" at the bottom.
+        # An unrecognized URL is not a license, and nothing below reads one:
+        # its slashes are not list separators.
+        return spdx_from_license_url(stripped) or "UNKNOWN"
     # Strip outer parens that wrap the whole expression — common Java
     # publisher convention is to write ``(Apache-2.0 OR EPL-2.0)`` or
     # ``(MIT)``. Every redundant wrap goes (``((MIT))`` too), so the
@@ -1195,15 +1295,21 @@ def _normalize_license_inner(raw: str) -> str:
     # Compound expressions like `MIT/Apache-2.0` are unwrapped here and
     # fall through to the compound classifier — no alias entry combines
     # licenses with OR/AND, so we don't re-lookup the translated form.
-    # Recurse so each part is itself normalized — important for prose names
+    # Each part is itself normalized — important for prose names
     # like ``"Eclipse Public License v2.0 / Eclipse Distribution License
     # v1.0"`` where the slash-OR alone doesn't produce SPDX IDs.
-    if "/" in stripped and " OR " not in stripped and " AND " not in stripped:
-        parts = [p.strip() for p in stripped.split("/")]
-        normalized_parts = [normalize_license(p) for p in parts]
-        if all(p != "UNKNOWN" for p in normalized_parts):
-            return " OR ".join(normalized_parts)
-        stripped = _SLASH_OR_RE.sub(" OR ", stripped)
+    if "/" in stripped:
+        if part:
+            return "UNKNOWN"
+        if " OR " not in stripped and " AND " not in stripped:
+            if _is_license_list(stripped):
+                parts = [p.strip() for p in stripped.split("/")]
+                normalized_parts = [_normalize_part(p) for p in parts]
+                if all(p != "UNKNOWN" for p in normalized_parts):
+                    if found is not None:
+                        found.append(("/", normalized_parts))
+                    return " OR ".join(normalized_parts)
+            stripped = _SLASH_OR_RE.sub(" OR ", stripped)
 
     # File-pointer / filename-mistake strings name a bundled file, not a
     # license. `LicenseRef-*` is not handled here: it is mapped per leaf
@@ -1232,24 +1338,30 @@ def _normalize_license_inner(raw: str) -> str:
     # independently normalizes to a known license — that avoids splitting
     # license names that contain a legitimate comma (`"Apache License,
     # Version 2.0"` is already caught by the direct lookup above).
-    if "," in stripped and " OR " not in stripped and " AND " not in stripped:
-        parts = [p.strip() for p in stripped.split(",")]
-        # Drop recognized non-license descriptor tokens (e.g. "dependency
-        # licenses") so a comma list of real SPDX IDs isn't lost to the
-        # all-or-nothing guard below just because the publisher tacked on a
-        # bundled-deps note. Unrecognized tokens are NOT dropped (see
-        # _LICENSE_NOISE_RE) — they still block the compound.
-        parts = [p for p in parts if not _LICENSE_NOISE_RE.match(p)]
-        normalized_parts = [normalize_license(p) for p in parts]
-        if parts and all(p != "UNKNOWN" for p in normalized_parts):
-            return " OR ".join(normalized_parts)
+    if "," in stripped:
+        if part:
+            return "UNKNOWN"
+        if _is_license_list(stripped):
+            parts = [p.strip() for p in stripped.split(",")]
+            # Drop recognized non-license descriptor tokens (e.g. "dependency
+            # licenses") so a comma list of real SPDX IDs isn't lost to the
+            # all-or-nothing guard below just because the publisher tacked on
+            # a bundled-deps note. Unrecognized tokens are NOT dropped (see
+            # _LICENSE_NOISE_RE) — they still block the compound.
+            parts = [p for p in parts if not _LICENSE_NOISE_RE.match(p)]
+            normalized_parts = [_normalize_part(p) for p in parts]
+            if parts and all(p != "UNKNOWN" for p in normalized_parts):
+                if found is not None:
+                    found.append((",", normalized_parts))
+                return " OR ".join(normalized_parts)
 
-    # Informal " -or- " separator: same intent as comma-as-OR. Seen in PyPI
-    # publisher prose like ``"MIT -or- Apache License 2.0"``. Conservative
-    # split — only treat as compound when every part normalizes cleanly.
+    # Informal " -or- " separator: the publisher states the choice. Seen in
+    # PyPI publisher prose like ``"MIT -or- Apache License 2.0"``.
+    # Conservative split — only treat as compound when every part
+    # normalizes cleanly.
     if " -or- " in stripped and " OR " not in stripped and " AND " not in stripped:
         parts = [p.strip() for p in stripped.split(" -or- ")]
-        normalized_parts = [normalize_license(p) for p in parts]
+        normalized_parts = [_normalize_part(p) for p in parts]
         if all(p != "UNKNOWN" for p in normalized_parts):
             return " OR ".join(normalized_parts)
 
@@ -1273,7 +1385,7 @@ def _normalize_license_inner(raw: str) -> str:
                 prev = idx + len(connector)
                 pos = prev
             parts.append(stripped[prev:].strip())
-            normalized_parts = [normalize_license(p) for p in parts if p]
+            normalized_parts = [_normalize_part(p) for p in parts if p]
             if len(normalized_parts) >= 2 and all(p != "UNKNOWN" for p in normalized_parts):
                 return join(normalized_parts)
 
@@ -1479,7 +1591,9 @@ def _translate_r_operand(operand: str) -> str:
     aliased = _R_LICENSE_ALIASES.get(operand.lower())
     if aliased is not None:
         return aliased
-    return normalize_license(operand)
+    # R separates alternatives with ``|`` only; a comma or slash inside one
+    # alternative is not a list R defines.
+    return _normalize_part(operand)
 
 
 def normalize_r_license(raw: str) -> str:

@@ -1654,6 +1654,26 @@ class TestOrArmVerdictDrivesTheExitCode:
         assert data["dependencies"][0]["risk"] == risk
 
 
+class TestListSeparatorInsideAnExpression:
+    """A slash-joined operand in an SPDX expression names no license: the
+    permissive IDs inside it are never elected."""
+
+    @pytest.mark.parametrize(
+        "raw", ["MIT/Apache-2.0 AND GPL-3.0-only", "MIT/Apache-2.0 OR GPL-3.0-only"]
+    )
+    def test_operand_with_a_separator_does_not_clear_the_expression(self, raw):
+        li = _make_license_info(normalize_license(raw), name="dep")
+        assert li.all_apply_license_id == ""
+        # The copyleft operand is the only one that resolves.
+        assert check_compatibility("MIT", li).verdict == CompatibilityVerdict.INCOMPATIBLE
+
+    def test_operand_with_a_separator_binds_in_a_conjunction(self):
+        li = _make_license_info(normalize_license("MIT/Apache-2.0 AND GPL-3.0-only"), name="dep")
+        result = check_compatibility("GPL-3.0-only", li)
+        assert result.verdict == CompatibilityVerdict.UNKNOWN
+        assert "cannot avoid MIT/Apache-2.0" in result.reason
+
+
 class TestMalformedExpressionDrivesTheExitCode:
     """``licenseal check`` on an MIT project: a malformed license expression
     in a registry field fails the check when a license it names is a

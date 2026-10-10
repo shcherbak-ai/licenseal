@@ -462,6 +462,12 @@ def _check_compat(
     license_info: LicenseInfo,
 ) -> CompatibilityResult:
     """Internal compatibility check with pre-computed project risk."""
+    # A license list whose source does not say whether its entries are
+    # alternatives is judged under both readings. A reviewed license is an
+    # explicit expression and is judged as written.
+    if license_info.all_apply_license_id and not license_info.reviewed:
+        return _check_both_readings(project_spdx, project_risk, license_info)
+
     dep_license = license_info.effective_license_id
     is_dev = license_info.dependency.group == DependencyGroup.DEV
 
@@ -571,6 +577,47 @@ def _check_compat(
         risk_level=dep_risk,
         verdict=verdict,
         reason=reason,
+    )
+
+
+def _check_both_readings(
+    project_spdx: str,
+    project_risk: RiskLevel,
+    license_info: LicenseInfo,
+) -> CompatibilityResult:
+    """Judge a license list with an undefined meaning as a choice and as a conjunction.
+
+    ``license_id`` holds the list as a choice and ``all_apply_license_id``
+    as every entry applying. When both readings give the same verdict, the
+    result is the choice reading's, which is what a source that did define
+    the list as a choice would report. When they differ, electing either
+    one would be a guess: the verdict is UNKNOWN and the reason names both.
+    """
+    choice = _check_compat(
+        project_spdx, project_risk, replace(license_info, all_apply_license_id="")
+    )
+    all_apply = _check_compat(
+        project_spdx,
+        project_risk,
+        replace(
+            license_info,
+            license_id=license_info.all_apply_license_id,
+            all_apply_license_id="",
+        ),
+    )
+    if choice.verdict == all_apply.verdict:
+        return replace(choice, license_info=license_info)
+    return CompatibilityResult(
+        license_info=license_info,
+        risk_level=choice.risk_level,
+        verdict=CompatibilityVerdict.UNKNOWN,
+        reason=(
+            f"{license_info.dependency.name} lists several licenses without stating whether "
+            f"they are alternatives: read as a choice ({license_info.license_id}) the verdict "
+            f"is {choice.verdict.value}, read as all applying "
+            f"({license_info.all_apply_license_id}) it is {all_apply.verdict.value} — confirm "
+            f"which holds and record that expression in licenseal.review.toml"
+        ),
     )
 
 

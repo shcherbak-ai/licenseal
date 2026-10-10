@@ -52,7 +52,11 @@ from xml.etree.ElementTree import Element  # nosec B405
 
 import httpx
 
-from licenseal.analysis.spdx import normalize_license, spdx_from_license_url
+from licenseal.analysis.spdx import (
+    all_apply_reading,
+    normalize_license,
+    spdx_from_license_url,
+)
 from licenseal.models import Dependency, LicenseInfo
 from licenseal.resolvers.deps_dev import (
     _DEPS_DEV_NUGET_VERSION_URL,
@@ -375,6 +379,8 @@ def resolve_nuget_license(
                     license_raw=expression,
                     resolved_version=pinned,
                     from_registry=True,
+                    # A license expression has no ``,`` or ``/`` operator.
+                    all_apply_license_id=all_apply_reading(expression),
                 )
         if license_url:
             # A non-empty return is always a usable license ID. It goes

@@ -7,17 +7,21 @@ import time
 import pytest
 
 from licenseal.analysis.spdx import (
+    _ALTERNATIVES_BY_OWN_TERMS,
     _CLASSIFIER_MAP,
     _LICENSE_URL_PREFIXES,
     _MAX_LICENSE_LENGTH,
     _NORMALIZATION_MAP,
     _looks_like_spdx,
+    all_apply_reading,
     and_join_licenses,
     canonical_license_id,
     collapse_bundled_license_pairs,
+    license_list_items,
     malformed_expression_conjunction,
     normalize_license,
     normalize_r_license,
+    read_license_array,
     spdx_from_license_url,
 )
 
@@ -1245,6 +1249,255 @@ class TestBundledLicensePairs:
             assert self._joined(expression) == expression
 
 
+class TestLicenseLists:
+    """A comma- or slash-separated list of licenses does not say whether its
+    entries are alternatives. ``normalize_license`` reads it as a choice;
+    ``license_list_items`` and ``all_apply_reading`` give a caller whose
+    source does not define the separator the other reading."""
+
+    @pytest.mark.parametrize(
+        "raw, items, choice, all_apply",
+        [
+            (
+                "MIT, GPL-3.0-only",
+                ("GPL-3.0-only", "MIT"),
+                "GPL-3.0-only OR MIT",
+                "GPL-3.0-only AND MIT",
+            ),
+            ("MIT/Apache-2.0", ("Apache-2.0", "MIT"), "Apache-2.0 OR MIT", "Apache-2.0 AND MIT"),
+            (
+                "MIT / Apache-2.0 / ISC",
+                ("Apache-2.0", "ISC", "MIT"),
+                "Apache-2.0 OR ISC OR MIT",
+                "Apache-2.0 AND ISC AND MIT",
+            ),
+            # Entries are normalized like any license string.
+            (
+                "Eclipse Public License v2.0 / Eclipse Distribution License v1.0",
+                ("BSD-3-Clause", "EPL-2.0"),
+                "BSD-3-Clause OR EPL-2.0",
+                "BSD-3-Clause AND EPL-2.0",
+            ),
+            (
+                "GPL-2.0+/MIT",
+                ("GPL-2.0-or-later", "MIT"),
+                "GPL-2.0-or-later OR MIT",
+                "GPL-2.0-or-later AND MIT",
+            ),
+            (
+                "MIT, LicenseRef-custom",
+                ("MIT", "Proprietary"),
+                "MIT OR Proprietary",
+                "MIT AND Proprietary",
+            ),
+            # A recognized note about bundled dependencies is not an entry.
+            (
+                "BSD-3-Clause, Apache-2.0, dependency licenses",
+                ("Apache-2.0", "BSD-3-Clause"),
+                "Apache-2.0 OR BSD-3-Clause",
+                "Apache-2.0 AND BSD-3-Clause",
+            ),
+            # An entry that is itself a choice stays one entry.
+            (
+                "CDDL+GPL, MIT",
+                ("CDDL-1.0 OR GPL-2.0-with-classpath-exception", "MIT"),
+                "CDDL-1.0 OR GPL-2.0-with-classpath-exception OR MIT",
+                "(CDDL-1.0 OR GPL-2.0-with-classpath-exception) AND MIT",
+            ),
+            (
+                "MIT -or- Apache-2.0 / GPL-3.0-only",
+                ("Apache-2.0 OR MIT", "GPL-3.0-only"),
+                "Apache-2.0 OR GPL-3.0-only OR MIT",
+                "(Apache-2.0 OR MIT) AND GPL-3.0-only",
+            ),
+            # An entry that only looks like an identifier is still an entry.
+            (
+                "FrobnicateLicense / MIT",
+                ("FrobnicateLicense", "MIT"),
+                "FrobnicateLicense OR MIT",
+                "FrobnicateLicense AND MIT",
+            ),
+        ],
+    )
+    def test_list_has_two_readings(self, raw, items, choice, all_apply):
+        assert license_list_items(raw) == items
+        assert normalize_license(raw) == choice
+        assert all_apply_reading(raw) == all_apply
+        # Both readings are normalized expressions with one reading each.
+        for reading in (choice, all_apply):
+            assert normalize_license(reading) == reading
+            assert license_list_items(reading) == ()
+
+    @pytest.mark.parametrize(
+        "raw",
+        [
+            # One license, an expression, or a connector the publisher wrote.
+            "MIT",
+            "MIT OR GPL-3.0-only",
+            "MIT AND GPL-3.0-only",
+            "MIT -or- Apache License 2.0",
+            "MIT or GPL-3.0-only",
+            "MIT and ISC",
+            # License names that contain the separator.
+            "Apache License, Version 2.0",
+            "University of Illinois/NCSA Open Source License",
+            "GNU General Public License, version 2, with the Classpath Exception",
+            "CDDL/GPLv2+CE",
+            # A list of one license.
+            "MIT, MIT License",
+            "Apache-2.0, dependency licenses",
+            # Not a license at all.
+            "",
+            "UNKNOWN",
+            "MIT, acme internal license",
+            "MIT / foobar",
+            "x" * (_MAX_LICENSE_LENGTH + 1),
+        ],
+    )
+    def test_anything_else_has_one_reading(self, raw):
+        assert license_list_items(raw) == ()
+        assert all_apply_reading(raw) == ""
+
+    def test_slash_a_source_defines_as_a_choice_has_one_reading(self):
+        assert license_list_items("MIT/Apache-2.0", slash_is_choice=True) == ()
+        assert all_apply_reading("MIT/GPL-3.0-only", slash_is_choice=True) == ""
+        # The comma is still undefined there.
+        assert license_list_items("MIT, GPL-3.0-only", slash_is_choice=True) == (
+            "GPL-3.0-only",
+            "MIT",
+        )
+        assert all_apply_reading("MIT, GPL-3.0-only", slash_is_choice=True) == (
+            "GPL-3.0-only AND MIT"
+        )
+
+    @pytest.mark.parametrize(
+        "raw",
+        ["Ruby/BSD-2-Clause", "BSD-2-Clause, Ruby", "Ruby, Simplified BSD License"],
+    )
+    def test_ruby_with_its_bsd_alternative_is_a_choice_by_its_own_terms(self, raw):
+        assert normalize_license(raw) == "BSD-2-Clause OR Ruby"
+        assert license_list_items(raw) == ()
+        assert all_apply_reading(raw) == ""
+
+    def test_the_own_terms_table_holds_exactly_the_ruby_pair(self):
+        assert frozenset({frozenset({"BSD-2-Clause", "Ruby"})}) == _ALTERNATIVES_BY_OWN_TERMS
+
+    @pytest.mark.parametrize(
+        "raw, items",
+        [
+            ("Ruby, MIT", ("MIT", "Ruby")),
+            ("Ruby, BSD-2-Clause, MIT", ("BSD-2-Clause", "MIT", "Ruby")),
+            ("Ruby/BSD-3-Clause", ("BSD-3-Clause", "Ruby")),
+            ("BSD-2-Clause, MIT", ("BSD-2-Clause", "MIT")),
+        ],
+    )
+    def test_any_other_list_with_one_of_the_pair_has_two_readings(self, raw, items):
+        assert license_list_items(raw) == items
+
+    @pytest.mark.parametrize(
+        "raw",
+        [
+            # A separator and a connector: which binds tighter is a guess.
+            "MIT/Apache-2.0 and GPL-3.0-only",
+            "GPL-3.0-only and MIT/Apache-2.0",
+            "MIT/Apache-2.0 And GPL-3.0-only",
+            "MIT, Apache-2.0 or GPL-3.0-only",
+            "MIT or Apache-2.0, GPL-3.0-only",
+            "BSD or MIT/X11",
+            # A list inside a list.
+            "MIT, Apache-2.0/GPL-3.0-only",
+            "MIT/Apache-2.0, GPL-3.0-only",
+        ],
+    )
+    def test_list_mixed_with_a_connector_or_another_list_is_unknown(self, raw):
+        assert normalize_license(raw) == "UNKNOWN"
+        assert license_list_items(raw) == ()
+
+    @pytest.mark.parametrize(
+        "raw, expected",
+        [
+            ("MIT/Apache-2.0 AND GPL-3.0-only", "GPL-3.0-only AND MIT/Apache-2.0"),
+            ("MIT/Apache-2.0 OR GPL-3.0-only", "GPL-3.0-only OR MIT/Apache-2.0"),
+        ],
+    )
+    def test_separator_inside_an_spdx_expression_is_not_split(self, raw, expected):
+        # The operators stand as written; the operand with the separator is
+        # one token that names no license.
+        assert normalize_license(raw) == expected
+        assert license_list_items(raw) == ()
+
+    @pytest.mark.parametrize(
+        "raw",
+        [
+            "https://example.com/licenses/MIT",
+            "HTTPS://example.com/licenses/MIT",
+            "HTTP://Example.com/MIT/Apache-2.0",
+            "https://Example.com/MIT",
+            "https://Example.com/MIT OR Apache-2.0",
+            "FTP://Example.com/MIT",
+            "git+https://Example.com/MIT",
+            "MIT (https://Example.com/licenses/MIT)",
+            "see https://Example.com/licenses/MIT",
+        ],
+    )
+    def test_url_is_never_a_license_list(self, raw):
+        # A path segment that spells a permissive license is not an entry.
+        assert normalize_license(raw) == "UNKNOWN"
+        assert license_list_items(raw) == ()
+
+    def test_recognized_license_url_with_an_uppercase_scheme_still_resolves(self):
+        assert normalize_license("HTTPS://www.apache.org/licenses/LICENSE-2.0") == "Apache-2.0"
+        assert normalize_license("HTTP://opensource.org/licenses/MIT") == "MIT"
+
+    def test_file_pointer_to_a_url_keeps_its_routing(self):
+        assert normalize_license("SEE LICENSE IN https://example.com/license.txt") == "Proprietary"
+
+
+class TestReadLicenseArray:
+    """An array of license strings with no stated relation between them."""
+
+    @pytest.mark.parametrize(
+        "entries, choice, all_apply",
+        [
+            (["MIT", "GPL-3.0-only"], "GPL-3.0-only OR MIT", "GPL-3.0-only AND MIT"),
+            (["GPL-3.0-only", "MIT"], "GPL-3.0-only OR MIT", "GPL-3.0-only AND MIT"),
+            (
+                ["MIT License", "Apache License, Version 2.0"],
+                "Apache-2.0 OR MIT",
+                "Apache-2.0 AND MIT",
+            ),
+            # One license, however often it is listed.
+            (["MIT"], "MIT", ""),
+            (["MIT", "MIT License"], "MIT", ""),
+            ([], "UNKNOWN", ""),
+            (["Acme house terms"], "UNKNOWN", ""),
+            # An unrecognized entry is still an entry.
+            (["MIT", "Acme house terms"], "MIT OR UNKNOWN", "MIT AND UNKNOWN"),
+            # The pair that is a choice by the license's own terms.
+            (["Ruby", "BSD-2-Clause"], "BSD-2-Clause OR Ruby", ""),
+            (["BSD-2-Clause", "Ruby"], "BSD-2-Clause OR Ruby", ""),
+            (["Ruby", "MIT"], "MIT OR Ruby", "MIT AND Ruby"),
+            # An entry that is an expression stays one entry.
+            (
+                ["MIT OR Apache-2.0", "GPL-3.0-only"],
+                "Apache-2.0 OR GPL-3.0-only OR MIT",
+                "(Apache-2.0 OR MIT) AND GPL-3.0-only",
+            ),
+            (["MIT AND ISC", "Zlib"], "ISC AND MIT OR Zlib", "ISC AND MIT AND Zlib"),
+            # An entry that is a list contributes its items.
+            (
+                ["MIT/Apache-2.0", "GPL-3.0-only"],
+                "Apache-2.0 OR GPL-3.0-only OR MIT",
+                "Apache-2.0 AND GPL-3.0-only AND MIT",
+            ),
+            (["MIT/Apache-2.0"], "Apache-2.0 OR MIT", "Apache-2.0 AND MIT"),
+            (["Ruby/BSD-2-Clause"], "BSD-2-Clause OR Ruby", ""),
+        ],
+    )
+    def test_array_readings(self, entries, choice, all_apply):
+        assert read_license_array(entries) == (choice, all_apply)
+
+
 class TestExpressionOperatorsAreKept:
     """``normalize_license`` keeps the operators of an expression: the pair
     rewrites belong to the deps.dev join alone."""
@@ -1340,6 +1593,11 @@ class TestNormalizeRLicense:
             ("GPL (>= 3) | file LICENCE", "GPL-3.0-or-later"),
             # A trailing empty alternative (malformed field) is dropped.
             ("GPL-2 | ", "GPL-2.0-only"),
+            # R separates alternatives with ``|`` only: a slash or comma
+            # inside one alternative is not a list.
+            ("MIT/Apache-2.0", "UNKNOWN"),
+            ("MIT, Apache-2.0", "UNKNOWN"),
+            ("GPL-2 | MIT/Apache-2.0", "GPL-2.0-only"),
             # Undeterminable → UNKNOWN (routes to manual review).
             ("file LICENSE", "UNKNOWN"),
             ("file LICENCE", "UNKNOWN"),
