@@ -8,10 +8,12 @@ representative formats (XML, JSON/nuget, yarn text, INI).
 
 from __future__ import annotations
 
+import json
 import sys
 from pathlib import Path
 
 import pytest
+import respx
 
 from licenseal.discovery import detect_project_license, discover_all_dependencies
 from licenseal.discovery._read import ReadDiagnostic, collect_read_diagnostics
@@ -32,7 +34,15 @@ from licenseal.discovery.python.setup_cfg import (
 )
 from licenseal.discovery.rust.lockfiles import parse_cargo_lock
 from licenseal.transitive import _read_local_pom
-from tests._helpers import _DEEP
+from tests._helpers import (
+    _DEEP,
+    _assert_gap_fails_only_strict,
+    _check_json,
+    _gaps,
+    _mock_npm,
+    _mock_pypi,
+    _resolve,
+)
 
 
 def _raise_oserror(self, *args, **kwargs):
@@ -153,6 +163,24 @@ class TestBadManifestBesideAHealthyOne:
                 "is not valid TOML; skipped",
                 id="toml-inline-tables-nested-too-deeply",
             ),
+            pytest.param(
+                "pyproject.toml",
+                b"# maintainer: Jos\xe9\n" + _PYPROJECT.encode("ascii"),
+                "is not valid UTF-8, which TOML requires; skipped",
+                id="toml-stray-non-utf8-byte",
+            ),
+            pytest.param(
+                "Cargo.toml",
+                b"\xef\xbb\xbf# maintainer: Jos\xe9\n" + _CARGO.encode("ascii"),
+                "is not valid UTF-8, which TOML requires; skipped",
+                id="toml-stray-non-utf8-byte-after-utf8-bom",
+            ),
+            pytest.param(
+                "Pipfile",
+                _PIPFILE.encode("latin-1") + "# café\n".encode("latin-1"),
+                "is not valid UTF-8, which TOML requires; skipped",
+                id="toml-latin1-encoded",
+            ),
         ],
     )
     def test_bad_manifest_is_a_gap_and_the_healthy_one_is_read(
@@ -217,12 +245,6 @@ class TestBadManifestBesideAHealthyOne:
                 "requirements.txt", b"# maintainer: Jos\xe9\nflask==3.0.0\n", "flask", id="text"
             ),
             pytest.param(
-                "pyproject.toml",
-                b"# maintainer: Jos\xe9\n" + _PYPROJECT.encode("ascii"),
-                "flask",
-                id="toml",
-            ),
-            pytest.param(
                 "package.json",
                 b'{"description": "Jos\xe9", "dependencies": {"left-pad": "1.3.0"}}',
                 "left-pad",
@@ -235,6 +257,7 @@ class TestBadManifestBesideAHealthyOne:
     ):
         # The documented latin-1 recovery: the ASCII dependency lines survive,
         # the file is flagged but is not a gap, and a UTF-8 BOM changes nothing.
+        # TOML has no such recovery; its cases are with the gaps above.
         recovered = project / "sub" / manifest
         recovered.write_bytes(bom + content)
         names, diags = _discover(project)
@@ -482,6 +505,90 @@ class TestCargoLockGaps:
             deps, known = parse_cargo_lock(lock, set(), set(), include_dev=True)
         assert deps == [] and known == set()
         assert any(d.is_gap and "not valid TOML" in d.reason for d in diags)
+
+
+_NOT_UTF8_TOML = "is not valid UTF-8, which TOML requires; skipped"
+
+
+class TestNonUtf8Toml:
+    """TOML must be UTF-8. A TOML manifest or lockfile that is not is a gap,
+    with no latin-1 recovery, wherever the stray byte sits."""
+
+    @respx.mock
+    @pytest.mark.parametrize("bom", [b"", b"\xef\xbb\xbf"], ids=["no-bom", "utf8-bom"])
+    def test_manifest_fails_only_strict_and_reads_once_it_is_utf8(self, tmp_path: Path, bom):
+        # The stray byte is in a comment, and the dependency lines are ASCII.
+        # The file is skipped all the same; saved as UTF-8 it is read.
+        (tmp_path / "package.json").write_text(
+            json.dumps({"name": "app", "license": "MIT", "dependencies": {"left-pad": "1.0.0"}})
+        )
+        text = "# maintainer: José\n" + _PYPROJECT
+        bad = tmp_path / "sub" / "pyproject.toml"
+        bad.parent.mkdir()
+        bad.write_bytes(bom + text.encode("latin-1"))
+        _mock_npm("left-pad", "MIT")
+        _mock_pypi("flask", "MIT", "3.0.0")
+
+        _assert_gap_fails_only_strict(
+            tmp_path,
+            bad,
+            _NOT_UTF8_TOML,
+            [("left-pad", "MIT")],
+            repair=lambda: bad.write_bytes(bom + text.encode("utf-8")),
+        )
+        _, data = _check_json(tmp_path)
+        assert sorted(d["name"] for d in data["dependencies"]) == ["flask", "left-pad"]
+
+    @pytest.mark.parametrize(
+        ("manifest", "manifest_text", "lockfile", "lock_text", "unpinned", "pinned"),
+        [
+            pytest.param(
+                "pyproject.toml",
+                '[project]\nname = "app"\ndependencies = ["flask"]\n',
+                "uv.lock",
+                'version = 1\n\n[[package]]\nname = "flask"\nversion = "3.0.0"\n',
+                ("flask", ""),
+                ("flask", "==3.0.0"),
+                id="uv.lock",
+            ),
+            pytest.param(
+                "pyproject.toml",
+                '[project]\nname = "app"\ndependencies = ["flask"]\n',
+                "poetry.lock",
+                '[[package]]\nname = "flask"\nversion = "3.0.0"\n',
+                ("flask", ""),
+                ("flask", "==3.0.0"),
+                id="poetry.lock",
+            ),
+            pytest.param(
+                "Cargo.toml",
+                _CARGO,
+                "Cargo.lock",
+                'version = 3\n\n[[package]]\nname = "serde"\nversion = "1.0.200"\n'
+                'source = "registry+https://github.com/rust-lang/crates.io-index"\n',
+                ("serde", "1"),
+                ("serde", "==1.0.200"),
+                id="Cargo.lock",
+            ),
+        ],
+    )
+    def test_lockfile_is_a_gap_and_pins_nothing(
+        self, tmp_path: Path, manifest, manifest_text, lockfile, lock_text, unpinned, pinned
+    ):
+        (tmp_path / manifest).write_text(manifest_text, encoding="utf-8", newline="\n")
+        lock = tmp_path / lockfile
+        lock.write_bytes(b"# locked by Jos\xe9\n" + lock_text.encode("ascii"))
+        rows, diags = _resolve(tmp_path)
+        assert _gaps(diags) == {(lock, _NOT_UTF8_TOML)}
+        # The lockfile's pin is not used: the dependency keeps the manifest's
+        # constraint, as in a scan with no lockfile.
+        assert {(name, version) for name, version, _ in rows} == {unpinned}
+
+        # Control: the same lockfile as UTF-8 is read.
+        lock.write_bytes("# locked by José\n".encode() + lock_text.encode("ascii"))
+        rows, diags = _resolve(tmp_path)
+        assert diags == []
+        assert {(name, version) for name, version, _ in rows} == {pinned}
 
 
 class TestLocalPomGaps:

@@ -258,14 +258,33 @@ class TestStructuredLoaders:
             assert load_toml(p) == {"a": "b"}
         assert diags == []
 
-    def test_load_toml_non_utf8_recovers_via_latin1(self, tmp_path: Path):
-        # Same recovery as every other manifest format: the stray byte sits in
-        # a comment, the ASCII keys and values survive, and it is not a gap.
+    @pytest.mark.parametrize("bom", [b"", b"\xef\xbb\xbf"], ids=["no-bom", "utf8-bom"])
+    @pytest.mark.parametrize(
+        "body",
+        [
+            pytest.param(b'# Jos\xe9\na = "b"\n', id="stray-byte-in-a-comment"),
+            pytest.param(b'a = "Jos\xe9"\n', id="stray-byte-in-a-value"),
+            pytest.param(b'a = "b"\n\xff', id="trailing-byte"),
+        ],
+    )
+    def test_load_toml_non_utf8_is_gap(self, tmp_path: Path, bom, body):
+        # TOML must be UTF-8, so there is no latin-1 recovery: the file is not
+        # valid TOML wherever the stray byte sits, with or without a UTF-8 BOM.
         p = tmp_path / "f.toml"
-        p.write_bytes(b'# Jos\xe9\na = "b"\n')
+        p.write_bytes(bom + body)
         with collect_read_diagnostics() as diags:
-            assert load_toml(p) == {"a": "b"}
-        assert len(diags) == 1 and diags[0].is_gap is False and "latin-1" in diags[0].reason
+            assert load_toml(p) is None
+        assert [(d.path, d.reason, d.is_gap) for d in diags] == [
+            (p, "is not valid UTF-8, which TOML requires; skipped", True)
+        ]
+
+    def test_load_toml_reads_non_ascii_utf8(self, tmp_path: Path):
+        # Control: non-ASCII content that is valid UTF-8 is read as written.
+        p = tmp_path / "f.toml"
+        p.write_bytes('a = "José"\n'.encode())
+        with collect_read_diagnostics() as diags:
+            assert load_toml(p) == {"a": "José"}
+        assert diags == []
 
     def test_load_toml_undecodable_is_gap(self, tmp_path: Path):
         p = tmp_path / "f.toml"

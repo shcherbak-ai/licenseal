@@ -8,7 +8,9 @@ encodings show up inside comments. A naive ``read_text(encoding="utf-8")``
 raises ``UnicodeDecodeError`` on the first bad byte, dropping the *whole* file
 (every dependency it declares) over a stray byte in a discarded comment. The
 loaders here BOM-detect, fall back to latin-1 for text, and hand XML raw bytes
-to its encoding-aware parser. Nothing here raises on file content: bytes that
+to its encoding-aware parser. TOML is the exception to the fallback: its
+specification requires UTF-8, so a TOML file that is not valid UTF-8 is not
+valid TOML and is a gap. Nothing here raises on file content: bytes that
 can't be decoded, and documents nested too deeply to parse, are recorded as
 gaps like any other parse failure.
 
@@ -361,7 +363,7 @@ _BOM_CODECS = (
 )
 
 
-def decode_text(path: Path) -> str | None:
+def decode_text(path: Path, *, requires_utf8: str = "") -> str | None:
     """Decode a text manifest to ``str``, or ``None`` if it can't be read or decoded.
 
     Strategy — deterministic, so a file decodes identically on every machine
@@ -376,6 +378,12 @@ def decode_text(path: Path) -> str | None:
        dependency lines survive a stray non-UTF-8 byte in a comment. Recorded as
        a *recovered* (non-gap) diagnostic. A UTF-8 BOM doesn't change this: the
        same bytes recover the same way with or without one.
+
+    ``requires_utf8`` names a format whose specification mandates UTF-8
+    (``"TOML"``). Step 3 does not apply to it: bytes that are not valid UTF-8
+    are not a document in that format, so the file is recorded as a gap. Steps
+    1 and 2 are unchanged, so a file with a byte-order mark is still read in
+    the encoding the mark names.
 
     We deliberately do *not* replicate pip's ``locale.getpreferredencoding()``
     fallback: it would make the same bytes decode differently across machines,
@@ -400,6 +408,11 @@ def decode_text(path: Path) -> str | None:
         # ``utf-8-sig`` strips a leading UTF-8 BOM and is plain UTF-8 without one.
         return data.decode("utf-8-sig")
     except UnicodeDecodeError:
+        if requires_utf8:
+            _record(
+                path, f"is not valid UTF-8, which {requires_utf8} requires; skipped", is_gap=True
+            )
+            return None
         _record(
             path,
             "decoded as latin-1 (not valid UTF-8); non-ASCII content may be wrong",
@@ -441,12 +454,13 @@ def load_json(path: Path) -> Any | None:
 def load_toml(path: Path) -> dict[str, Any] | None:
     """Read + parse a TOML manifest, recording a read or parse failure as a gap.
 
-    Decoding goes through :func:`decode_text`, the same as the JSON and YAML
-    loaders: TOML mandates UTF-8, but a manifest written through a Windows
-    shell redirect arrives as UTF-16 or with a UTF-8 BOM, and ``tomllib``
-    accepts neither on its own.
+    Decoding goes through :func:`decode_text` for its byte-order-mark
+    handling: a manifest written through a Windows shell redirect arrives as
+    UTF-16 or with a UTF-8 BOM, and ``tomllib`` accepts neither on its own.
+    TOML mandates UTF-8, so there is no latin-1 recovery: a file without a
+    UTF-16 / UTF-32 BOM that is not valid UTF-8 is recorded as a gap.
     """
-    raw = decode_text(path)
+    raw = decode_text(path, requires_utf8="TOML")
     if raw is None:
         return None
     try:
