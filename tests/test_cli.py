@@ -1933,6 +1933,227 @@ class TestCheckCommand:
         assert "No reviewable flagged dependencies found" in result.output
 
     @respx.mock
+    def test_init_review_file_multiline_registry_license_scaffold_stays_valid(self, tmp_path):
+        # A registry ``license`` string that spans lines must not leave its
+        # second line as live TOML: the scaffold has to stay loadable by the
+        # next ``check`` and by ``init-review-file --merge``.
+        (tmp_path / "package.json").write_text(
+            json.dumps(
+                {"name": "myproject", "license": "MIT", "dependencies": {"custom-lib": "1.0.0"}}
+            )
+        )
+        _mock_npm("custom-lib", "Custom license\nAll rights reserved.")
+
+        runner = CliRunner()
+        result = runner.invoke(main, ["init-review-file", "--path", str(tmp_path)])
+        assert result.exit_code == 0
+        content = (tmp_path / "licenseal.review.toml").read_text(encoding="utf-8")
+        assert "# raw: Custom license All rights reserved.\n" in content
+        assert load_review_file(tmp_path).incomplete == ["npm:custom-lib@1.0.0"]
+
+        result = runner.invoke(main, ["check", "--path", str(tmp_path)])
+        assert "Invalid licenseal.review.toml" not in result.output
+        assert "incomplete review entries were not applied: npm:custom-lib@1.0.0" in result.output
+
+        result = runner.invoke(main, ["init-review-file", "--path", str(tmp_path), "--merge"])
+        assert result.exit_code == 0
+        assert "No new flagged dependencies to add." in result.output
+
+    @respx.mock
+    def test_init_review_file_registry_license_cannot_forge_a_review_entry(self, tmp_path):
+        # A direct dependency's registry ``license`` string carries a line
+        # break followed by a complete, pre-filled stanza for a different
+        # package — a copyleft transitive of that same dependency. The live
+        # scaffold resolves direct dependencies only, so no legitimate stanza
+        # for the transitive would collide with a forged one.
+        hostile = (
+            "Custom terms\n"
+            "[[review]]\n"
+            'ecosystem = "npm"\n'
+            'package = "victim-lib"\n'
+            'version = "2.0.0"\n'
+            'license = "MIT"\n'
+            'note = "forged approval"'
+        )
+        (tmp_path / "package.json").write_text(
+            json.dumps(
+                {"name": "myproject", "license": "MIT", "dependencies": {"attacker-lib": "1.0.0"}}
+            )
+        )
+        respx.get("https://registry.npmjs.org/attacker-lib/1.0.0").mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "name": "attacker-lib",
+                    "version": "1.0.0",
+                    "license": hostile,
+                    "dependencies": {"victim-lib": "2.0.0"},
+                },
+            )
+        )
+        _mock_npm("victim-lib", "GPL-3.0-only", version="2.0.0")
+
+        runner = CliRunner()
+        result = runner.invoke(main, ["init-review-file", "--path", str(tmp_path)])
+        assert result.exit_code == 0
+        assert "with 1 review entry" in result.output
+        contents = load_review_file(tmp_path)
+        assert contents.licenses == {}
+        assert contents.incomplete == ["npm:attacker-lib@1.0.0"]
+
+        # The intended workflow: the maintainer fills in the one stanza the
+        # scaffold holds. That must not clear the copyleft transitive.
+        review_path = tmp_path / "licenseal.review.toml"
+        text = review_path.read_text(encoding="utf-8")
+        assert text.count('license = ""') == 1
+        review_path.write_text(text.replace('license = ""', 'license = "MIT"'), encoding="utf-8")
+
+        result = runner.invoke(main, ["check", "--path", str(tmp_path), "-f", "json"])
+        assert result.exit_code == 1
+        data = json.loads(result.output[result.output.index("{") :])
+        by_name = {dep["name"]: dep for dep in data["dependencies"]}
+        assert by_name["attacker-lib"]["reviewed"] is True
+        assert by_name["victim-lib"]["reviewed"] is False
+        assert by_name["victim-lib"]["license"] == "GPL-3.0-only"
+        assert by_name["victim-lib"]["verdict"] == "incompatible"
+        assert data["summary"]["reviewed"] == 1
+
+    def test_init_review_file_from_report_licenses_cannot_bracket_a_stanza(self, tmp_path):
+        # Two report rows bracket a legitimately flagged dependency: the first
+        # row's raw license forges a pre-filled stanza for it and leaves a
+        # multi-line string open as the note, the last row's closes it. The
+        # legitimate blank stanza in between would be swallowed into the
+        # forged note, so the duplicate-entry check never fires.
+        opener = (
+            "Custom terms\n"
+            "[[review]]\n"
+            'ecosystem = "npm"\n'
+            'package = "victim-lib"\n'
+            'version = "2.0.0"\n'
+            'license = "MIT"\n'
+            'note = """'
+        )
+        report_path = tmp_path / "report.json"
+        report_path.write_text(
+            json.dumps(
+                {
+                    "project_license": "MIT",
+                    "dependencies": [
+                        {
+                            "name": "a-opener",
+                            "ecosystem": "npm",
+                            "verdict": "unknown",
+                            "resolved_version": "1.0.0",
+                            "detected_license": "UNKNOWN",
+                            "license_raw": opener,
+                        },
+                        {
+                            "name": "victim-lib",
+                            "ecosystem": "npm",
+                            "verdict": "incompatible",
+                            "resolved_version": "2.0.0",
+                            "detected_license": "GPL-3.0-only",
+                            "license_raw": "GPL-3.0-only",
+                        },
+                        {
+                            "name": "z-closer",
+                            "ecosystem": "npm",
+                            "verdict": "unknown",
+                            "resolved_version": "1.0.0",
+                            "detected_license": "UNKNOWN",
+                            "license_raw": 'Custom terms\n"""',
+                        },
+                    ],
+                }
+            )
+        )
+
+        runner = CliRunner()
+        result = runner.invoke(
+            main,
+            ["init-review-file", "--path", str(tmp_path), "--from-report", str(report_path)],
+        )
+        assert result.exit_code == 0
+        assert "with 3 review entries" in result.output
+        contents = load_review_file(tmp_path)
+        assert contents.licenses == {}
+        assert sorted(contents.incomplete) == [
+            "npm:a-opener@1.0.0",
+            "npm:victim-lib@2.0.0",
+            "npm:z-closer@1.0.0",
+        ]
+
+    @pytest.mark.parametrize("newline", ["\n", "\r", "\r\n"])
+    def test_init_review_file_from_report_merge_appends_only_blank_stanzas(self, tmp_path, newline):
+        # ``--merge`` re-reads the file in text mode before appending, where a
+        # bare carriage return left in a comment would turn into a line break.
+        forged = newline.join(
+            [
+                "Custom terms",
+                "[[review]]",
+                'ecosystem = "npm"',
+                'package = "victim-lib"',
+                'version = "2.0.0"',
+                'license = "MIT"',
+                'note = "forged approval"',
+            ]
+        )
+        review_path = tmp_path / "licenseal.review.toml"
+        review_path.write_text(
+            textwrap.dedent("""\
+            [[review]]
+            ecosystem = "npm"
+            package = "old-lib"
+            version = "1.0.0"
+            license = "MIT"
+            note = "verified manually"
+            """),
+            encoding="utf-8",
+        )
+        report_path = tmp_path / "report.json"
+        report_path.write_text(
+            json.dumps(
+                {
+                    "project_license": "MIT",
+                    "dependencies": [
+                        {
+                            "name": "attacker-lib",
+                            "ecosystem": "npm",
+                            "verdict": "unknown",
+                            "resolved_version": "1.0.0",
+                            "detected_license": "UNKNOWN",
+                            "license_raw": forged,
+                        },
+                    ],
+                }
+            )
+        )
+        args = [
+            "init-review-file",
+            "--path",
+            str(tmp_path),
+            "--from-report",
+            str(report_path),
+            "--merge",
+        ]
+
+        runner = CliRunner()
+        result = runner.invoke(main, args)
+        assert result.exit_code == 0
+        assert "Appended 1 review entry" in result.output
+        contents = load_review_file(tmp_path)
+        assert contents.licenses == {"npm:old-lib@1.0.0": "MIT"}
+        assert contents.incomplete == ["npm:attacker-lib@1.0.0"]
+
+        # A second merge re-reads what the first one wrote.
+        result = runner.invoke(main, args)
+        assert result.exit_code == 0
+        assert "No new flagged dependencies to add." in result.output
+        contents = load_review_file(tmp_path)
+        assert contents.licenses == {"npm:old-lib@1.0.0": "MIT"}
+        assert contents.incomplete == ["npm:attacker-lib@1.0.0"]
+
+    @respx.mock
     def test_markdown_output(self, tmp_path):
         (tmp_path / "pyproject.toml").write_text(
             textwrap.dedent("""\

@@ -301,10 +301,52 @@ def flagged_entries_from_json_report(
                 version=version_text,
                 detected_license=str(detected),
                 license_raw=str(raw.get("license_raw") or ""),
-                verdict=verdict or "unknown",
+                verdict=str(verdict or "unknown"),
             )
         )
     return entries, unscaffoldable
+
+
+# Longest value shown on a generated ``#`` comment line. The comment is a hint
+# for the reviewer; the full string stays in the scan report's own fields.
+_COMMENT_VALUE_MAX = 200
+
+
+def _comment_text(value: str) -> str:
+    """One-line, bounded rendering of an untrusted value for a ``#`` comment.
+
+    Registry and report strings are unbounded free text and may span lines.
+    Anything after a line break in a comment would be parsed as live TOML, so
+    every whitespace, control, and other non-printable character (a bare
+    carriage return and the Unicode line separators included) collapses to a
+    single space, and the result is capped.
+    """
+    text = "".join(ch if ch.isprintable() else " " for ch in value)
+    text = " ".join(text.split())
+    if len(text) > _COMMENT_VALUE_MAX:
+        text = text[: _COMMENT_VALUE_MAX - 1] + "…"
+    return text
+
+
+def _toml_basic_string(value: str) -> str:
+    """Serialize ``value`` as a quoted, single-line TOML basic string.
+
+    Backslashes and double quotes are escaped, and every non-printable
+    character (control characters and line separators included) is written as
+    a ``\\uXXXX`` / ``\\UXXXXXXXX`` escape, so the value cannot close the
+    string or start a new line and parses back unchanged.
+    """
+    parts: list[str] = []
+    for ch in value:
+        if ch in ('"', "\\"):
+            parts.append("\\" + ch)
+        elif ch.isprintable():
+            parts.append(ch)
+        elif ord(ch) <= 0xFFFF:
+            parts.append(f"\\u{ord(ch):04X}")
+        else:
+            parts.append(f"\\U{ord(ch):08X}")
+    return '"' + "".join(parts) + '"'
 
 
 def render_review_template(
@@ -312,7 +354,13 @@ def render_review_template(
     *,
     include_header: bool = True,
 ) -> str:
-    """Render a review template for the given flagged entries."""
+    """Render a review template for the given flagged entries.
+
+    Entry fields come from registry metadata, manifests, or a saved report
+    and are written as data only: each comment stays one comment line and
+    each value one escaped string, so an entry can never add, alter, or
+    pre-fill a ``[[review]]`` stanza.
+    """
     if not entries:
         return ""
     lines: list[str] = []
@@ -323,15 +371,16 @@ def render_review_template(
         )
         lines.append("")
     for entry in entries:
-        detected = entry.detected_license or "UNKNOWN"
+        detected = _comment_text(entry.detected_license) or "UNKNOWN"
+        raw = _comment_text(entry.license_raw)
         lines.append(f"# detected: {detected}")
-        lines.append(f"# status: {entry.verdict}")
-        if entry.license_raw and entry.license_raw != detected:
-            lines.append(f"# raw: {entry.license_raw}")
+        lines.append(f"# status: {_comment_text(entry.verdict) or 'unknown'}")
+        if raw and raw != detected:
+            lines.append(f"# raw: {raw}")
         lines.append("[[review]]")
-        lines.append(f'ecosystem = "{entry.ecosystem}"')
-        lines.append(f'package = "{entry.name}"')
-        lines.append(f'version = "{entry.version}"')
+        lines.append(f"ecosystem = {_toml_basic_string(entry.ecosystem)}")
+        lines.append(f"package = {_toml_basic_string(entry.name)}")
+        lines.append(f"version = {_toml_basic_string(entry.version)}")
         lines.append('license = ""')
         lines.append('note = ""')
         lines.append("")

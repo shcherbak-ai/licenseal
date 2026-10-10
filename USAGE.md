@@ -137,6 +137,8 @@ Workflow:
 3. Fill in `license` (and optionally `note`) for each entry
 4. `licenseal check` again — overrides apply
 
+Each scaffolded stanza is preceded by `# detected:`, `# status:`, and (when it differs from the detected license) `# raw:` comment lines. Their values are collapsed to a single line and truncated at 200 characters; the full registry string is the `license_raw` field of the JSON report.
+
 When new flagged dependencies appear later, run `licenseal init-review-file --merge` to **add new stanzas** to the existing file. Existing entries are preserved verbatim.
 
 Rules at a glance:
