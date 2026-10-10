@@ -15,6 +15,24 @@ tethered.activate(allow=[])
 
 
 @pytest.fixture(autouse=True)
+def _pin_terminal_environment(monkeypatch):
+    """Run every test as if the output were an 80-column pipe, whatever the host is.
+
+    The CLI builds its consoles from the environment, so a host that sets
+    ``FORCE_COLOR``, ``NO_COLOR``, ``TERM=dumb``, or a terminal size would
+    otherwise change the output the tests capture. A test that needs a
+    different terminal sets its own values on top of these.
+
+    ``LINES`` is removed rather than set: with both dimensions fixed, Rich
+    reports a legacy Windows console as one column narrower than the width it
+    was given.
+    """
+    for name in ("TERM", "FORCE_COLOR", "NO_COLOR", "LINES", "TTY_COMPATIBLE", "TTY_INTERACTIVE"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("COLUMNS", "80")
+
+
+@pytest.fixture(autouse=True)
 def _default_deps_dev_batch_mock(request):
     """Pre-register an empty deps.dev batch response on the global respx router.
 
