@@ -164,10 +164,10 @@ _NORMALIZATION_MAP: dict[str, str] = {
     "gplv2 with classpath exception": "GPL-2.0-with-classpath-exception",
     "gpl v2 with classpath exception": "GPL-2.0-with-classpath-exception",
     "gpl v2 with the classpath exception": "GPL-2.0-with-classpath-exception",
-    # Same shape as the longer "Dual license consisting of..." entries
-    # below, but the short publisher phrasing seen in Sun/Oracle
-    # artifacts and other JVM artifacts.
-    "cddl or gpl 2 with classpath exception": "CDDL-1.0 AND GPL-2.0-with-classpath-exception",
+    # Same dual license as the longer "Dual license consisting of..."
+    # entries below, in the short publisher phrasing seen in Sun/Oracle
+    # artifacts and other JVM artifacts. The name states the choice.
+    "cddl or gpl 2 with classpath exception": "CDDL-1.0 OR GPL-2.0-with-classpath-exception",
     "cddl v1.1 / gpl v2 dual license": "CDDL-1.1 AND GPL-2.0-only",
     # Eclipse-foundation prose variant with ``v.`` (period after ``v``).
     "eclipse public license v. 1.0": "EPL-1.0",
@@ -175,10 +175,11 @@ _NORMALIZATION_MAP: dict[str, str] = {
     # ``Dual license consisting of the CDDL v1.1 and GPL v2`` — the Sun /
     # OpenJDK pattern (different phrasing than ``CDDL +
     # GPLv2 with classpath exception``); used across the JSR-spec API
-    # family. Has the same legal substance as the CDDL+GPL+CPE compound.
-    "dual license consisting of the cddl v1.1 and gpl v2": "CDDL-1.1 AND GPL-2.0-with-classpath-exception",
-    "dual license consisting of the cddl v1.0 and gpl v2": "CDDL-1.0 AND GPL-2.0-with-classpath-exception",
-    "dual license consisting of the cddl v1.1 and gpl 2": "CDDL-1.1 AND GPL-2.0-with-classpath-exception",
+    # family. Has the same legal substance as the CDDL+GPL+CPE compound:
+    # a dual license, so either license may be taken.
+    "dual license consisting of the cddl v1.1 and gpl v2": "CDDL-1.1 OR GPL-2.0-with-classpath-exception",
+    "dual license consisting of the cddl v1.0 and gpl v2": "CDDL-1.0 OR GPL-2.0-with-classpath-exception",
+    "dual license consisting of the cddl v1.1 and gpl 2": "CDDL-1.1 OR GPL-2.0-with-classpath-exception",
     "3-clause bsd": "BSD-3-Clause",
     "3 clause bsd": "BSD-3-Clause",
     "3-clause bsd license": "BSD-3-Clause",
@@ -423,10 +424,12 @@ _NORMALIZATION_MAP: dict[str, str] = {
     "common development and distribution license (cddl) version 1.1": "CDDL-1.1",
     # The GlassFish dual-license shorthand (CDDL + GPL-2.0-with-classpath-
     # exception) for javax.* APIs that Sun originally released under both.
-    "cddl+gpl": "CDDL-1.0 AND GPL-2.0-with-classpath-exception",
-    "cddl+gpl license": "CDDL-1.0 AND GPL-2.0-with-classpath-exception",
-    "cddl + gpl": "CDDL-1.0 AND GPL-2.0-with-classpath-exception",
-    "cddl/gplv2+ce": "CDDL-1.0 AND GPL-2.0-with-classpath-exception",
+    # Each of these strings is a name of that one dual license, whose terms
+    # let the recipient take either license; none is a list of two.
+    "cddl+gpl": "CDDL-1.0 OR GPL-2.0-with-classpath-exception",
+    "cddl+gpl license": "CDDL-1.0 OR GPL-2.0-with-classpath-exception",
+    "cddl + gpl": "CDDL-1.0 OR GPL-2.0-with-classpath-exception",
+    "cddl/gplv2+ce": "CDDL-1.0 OR GPL-2.0-with-classpath-exception",
     # Sun/Oracle ``javax.*`` API canonical publisher string — used verbatim
     # across the JSR specification artifacts.
     # Without this entry the embedded ``+`` and free-form ``with classpath
@@ -434,10 +437,10 @@ _NORMALIZATION_MAP: dict[str, str] = {
     # name falls through to UNKNOWN; the resolver then probes deps.dev,
     # which returns ``"non-standard"`` for these artifacts, and the result
     # gets classified as Proprietary — losing real CDDL+GPL+CPE signal.
-    "cddl + gplv2 with classpath exception": "CDDL-1.0 AND GPL-2.0-with-classpath-exception",
-    "cddl + gpl2 with classpath exception": "CDDL-1.0 AND GPL-2.0-with-classpath-exception",
-    "cddl+gplv2 with classpath exception": "CDDL-1.0 AND GPL-2.0-with-classpath-exception",
-    "cddl + gpl with the classpath exception": "CDDL-1.0 AND GPL-2.0-with-classpath-exception",
+    "cddl + gplv2 with classpath exception": "CDDL-1.0 OR GPL-2.0-with-classpath-exception",
+    "cddl + gpl2 with classpath exception": "CDDL-1.0 OR GPL-2.0-with-classpath-exception",
+    "cddl+gplv2 with classpath exception": "CDDL-1.0 OR GPL-2.0-with-classpath-exception",
+    "cddl + gpl with the classpath exception": "CDDL-1.0 OR GPL-2.0-with-classpath-exception",
     # GPL-2.0-with-classpath-exception abbreviations seen in JVM API POMs.
     "gpl2 w/ cpe": "GPL-2.0-with-classpath-exception",
     "gpl2 w/cpe": "GPL-2.0-with-classpath-exception",
@@ -1064,36 +1067,35 @@ _GPL_VARIANT_RE = re.compile(
 _CDDL_GPL_CPE_AND_RE = re.compile(r"^CDDL-\d+(?:\.\d+)* AND GPL-2\.0-with-classpath-exception$")
 
 
-def _collapse_redundant_license_pairs(expr: str) -> str:
-    """Rewrite AND-chains where one license is a redundant inclusion of another.
+def collapse_bundled_license_pairs(expr: str) -> str:
+    """Rewrite the two license pairs a deps.dev array lists side by side
+    without both binding.
 
-    Two patterns, both narrow and ecosystem-observed:
+    For the conjunction a multi-entry deps.dev ``licenses`` array is joined
+    into, and nothing else: an entry there is a license text the matcher
+    found, not an operand a publisher wrote. An expression from any other
+    source, the join of a POM's ``<licenses>`` and a review entry keep their
+    operators and never pass through here.
 
     * ``LGPL-X.Y AND GPL-X.Y`` → ``LGPL-X.Y``. The LGPL license text
       embeds the GPL by reference (LGPL packages routinely ship both
       LICENSE files), so deps.dev's ``licensecheck`` returns both when
       it scans the source tree. Complying with LGPL already satisfies
-      GPL — the AND-join is the publisher-bundled-both pattern, not a
-      dual-license declaration. Triggered when the AND-chain contains
+      GPL. Triggered when the AND-chain contains
       ``LGPL-X.Y[-only|-or-later]`` and any ``GPL-X.Y[-only|-or-later]``
       of the same X.Y; the GPL variants are dropped. The LGPL-2.1 +
       GPL-2.0 case is also covered (LGPL-2.1 explicitly references
-      GPL-2.0). Without this, a package with an LGPL-3.0 publisher
-      declaration that ships LICENSE.GPL alongside would classify as
-      strong-copyleft / violation when AND-aggregated.
+      GPL-2.0).
 
     * Exact ``CDDL-X.Y AND GPL-2.0-with-classpath-exception`` →
       ``CDDL-X.Y OR GPL-2.0-with-classpath-exception``. The
-      Sun/Oracle dual-license shorthand used by ``javax.*`` APIs and
-      most Jakarta EE specifications. Maven POM `<licenses>` has no
-      OR operator, so the convention is to list both under AND even
-      though publisher intent is OR (either license suffices). Narrow
-      to the exact two-operand shape so we don't reinterpret AND in
-      multi-license compounds that may genuinely intend all-apply.
+      Sun/Oracle dual license used by ``javax.*`` APIs and most Jakarta
+      EE specifications, whose two license texts arrive as two entries.
+      Narrow to the exact two-operand shape so an AND in a longer
+      compound, which may genuinely mean all-apply, is not reinterpreted.
 
-    Operates on the operand-canonicalized form (called from
-    :func:`normalize_license` after :func:`_canonicalize_spdx_operands`),
-    so operand order is deterministic and string-matching is safe.
+    ``expr`` is a normalized expression (:func:`normalize_license`), so
+    operand order is deterministic and string-matching is safe.
     """
     # Exact-shape Sun/Oracle javax.* pattern: rewrite AND → OR.
     if _CDDL_GPL_CPE_AND_RE.match(expr):
@@ -1141,18 +1143,14 @@ def normalize_license(raw: str) -> str:
     and common variations. Compound SPDX expressions in the result are
     operand-canonicalized (``OR``/``AND`` children sorted
     case-insensitively at every level) so equality comparison reflects
-    SPDX semantics rather than source string order. Known
-    redundant-inclusion patterns (``LGPL+GPL`` of the same family,
-    Sun/Oracle's ``CDDL+GPL-with-classpath-exception`` AND-shorthand for
-    publisher-intended-OR dual licensing) are also collapsed — see
-    :func:`_collapse_redundant_license_pairs`.
+    SPDX semantics rather than source string order. The operators of an
+    expression are kept as written: ``GPL-3.0-only AND LGPL-3.0-only`` is
+    both licenses.
 
     Normalizing a result again returns it unchanged, for any result
     within the expression length limit of :func:`_looks_like_spdx`.
     """
-    return _collapse_redundant_license_pairs(
-        _canonicalize_spdx_operands(_normalize_license_inner(raw))
-    )
+    return _canonicalize_spdx_operands(_normalize_license_inner(raw))
 
 
 def _normalize_license_inner(raw: str) -> str:

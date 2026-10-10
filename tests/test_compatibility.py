@@ -16,7 +16,11 @@ from licenseal.analysis.compatibility import (
     check_compatibility,
     is_recognised_project_license,
 )
-from licenseal.analysis.spdx import and_join_licenses, normalize_license
+from licenseal.analysis.spdx import (
+    and_join_licenses,
+    collapse_bundled_license_pairs,
+    normalize_license,
+)
 from licenseal.cli import main
 from licenseal.models import (
     CompatibilityVerdict,
@@ -1241,11 +1245,42 @@ class TestDeprecatedIdPairConflicts:
         assert analyze("GPL-2.0+ OR MIT", []).project_license == "GPL-2.0-or-later OR MIT"
 
     def test_survivor_of_a_collapsed_pair_conflicts_like_its_current_id(self):
-        # ``LGPL-3.0 AND GPL-3.0`` collapses to its LGPL operand, which a
-        # GPL-2.0-only project cannot take.
-        li = _make_license_info(normalize_license("LGPL-3.0 AND GPL-3.0"))
+        # In a deps.dev array, ``LGPL-3.0`` beside ``GPL-3.0`` collapses to
+        # its LGPL entry, which a GPL-2.0-only project cannot take.
+        li = _make_license_info(
+            collapse_bundled_license_pairs(normalize_license("LGPL-3.0 AND GPL-3.0"))
+        )
         assert li.license_id == "LGPL-3.0-only"
         assert check_compatibility("GPL-2.0-only", li).verdict == CompatibilityVerdict.INCOMPATIBLE
+
+    def test_written_conjunction_of_lgpl_and_gpl_binds_both(self):
+        # The same two licenses in an expression a publisher wrote, or in a
+        # review entry, are both binding: a violation for a permissive
+        # project, where the LGPL alone is a warning.
+        li = _make_license_info(normalize_license("GPL-3.0-only AND LGPL-3.0-only"))
+        assert li.license_id == "GPL-3.0-only AND LGPL-3.0-only"
+        assert check_compatibility("MIT", li).verdict == CompatibilityVerdict.INCOMPATIBLE
+        reviewed = _make_license_info("UNKNOWN")
+        reviewed.reviewed_license_id = normalize_license("GPL-3.0-only AND LGPL-3.0-only")
+        assert check_compatibility("MIT", reviewed).verdict == CompatibilityVerdict.INCOMPATIBLE
+        alone = _make_license_info("LGPL-3.0-only")
+        assert check_compatibility("MIT", alone).verdict == CompatibilityVerdict.WARNING
+
+    def test_written_cddl_gpl_classpath_conjunction_binds_both(self):
+        # CDDL-1.0 is a pair-level violation in a GPL project. The dual
+        # license escapes it through the GPL arm; a written AND does not.
+        both = _make_license_info(
+            normalize_license("CDDL-1.0 AND GPL-2.0-with-classpath-exception")
+        )
+        assert check_compatibility("GPL-3.0-only", both).verdict == (
+            CompatibilityVerdict.INCOMPATIBLE
+        )
+        either = _make_license_info(
+            normalize_license("CDDL-1.0 OR GPL-2.0-with-classpath-exception")
+        )
+        assert check_compatibility("GPL-3.0-only", either).verdict == (
+            CompatibilityVerdict.COMPATIBLE
+        )
 
     def test_permissive_project_verdicts_are_the_control(self):
         # The risk class comes from the ID's family prefix, so a permissive

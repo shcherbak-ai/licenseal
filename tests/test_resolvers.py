@@ -3701,6 +3701,59 @@ class TestDepsDevMultiEntryGrouping:
         assert check_compatibility("MIT", info).verdict == CompatibilityVerdict.COMPATIBLE
 
     @pytest.mark.parametrize(
+        "licenses, expected, raw, verdict",
+        [
+            # A GPL text listed beside the LGPL that refers to it.
+            (
+                ["LGPL-3.0", "GPL-3.0"],
+                "LGPL-3.0-only",
+                "LGPL-3.0 AND GPL-3.0",
+                CompatibilityVerdict.WARNING,
+            ),
+            (
+                ["GPL-2.0-only", "LGPL-2.1-or-later", "MIT"],
+                "LGPL-2.1-or-later AND MIT",
+                "GPL-2.0-only AND LGPL-2.1-or-later AND MIT",
+                CompatibilityVerdict.WARNING,
+            ),
+            # The CDDL + GPL-with-Classpath dual license listed as two entries.
+            (
+                ["GPL-2.0-with-classpath-exception", "CDDL-1.1"],
+                "CDDL-1.1 OR GPL-2.0-with-classpath-exception",
+                "GPL-2.0-with-classpath-exception AND CDDL-1.1",
+                CompatibilityVerdict.WARNING,
+            ),
+            # One entry that is itself an expression keeps its operators.
+            (
+                ["GPL-3.0-only AND LGPL-3.0-only"],
+                "GPL-3.0-only AND LGPL-3.0-only",
+                "GPL-3.0-only AND LGPL-3.0-only",
+                CompatibilityVerdict.INCOMPATIBLE,
+            ),
+            (
+                ["CDDL-1.0 AND GPL-2.0-with-classpath-exception"],
+                "CDDL-1.0 AND GPL-2.0-with-classpath-exception",
+                "CDDL-1.0 AND GPL-2.0-with-classpath-exception",
+                CompatibilityVerdict.WARNING,
+            ),
+        ],
+    )
+    @respx.mock
+    def test_bundled_pairs_are_rewritten_only_in_a_multi_entry_array(
+        self, licenses, expected, raw, verdict
+    ):
+        info = self._resolve(licenses)
+        assert info.license_id == expected
+        assert info.license_raw == raw
+        assert check_compatibility("MIT", info).verdict == verdict
+
+    def test_rubygems_array_is_not_a_conjunction_and_is_not_rewritten(self):
+        info = _license_info_from_version_object(
+            _go_dep(), "1.0.0", {"licenses": ["LGPL-3.0", "GPL-3.0"]}, system="RUBYGEMS"
+        )
+        assert info.license_id == "GPL-3.0-only OR LGPL-3.0-only"
+
+    @pytest.mark.parametrize(
         "licenses, expected",
         [
             (["GPL-3.0", "MIT"], "GPL-3.0-only AND MIT"),

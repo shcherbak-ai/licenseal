@@ -14,6 +14,7 @@ from licenseal.analysis.spdx import (
     _looks_like_spdx,
     and_join_licenses,
     canonical_license_id,
+    collapse_bundled_license_pairs,
     malformed_expression_conjunction,
     normalize_license,
     normalize_r_license,
@@ -340,14 +341,11 @@ class TestPublisherAliasGapsClosedByBench:
         assert normalize_license("GPL v2 with the Classpath exception") == cpe
 
     def test_short_cddl_or_gpl_dual_variants(self):
-        # Short publisher phrasings. The
-        # ``CDDL + GPL-2.0-with-classpath-exception`` two-license shape
-        # is the Sun/Oracle dual-license pattern — publisher intent is
-        # OR (either license suffices), and the collapse step in
-        # ``normalize_license`` rewrites the alias map's literal AND
-        # back to OR. The ``CDDL v1.1 / GPL v2`` variant (no classpath
-        # exception) is not part of the OR-shorthand convention and
-        # stays as the literal AND from the alias map.
+        # Short publisher phrasings. The first names the Sun/Oracle dual
+        # license and states the choice itself, so the alias map reads it
+        # as OR. The ``CDDL v1.1 / GPL v2`` variant (no classpath
+        # exception) is not that dual license and stays as the literal
+        # AND from the alias map.
         assert (
             normalize_license("CDDL or GPL 2 with Classpath Exception")
             == "CDDL-1.0 OR GPL-2.0-with-classpath-exception"
@@ -1024,13 +1022,12 @@ class TestNormalizeIdempotence:
             "(MIT or Apache-2.0) and GPL-3.0-only",
             "CDDL+GPL and MIT",
             "MIT, LicenseRef-custom",
-            # Rewritten pairs.
+            # The pairs the deps.dev join rewrites.
             "CDDL-1.0 AND GPL-2.0-with-classpath-exception",
             "Apache-2.0 AND CDDL-1.0 AND GPL-2.0-with-classpath-exception",
             "LGPL-3.0-only AND GPL-3.0-or-later",
             "Apache-2.0 AND GPL-3.0-only AND LGPL-3.0-only",
-            # Deprecated GNU spellings: alone, in compounds, from URLs, and as
-            # the survivors of a rewritten pair.
+            # Deprecated GNU spellings: alone, in compounds, and from URLs.
             "GPL-2.0",
             "GPL-3.0+",
             "LGPL-3.0+",
@@ -1165,74 +1162,72 @@ class TestLowercaseConnectorPrecedence:
         assert normalize_license("MIT or Apache-2.0 AND GPL-3.0-only") == "UNKNOWN"
 
 
-class TestRedundantLicensePairCollapse:
-    """Pattern-level cleanup for SPDX AND-chains where one license is a
-    redundant inclusion of another (LGPL imports GPL by reference) or
-    where AND is a POM-convention artifact for publisher-intended OR
-    (Sun/Oracle javax.* family).
+class TestBundledLicensePairs:
+    """The two pairs the deps.dev join rewrites in a multi-entry ``licenses``
+    array: a GPL text listed beside the LGPL that refers to it, and the
+    Sun/Oracle CDDL + GPL-with-Classpath dual license listed as two entries.
 
-    Covers regressions surfaced by deps.dev's licensecheck enumerating
-    all LICENSE files in a package's source tree — see :func:
-    `licenseal.analysis.spdx._collapse_redundant_license_pairs`.
+    :func:`collapse_bundled_license_pairs` takes the normalized join, as the
+    deps.dev resolver hands it over.
     """
+
+    @staticmethod
+    def _joined(expression: str) -> str:
+        return collapse_bundled_license_pairs(normalize_license(expression))
 
     def test_lgpl_and_gpl_same_version_collapses_to_lgpl(self):
         # An LGPL package that also ships the GPL text, after operand canonicalization:
         # GPL-3.0 AND GPL-3.0-or-later AND LGPL-3.0 → LGPL-3.0. The surviving
         # LGPL operand is in its current spelling.
-        assert normalize_license("LGPL-3.0 AND GPL-3.0") == "LGPL-3.0-only"
-        assert normalize_license("GPL-3.0 AND LGPL-3.0") == "LGPL-3.0-only"
-        assert normalize_license("GPL-3.0 AND GPL-3.0-or-later AND LGPL-3.0") == "LGPL-3.0-only"
-        assert normalize_license("GPL-3.0+ AND LGPL-3.0+") == "LGPL-3.0-or-later"
+        assert self._joined("LGPL-3.0 AND GPL-3.0") == "LGPL-3.0-only"
+        assert self._joined("GPL-3.0 AND LGPL-3.0") == "LGPL-3.0-only"
+        assert self._joined("GPL-3.0 AND GPL-3.0-or-later AND LGPL-3.0") == "LGPL-3.0-only"
+        assert self._joined("GPL-3.0+ AND LGPL-3.0+") == "LGPL-3.0-or-later"
 
     def test_lgpl_2_1_and_gpl_2_0_collapses(self):
         # LGPL-2.1 explicitly references GPL-2.0 in its text — same
         # inclusion relationship as the matching-X.Y case.
-        assert normalize_license("LGPL-2.1 AND GPL-2.0") == "LGPL-2.1-only"
-        assert normalize_license("GPL-2.0-only AND LGPL-2.1-only") == "LGPL-2.1-only"
+        assert self._joined("LGPL-2.1 AND GPL-2.0") == "LGPL-2.1-only"
+        assert self._joined("GPL-2.0-only AND LGPL-2.1-only") == "LGPL-2.1-only"
 
     def test_lgpl_only_and_gpl_or_later_variants_collapse(self):
         # ``-only`` / ``-or-later`` SPDX suffixes shouldn't block the
         # match — the inclusion relation is per license family, not
         # per exact identifier string.
-        assert normalize_license("LGPL-3.0-only AND GPL-3.0-or-later") == "LGPL-3.0-only"
+        assert self._joined("LGPL-3.0-only AND GPL-3.0-or-later") == "LGPL-3.0-only"
 
     def test_lgpl_without_gpl_left_alone(self):
-        # LGPL by itself is not a collapse case (and the alias map
-        # rewrites bare LGPL-3.0 to LGPL-3.0-only — orthogonal step).
-        assert normalize_license("LGPL-3.0") == "LGPL-3.0-only"
-        assert normalize_license("LGPL-3.0-only") == "LGPL-3.0-only"
+        assert self._joined("LGPL-3.0") == "LGPL-3.0-only"
+        assert self._joined("LGPL-3.0-only AND MIT") == "LGPL-3.0-only AND MIT"
 
     def test_gpl_without_lgpl_left_alone(self):
         # GPL by itself stays as-is — the inclusion only goes one way.
-        # (Bare GPL-3.0 rewrites to GPL-3.0-only via the alias map.)
-        assert normalize_license("GPL-3.0") == "GPL-3.0-only"
-        assert normalize_license("GPL-2.0-only AND GPL-3.0-only") == "GPL-2.0-only AND GPL-3.0-only"
+        assert self._joined("GPL-3.0") == "GPL-3.0-only"
+        assert self._joined("GPL-2.0-only AND GPL-3.0-only") == "GPL-2.0-only AND GPL-3.0-only"
 
     def test_mismatched_versions_not_collapsed(self):
         # LGPL-3.0 + GPL-2.0 is NOT a known inclusion pair (LGPL-3.0
         # references GPL-3.0, not GPL-2.0). Keep AND.
-        assert normalize_license("LGPL-3.0 AND GPL-2.0") == "GPL-2.0-only AND LGPL-3.0-only"
+        assert self._joined("LGPL-3.0 AND GPL-2.0") == "GPL-2.0-only AND LGPL-3.0-only"
 
     def test_lgpl_and_gpl_chain_with_other_licenses(self):
         # Mixed compound: LGPL+GPL+Apache. Drop the GPL (LGPL subsumes
         # it), keep Apache. The result is the operand-canonical join of
         # the remaining two.
-        assert (
-            normalize_license("Apache-2.0 AND GPL-3.0 AND LGPL-3.0")
-            == "Apache-2.0 AND LGPL-3.0-only"
+        assert self._joined("Apache-2.0 AND GPL-3.0 AND LGPL-3.0") == (
+            "Apache-2.0 AND LGPL-3.0-only"
         )
 
     def test_cddl_and_gpl_classpath_exception_becomes_or(self):
-        # The Sun/Oracle javax.* dual-license convention: POM forces
-        # AND but publisher intent is OR. Exact two-operand shape only.
+        # The Sun/Oracle javax.* dual license, listed as two entries. Exact
+        # two-operand shape only.
         assert (
-            normalize_license("CDDL-1.0 AND GPL-2.0-with-classpath-exception")
+            self._joined("CDDL-1.0 AND GPL-2.0-with-classpath-exception")
             == "CDDL-1.0 OR GPL-2.0-with-classpath-exception"
         )
         # CDDL-1.1 variant — same Sun/Oracle pattern.
         assert (
-            normalize_license("CDDL-1.1 AND GPL-2.0-with-classpath-exception")
+            self._joined("CDDL-1.1 AND GPL-2.0-with-classpath-exception")
             == "CDDL-1.1 OR GPL-2.0-with-classpath-exception"
         )
 
@@ -1241,9 +1236,73 @@ class TestRedundantLicensePairCollapse:
         # rewrite. A three-license chain might genuinely be all-apply,
         # so we leave it. ``Apache-2.0 AND CDDL-1.0 AND
         # GPL-2.0-with-classpath-exception`` keeps its AND.
-        result = normalize_license("Apache-2.0 AND CDDL-1.0 AND GPL-2.0-with-classpath-exception")
+        result = self._joined("Apache-2.0 AND CDDL-1.0 AND GPL-2.0-with-classpath-exception")
         assert " OR " not in result
         assert result == "Apache-2.0 AND CDDL-1.0 AND GPL-2.0-with-classpath-exception"
+
+    def test_expression_without_a_conjunction_is_left_alone(self):
+        for expression in ("MIT", "GPL-3.0-only OR LGPL-3.0-only", "UNKNOWN"):
+            assert self._joined(expression) == expression
+
+
+class TestExpressionOperatorsAreKept:
+    """``normalize_license`` keeps the operators of an expression: the pair
+    rewrites belong to the deps.dev join alone."""
+
+    @pytest.mark.parametrize(
+        "raw, expected",
+        [
+            ("LGPL-3.0 AND GPL-3.0", "GPL-3.0-only AND LGPL-3.0-only"),
+            ("GPL-3.0-only AND LGPL-3.0-only", "GPL-3.0-only AND LGPL-3.0-only"),
+            ("GPL-3.0+ AND LGPL-3.0+", "GPL-3.0-or-later AND LGPL-3.0-or-later"),
+            ("LGPL-2.1 AND GPL-2.0", "GPL-2.0-only AND LGPL-2.1-only"),
+            (
+                "Apache-2.0 AND GPL-3.0 AND LGPL-3.0",
+                "Apache-2.0 AND GPL-3.0-only AND LGPL-3.0-only",
+            ),
+            (
+                "CDDL-1.0 AND GPL-2.0-with-classpath-exception",
+                "CDDL-1.0 AND GPL-2.0-with-classpath-exception",
+            ),
+            (
+                "CDDL-1.1 AND GPL-2.0-with-classpath-exception",
+                "CDDL-1.1 AND GPL-2.0-with-classpath-exception",
+            ),
+            # Lowercase connectors and a license name that spells out "AND".
+            ("GPL-3.0-only and LGPL-3.0-only", "GPL-3.0-only AND LGPL-3.0-only"),
+            ("CDDL 1.1 AND GPL2 w/ CPE", "CDDL-1.1 AND GPL-2.0-with-classpath-exception"),
+            ("EPL 2.0 AND GPL2 w/ CPE", "EPL-2.0 AND GPL-2.0-with-classpath-exception"),
+        ],
+    )
+    def test_conjunction_keeps_every_operand(self, raw, expected):
+        assert normalize_license(raw) == expected
+
+    @pytest.mark.parametrize(
+        "name",
+        [
+            "CDDL or GPL 2 with Classpath Exception",
+            "Dual license consisting of the CDDL v1.0 and GPL v2",
+            "CDDL+GPL",
+            "CDDL+GPL License",
+            "CDDL + GPL",
+            "CDDL/GPLv2+CE",
+            "CDDL + GPLv2 with classpath exception",
+            "CDDL + GPL2 with classpath exception",
+            "CDDL+GPLv2 with classpath exception",
+            "CDDL + GPL with the classpath exception",
+        ],
+    )
+    def test_names_of_the_cddl_gpl_dual_license_are_a_choice(self, name):
+        # One license name, not a list: the dual license it names lets the
+        # recipient take either license.
+        assert normalize_license(name) == "CDDL-1.0 OR GPL-2.0-with-classpath-exception"
+
+    def test_cddl_1_1_dual_license_names_are_a_choice(self):
+        for name in (
+            "Dual license consisting of the CDDL v1.1 and GPL v2",
+            "Dual license consisting of the CDDL v1.1 and GPL 2",
+        ):
+            assert normalize_license(name) == "CDDL-1.1 OR GPL-2.0-with-classpath-exception"
 
 
 class TestNormalizeRLicense:

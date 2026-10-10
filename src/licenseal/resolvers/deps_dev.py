@@ -39,7 +39,11 @@ from typing import Any, cast
 import httpx
 
 from licenseal._concurrency import map_with_context
-from licenseal.analysis.spdx import and_join_licenses, normalize_license
+from licenseal.analysis.spdx import (
+    and_join_licenses,
+    collapse_bundled_license_pairs,
+    normalize_license,
+)
 from licenseal.models import Dependency, LicenseInfo
 from licenseal.resolvers.http import (
     Fetcher,
@@ -158,7 +162,10 @@ def _licenses_to_spdx(licenses_field: object, *, system: str = "") -> str:
     * For every other system, join with ``AND`` (the conservative /
       more-restrictive choice; the user can override via
       ``licenseal.review.toml``). An entry that is itself an ``OR``
-      expression is parenthesised, so every entry stays binding.
+      expression is parenthesised, so every entry stays binding. Two pairs
+      of entries that the matcher reports side by side without both
+      binding are rewritten when the join is normalized
+      (:func:`~licenseal.analysis.spdx.collapse_bundled_license_pairs`).
 
     deps.dev surfaces ``"non-standard"`` for packages whose ``<licenseUrl>``
     (NuGet) or ``<license>`` (Maven) tag couldn't be matched to an SPDX
@@ -177,20 +184,7 @@ def _licenses_to_spdx(licenses_field: object, *, system: str = "") -> str:
     filter leaves the list empty, the caller surfaces UNKNOWN, which
     is the accurate signal for "deps.dev couldn't classify".
     """
-    if not isinstance(licenses_field, list):
-        return ""
-    collected: list[str] = []
-    seen: set[str] = set()
-    for entry in licenses_field:
-        if not isinstance(entry, str) or not entry:
-            continue
-        if entry.strip().lower() == "non-standard":
-            # deps.dev's "I can't classify this" signal; do NOT route to
-            # the publisher-authored "non-standard" → Proprietary alias.
-            continue
-        if entry not in seen:
-            seen.add(entry)
-            collected.append(entry)
+    collected = _license_entries(licenses_field)
     if not collected:
         return ""
     if len(collected) == 1:
@@ -198,6 +192,27 @@ def _licenses_to_spdx(licenses_field: object, *, system: str = "") -> str:
     if system in _DISJUNCTIVE_MULTI_LICENSE_SYSTEMS:
         return " OR ".join(collected)
     return and_join_licenses(collected)
+
+
+def _license_entries(licenses_field: object) -> list[str]:
+    """Distinct license entries of a ``licenses`` array, in the order given.
+
+    Non-string and empty entries are skipped, and so is ``"non-standard"``
+    (see :func:`_licenses_to_spdx`).
+    """
+    if not isinstance(licenses_field, list):
+        return []
+    collected: list[str] = []
+    for entry in licenses_field:
+        if not isinstance(entry, str) or not entry:
+            continue
+        if entry.strip().lower() == "non-standard":
+            # deps.dev's "I can't classify this" signal; do NOT route to
+            # the publisher-authored "non-standard" → Proprietary alias.
+            continue
+        if entry not in collected:
+            collected.append(entry)
+    return collected
 
 
 def _repo_url_from_links(links_field: object) -> str:
@@ -255,8 +270,14 @@ def _license_info_from_version_object(
             from_registry=False,
         )
 
-    raw_license = _licenses_to_spdx(version_object.get("licenses"), system=system)
+    licenses = version_object.get("licenses")
+    raw_license = _licenses_to_spdx(licenses, system=system)
     normalized = normalize_license(raw_license)
+    if len(_license_entries(licenses)) > 1 and system not in _DISJUNCTIVE_MULTI_LICENSE_SYSTEMS:
+        # Several entries are the license texts the matcher found side by
+        # side. Two such pairs do not both bind; an entry that is itself an
+        # expression is never rewritten.
+        normalized = collapse_bundled_license_pairs(normalized)
     repo_url = _repo_url_from_links(version_object.get("links"))
 
     # ``versionKey.version`` echoes the version we asked for; prefer it over
