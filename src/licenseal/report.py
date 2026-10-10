@@ -35,6 +35,9 @@ _SPDX_OPERATORS = {"AND", "OR", "WITH"}
 
 _LINE_BREAKS_AND_TABS = re.compile(r"\r\n|[\n\r\t]")
 _CONTROL_CHARS = re.compile(r"[\x00-\x1f\x7f-\x9f]")
+# A surrogate in a ``str`` is always a lone one: a decoded pair is a single
+# character.
+_LONE_SURROGATES = re.compile(r"[\ud800-\udfff]")
 _MARKDOWN_SPECIALS = re.compile(r"[\\`\[\]<>|]")
 
 
@@ -47,11 +50,16 @@ def _printable(value: str) -> str:
     displays a saved report. Line breaks and tabs become a space; every other
     control character is shown as a ``\\xNN`` escape.
 
+    A lone surrogate (an unpaired ``\\uD800``-style JSON escape) cannot be
+    written to a terminal or a file in any encoding; it is shown as a
+    ``\\uNNNN`` escape, so a report never fails to print or save over one.
+
     Presentation only: the data model and the JSON report keep the original
     string, so a dependency's identity is never rewritten.
     """
     value = _LINE_BREAKS_AND_TABS.sub(" ", value)
-    return _CONTROL_CHARS.sub(lambda match: f"\\x{ord(match.group()):02x}", value)
+    value = _CONTROL_CHARS.sub(lambda match: f"\\x{ord(match.group()):02x}", value)
+    return _LONE_SURROGATES.sub(lambda match: f"\\u{ord(match.group()):04x}", value)
 
 
 def _escape_md(value: str) -> str:
@@ -80,8 +88,12 @@ def _url_quote(value: str) -> str:
     unreserved set is encoded, so a name cannot add a query or fragment, close
     a Markdown link target or a console markup tag, or carry control characters
     into a link.
+
+    A lone surrogate has no UTF-8 encoding. It is encoded as the three bytes
+    its code point would take (``surrogatepass``), so building a link never
+    fails and the link of such a name is not the link of any other name.
     """
-    return quote(value, safe="/@+")
+    return quote(value, safe="/@+", errors="surrogatepass")
 
 
 def _license_url(license_id: str) -> str:

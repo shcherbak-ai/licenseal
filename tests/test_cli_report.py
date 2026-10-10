@@ -5,6 +5,7 @@ from __future__ import annotations
 import contextlib
 import io
 import json
+import re
 import textwrap
 from pathlib import Path
 
@@ -386,6 +387,79 @@ class TestUntrustedStrings:
         assert deps["brack[et"]["package_url"] == "https://www.npmjs.com/package/brack%5Bet"
         # The file itself is ASCII: JSON escapes the control characters.
         assert "\\u001b[2JEvil" in raw_json
+
+    @staticmethod
+    def _project_with_lone_surrogates(project: Path) -> None:
+        # An unpaired ``\uD800``-style JSON escape decodes to a lone surrogate,
+        # which no encoding can write. One is in a manifest key; a registry
+        # answer puts one in a child's name and one in a license string.
+        manifest = {
+            "name": "app",
+            "license": "MIT",
+            "dependencies": {"bad\ud800name": "1.0.0", "parent": "1.0.0"},
+        }
+        (project / "package.json").write_text(json.dumps(manifest), encoding="ascii")
+        documents = {
+            "parent": {
+                "license": "MIT",
+                "dependencies": {"odd-license": "1.0.0", "evil\udfffchild": "1.0.0"},
+            },
+            "odd-license": {"license": "Odd\ud800License"},
+        }
+        for name, fields in documents.items():
+            body = json.dumps({"name": name, "version": "1.0.0", **fields})
+            assert body.isascii()
+            respx.get(f"https://registry.npmjs.org/{name}/1.0.0").mock(
+                return_value=httpx.Response(200, content=body.encode("ascii"))
+            )
+
+    @respx.mock
+    def test_lone_surrogates_are_written_in_every_format(self, tmp_path):
+        self._project_with_lone_surrogates(tmp_path)
+        shown = {
+            "table": ("bad\\ud800name", "evil\\udfffchild", "Odd\\ud800License"),
+            "markdown": ("bad\\\\ud800name", "evil\\\\udfffchild", "Odd\\\\ud800License"),
+            "json": ('"bad\\ud800name"', '"evil\\udfffchild"', '"Odd\\ud800License"'),
+        }
+        for output_format, expected in shown.items():
+            exit_code, stdout = _check(tmp_path, "-f", output_format, "--no-strict")
+            file_exit_code, saved = _check_to_file(tmp_path, output_format, "--no-strict")
+            assert exit_code == file_exit_code == 0, output_format
+            for report in (stdout, saved):
+                for text in expected:
+                    assert text in report, output_format
+                # Nothing the stream or the UTF-8 file could not encode.
+                assert not re.search("[\ud800-\udfff\ufffd]", report), output_format
+
+    @respx.mock
+    def test_lone_surrogates_keep_identity_in_json_and_fail_strict_cleanly(self, tmp_path):
+        self._project_with_lone_surrogates(tmp_path)
+        _, raw_json = _check_to_file(tmp_path, "json", "--no-strict")
+        deps = {d["name"]: d for d in json.loads(raw_json)["dependencies"]}
+        assert set(deps) == {"bad\ud800name", "parent", "odd-license", "evil\udfffchild"}
+        assert deps["bad\ud800name"]["verdict"] == "unknown"
+        assert deps["bad\ud800name"]["package_url"] == (
+            "https://www.npmjs.com/package/bad%ED%A0%80name"
+        )
+        assert deps["evil\udfffchild"]["direct_ancestors"] == ["parent"]
+        odd = deps["odd-license"]
+        assert odd["license"] == odd["license_raw"] == "Odd\ud800License"
+        assert odd["verdict"] == "unknown"
+
+        # Strict mode fails on the findings, and says so on stderr, for a
+        # report saved in any format.
+        for output_format in ("table", "markdown", "json"):
+            out_file = tmp_path / f"strict.{output_format}"
+            result = CliRunner().invoke(
+                main, ["check", "--path", str(tmp_path), "-f", output_format, "-o", str(out_file)]
+            )
+            assert result.exit_code == 1
+            assert isinstance(result.exception, SystemExit)
+            assert (
+                "License check failed: 0 violations, 0 warnings, 3 unknown, 1 ok" in result.stderr
+            )
+            assert "bad\\ud800name" in result.stderr
+            assert out_file.read_text(encoding="utf-8")
 
 
 class TestAnalysisGaps:

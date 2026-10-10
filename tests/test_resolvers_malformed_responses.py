@@ -9,18 +9,24 @@ resolvers are driven through ``RegistryCache.fetch``, the production wiring.
 
 from __future__ import annotations
 
+import json
+
 import httpx
 import pytest
 import respx
 
 from licenseal.models import Dependency, DependencyGroup, Ecosystem, LicenseInfo
 from licenseal.resolvers.crates_io import fetch_rust_dependencies, resolve_rust_license
-from licenseal.resolvers.deps_dev import bulk_resolve_licenses, resolve_go_license
+from licenseal.resolvers.deps_dev import (
+    bulk_resolve_licenses,
+    fetch_maven_dependencies,
+    resolve_go_license,
+)
 from licenseal.resolvers.hex import fetch_hex_dependencies, resolve_hex_license
 from licenseal.resolvers.http import RegistryCache
 from licenseal.resolvers.maven_central import resolve_maven_central_license
 from licenseal.resolvers.npm_registry import fetch_npm_dependencies, resolve_npm_license
-from licenseal.resolvers.nuget import resolve_nuget_license
+from licenseal.resolvers.nuget import fetch_nuget_dependencies, resolve_nuget_license
 from licenseal.resolvers.packagist import fetch_packagist_dependencies, resolve_php_license
 from licenseal.resolvers.pypi import (
     _extract_pinned_version as extract_python_pinned_version,
@@ -445,3 +451,159 @@ class TestCoordinateNoUrlCanCarry:
         if version_is_in_the_url:
             assert fetch("pkg-a", "1.0\x01", client, parent_depth=0, fetcher=cache.fetch) == []
         assert respx.calls.call_count == 0
+
+
+# Half of a UTF-16 pair on its own: what an unpaired ``\uD800``-style escape in
+# a JSON manifest or registry response decodes to. It has no UTF-8 encoding.
+_NO_ENCODING = "pkg\ud800a"
+
+
+class TestCoordinateWithNoEncoding:
+    """A name or version holding a lone surrogate. No request can carry it, so
+    none is sent: the lookup fails for that dependency alone, and its identity
+    stays exactly as declared.
+    """
+
+    @respx.mock
+    @pytest.mark.parametrize(
+        ("ecosystem", "resolve", "name", "version"),
+        [
+            pytest.param(Ecosystem.PYTHON, resolve_python_license, _NO_ENCODING, "", id="python"),
+            pytest.param(Ecosystem.NPM, resolve_npm_license, _NO_ENCODING, "", id="npm"),
+            pytest.param(Ecosystem.NPM, resolve_npm_license, _NO_ENCODING, "^1.0", id="npm-range"),
+            pytest.param(Ecosystem.RUST, resolve_rust_license, _NO_ENCODING, "", id="rust"),
+            pytest.param(
+                Ecosystem.PHP, resolve_php_license, f"vendor/{_NO_ENCODING}", "", id="php"
+            ),
+            pytest.param(Ecosystem.RUBY, resolve_ruby_license, _NO_ENCODING, "", id="ruby"),
+            pytest.param(
+                Ecosystem.RUBY, resolve_ruby_license, _NO_ENCODING, "==1.0", id="ruby-pin"
+            ),
+            pytest.param(
+                Ecosystem.RUBY, resolve_ruby_license, "pkg-a", "==1.0\ud800", id="ruby-ver"
+            ),
+            pytest.param(Ecosystem.HEX, resolve_hex_license, _NO_ENCODING, "==1.0", id="hex"),
+            # Pinned: these end at the fallback endpoint whose URL is
+            # percent-encoded, and there is nothing to percent-encode this to.
+            pytest.param(
+                Ecosystem.PYTHON, resolve_python_license, _NO_ENCODING, "==1.0.0", id="python-pin"
+            ),
+            pytest.param(Ecosystem.NPM, resolve_npm_license, _NO_ENCODING, "1.0.0", id="npm-pin"),
+            pytest.param(
+                Ecosystem.RUST, resolve_rust_license, _NO_ENCODING, "=1.0.0", id="rust-pin"
+            ),
+            pytest.param(Ecosystem.GO, resolve_go_license, _NO_ENCODING, "v1.0.0", id="go"),
+            pytest.param(
+                Ecosystem.GO, resolve_go_license, "example.com/mod", "v1.0\ud800", id="go-ver"
+            ),
+        ],
+    )
+    def test_lookup_fails_without_a_request(self, client, ecosystem, resolve, name, version):
+        dep = _dep(ecosystem, name=name, version=version)
+        result = resolve(dep, client, fetcher=RegistryCache().fetch)
+        assert result.license_id == "UNKNOWN"
+        assert result.from_registry is False
+        assert result.dependency is dep
+        assert respx.calls.call_count == 0
+
+    @respx.mock
+    @pytest.mark.parametrize(
+        ("ecosystem", "resolve", "name"),
+        [
+            pytest.param(
+                Ecosystem.JAVA,
+                resolve_maven_central_license,
+                "com.example:pkg\ud800a",
+                id="java-artifact",
+            ),
+            pytest.param(
+                Ecosystem.JAVA,
+                resolve_maven_central_license,
+                "com.exa\ud800mple:pkg-a",
+                id="java-group",
+            ),
+            pytest.param(Ecosystem.DOTNET, resolve_nuget_license, _NO_ENCODING, id="dotnet"),
+        ],
+    )
+    def test_resolver_that_percent_encodes_fails_without_a_request(
+        self, client, ecosystem, resolve, name
+    ):
+        dep = _dep(ecosystem, name=name, version="1.0.0")
+        cache = RegistryCache()
+        result = resolve(dep, client, fetcher=cache.fetch_text, json_fetcher=cache.fetch)
+        assert result.license_id == "UNKNOWN"
+        assert result.from_registry is False
+        assert result.dependency is dep
+        assert respx.calls.call_count == 0
+        # Every registry tried counts as a failed lookup, none as answered.
+        assert cache.fetches_attempted >= 1
+        assert cache.fetches_succeeded == 0
+
+    @respx.mock
+    @pytest.mark.parametrize(
+        ("fetch", "name", "version_is_in_the_url"),
+        [
+            pytest.param(fetch_python_dependencies, _NO_ENCODING, True, id="python"),
+            pytest.param(fetch_npm_dependencies, _NO_ENCODING, True, id="npm"),
+            pytest.param(fetch_rust_dependencies, _NO_ENCODING, True, id="rust"),
+            pytest.param(fetch_packagist_dependencies, f"vendor/{_NO_ENCODING}", False, id="php"),
+            pytest.param(fetch_rubygems_dependencies, _NO_ENCODING, True, id="ruby"),
+            pytest.param(fetch_hex_dependencies, _NO_ENCODING, True, id="hex"),
+        ],
+    )
+    def test_dependency_walk_finds_no_children_without_a_request(
+        self, client, fetch, name, version_is_in_the_url
+    ):
+        cache = RegistryCache()
+        assert fetch(name, "1.0.0", client, parent_depth=0, fetcher=cache.fetch) == []
+        if version_is_in_the_url:
+            assert fetch("pkg-a", "1.0\ud800", client, parent_depth=0, fetcher=cache.fetch) == []
+        assert respx.calls.call_count == 0
+
+    @respx.mock
+    def test_graph_walk_finds_nothing_without_a_request(self, client):
+        cache = RegistryCache()
+        for name, version in (("com.example:pkg\ud800a", "1.0.0"), ("com.example:a", "1\ud800")):
+            assert fetch_maven_dependencies(name, version, client, fetcher=cache.fetch) == ([], [])
+        for name, version in ((_NO_ENCODING, "1.0.0"), ("pkg-a", "1.0\ud800")):
+            walked = fetch_nuget_dependencies(name, version, client, fetcher=cache.fetch_text)
+            assert walked == ([], [])
+        assert respx.calls.call_count == 0
+
+    @respx.mock
+    def test_it_is_left_out_of_the_batch_and_its_chunk_is_still_answered(self, client):
+        # One request body holds a whole chunk. A coordinate that cannot be
+        # written into it is not sent, so the dependencies beside it resolve.
+        key = {"system": "NPM", "name": "pkg-a", "version": "1.0.0"}
+        batch = respx.post("https://api.deps.dev/v3alpha/versionbatch").mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "responses": [
+                        {
+                            "request": {"versionKey": key},
+                            "version": {"versionKey": key, "licenses": ["MIT"]},
+                        }
+                    ]
+                },
+            )
+        )
+        caches = bulk_resolve_licenses(
+            {
+                "NPM": [
+                    _dep(Ecosystem.NPM, name=_NO_ENCODING, version="1.0.0"),
+                    _dep(Ecosystem.NPM, name="pkg-a", version="1.0.0"),
+                ],
+                "GO": [_dep(Ecosystem.GO, name="example.com/mod", version="v1.0\ud800")],
+            },
+            client,
+            max_workers=4,
+        )
+        assert batch.call_count == 1
+        assert json.loads(batch.calls.last.request.content) == {"requests": [{"versionKey": key}]}
+        assert set(caches["NPM"]) == {("pkg-a", "1.0.0")}
+        npm_hit = caches["NPM"]["pkg-a", "1.0.0"]
+        assert npm_hit is not None
+        assert npm_hit.license_id == "MIT"
+        # Absent, not ``None``: the caller goes on to the per-package lookup.
+        assert caches["GO"] == {}

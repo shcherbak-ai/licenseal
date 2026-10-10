@@ -47,7 +47,6 @@ the on-disk ``.csproj``, is untrusted input.
 from __future__ import annotations
 
 import re
-import urllib.parse
 from typing import cast
 from xml.etree.ElementTree import Element  # nosec B405
 
@@ -63,6 +62,7 @@ from licenseal.resolvers.http import (
     Fetcher,
     fetch_registry_json,
     fetch_registry_text,
+    quote_coordinate,
 )
 
 _NUGET_FLATCONTAINER_URL = "https://api.nuget.org/v3-flatcontainer/{name}/{version}/{name}.nuspec"
@@ -135,8 +135,8 @@ def _nuspec_url(package_id: str, version: str) -> str:
     pathological IDs without changing well-formed ones.
     """
     lowered_id = package_id.lower()
-    encoded_id = urllib.parse.quote(lowered_id, safe="")
-    encoded_version = urllib.parse.quote(version.lower(), safe="")
+    encoded_id = quote_coordinate(lowered_id, safe="")
+    encoded_version = quote_coordinate(version.lower(), safe="")
     return _NUGET_FLATCONTAINER_URL.format(name=encoded_id, version=encoded_version)
 
 
@@ -311,8 +311,8 @@ def _resolve_via_deps_dev(
     :func:`_license_info_from_version_object` normalizes the response
     into an SPDX-shaped :class:`LicenseInfo`.
     """
-    encoded_name = urllib.parse.quote(dep.name, safe="")
-    encoded_version = urllib.parse.quote(version, safe="")
+    encoded_name = quote_coordinate(dep.name, safe="")
+    encoded_version = quote_coordinate(version, safe="")
     url = _DEPS_DEV_NUGET_VERSION_URL.format(name=encoded_name, version=encoded_version)
     data = fetcher(url, client)
     if data is None:

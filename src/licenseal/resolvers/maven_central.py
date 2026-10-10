@@ -39,7 +39,6 @@ input).
 from __future__ import annotations
 
 import re
-import urllib.parse
 from typing import cast
 
 import httpx
@@ -63,6 +62,7 @@ from licenseal.resolvers.http import (
     Fetcher,
     fetch_registry_json,
     fetch_registry_text,
+    quote_coordinate,
 )
 
 # Sonatype publishes Maven Central at multiple equivalent hostnames
@@ -173,9 +173,9 @@ def _maven_central_pom_url(group_id: str, artifact_id: str, version: str) -> str
     """
     group_path = group_id.replace(".", "/")
     return _MAVEN_CENTRAL_POM_URL.format(
-        group_path=urllib.parse.quote(group_path, safe="/"),
-        artifact=urllib.parse.quote(artifact_id, safe=""),
-        version=urllib.parse.quote(version, safe=""),
+        group_path=quote_coordinate(group_path, safe="/"),
+        artifact=quote_coordinate(artifact_id, safe=""),
+        version=quote_coordinate(version, safe=""),
     )
 
 
@@ -205,9 +205,9 @@ def _fetch_pom(
     once per scan.
     """
     group_path = group_id.replace(".", "/")
-    encoded_group_path = urllib.parse.quote(group_path, safe="/")
-    encoded_artifact = urllib.parse.quote(artifact_id, safe="")
-    encoded_version = urllib.parse.quote(version, safe="")
+    encoded_group_path = quote_coordinate(group_path, safe="/")
+    encoded_artifact = quote_coordinate(artifact_id, safe="")
+    encoded_version = quote_coordinate(version, safe="")
 
     candidate_urls = [_maven_central_pom_url(group_id, artifact_id, version)]
     candidate_urls.extend(
@@ -252,8 +252,8 @@ def _licenses_from_deps_dev(
     deps.dev also has nothing.
     """
     coord = f"{group_id}:{artifact_id}"
-    encoded_name = urllib.parse.quote(coord, safe="")
-    encoded_version = urllib.parse.quote(version, safe="")
+    encoded_name = quote_coordinate(coord, safe="")
+    encoded_version = quote_coordinate(version, safe="")
     url = _DEPS_DEV_MAVEN_VERSION_URL.format(name=encoded_name, version=encoded_version)
     data = json_fetcher(url, client)
     if data is None:
@@ -344,8 +344,8 @@ def _resolve_via_deps_dev(
     is reused for the parse + normalization.
     """
     coord = f"{group_id}:{artifact_id}"
-    encoded_name = urllib.parse.quote(coord, safe="")
-    encoded_version = urllib.parse.quote(version, safe="")
+    encoded_name = quote_coordinate(coord, safe="")
+    encoded_version = quote_coordinate(version, safe="")
     url = _DEPS_DEV_MAVEN_VERSION_URL.format(name=encoded_name, version=encoded_version)
     data = fetcher(url, client)
     if data is None:

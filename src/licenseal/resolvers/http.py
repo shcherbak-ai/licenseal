@@ -8,7 +8,7 @@ import threading
 import time
 from collections import Counter
 from collections.abc import Callable
-from urllib.parse import urlsplit
+from urllib.parse import quote, urlsplit
 from xml.etree.ElementTree import Element  # nosec B405
 
 import httpx
@@ -288,6 +288,31 @@ def object_field(data: dict, key: str) -> dict:
     return value if isinstance(value, dict) else {}
 
 
+def has_utf8_encoding(value: str) -> bool:
+    """Whether ``value`` can be written into a request URL or body.
+
+    False for a string holding a lone surrogate: half of a UTF-16 pair, which
+    is what an unpaired ``\\uD800``-style escape in a JSON manifest or registry
+    response decodes to. No request can carry it.
+    """
+    try:
+        value.encode()
+    except UnicodeEncodeError:
+        return False
+    return True
+
+
+def quote_coordinate(value: str, *, safe: str = "") -> str:
+    """Percent-encode a dependency name or version for a registry URL.
+
+    A value with no UTF-8 encoding (see :func:`has_utf8_encoding`) cannot be
+    percent-encoded. It is returned as it is, not stripped or replaced, so the
+    URL built from it has no UTF-8 encoding either: the fetch helpers report a
+    failed lookup for it and send nothing.
+    """
+    return quote(value, safe=safe) if has_utf8_encoding(value) else value
+
+
 def fetch_registry_json(url: str, client: httpx.Client) -> dict | None:
     """Fetch a JSON object with brief retries for transient registry failures.
 
@@ -295,16 +320,20 @@ def fetch_registry_json(url: str, client: httpx.Client) -> dict | None:
     retry budget, an oversized body, or a body that is not a JSON object (see
     :func:`_decode_json_object`).
 
-    A URL the client refuses to build is a failed lookup too, here and in the
-    other GET fetchers below. ``httpx.InvalidURL`` is raised before anything
-    is sent and is not a ``RequestError``; it is what a dependency name or
+    A URL that cannot be sent is a failed lookup too, here and in the other
+    GET fetchers below. One with no UTF-8 encoding (a lone surrogate in a name
+    or version, see :func:`has_utf8_encoding`) is never handed to the client.
+    One the client refuses to build raises ``httpx.InvalidURL`` before anything
+    is sent, which is not a ``RequestError``; it is what a dependency name or
     version carrying a character no URL may hold (an ASCII control character,
-    for example) produces. It is not retried: the same URL fails the same way.
+    for example) produces. Neither is retried: the same URL fails the same way.
 
     A rate-limited response from a host with a rate-limit window (see
     :class:`_HostRateLimitWindow`) is retried once the window reopens without
     spending one of the ``_MAX_ATTEMPTS``; the window bounds its own waiting.
     """
+    if not has_utf8_encoding(url):
+        return None
     delay = _INITIAL_BACKOFF_SECONDS
     attempt = 0
     while attempt < _MAX_ATTEMPTS:
@@ -411,6 +440,8 @@ def fetch_pep658_metadata(url: str, client: httpx.Client) -> dict[str, str] | No
     is refused whole — per the no-prose-extraction rule, the first line of a
     body must never become the identifier.
     """
+    if not has_utf8_encoding(url):
+        return None
     delay = _INITIAL_BACKOFF_SECONDS
     # Override the client default ``Accept: application/json`` — the sidecar
     # is served as plain text.
@@ -540,6 +571,8 @@ def fetch_registry_text(url: str, client: httpx.Client) -> dict[str, str] | None
     or plain text don't 406. Used for raw POM XML from Maven Central and
     raw go.mod text from the Go module proxy.
     """
+    if not has_utf8_encoding(url):
+        return None
     delay = _INITIAL_BACKOFF_SECONDS
     headers = {"Accept": "*/*"}
     for attempt in range(_MAX_ATTEMPTS):

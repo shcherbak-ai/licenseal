@@ -3068,6 +3068,118 @@ class TestCheckWithUnusableRegistryAnswers:
         assert respx.calls.call_count == 0
 
     @respx.mock
+    def test_names_with_a_lone_surrogate_keep_their_identity(self, tmp_path):
+        # An unpaired ``\uD800``-style escape in JSON decodes to a lone
+        # surrogate, which no request can carry. Two such names come from the
+        # manifest (one of them pinned, so it is a candidate for the batch
+        # request), a third from a registry answer.
+        manifest = json.dumps(
+            {
+                "name": "app",
+                "license": "MIT",
+                "dependencies": {
+                    "parent-pkg": "1.0.0",
+                    "bad\ud800name": "^1.0.0",
+                    "pinned\udfffname": "2.0.0",
+                },
+            }
+        )
+        assert "\\ud800" in manifest
+        (tmp_path / "package.json").write_text(manifest, encoding="ascii")
+        respx.get("https://registry.npmjs.org/parent-pkg/1.0.0").mock(
+            return_value=httpx.Response(
+                200,
+                content=json.dumps(
+                    {
+                        "version": "1.0.0",
+                        "license": "MIT",
+                        "dependencies": {"evil\ud800child": "^2.0.0"},
+                    }
+                ).encode("ascii"),
+            )
+        )
+        self._assert_one_unknown_per_mode(
+            tmp_path,
+            {
+                "parent-pkg": "MIT",
+                "bad\ud800name": "UNKNOWN",
+                "pinned\udfffname": "UNKNOWN",
+                "evil\ud800child": "UNKNOWN",
+            },
+        )
+        _, report = self._check(tmp_path, "--no-strict")
+        child = next(d for d in report["dependencies"] if d["name"] == "evil\ud800child")
+        assert child["is_transitive"] is True
+        assert child["direct_ancestors"] == ["parent-pkg"]
+        # Only the well-formed coordinate was ever sent, in a URL or a body.
+        assert {call.request.url.host for call in respx.calls} == {
+            "registry.npmjs.org",
+            "api.deps.dev",
+        }
+        for call in respx.calls:
+            assert call.request.url.path in {"/parent-pkg/1.0.0", "/v3alpha/versionbatch"}
+            if call.request.method == "POST":
+                names = [
+                    r["versionKey"]["name"] for r in json.loads(call.request.content)["requests"]
+                ]
+                assert names == ["parent-pkg"]
+
+    @respx.mock
+    def test_lone_surrogate_where_the_lookup_percent_encodes_the_name(self, tmp_path):
+        # A .NET lookup percent-encodes the package id into each URL it tries,
+        # and there is nothing to percent-encode a lone surrogate to. The
+        # package is one UNKNOWN row, no request names it, and the package
+        # beside it in the lockfile resolves.
+        (tmp_path / "App.csproj").write_text(
+            '<Project Sdk="Microsoft.NET.Sdk"><ItemGroup>'
+            '<PackageReference Include="GoodPkg" Version="1.0.0" />'
+            "</ItemGroup></Project>",
+            encoding="utf-8",
+        )
+        lockfile = json.dumps(
+            {
+                "version": 1,
+                "dependencies": {
+                    "net8.0": {
+                        "GoodPkg": {
+                            "type": "Direct",
+                            "resolved": "1.0.0",
+                            "dependencies": {"Bad\ud800Pkg": "2.0.0"},
+                        },
+                        "Bad\ud800Pkg": {"type": "Transitive", "resolved": "2.0.0"},
+                    }
+                },
+            }
+        )
+        (tmp_path / "packages.lock.json").write_text(lockfile, encoding="ascii")
+        nuspec_path = "/v3-flatcontainer/goodpkg/1.0.0/goodpkg.nuspec"
+        respx.get(f"https://api.nuget.org{nuspec_path}").mock(
+            return_value=httpx.Response(
+                200,
+                text=(
+                    '<package xmlns="http://schemas.microsoft.com/packaging/2013/05/nuspec.xsd">'
+                    "<metadata><id>GoodPkg</id><version>1.0.0</version>"
+                    '<license type="expression">MIT</license></metadata></package>'
+                ),
+            )
+        )
+        self._assert_one_unknown_per_mode(tmp_path, {"GoodPkg": "MIT", "Bad\ud800Pkg": "UNKNOWN"})
+        _, report = self._check(tmp_path, "--no-strict")
+        bad = next(d for d in report["dependencies"] if d["name"] == "Bad\ud800Pkg")
+        assert bad["direct_ancestors"] == ["GoodPkg"]
+        assert bad["resolved_version"] == "2.0.0"
+        assert {(call.request.method, call.request.url.path) for call in respx.calls} == {
+            ("POST", "/v3alpha/versionbatch"),
+            ("GET", nuspec_path),
+        }
+        for call in respx.calls:
+            if call.request.method == "POST":
+                names = [
+                    r["versionKey"]["name"] for r in json.loads(call.request.content)["requests"]
+                ]
+                assert names == ["GoodPkg"]
+
+    @respx.mock
     @pytest.mark.parametrize(
         "body",
         [

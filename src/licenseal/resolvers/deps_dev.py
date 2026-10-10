@@ -33,7 +33,6 @@ shape natively, and ships independent rate budgets per endpoint.
 
 from __future__ import annotations
 
-import urllib.parse
 from collections.abc import Callable, Mapping
 from typing import Any, cast
 
@@ -46,6 +45,8 @@ from licenseal.resolvers.http import (
     Fetcher,
     fetch_registry_json,
     fetch_registry_json_post,
+    has_utf8_encoding,
+    quote_coordinate,
 )
 
 _DEPS_DEV_BATCH_URL = "https://api.deps.dev/v3alpha/versionbatch"
@@ -345,8 +346,8 @@ def resolve_via_deps_dev_stable_get(
     deps.dev itself returns no data — caller surfaces that as
     "no canonical source had license info."
     """
-    encoded_name = urllib.parse.quote(dep.name, safe="")
-    encoded_version = urllib.parse.quote(pinned_version, safe="")
+    encoded_name = quote_coordinate(dep.name, safe="")
+    encoded_version = quote_coordinate(pinned_version, safe="")
     url = (
         f"https://api.deps.dev/v3/systems/{system}/packages/"
         f"{encoded_name}/versions/{encoded_version}"
@@ -372,16 +373,20 @@ def _build_batch_chunks(
     """Pin, dedup, and chunk one system's deps for the batch endpoint.
 
     Deps whose constraint can't be pinned by ``version_extractor`` are
-    dropped (they flow through the per-package resolver instead). Dedup is
-    by ``(name, version)`` — the same package can appear multiple times in
-    the flattened dep list; one batch entry suffices, and the resolver-side
-    cache lookup re-binds the result to each dep instance.
+    dropped (they flow through the per-package resolver instead). So is a
+    dep whose name or version has no UTF-8 encoding: the request body cannot
+    carry it, and leaving it out keeps the rest of its chunk answerable.
+    Dedup is by ``(name, version)`` — the same package can appear multiple
+    times in the flattened dep list; one batch entry suffices, and the
+    resolver-side cache lookup re-binds the result to each dep instance.
     """
     seen: set[tuple[str, str]] = set()
     deduped: list[tuple[Dependency, str]] = []
     for dep in deps:
         pinned = version_extractor(dep.version_constraint)
         if pinned is None:
+            continue
+        if not (has_utf8_encoding(dep.name) and has_utf8_encoding(pinned)):
             continue
         key = (dep.name, pinned)
         if key in seen:
@@ -526,9 +531,10 @@ def bulk_resolve_licenses(
     * **present, ``None``** — batch confirmed the version doesn't exist
       (response had ``request`` but no ``version`` field). Caller skips
       further fetches and emits UNKNOWN (Go) or falls back (the rest).
-    * **absent** — the chunk's POST failed, or the dep's version couldn't
-      be pinned by the system's extractor. Caller falls through to the
-      per-package official-registry path.
+    * **absent** — the chunk's POST failed, the dep's version couldn't be
+      pinned by the system's extractor, or its name or version has no
+      UTF-8 encoding. Caller falls through to the per-package
+      official-registry path.
 
     Every system's chunks fan out through ONE threadpool
     ``min(chunks, max_workers, _BATCH_MAX_WORKERS)`` wide, so a polyglot
@@ -700,7 +706,7 @@ def fetch_maven_dependencies(
     subgraph as "no resolved children", and the direct dep still flows
     through with whatever license info we already have.
     """
-    encoded_name = urllib.parse.quote(name, safe="")
-    encoded_version = urllib.parse.quote(version, safe="")
+    encoded_name = quote_coordinate(name, safe="")
+    encoded_version = quote_coordinate(version, safe="")
     url = _DEPS_DEV_MAVEN_DEPS_URL.format(name=encoded_name, version=encoded_version)
     return _fetch_deps_dev_dependencies(url, client, fetcher)

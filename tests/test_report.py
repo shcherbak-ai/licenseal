@@ -211,6 +211,52 @@ def _hostile_report() -> AnalysisReport:
     )
 
 
+# Half of a UTF-16 pair on its own: what an unpaired ``\uD800``-style escape in
+# JSON decodes to. No text encoding can write it.
+_LONE_SURROGATE = re.compile(r"[\ud800-\udfff]")
+
+
+def _surrogate_report() -> AnalysisReport:
+    """A report with a lone surrogate in every registry- or manifest-derived string."""
+    return AnalysisReport(
+        project_license="MIT\ud800",
+        results=[
+            _make_result(
+                "pkg\ud800a",
+                "Evil\udfff",
+                RiskLevel.UNKNOWN,
+                CompatibilityVerdict.UNKNOWN,
+                reason="pkg\ud800a uses Evil\udfff",
+                resolved_version="1.0\ud800",
+                source="dir\udc80/requirements.txt",
+                repository_url="https://example.test/\ud800",
+                homepage_url="https://example.test/home\ud800",
+            ),
+            _make_result(
+                "child",
+                "MIT",
+                RiskLevel.PERMISSIVE,
+                CompatibilityVerdict.COMPATIBLE,
+                depth=1,
+                direct_ancestors=("pkg\ud800a", "other\udbff"),
+            ),
+            _make_result(
+                "reviewed",
+                "UNKNOWN",
+                RiskLevel.PERMISSIVE,
+                CompatibilityVerdict.COMPATIBLE,
+                resolved_version="2.0.0",
+                license_raw="raw\ud800",
+                reviewed_license_id="MIT",
+                review_note="note\ud800",
+            ),
+        ],
+        read_diagnostics=[
+            ReportDiagnostic(path="sub\udc80/package.json", reason="bad \ud800", severity="gap")
+        ],
+    )
+
+
 class TestRenderTable:
     def test_renders_empty_report(self):
         report = AnalysisReport(project_license="MIT")
@@ -1833,6 +1879,85 @@ class TestUntrustedStrings:
         assert dep["reason"].endswith("which did not resolve\rSummary: 0 violations")
         assert dep["package_url"] == "https://pypi.org/project/pkg%1B%5B31m/"
         assert data["project_license"] == "MIT\x1b]0;title\x07"
+
+    def test_printable_shows_lone_surrogates(self):
+        assert _printable("a\ud800b\udfffc") == "a\\ud800b\\udfffc"
+        # A character outside the BMP is one code point, not a surrogate pair.
+        assert _printable("a\U0001f600b") == "a\U0001f600b"
+
+    def test_table_with_lone_surrogates_can_be_written(self):
+        for console, buf in (
+            _make_console(width=300),
+            _make_terminal_console(width=300, styled=False),
+        ):
+            render_table(_surrogate_report(), console)
+            output = buf.getvalue()
+            assert not _LONE_SURROGATE.search(output)
+            output.encode("utf-8")
+            assert "Project license: MIT\\ud800" in output
+            assert "pkg\\ud800a (1.0\\ud800)" in output
+            assert "Evil\\udfff" in output
+            assert "dir\\udc80/requirements.txt" in output
+            assert "(also: other\\udbff)" in output
+            assert "sub\\udc80/package.json: bad \\ud800" in output
+            assert "pkg\\ud800a uses Evil\\udfff" in output
+            assert "UNKNOWN (raw: raw\\ud800)" in output
+            assert "note\\ud800" in output
+
+    def test_markdown_with_lone_surrogates_can_be_written(self):
+        md = render_markdown(_surrogate_report())
+        assert not _LONE_SURROGATE.search(md)
+        md.encode("utf-8")
+        assert "**Project license:** MIT\\\\ud800" in md
+        assert (
+            "|[pkg\\\\ud800a (1.0\\\\ud800)](https://pypi.org/project/pkg%ED%A0%80a/)|python|prod|"
+            "[dir\\\\udc80/requirements.txt](dir%ED%B2%80/requirements.txt)|"
+            "Evil\\\\udfff|unknown|?|"
+        ) in md
+        assert "|[sub\\\\udc80/package.json](sub%ED%B2%80/package.json)|bad \\\\ud800|" in md
+        assert "- ? pkg\\\\ud800a uses Evil\\\\udfff" in md
+        assert "|note\\\\ud800|" in md
+
+    def test_check_failure_message_with_lone_surrogates_can_be_written(self):
+        report = _surrogate_report()
+        text = render_check_failure(
+            report, report.unknown, gap_count=1, output_file=Path("LICENSES.md")
+        )
+        assert not _LONE_SURROGATE.search(text)
+        assert "  ? pkg\\ud800a uses Evil\\udfff" in text
+
+    def test_json_keeps_lone_surrogates_verbatim(self):
+        raw = render_json(_surrogate_report())
+        # Escaped by the JSON encoder, so the document itself is plain ASCII.
+        assert raw.isascii()
+        data = json.loads(raw)
+        dep = next(d for d in data["dependencies"] if d["name"] == "pkg\ud800a")
+        assert dep["license"] == dep["license_raw"] == "Evil\udfff"
+        assert dep["resolved_version"] == "1.0\ud800"
+        assert dep["source"] == dep["source_url"] == "dir\udc80/requirements.txt"
+        assert dep["repository_url"] == "https://example.test/\ud800"
+        assert dep["reason"] == "pkg\ud800a uses Evil\udfff"
+        assert dep["package_url"] == "https://pypi.org/project/pkg%ED%A0%80a/"
+        assert data["project_license"] == "MIT\ud800"
+        assert data["diagnostics"][0]["path"] == "sub\udc80/package.json"
+
+    def test_package_url_of_a_lone_surrogate_name_is_its_own(self):
+        # The link never fails to build, and it is not the link of another name:
+        # not of a different surrogate, and not of a replacement character.
+        names = ["pkg\ud800a", "pkg\ud801a", "pkg?a", "pkg\ufffda", "pkga"]
+        report = AnalysisReport(
+            project_license="MIT",
+            results=[
+                _make_result(name, "MIT", RiskLevel.PERMISSIVE, CompatibilityVerdict.COMPATIBLE)
+                for name in names
+            ],
+        )
+        urls = {
+            d["name"]: d["package_url"] for d in json.loads(render_json(report))["dependencies"]
+        }
+        assert len(set(urls.values())) == len(names)
+        assert urls["pkg\ud800a"] == "https://pypi.org/project/pkg%ED%A0%80a/"
+        assert urls["pkg\ud801a"] == "https://pypi.org/project/pkg%ED%A0%81a/"
 
     @pytest.mark.parametrize("name", ["brack[et", "tag[bold]x[/bold]", "close]d", "[/link]", "\\"])
     def test_table_renders_console_markup_in_names_literally(self, name):

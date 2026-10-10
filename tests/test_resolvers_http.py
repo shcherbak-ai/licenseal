@@ -412,6 +412,12 @@ class TestUrlTheClientRefusesToBuild:
             pytest.param("https://pypi.org/pypi/pkg\ta/json", id="tab"),
             pytest.param("https://pypi.org/pypi/pkg\x7fa/json", id="delete"),
             pytest.param("https://pypi.org/pypi/" + "a" * 70_000 + "/json", id="over-long"),
+            # Half of a UTF-16 pair, as an unpaired JSON ``\uD800`` escape
+            # decodes. The URL has no UTF-8 encoding, so the client is never
+            # asked to build it.
+            pytest.param("https://pypi.org/pypi/pkg\ud800a/json", id="lone-surrogate"),
+            pytest.param("https://pypi.org/pypi/pkg-a/1.0\udfff/json", id="lone-low-surrogate"),
+            pytest.param("https://pypi.org/pypi/pkg-a/json?v=\ud800", id="lone-surrogate-query"),
         ],
     )
     def test_is_a_failed_lookup_with_no_request_and_no_retry(self, url, fake_registry_clock):
@@ -432,6 +438,34 @@ class TestUrlTheClientRefusesToBuild:
             assert cache.fetch_text(text_url, client) is None
         assert respx.calls.call_count == 0
         assert (cache.fetches_attempted, cache.fetches_succeeded) == (2, 0)
+
+    @respx.mock
+    def test_lone_surrogate_through_the_cache_is_a_cached_failed_lookup(self):
+        json_url = "https://registry.npmjs.org/pkg\ud800a/1.0.0"
+        text_url = "https://proxy.golang.org/example.com/pkg\ud800a/@v/v1.0.0.mod"
+        cache = registry_http.RegistryCache()
+        with httpx.Client() as client:
+            assert cache.fetch(json_url, client) is None
+            assert cache.fetch(json_url, client) is None
+            assert cache.fetch_text(text_url, client) is None
+        assert respx.calls.call_count == 0
+        assert (cache.fetches_attempted, cache.fetches_succeeded) == (2, 0)
+        assert cache.fetches_by_host == {"registry.npmjs.org": 1, "proxy.golang.org": 1}
+
+    def test_quote_coordinate_percent_encodes(self):
+        assert registry_http.quote_coordinate("a b/c+d") == "a%20b%2Fc%2Bd"
+        assert registry_http.quote_coordinate("com/example", safe="/") == "com/example"
+        # A character outside the BMP is one code point with a UTF-8 encoding.
+        assert registry_http.quote_coordinate("\U0001f600") == "%F0%9F%98%80"
+
+    def test_quote_coordinate_leaves_a_value_with_no_encoding_as_declared(self):
+        # Nothing to percent-encode it to. It is not stripped or replaced: the
+        # URL built from it keeps the surrogate, and the fetchers refuse it.
+        for value in ("pkg\ud800a", "\udfff", "a/b\ud800"):
+            assert not registry_http.has_utf8_encoding(value)
+            assert registry_http.quote_coordinate(value) == value
+            assert registry_http.quote_coordinate(value, safe="/") == value
+        assert registry_http.has_utf8_encoding("pkg-a \U0001f600")
 
     @respx.mock
     def test_link_with_an_unparseable_authority_is_a_failed_lookup(self):
