@@ -510,6 +510,95 @@ class TestChooseBranchesAndReferenceMetadata:
             "Element.Lib": DependencyGroup.DEV,
         }
 
+    def test_item_group_condition_marks_its_references_dev(self, tmp_path):
+        # A reference is included only when its group's Condition and its own
+        # both hold. A Debug / Test / IsTestProject condition on the group
+        # makes every reference in it DEV; a group restored in Release as well
+        # leaves the decision to each reference.
+        _write(
+            tmp_path / "App.csproj",
+            """<Project Sdk="Microsoft.NET.Sdk">
+  <ItemGroup Condition="'$(IsTestProject)' == 'true'">
+    <PackageReference Include="Group.Test" Version="1.0.0" />
+    <PackageReference Include="Group.Test.Either" Version="1.1.0"
+        Condition="'$(Configuration)' == 'Debug' Or '$(Configuration)' == 'Release'" />
+  </ItemGroup>
+  <ItemGroup Condition=" '$(CONFIGURATION)'=='debug' ">
+    <PackageReference Include="Group.Debug" Version="2.0.0" />
+  </ItemGroup>
+  <ItemGroup Condition="'$(Configuration)' == 'Debug' Or '$(Configuration)' == 'Release'">
+    <PackageReference Include="Group.Either" Version="3.0.0" />
+    <PackageReference Include="Group.Either.Debug" Version="3.1.0"
+        Condition="'$(Configuration)' == 'Debug'" />
+  </ItemGroup>
+  <ItemGroup Condition="'$(TargetFramework)' == 'net8.0'">
+    <PackageReference Include="Group.Framework" Version="4.0.0" />
+  </ItemGroup>
+  <ItemGroup Condition="">
+    <PackageReference Include="Group.Empty" Version="5.0.0" />
+  </ItemGroup>
+</Project>""",
+        )
+        deps, _ = discover_all_dependencies(tmp_path)
+        assert {d.name: d.group for d in deps} == {
+            "Group.Test": DependencyGroup.DEV,
+            "Group.Test.Either": DependencyGroup.DEV,
+            "Group.Debug": DependencyGroup.DEV,
+            "Group.Either": DependencyGroup.PROD,
+            "Group.Either.Debug": DependencyGroup.DEV,
+            "Group.Framework": DependencyGroup.PROD,
+            "Group.Empty": DependencyGroup.PROD,
+        }
+
+    def test_item_group_condition_inside_a_choose_branch(self, tmp_path):
+        # The <ItemGroup> condition is read inside a branch as outside one.
+        # The <When> condition itself is not evaluated: a Debug-only branch
+        # with an unconditioned group stays production.
+        _write(
+            tmp_path / "App.csproj",
+            """<Project Sdk="Microsoft.NET.Sdk">
+  <Choose>
+    <When Condition="'$(Configuration)' == 'Debug'">
+      <ItemGroup>
+        <PackageReference Include="Branch.Plain" Version="1.0.0" />
+      </ItemGroup>
+      <ItemGroup Condition="'$(IsTestProject)' == 'true'">
+        <PackageReference Include="Branch.Test" Version="2.0.0" />
+      </ItemGroup>
+    </When>
+    <Otherwise>
+      <ItemGroup Condition="'$(Configuration)' == 'Test'">
+        <PackageReference Include="Otherwise.Test" Version="3.0.0" />
+      </ItemGroup>
+    </Otherwise>
+  </Choose>
+</Project>""",
+        )
+        deps, _ = discover_all_dependencies(tmp_path)
+        assert {d.name: d.group for d in deps} == {
+            "Branch.Plain": DependencyGroup.PROD,
+            "Branch.Test": DependencyGroup.DEV,
+            "Otherwise.Test": DependencyGroup.DEV,
+        }
+
+    def test_item_group_condition_in_a_legacy_namespace_project(self, tmp_path):
+        _write(
+            tmp_path / "Old.csproj",
+            """<Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup Condition="'$(Configuration)' == 'Debug'">
+    <PackageReference Include="Legacy.Debug" Version="1.0.0" />
+  </ItemGroup>
+  <ItemGroup>
+    <PackageReference Include="Legacy.Plain" Version="2.0.0" />
+  </ItemGroup>
+</Project>""",
+        )
+        deps, _ = discover_all_dependencies(tmp_path)
+        assert {d.name: d.group for d in deps} == {
+            "Legacy.Debug": DependencyGroup.DEV,
+            "Legacy.Plain": DependencyGroup.PROD,
+        }
+
 
 # ---------------------------------------------------------------------------
 # _parse_csproj — legacy MSBuild-namespace project files

@@ -459,6 +459,51 @@ class TestDirectoryBuildPackageReferences:
             ("Core.Lib", "2.0.0", DependencyGroup.PROD, "Directory.Build.targets"),
         ]
 
+    def test_item_group_condition_marks_build_file_references_dev(self, tmp_path):
+        # Test packages shared through a conditioned <ItemGroup>: in the
+        # Directory.Build file itself, in a file it imports, and in a
+        # <Choose> branch. A group that is also restored in Release is
+        # production.
+        _write(
+            tmp_path / "eng" / "Tests.props",
+            """<Project>
+  <ItemGroup Condition="'$(Configuration)' == 'Debug'">
+    <PackageReference Include="Imported.Debug" Version="1.0.0" />
+  </ItemGroup>
+  <ItemGroup>
+    <PackageReference Include="Imported.Lib" Version="2.0.0" />
+  </ItemGroup>
+</Project>""",
+        )
+        _write(
+            tmp_path / "Directory.Build.props",
+            """<Project>
+  <Import Project="eng/Tests.props" />
+  <ItemGroup Condition="'$(IsTestProject)' == 'true'">
+    <PackageReference Include="Test.Framework" Version="3.0.0" />
+    <PackageReference Include="Test.Runner" Version="4.0.0" />
+  </ItemGroup>
+  <ItemGroup Condition="'$(IsTestProject)' == 'true' Or '$(IsPackable)' == 'true'">
+    <PackageReference Include="Either.Lib" Version="5.0.0" />
+  </ItemGroup>
+  <Choose>
+    <When Condition="'$(TargetFramework)' == 'net48'">
+      <ItemGroup Condition="$(IsTestProject) == 'true'">
+        <PackageReference Include="Branch.Test" Version="6.0.0" />
+      </ItemGroup>
+    </When>
+  </Choose>
+</Project>""",
+        )
+        assert _dotnet_rows(tmp_path) == [
+            ("Imported.Debug", "1.0.0", DependencyGroup.DEV, "Directory.Build.props"),
+            ("Imported.Lib", "2.0.0", DependencyGroup.PROD, "Directory.Build.props"),
+            ("Test.Framework", "3.0.0", DependencyGroup.DEV, "Directory.Build.props"),
+            ("Test.Runner", "4.0.0", DependencyGroup.DEV, "Directory.Build.props"),
+            ("Either.Lib", "5.0.0", DependencyGroup.PROD, "Directory.Build.props"),
+            ("Branch.Test", "6.0.0", DependencyGroup.DEV, "Directory.Build.props"),
+        ]
+
     def test_production_reference_wins_over_a_dev_one_for_the_same_package(self, tmp_path):
         # Dev in the Directory.Build file and production in a project, and
         # the other way round: either way the package ships.

@@ -4835,6 +4835,73 @@ class TestDotnetEcosystem:
             "ElementGpl": ("dev", "warning"),
         }
 
+    @respx.mock
+    def test_item_group_condition_decides_the_default_check(self, tmp_path):
+        # Directory.Build.props shares copyleft test packages through
+        # conditioned <ItemGroup>s. The IsTestProject group and the imported
+        # Debug group are dev: left out by default, warnings under --dev.
+        # EitherGpl's group is restored in Release as well, so it ships and
+        # the default scan fails on it.
+        self._write_project(
+            tmp_path, '    <PackageReference Include="ProdLib" Version="1.0.0" />\n', None
+        )
+        (tmp_path / "Tests.props").write_text(
+            "<Project>\n"
+            "  <ItemGroup Condition=\"'$(Configuration)' == 'Debug'\">\n"
+            '    <PackageReference Include="ImportedGpl" Version="2.0.0" />\n'
+            "  </ItemGroup>\n"
+            "</Project>\n",
+            encoding="utf-8",
+        )
+        build_props = tmp_path / "Directory.Build.props"
+        build_props.write_text(
+            "<Project>\n"
+            '  <Import Project="Tests.props" />\n'
+            "  <ItemGroup Condition=\"'$(IsTestProject)' == 'true'\">\n"
+            '    <PackageReference Include="TestGpl" Version="3.0.0" />\n'
+            "  </ItemGroup>\n"
+            "  <ItemGroup Condition=\"'$(Configuration)' == 'Debug' Or "
+            "'$(Configuration)' == 'Release'\">\n"
+            '    <PackageReference Include="EitherGpl" Version="4.0.0" />\n'
+            "  </ItemGroup>\n"
+            "</Project>\n",
+            encoding="utf-8",
+        )
+        self._mock_nuspec("ProdLib", "1.0.0", "MIT")
+        self._mock_nuspec("EitherGpl", "4.0.0", "GPL-3.0-only")
+        dev_routes = [
+            self._mock_nuspec("ImportedGpl", "2.0.0", "GPL-3.0-only"),
+            self._mock_nuspec("TestGpl", "3.0.0", "GPL-3.0-only"),
+        ]
+
+        exit_code, rows = self._check(tmp_path)
+        assert exit_code == 1
+        assert {name: (d["group"], d["verdict"]) for name, d in rows.items()} == {
+            "ProdLib": ("prod", "compatible"),
+            "EitherGpl": ("prod", "incompatible"),
+        }
+        assert not any(route.called for route in dev_routes)
+
+        exit_code, rows = self._check(tmp_path, "--dev", "--no-strict")
+        assert exit_code == 1
+        assert {name: (d["group"], d["verdict"], d["source"]) for name, d in rows.items()} == {
+            "ProdLib": ("prod", "compatible", "App.csproj"),
+            "EitherGpl": ("prod", "incompatible", "Directory.Build.props"),
+            "ImportedGpl": ("dev", "warning", "Directory.Build.props"),
+            "TestGpl": ("dev", "warning", "Directory.Build.props"),
+        }
+
+        # Control: without EitherGpl the default scan passes.
+        build_props.write_text(
+            build_props.read_text(encoding="utf-8").replace(
+                '    <PackageReference Include="EitherGpl" Version="4.0.0" />\n', ""
+            ),
+            encoding="utf-8",
+        )
+        exit_code, rows = self._check(tmp_path)
+        assert exit_code == 0
+        assert set(rows) == {"ProdLib"}
+
     _PAKET_LOCK = (
         "RESTRICTION: || (== net6.0) (== netstandard2.0)\n"
         "NUGET\n"

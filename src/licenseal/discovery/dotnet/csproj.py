@@ -55,7 +55,9 @@ mapping):
   (heuristic — full MSBuild condition evaluation is out of scope, the same
   trade-off other manifest scanners make). A condition that only
   contains such a comparison (``… Or '$(Configuration)' == 'Release'``)
-  is PROD.
+  is PROD. The ``Condition`` of the reference and the one of its enclosing
+  ``<ItemGroup>`` are each tested this way: the reference is included only
+  when both hold, so either one being a DEV condition makes it DEV.
 * ``IncludeAssets="all"`` and other normal usage attributes → PROD
 
 ``<Choose>`` blocks: the items of every ``<When>`` / ``<Otherwise>`` branch
@@ -175,6 +177,11 @@ def _expand_properties(value: str, properties: dict[str, str]) -> str:
     return _PROPERTY_RE.sub(replace, value)
 
 
+def _is_dev_condition(condition: str) -> bool:
+    """True when ``condition`` is, as a whole, one of the DEV-only comparisons."""
+    return condition.lower().replace(" ", "") in _DEV_CONDITIONS
+
+
 def _is_dev_package_ref(
     package_ref_el: Element | None,
     *,
@@ -191,7 +198,7 @@ def _is_dev_package_ref(
     del package_ref_el  # placeholder; structural hints currently only via attrs
     if private_assets.strip().lower() == "all":
         return True
-    return condition.lower().replace(" ", "") in _DEV_CONDITIONS
+    return _is_dev_condition(condition)
 
 
 def _parse_property_group(group_el: Element, into: dict[str, str]) -> None:
@@ -254,6 +261,10 @@ def _read_version(
 
 def _parse_item_group(group_el: Element, data: _CsprojData) -> None:
     """Collect the package and project references of one ``<ItemGroup>``."""
+    # An item is included only when the group's ``Condition`` and its own both
+    # hold, so a DEV-only condition on the group makes every reference in it
+    # DEV, whatever the reference's own condition says.
+    group_is_dev = _is_dev_condition(group_el.get("Condition") or "")
     for item in group_el:
         item_local = _strip_ns(item.tag)
         if item_local == "PackageReference":
@@ -262,7 +273,8 @@ def _parse_item_group(group_el: Element, data: _CsprojData) -> None:
                 continue
             group = (
                 DependencyGroup.DEV
-                if _is_dev_package_ref(
+                if group_is_dev
+                or _is_dev_package_ref(
                     item,
                     private_assets=_read_metadata(item, "PrivateAssets"),
                     condition=item.get("Condition") or "",
