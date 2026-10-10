@@ -225,9 +225,15 @@ def parse_package_lock_json(
         return []
 
     if "packages" not in data and isinstance(data.get("dependencies"), dict):
-        return _parse_package_lock_v1(
-            data["dependencies"], prod_root_names, dev_root_names, include_dev
-        )
+        try:
+            return _parse_package_lock_v1(
+                data["dependencies"], prod_root_names, dev_root_names, include_dev
+            )
+        except RecursionError:
+            # The tree walk recurses once per nesting level, so a tree the JSON
+            # parser accepted can still be too deep to walk.
+            record_parse_failure(path, "JSON")
+            return []
 
     packages = data.get("packages")
     if not isinstance(packages, dict):
@@ -579,7 +585,7 @@ def _parse_yarn_berry(
 ) -> list[Dependency]:
     try:
         data = yaml.safe_load(text)
-    except yaml.YAMLError:
+    except (yaml.YAMLError, RecursionError):
         record_parse_failure(path, "YAML")
         return []
     if not isinstance(data, dict):
@@ -838,7 +844,7 @@ def parse_bun_lock(
     cleaned = _BUN_TRAILING_COMMA_RE.sub(r"\1", raw_text)
     try:
         data = json.loads(cleaned)
-    except json.JSONDecodeError:
+    except (json.JSONDecodeError, RecursionError):
         record_parse_failure(path, "JSON")
         return []
     if not isinstance(data, dict):

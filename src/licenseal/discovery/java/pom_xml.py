@@ -213,10 +213,11 @@ def _parse_pom(raw: str | bytes) -> _PomData | None:
     ``<?xml … encoding="…"?>`` prolog / BOM) or already-decoded text. Uses
     ``defusedxml`` to block XML bombs and external-entity attacks.
 
-    Returns ``None`` when the bytes aren't parseable XML (truncated, non-XML, or
-    a blocked entity-expansion attack) so the caller can record it as an
-    analysis gap. A *valid* document that simply isn't a ``<project>`` returns
-    an empty ``_PomData`` (no gap — it's well-formed, just not a POM).
+    Returns ``None`` when the bytes aren't parseable XML (truncated, non-XML, a
+    blocked entity-expansion attack, or a prolog naming an encoding the parser
+    can't decode) so the caller can record it as an analysis gap. A *valid*
+    document that simply isn't a ``<project>`` returns an empty ``_PomData``
+    (no gap — it's well-formed, just not a POM).
     """
     try:
         root = DefusedET.fromstring(raw)
@@ -224,6 +225,11 @@ def _parse_pom(raw: str | bytes) -> _PomData | None:
         return None
     except DefusedET.EntitiesForbidden:
         # Malicious POM with declared entities — refuse to parse but don't crash.
+        return None
+    except (ValueError, LookupError):
+        # The prolog declares an encoding the parser can't decode: a multi-byte
+        # one it doesn't support (``ValueError``) or a name that isn't a text
+        # codec (``LookupError``).
         return None
 
     if _strip_ns(root.tag) != "project":

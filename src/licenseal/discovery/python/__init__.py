@@ -38,11 +38,12 @@ def parse_pep508_dep(dep_str: str) -> tuple[str, str, frozenset[str]]:
         return "", "", frozenset()
     try:
         req = Requirement(text)
-    except InvalidRequirement:
+    except (InvalidRequirement, RecursionError):
         # Fall back to the regex parser for malformed strings — they were
         # silently dropped before this helper existed, and changing that
         # would alter discovery behavior on quirky manifests. A path is the
         # exception: its first segment is a directory, not a package name.
+        # ``RecursionError``: a marker nested too deeply for the parser.
         name_match = DEP_NAME_RE.match(text)
         if not name_match or _PATH_TOKEN_RE.match(text):
             return "", "", frozenset()

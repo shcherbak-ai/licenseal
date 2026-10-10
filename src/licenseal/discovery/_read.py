@@ -8,7 +8,9 @@ encodings show up inside comments. A naive ``read_text(encoding="utf-8")``
 raises ``UnicodeDecodeError`` on the first bad byte, dropping the *whole* file
 (every dependency it declares) over a stray byte in a discarded comment. The
 loaders here BOM-detect, fall back to latin-1 for text, and hand XML raw bytes
-to its encoding-aware parser.
+to its encoding-aware parser. Nothing here raises on file content: bytes that
+can't be decoded, and documents nested too deeply to parse, are recorded as
+gaps like any other parse failure.
 
 **2. Surface gaps, never silently.** For a license scanner a silent skip is the
 worst error class: "0 problems" then means *either* "nothing wrong" *or* "I
@@ -16,9 +18,9 @@ couldn't look". So every read/parse failure is recorded on a context-scoped
 sink, partitioned into:
 
 * **gap** (``is_gap=True``) — a manifest that may declare dependencies was lost
-  (unreadable, unparseable, in a subtree we couldn't enter, or referenced
-  through a path that is not followed). Analysis is *incomplete*; ``--strict``
-  treats this like an UNKNOWN and fails.
+  (unreadable, undecodable, unparseable, in a subtree we couldn't enter, or
+  referenced through a path that is not followed). Analysis is *incomplete*;
+  ``--strict`` treats this like an UNKNOWN and fails.
 * **recovered** (``is_gap=False``) — decoded with a caveat (latin-1 fallback);
   the ASCII dependency lines survived, so analysis is complete but lossy for any
   non-ASCII content. Worth a warning, not a failure.
@@ -203,34 +205,32 @@ def read_bytes(path: Path) -> bytes | None:
         return None
 
 
-def _decode_with_bom(data: bytes) -> str | None:
-    """Decode ``data`` by leading BOM, stripping it; ``None`` if no BOM.
-
-    UTF-32 is checked before UTF-16 because the UTF-32 LE BOM (``ff fe 00 00``)
-    starts with the UTF-16 LE BOM (``ff fe``). The endianness-agnostic codecs
-    (``utf-16`` / ``utf-32``) consume the BOM; the explicit ``-le`` / ``-be``
-    codecs would leave it as a leading ``\\ufeff``.
-    """
-    if data.startswith((codecs.BOM_UTF32_LE, codecs.BOM_UTF32_BE)):
-        return data.decode("utf-32")
-    if data.startswith(codecs.BOM_UTF8):
-        return data.decode("utf-8-sig")
-    if data.startswith((codecs.BOM_UTF16_LE, codecs.BOM_UTF16_BE)):
-        return data.decode("utf-16")
-    return None
+# Byte-order marks that name a codec other than UTF-8. UTF-32 comes first
+# because the UTF-32 LE BOM (``ff fe 00 00``) starts with the UTF-16 LE BOM
+# (``ff fe``). The endianness-agnostic codecs (``utf-16`` / ``utf-32``) consume
+# the BOM; the explicit ``-le`` / ``-be`` codecs would leave it in the decoded
+# text as a leading U+FEFF.
+_BOM_CODECS = (
+    ((codecs.BOM_UTF32_LE, codecs.BOM_UTF32_BE), "utf-32"),
+    ((codecs.BOM_UTF16_LE, codecs.BOM_UTF16_BE), "utf-16"),
+)
 
 
 def decode_text(path: Path) -> str | None:
-    """Decode a text manifest to ``str``, or ``None`` if it can't be read.
+    """Decode a text manifest to ``str``, or ``None`` if it can't be read or decoded.
 
     Strategy — deterministic, so a file decodes identically on every machine
     (no locale lookup, no charset sniffing):
 
-    1. **BOM** → exact codec (UTF-16/32 Windows redirection; strips a UTF-8 BOM).
-    2. **UTF-8** (strict) — the overwhelmingly common case.
+    1. **UTF-16 / UTF-32 BOM** → exact codec (Windows redirection). Bytes that
+       aren't valid in the codec the BOM names (a truncated file, an unpaired
+       surrogate) have no fallback: single-byte decoding of a two- or four-byte
+       encoding recovers nothing, so the file is recorded as a gap.
+    2. **UTF-8** (strict), stripping a UTF-8 BOM — the overwhelmingly common case.
     3. **latin-1** fallback — never raises, maps every byte 1:1, so ASCII-only
        dependency lines survive a stray non-UTF-8 byte in a comment. Recorded as
-       a *recovered* (non-gap) diagnostic.
+       a *recovered* (non-gap) diagnostic. A UTF-8 BOM doesn't change this: the
+       same bytes recover the same way with or without one.
 
     We deliberately do *not* replicate pip's ``locale.getpreferredencoding()``
     fallback: it would make the same bytes decode differently across machines,
@@ -239,18 +239,28 @@ def decode_text(path: Path) -> str | None:
     data = read_bytes(path)
     if data is None:
         return None
-    decoded = _decode_with_bom(data)
-    if decoded is not None:
-        return decoded
+    for boms, codec in _BOM_CODECS:
+        if data.startswith(boms):
+            try:
+                return data.decode(codec)
+            except UnicodeDecodeError:
+                label = codec.upper()
+                _record(
+                    path,
+                    f"has a {label} byte-order mark but is not valid {label}; skipped",
+                    is_gap=True,
+                )
+                return None
     try:
-        return data.decode("utf-8")
+        # ``utf-8-sig`` strips a leading UTF-8 BOM and is plain UTF-8 without one.
+        return data.decode("utf-8-sig")
     except UnicodeDecodeError:
         _record(
             path,
             "decoded as latin-1 (not valid UTF-8); non-ASCII content may be wrong",
             is_gap=False,
         )
-        return data.decode("latin-1")
+        return data.removeprefix(codecs.BOM_UTF8).decode("latin-1")
 
 
 def read_xml_bytes(path: Path) -> bytes | None:
@@ -270,14 +280,15 @@ def load_json(path: Path) -> Any | None:
     """Read + parse a JSON manifest, recording a read or parse failure as a gap.
 
     Decoding goes through :func:`decode_text` (BOM-aware, latin-1 safety net),
-    so a stray byte can't drop an otherwise-valid lockfile.
+    so a stray byte can't drop an otherwise-valid lockfile. A document nested
+    past the interpreter's recursion limit is a parse failure like any other.
     """
     raw = decode_text(path)
     if raw is None:
         return None
     try:
         return json.loads(raw)
-    except ValueError:  # JSONDecodeError is a ValueError subclass
+    except (ValueError, RecursionError):  # JSONDecodeError is a ValueError subclass
         record_parse_failure(path, "JSON")
         return None
 
@@ -285,19 +296,17 @@ def load_json(path: Path) -> Any | None:
 def load_toml(path: Path) -> dict[str, Any] | None:
     """Read + parse a TOML manifest, recording a read or parse failure as a gap.
 
-    TOML mandates UTF-8, so we read bytes straight into ``tomllib`` rather than
-    through :func:`decode_text`. A file past the manifest size cap is skipped
-    before it is opened (see :func:`_over_size_cap`).
+    Decoding goes through :func:`decode_text`, the same as the JSON and YAML
+    loaders: TOML mandates UTF-8, but a manifest written through a Windows
+    shell redirect arrives as UTF-16 or with a UTF-8 BOM, and ``tomllib``
+    accepts neither on its own.
     """
-    try:
-        if _over_size_cap(path):
-            return None
-        with open(path, "rb") as handle:
-            return tomllib.load(handle)
-    except OSError as exc:
-        _record(path, f"could not be read ({type(exc).__name__}); skipped", is_gap=True)
+    raw = decode_text(path)
+    if raw is None:
         return None
-    except tomllib.TOMLDecodeError:
+    try:
+        return tomllib.loads(raw)
+    except (tomllib.TOMLDecodeError, RecursionError):
         record_parse_failure(path, "TOML")
         return None
 
@@ -309,6 +318,6 @@ def load_yaml(path: Path) -> Any | None:
         return None
     try:
         return yaml.safe_load(raw)
-    except yaml.YAMLError:
+    except (yaml.YAMLError, RecursionError):
         record_parse_failure(path, "YAML")
         return None

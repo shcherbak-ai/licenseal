@@ -35,6 +35,10 @@ from licenseal.discovery.hex.mix_lock import (  # noqa: PLC2701
 from licenseal.models import Dependency, DependencyGroup, Ecosystem
 
 _BINARY_RE = re.compile(r'<<"([^"]*)">>')
+# A dependency level: ASCII digits only, and few of them. ``str.isdigit`` also
+# accepts characters ``int()`` rejects, and ``int()`` refuses very long digit
+# strings.
+_LEVEL_RE = re.compile(r"[0-9]{1,9}")
 
 
 def find_rebar_lockfiles(
@@ -114,7 +118,7 @@ def parse_rebar_lock(
         elements = _split_top_level(body)
         # A lock entry is a 3-tuple ending in the integer level; the 2-tuple
         # ``{<<"name">>,<<"hash">>}`` hash entries are skipped by arity.
-        if len(elements) != 3 or not elements[2].strip().isdigit():
+        if len(elements) != 3 or not _LEVEL_RE.fullmatch(elements[2].strip()):
             continue
         name, version, level, off_registry = _parse_lock_entry(elements)
         is_direct = level == 0

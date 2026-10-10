@@ -24,6 +24,10 @@ _NON_RELATIVE_PATH_VALUES = (
     r"\example.invalid\target",
 )
 
+# Nesting depth no supported interpreter's JSON / TOML / YAML parser can recurse
+# through, whether it bounds recursion by a frame count or by stack space.
+_DEEP = 200_000
+
 _PATH_IO_METHODS = (
     "resolve",
     "exists",

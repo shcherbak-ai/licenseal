@@ -19,7 +19,7 @@ from licenseal.discovery._read import (
     record_walk_error,
     rejected_path_reference,
 )
-from tests._helpers import _NON_RELATIVE_PATH_VALUES, _record_path_io
+from tests._helpers import _DEEP, _NON_RELATIVE_PATH_VALUES, _record_path_io
 
 
 class TestDecodeText:
@@ -73,6 +73,50 @@ class TestDecodeText:
 
         monkeypatch.setattr(Path, "read_bytes", boom)
         assert decode_text(p) is None
+
+    @pytest.mark.parametrize(
+        ("data", "label"),
+        [
+            # An odd byte count: the last code unit is cut in half.
+            (b"\xff\xfe\x52", "UTF-16"),
+            (b"\xfe\xff\x00", "UTF-16"),
+            # A high surrogate with no low surrogate after it.
+            (b"\xff\xfe" + b"\x00\xd8" + "a\n".encode("utf-16-le"), "UTF-16"),
+            (b"\xff\xfe\x00\x00" + b"\x41\x00", "UTF-32"),
+            # A code point past U+10FFFF.
+            (b"\xff\xfe\x00\x00" + b"\x00\x00\x11\x00", "UTF-32"),
+        ],
+    )
+    def test_bytes_invalid_for_the_bom_codec_are_a_gap(self, tmp_path: Path, data, label):
+        # A UTF-16 / UTF-32 BOM commits the file to that codec. Bytes that are
+        # not valid in it are recorded as a gap; they never raise.
+        p = tmp_path / "f.txt"
+        p.write_bytes(data)
+        with collect_read_diagnostics() as diags:
+            assert decode_text(p) is None
+        assert len(diags) == 1
+        assert diags[0].path == p
+        assert diags[0].is_gap is True
+        assert diags[0].reason == (
+            f"has a {label} byte-order mark but is not valid {label}; skipped"
+        )
+
+    def test_utf8_bom_with_invalid_byte_recovers_like_the_file_without_a_bom(self, tmp_path: Path):
+        # A UTF-8 BOM in front of a stray non-UTF-8 byte must not change the
+        # outcome: the same latin-1 recovery, the same text, the BOM dropped.
+        body = b"# Jos\xe9\nflask==3.0.0\n"
+        plain = tmp_path / "plain.txt"
+        plain.write_bytes(body)
+        with_bom = tmp_path / "bom.txt"
+        with_bom.write_bytes(b"\xef\xbb\xbf" + body)
+        with collect_read_diagnostics() as diags:
+            decoded_plain = decode_text(plain)
+            decoded_bom = decode_text(with_bom)
+        assert decoded_bom == decoded_plain == "# Jos\xe9\nflask==3.0.0\n"
+        assert [d.path for d in diags] == [plain, with_bom]
+        assert diags[0].reason == diags[1].reason
+        assert "latin-1" in diags[1].reason
+        assert diags[1].is_gap is False
 
 
 class TestReadXmlBytes:
@@ -192,10 +236,66 @@ class TestStructuredLoaders:
     def test_load_toml_unreadable_is_gap(self, tmp_path: Path, monkeypatch):
         p = tmp_path / "f.toml"
         p.write_bytes(b"a = 1\n")
-        monkeypatch.setattr("builtins.open", lambda *a, **k: (_ for _ in ()).throw(OSError()))
+        monkeypatch.setattr(Path, "read_bytes", lambda self: (_ for _ in ()).throw(OSError()))
         with collect_read_diagnostics() as diags:
             assert load_toml(p) is None
         assert len(diags) == 1 and diags[0].is_gap and "could not be read" in diags[0].reason
+
+    @pytest.mark.parametrize(
+        "data",
+        [
+            # What a Windows shell redirect writes: UTF-16 LE with a BOM and
+            # CRLF line endings.
+            b"\xff\xfe" + 'a = "b"\r\n'.encode("utf-16-le"),
+            b"\xfe\xff" + 'a = "b"\n'.encode("utf-16-be"),
+            b"\xef\xbb\xbf" + b'a = "b"\n',
+        ],
+    )
+    def test_load_toml_decodes_by_bom(self, tmp_path: Path, data):
+        p = tmp_path / "f.toml"
+        p.write_bytes(data)
+        with collect_read_diagnostics() as diags:
+            assert load_toml(p) == {"a": "b"}
+        assert diags == []
+
+    def test_load_toml_non_utf8_recovers_via_latin1(self, tmp_path: Path):
+        # Same recovery as every other manifest format: the stray byte sits in
+        # a comment, the ASCII keys and values survive, and it is not a gap.
+        p = tmp_path / "f.toml"
+        p.write_bytes(b'# Jos\xe9\na = "b"\n')
+        with collect_read_diagnostics() as diags:
+            assert load_toml(p) == {"a": "b"}
+        assert len(diags) == 1 and diags[0].is_gap is False and "latin-1" in diags[0].reason
+
+    def test_load_toml_undecodable_is_gap(self, tmp_path: Path):
+        p = tmp_path / "f.toml"
+        p.write_bytes(b"\xff\xfe\x52")
+        with collect_read_diagnostics() as diags:
+            assert load_toml(p) is None
+        assert len(diags) == 1 and diags[0].is_gap and "byte-order mark" in diags[0].reason
+
+    @pytest.mark.parametrize(
+        ("loader", "prefix", "opener", "core", "closer", "fmt"),
+        [
+            pytest.param(load_json, "", "[", "", "]", "JSON", id="json-arrays"),
+            pytest.param(load_json, "", '{"a":', "1", "}", "JSON", id="json-objects"),
+            pytest.param(load_toml, "a = ", "[", "", "]", "TOML", id="toml-arrays"),
+            pytest.param(load_toml, "a = ", "{b = ", "1", "}", "TOML", id="toml-inline-tables"),
+            pytest.param(load_yaml, "", "[", "", "]", "YAML", id="yaml-flow-sequences"),
+            pytest.param(load_yaml, "", "{a: ", "1", "}", "YAML", id="yaml-flow-mappings"),
+        ],
+    )
+    def test_document_nested_too_deeply_is_gap(
+        self, tmp_path: Path, loader, prefix, opener, core, closer, fmt
+    ):
+        # A syntactically valid document nested past what the parser can
+        # recurse through is a parse failure, not an uncaught RecursionError.
+        p = tmp_path / "manifest"
+        p.write_text(prefix + opener * _DEEP + core + closer * _DEEP + "\n", encoding="utf-8")
+        with collect_read_diagnostics() as diags:
+            assert loader(p) is None
+        assert len(diags) == 1 and diags[0].is_gap
+        assert diags[0].reason == f"is not valid {fmt}; skipped"
 
     def test_load_yaml_ok(self, tmp_path: Path):
         p = tmp_path / "f.yaml"

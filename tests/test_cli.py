@@ -50,7 +50,7 @@ from licenseal.review import (
     render_review_template,
     review_key,
 )
-from tests._helpers import _record_path_io
+from tests._helpers import _DEEP, _record_path_io
 
 
 def _mock_pypi(name: str, license_str: str, version: str = "1.0.0"):
@@ -249,6 +249,161 @@ class TestCheckCommand:
             d["severity"] == "gap" and "package.json" in d["path"] and "JSON" in d["reason"]
             for d in data["diagnostics"]
         )
+
+    @respx.mock
+    @pytest.mark.parametrize(
+        ("manifest", "content", "reason"),
+        [
+            pytest.param(
+                "requirements.txt",
+                b"\xff\xfe\x52",
+                "has a UTF-16 byte-order mark but is not valid UTF-16; skipped",
+                id="truncated-utf16",
+            ),
+            pytest.param(
+                "pyproject.toml",
+                b"\xff\xfe\x00\x00" + b"\x41\x00",
+                "has a UTF-32 byte-order mark but is not valid UTF-32; skipped",
+                id="truncated-utf32-toml",
+            ),
+            pytest.param(
+                "pom.xml",
+                b'<?xml version="1.0" encoding="Shift_JIS"?>\n<project/>\n',
+                "is not valid XML; skipped",
+                id="pom-multi-byte-encoding",
+            ),
+            pytest.param(
+                "pom.xml",
+                b'<?xml version="1.0" encoding="no-such-encoding"?>\n<project/>\n',
+                "is not valid XML; skipped",
+                id="pom-unknown-encoding",
+            ),
+            pytest.param(
+                "package.json",
+                b'{"dependencies": ' + b"[" * _DEEP + b"]" * _DEEP + b"}",
+                "is not valid JSON; skipped",
+                id="json-nested-too-deeply",
+            ),
+            pytest.param(
+                "Cargo.toml",
+                b"a = " + b"[" * _DEEP + b"]" * _DEEP + b"\n",
+                "is not valid TOML; skipped",
+                id="toml-nested-too-deeply",
+            ),
+        ],
+    )
+    def test_undecodable_or_unparseable_manifest_is_a_gap_not_a_crash(
+        self, tmp_path, manifest, content, reason
+    ):
+        # One manifest the scan cannot decode or parse, beside a healthy one.
+        # The healthy one is still resolved and reported; the bad one is a gap
+        # on stderr and in the JSON report, and only --strict fails on it.
+        (tmp_path / "requirements.txt").write_bytes(b"flask\n")
+        (tmp_path / "svc").mkdir()
+        (tmp_path / "svc" / manifest).write_bytes(content)
+        _mock_pypi("flask", "BSD-3-Clause")
+        out = tmp_path / "report.json"
+        runner = CliRunner()
+
+        lenient = runner.invoke(
+            main,
+            ["check", "--path", str(tmp_path), "--no-strict", "-f", "json", "-o", str(out)],
+        )
+        assert lenient.exit_code == 0
+        data = json.loads(out.read_text(encoding="utf-8"))
+        assert [(d["name"], d["license"]) for d in data["dependencies"]] == [
+            ("flask", "BSD-3-Clause")
+        ]
+        assert data["summary"]["gaps"] == 1
+        assert data["diagnostics"] == [
+            {"path": f"svc/{manifest}", "reason": reason, "severity": "gap"}
+        ]
+
+        strict = runner.invoke(main, ["check", "--path", str(tmp_path)])
+        assert strict.exit_code == 1
+        assert f"Warning: svc/{manifest}: {reason}" in strict.output
+        assert "1 manifest(s) could not be fully analyzed" in strict.output
+        assert "flask" in strict.output
+
+    @respx.mock
+    def test_utf8_bom_before_a_stray_byte_recovers_and_passes_strict(self, tmp_path):
+        # The same bytes without the BOM are the documented latin-1 recovery.
+        # The BOM must not turn that into a failure or a gap.
+        (tmp_path / "requirements.txt").write_bytes(
+            b"\xef\xbb\xbf# maintainer: Jos\xe9 Garcia\nflask\n"
+        )
+        _mock_pypi("flask", "BSD-3-Clause")
+
+        runner = CliRunner()
+        result = runner.invoke(main, ["check", "--path", str(tmp_path), "-f", "json"])
+        assert result.exit_code == 0
+        assert "Warning: requirements.txt: decoded as latin-1" in result.stderr
+        assert "could not be fully analyzed" not in result.stderr
+        data = json.loads(result.stdout)
+        assert [d["name"] for d in data["dependencies"]] == ["flask"]
+        assert data["summary"]["gaps"] == 0
+        assert [d["severity"] for d in data["diagnostics"]] == ["recovered"]
+
+    @respx.mock
+    @pytest.mark.parametrize(
+        "encode",
+        [
+            lambda text: b"\xff\xfe" + text.replace("\n", "\r\n").encode("utf-16-le"),
+            lambda text: b"\xef\xbb\xbf" + text.encode("utf-8"),
+        ],
+        ids=["utf16-le-crlf", "utf8-bom"],
+    )
+    def test_pyproject_written_with_a_bom_is_scanned(self, tmp_path, encode):
+        # What a Windows shell redirect produces. The project license and the
+        # dependency list are both read from it, with nothing to report.
+        (tmp_path / "pyproject.toml").write_bytes(
+            encode('[project]\nname = "app"\nlicense = "MIT"\ndependencies = ["flask"]\n')
+        )
+        _mock_pypi("flask", "BSD-3-Clause")
+
+        runner = CliRunner()
+        result = runner.invoke(main, ["check", "--path", str(tmp_path), "-f", "json"])
+        assert result.exit_code == 0
+        assert "Warning:" not in result.stderr
+        data = json.loads(result.stdout)
+        assert data["project_license"] == "MIT"
+        assert [d["name"] for d in data["dependencies"]] == ["flask"]
+        assert data["diagnostics"] == []
+
+    @respx.mock
+    def test_lockfile_nested_too_deeply_is_a_gap_and_the_manifest_is_still_walked(self, tmp_path):
+        # The lockfile is lost, so it is a gap. The direct dependency declared
+        # in package.json is still resolved through the registry.
+        (tmp_path / "package.json").write_text(
+            json.dumps({"name": "app", "license": "MIT", "dependencies": {"left-pad": "1.0.0"}}),
+            encoding="utf-8",
+        )
+        nested = (
+            b'{"lockfileVersion": 1, "dependencies": {"left-pad": '
+            + b'{"version": "1.0.0", "dependencies": {"left-pad": ' * _DEEP
+            + b'{"version": "1.0.0"}'
+            + b"}}" * _DEEP
+            + b"}}"
+        )
+        (tmp_path / "package-lock.json").write_bytes(nested)
+        _mock_npm("left-pad", "MIT")
+        out = tmp_path / "report.json"
+
+        runner = CliRunner()
+        lenient = runner.invoke(
+            main,
+            ["check", "--path", str(tmp_path), "--no-strict", "-f", "json", "-o", str(out)],
+        )
+        assert lenient.exit_code == 0
+        data = json.loads(out.read_text(encoding="utf-8"))
+        assert [(d["name"], d["license"]) for d in data["dependencies"]] == [("left-pad", "MIT")]
+        assert data["diagnostics"] == [
+            {"path": "package-lock.json", "reason": "is not valid JSON; skipped", "severity": "gap"}
+        ]
+
+        strict = runner.invoke(main, ["check", "--path", str(tmp_path)])
+        assert strict.exit_code == 1
+        assert "1 manifest(s) could not be fully analyzed" in strict.output
 
     @respx.mock
     @pytest.mark.parametrize(

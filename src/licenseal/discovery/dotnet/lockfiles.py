@@ -93,8 +93,8 @@ def find_nuget_lockfiles(
 def parse_packages_lock_json(text: str) -> list[_LockEntry] | None:
     """Parse one ``packages.lock.json`` content into a list of :class:`_LockEntry`.
 
-    Returns ``None`` on malformed JSON. Returns an empty list on a valid
-    but empty file. Format:
+    Returns ``None`` on malformed JSON, or JSON nested too deeply to parse.
+    Returns an empty list on a valid but empty file. Format:
 
     .. code-block:: json
 
@@ -129,7 +129,7 @@ def parse_packages_lock_json(text: str) -> list[_LockEntry] | None:
     """
     try:
         data = json.loads(text)
-    except (json.JSONDecodeError, ValueError):
+    except (ValueError, RecursionError):  # JSONDecodeError is a ValueError subclass
         return None
     if not isinstance(data, dict):
         return []
@@ -199,7 +199,8 @@ def _extract_edges(raw: object) -> tuple[str, ...]:
 def parse_project_assets_json(text: str) -> list[_LockEntry] | None:
     """Parse one ``project.assets.json`` content into a list of :class:`_LockEntry`.
 
-    Returns ``None`` on malformed JSON. Format (simplified):
+    Returns ``None`` on malformed JSON, or JSON nested too deeply to parse.
+    Format (simplified):
 
     .. code-block:: json
 
@@ -238,7 +239,7 @@ def parse_project_assets_json(text: str) -> list[_LockEntry] | None:
     """
     try:
         data = json.loads(text)
-    except (json.JSONDecodeError, ValueError):
+    except (ValueError, RecursionError):  # JSONDecodeError is a ValueError subclass
         return None
     if not isinstance(data, dict):
         return []
