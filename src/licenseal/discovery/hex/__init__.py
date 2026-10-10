@@ -21,7 +21,6 @@ from licenseal.discovery.hex.mix_exs import (
 from licenseal.discovery.hex.mix_lock import (
     attach_direct_sources,
     find_mix_lockfiles,
-    is_off_registry_marker,
     parse_mix_lock,
 )
 from licenseal.discovery.hex.rebar_config import discover_rebar_config_dependencies
@@ -36,7 +35,6 @@ __all__ = [
     "discover_rebar_config_dependencies",
     "find_mix_lockfiles",
     "find_rebar_lockfiles",
-    "is_off_registry_marker",
     "parse_mix_lock",
     "parse_rebar_lock",
     "workspace_erlang_mk_project_names",

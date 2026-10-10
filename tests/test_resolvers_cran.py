@@ -9,7 +9,6 @@ import pytest
 import respx
 
 from licenseal.analysis.compatibility import check_compatibility
-from licenseal.discovery.r._lock import _OFF_REGISTRY_MARKER
 from licenseal.models import CompatibilityVerdict, Dependency, Ecosystem
 from licenseal.resolvers.cran import (
     _CRAN_INDEX_URL,
@@ -250,9 +249,3 @@ class TestResolveRLicense:
         info = resolve_r_license(_r_dep("nonexistent"), _index())
         assert info.license_id == "UNKNOWN"
         assert info.from_registry is False
-
-    def test_off_registry_short_circuits(self):
-        info = resolve_r_license(_r_dep("myfork", "==1.0", source=_OFF_REGISTRY_MARKER), _index())
-        assert info.license_id == "UNKNOWN"
-        assert info.from_registry is False
-        assert info.dependency.source == ""  # internal marker dropped

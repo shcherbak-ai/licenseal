@@ -17,7 +17,6 @@ from licenseal.discovery.ruby.gemspec import (
     discover_gemspec_dependencies,
     workspace_gemspec_names,
 )
-from licenseal.discovery.ruby.lockfiles import is_off_registry_marker
 from licenseal.models import DependencyGroup, Ecosystem
 
 _FIXTURES = Path(__file__).parent / "fixtures" / "gemfile"
@@ -46,24 +45,26 @@ class TestDiscoverGemfileDependencies:
         assert by_name["pg"] == ">= 1.5"
         assert by_name["puma"] == ""
 
-    def test_off_registry_sources_emitted_with_marker(self):
-        # git: / path: / github: gems are emitted (not skipped) so their
-        # group + direct-ness survive; they carry the off-registry marker
-        # so the resolver short-circuits them to UNKNOWN.
+    def test_git_and_github_gems_carry_their_origin(self):
+        # git: / github: gems are emitted (not skipped) so their group +
+        # direct-ness survive; the origin says where each comes from.
         deps, _ = discover_gemfile_dependencies(_FIXTURES / "simple")
-        by_name = {d.name: d for d in deps}
-        for nm in ("edge", "vendored", "shorthand"):
-            assert nm in by_name, nm
-            assert is_off_registry_marker(by_name[nm].source)
+        origins = {d.name: d.origin for d in deps if d.origin}
+        assert origins == {
+            "edge": "git+https://github.com/example/edge.git@main",
+            "shorthand": "git+https://github.com/example/shorthand.git",
+        }
+
+    def test_path_gem_inside_the_scanned_directory_is_not_a_dependency(self):
+        # ``path: "vendor/foo"`` is the project's own code.
+        deps, filtered = discover_gemfile_dependencies(_FIXTURES / "simple")
+        assert "vendored" not in {d.name for d in deps}
+        assert filtered == 0
 
     def test_ecosystem_and_source_stamped(self):
         deps, _ = discover_gemfile_dependencies(_FIXTURES / "simple")
         for dep in deps:
             assert dep.ecosystem == Ecosystem.RUBY
-            # Registry gems carry the manifest path; off-registry gems carry
-            # the marker instead.
-            if is_off_registry_marker(dep.source):
-                continue
             assert dep.source == "Gemfile"
 
     def test_monorepo_walks_nested_gemfiles(self):

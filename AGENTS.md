@@ -29,6 +29,7 @@ src/licenseal/
     compatibility.py          Project-vs-dependency compatibility matrix
   discovery/
     __init__.py               Aggregates all discovery sources; detects the project's own license from the manifests of the scanned directory (`detect_project_license`)
+    _origin.py                Origin strings for git / URL / path dependencies (credential stripping; in-tree path → not a dependency)
     python/
       pyproject.py            PEP 621 / Poetry / PEP 735
       requirements.py         requirements*.txt (pip-style comment stripping; `-r` / `--requirement` includes followed inside the scan root, cycle-safe, with the including file's dev/prod group; `-c` constraints never read; URL / VCS / local-path lines and other option lines skipped)
@@ -37,8 +38,9 @@ src/licenseal/
       pipfile.py              Pipfile (Pipenv manifest)
       lockfiles.py            uv.lock, poetry.lock, Pipfile.lock parsers (transitive; edge-aware for uv/poetry, section-based for Pipfile; a lockfile in a declared version the parser does not list is still read, with a non-gap diagnostic)
     npm/
-      package_json.py         package.json (recursive, skips node_modules; filters workspace-internal names)
-      lockfiles.py            package-lock.json (v1 + v2/v3), pnpm-lock.yaml (lockfileVersion 6 and 9), yarn.lock (v1 and Berry), bun.lock parsers (transitive, edge-aware; a pnpm lockfileVersion below 6 is a gap; a lockfile in any other declared version is still read, with a non-gap diagnostic)
+      package_json.py         package.json (recursive, skips node_modules; filters workspace-internal names; git / hosting-shorthand / tarball-URL specs → `origin`)
+      _specs.py               npm dependency-spec classifier (git URL, `github:` and `user/repo` shorthands, tarball URL → origin)
+      lockfiles.py            package-lock.json (v1 + v2/v3), pnpm-lock.yaml (lockfileVersion 6 and 9), yarn.lock (v1 and Berry), bun.lock parsers (transitive, edge-aware; pnpm non-registry packages → `origin` from `resolution`; a pnpm lockfileVersion below 6 is a gap; a lockfile in any other declared version is still read, with a non-gap diagnostic)
     rust/
       cargo_toml.py           Cargo.toml ([dependencies], target.<cfg>.*; [workspace.dependencies] is a version catalog — entries emitted only when a member references them via `workspace = true`, CPM-style stitching; `git` / `path` dependencies are not emitted, their names are reported separately as Cargo.lock roots)
       lockfiles.py            Cargo.lock parser (transitive, edge-aware; rows for registry-sourced crates only, git / path / local crates stay in the edge graph)
@@ -60,21 +62,21 @@ src/licenseal/
       composer_json.py        composer.json parser (require + require-dev; platform pseudo-packages — names without a `/` — filtered; license-field array → OR-joined disjunction)
       lockfiles.py            composer.lock parser (packages + packages-dev; trusts explicit `dev` flag; extracts embedded SPDX license map for lockfile-first resolver)
     ruby/
-      gemfile.py              Static Gemfile parser (line-oriented regex + block-nesting state machine; never executes Ruby; git/path/github sources flagged off-registry; a gem is dev only when every group it is in — enclosing blocks plus per-line `group:`/`groups:` — is :development/:test, so custom, production, and mixed group lists are prod; a group name is read from a :symbol, a quoted string, or a %i[...] / %w[...] word list, and any other spelling is prod)
+      gemfile.py              Static Gemfile parser (line-oriented regex + block-nesting state machine; never executes Ruby; inline git/github/path options → `origin`, a path inside the scan root → not a dependency; a gem is dev only when every group it is in — enclosing blocks plus per-line `group:`/`groups:` — is :development/:test, so custom, production, and mixed group lists are prod; a group name is read from a :symbol, a quoted string, or a %i[...] / %w[...] word list, and any other spelling is prod)
       gemspec.py              Static *.gemspec parser (regex-only; `license` / `licenses` extraction; runtime vs development add_*_dependency split; workspace-internal name filter for multi-gemspec monorepos)
-      lockfiles.py            Gemfile.lock parser (2/4/6-space indent contract per Bundler's grammar; platform suffix stripped; off-registry marker on GIT/PATH/PLUGIN SOURCE specs)
+      lockfiles.py            Gemfile.lock parser (2/4/6-space indent contract per Bundler's grammar; platform suffix stripped; GIT/PLUGIN SOURCE specs and PATH specs outside the scan root carry an `origin`, a PATH spec inside it has no row)
     hex/
-      mix_exs.py              Static mix.exs parser (Elixir; flat `deps` tuple list, never executed; `only: :dev|:test` → dev; git/github/path/in_umbrella off-registry; `package` `licenses` → project license; umbrella `app:` workspace filter)
-      mix_lock.py             mix.lock parser (Elixir map literal; edge-aware via the 6th tuple element → reverse-BFS group attribution; `:git`/`:path` off-registry; shared `_split_top_level`/`_strip_line_comments`/off-registry-marker term helpers)
-      rebar_config.py         Static rebar.config parser (Erlang terms; top-level `{deps,…}` → prod; `{profiles,[{Name,[{deps,…}]}]}` → dev for the `test` / `dev` profiles, prod for every other profile; only top-level terms are read, so a `{deps,…}` nested in `overrides` is not a project dependency list; `{pkg,…}` hex-rename; `{git,…}` off-registry)
+      mix_exs.py              Static mix.exs parser (Elixir; flat `deps` tuple list, never executed; `only: :dev|:test` → dev; git/github/path → `origin`, `in_umbrella` and a path inside the scan root → not a dependency; `package` `licenses` → project license; umbrella `app:` workspace filter)
+      mix_lock.py             mix.lock parser (Elixir map literal; edge-aware via the 6th tuple element → reverse-BFS group attribution; a non-`:hex` tuple carries an `origin`; shared `_split_top_level`/`_strip_line_comments` term helpers)
+      rebar_config.py         Static rebar.config parser (Erlang terms; top-level `{deps,…}` → prod; `{profiles,[{Name,[{deps,…}]}]}` → dev for the `test` / `dev` profiles, prod for every other profile; only top-level terms are read, so a `{deps,…}` nested in `overrides` is not a project dependency list; `{pkg,…}` hex-rename; `{git,…}` / `{git_subdir,…}` / `{hg,…}` → `origin`)
       rebar_lock.py           rebar.lock parser (Erlang terms; level/section-based — depth levels, NO edges, like Pipfile.lock; level-0 grouped by rebar.config profile, level-≥1 conservative PROD with no ancestors)
       erlang_mk.py            Static erlang.mk Makefile parser (DEPS/REL_DEPS prod, TEST/BUILD/DOC/SHELL_DEPS dev, LOCAL_DEPS=OTP skipped; `dep_<name> = hex VER | git URL`; gated on `include erlang.mk`, never parses erlang.mk itself; manifest-only → registry walk; PROJECT-name monorepo workspace filter unioned with Mix umbrella apps)
     r/
       _dcf.py                 Debian-control-file (DCF) parser shared by DESCRIPTION + packrat.lock
-      description.py          DESCRIPTION manifest (Imports/Depends/LinkingTo → prod, Suggests/Enhances → dev; filters the `R` pseudo-package + base-priority packages not on CRAN; project `License` via normalize_r_license)
-      renv_lock.py            renv.lock parser (JSON; `Requirements` edges → reverse-BFS; GitHub/Bioconductor/Local → off-registry)
-      packrat.py              packrat/packrat.lock parser (DCF; `Requires` edges; `Source: CRAN` on-registry, else off)
-      _lock.py                shared edge-attribution (reverse-BFS group/ancestors) + off-registry marker for both R lockfiles
+      description.py          DESCRIPTION manifest (Imports/Depends/LinkingTo → prod, Suggests/Enhances → dev; `Remotes` entries → `origin`; filters the `R` pseudo-package + base-priority packages not on CRAN; project `License` via normalize_r_license)
+      renv_lock.py            renv.lock parser (JSON; `Requirements` edges → reverse-BFS; every source but a CRAN repository → `origin`)
+      packrat.py              packrat/packrat.lock parser (DCF; `Requires` edges; `Source: CRAN` on-registry, any other source → `origin`)
+      _lock.py                shared edge-attribution (reverse-BFS group/ancestors) + hosted-repository origin helper for both R lockfiles
   resolvers/
     pypi.py                   PyPI JSON API + PEP 658 wheel-metadata fallback + transitive deps fetcher
     npm_registry.py           npm registry API + transitive deps fetcher
@@ -94,7 +96,9 @@ src/licenseal/
 
 `Dependency` carries `depth` (0 for direct, ≥1 for transitive) and `direct_ancestors: tuple[str, ...]` — the depth-0 deps that pull the entry in. Reports nest transitives under their alphabetically-first direct ancestor, matched on `(ecosystem, name)`; shared transitives carry an `(also: X, Y)` annotation. Each result is rendered as exactly one row (`report._grouped_results`), so table and Markdown row counts equal JSON's `summary.total`. JSON output exposes the full ancestor list.
 
-Review keys are `<ecosystem>:<canonical-name>@<version>`. Python names are PEP 503 normalized (`-_.` collapsed and lowercased); npm names are lowercased.
+`Dependency.origin` is empty for a registry package. For a dependency declared from a git repository, a direct URL, or a path outside the scanned directory it holds the source as one normalized string, built by `discovery/_origin.py` (`git_origin`, `url_origin`, `path_origin`), which also strips URL credentials. `path_origin` returns `None` for a path inside the scan root: that is the project's own code and the parser emits no dependency for it. A dependency with an origin is never turned into a registry request: `cli._resolve` answers UNKNOWN for it before any resolver runs, the deps.dev batch is built from the dependencies without one, and `transitive._walk_one_inner` neither resolves nor expands it. Any new code path that builds a request from a `Dependency` must skip `dep.origin` the same way. The origin is part of a row's identity in `discover_all_dependencies`' dedupe and in `transitive._dedupe`. An alternate index or registry is not an origin: those names resolve against the public registry.
+
+Review keys are `<ecosystem>:<canonical-name>@<version>`. Python names are PEP 503 normalized (`-_.` collapsed and lowercased); npm names are lowercased. A dependency with an origin is keyed `off-registry <ecosystem>:<canonical-name> from <origin>` instead (`review.source_review_key`, from the stanza's `source` key); the prefix makes the two key spaces disjoint whatever the package and version text hold.
 
 ## Architecture: manifest + registry only
 

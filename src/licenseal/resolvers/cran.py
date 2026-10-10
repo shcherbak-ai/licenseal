@@ -20,13 +20,10 @@ license with ``AND``.
 
 from __future__ import annotations
 
-from dataclasses import replace
-
 import httpx
 
 from licenseal.analysis.spdx import normalize_r_license
 from licenseal.discovery.r._dcf import parse_dcf, parse_package_list
-from licenseal.discovery.r._lock import is_off_registry_marker
 from licenseal.discovery.r.description import is_base_package
 from licenseal.models import Dependency, LicenseInfo
 from licenseal.resolvers.http import Fetcher, fetch_registry_text
@@ -122,15 +119,13 @@ def _unknown(dep: Dependency, *, from_registry: bool) -> LicenseInfo:
 def resolve_r_license(dep: Dependency, index: CranIndex) -> LicenseInfo:
     """Resolve an R package's license from the parsed CRAN ``PACKAGES`` index.
 
-    Off-registry (GitHub / Bioconductor / Local) deps and packages absent from
-    the current index (archived / off-CRAN) resolve to UNKNOWN. The reported
-    ``resolved_version`` is the lockfile pin when present, else the index's
-    current version. The index carries no repository/homepage URLs, so those
-    stay empty for R.
+    A package absent from the current index (archived / off-CRAN) resolves to
+    UNKNOWN. The reported ``resolved_version`` is the lockfile pin when
+    present, else the index's current version. The index carries no
+    repository/homepage URLs, so those stay empty for R. A package with an
+    ``origin`` (GitHub / Bioconductor / Local) is not a CRAN package; the CLI
+    never passes one to this function.
     """
-    if is_off_registry_marker(dep.source):
-        # Drop the internal marker so it doesn't surface as the report's Source.
-        return _unknown(replace(dep, source=""), from_registry=False)
     record = index.get(dep.name.lower())
     if record is None:
         return _unknown(dep, from_registry=False)

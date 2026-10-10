@@ -4,9 +4,10 @@ Both R lockfiles enumerate the pinned package set with per-package requirement
 edges but carry no prod/dev marker — group attribution comes from the
 ``DESCRIPTION`` (``Imports``/``Depends``/``LinkingTo`` = prod roots,
 ``Suggests``/``Enhances`` = dev roots) via the same reverse-BFS the Hex /
-Bundler paths use. Off-registry packages (GitHub / Bioconductor / Local) can't
-be resolved on CRAN, so they carry the off-registry source marker the resolver
-short-circuits on.
+Bundler paths use. A package a lockfile does not source from CRAN (GitHub,
+GitLab, Bitbucket, Bioconductor, a URL, a local path) is emitted with an
+``origin`` and is never looked up in the CRAN index. A local path inside the
+scanned directory is the project's own code and gets no row.
 """
 
 from __future__ import annotations
@@ -14,22 +15,36 @@ from __future__ import annotations
 from dataclasses import replace
 
 from licenseal._graph import compute_direct_ancestors
+from licenseal.discovery._origin import UNRECORDED, hosted_git_origin
 from licenseal.models import Dependency, DependencyGroup, Ecosystem
 
-# Source marker the resolver checks to short-circuit registry fetches on
-# GitHub / Bioconductor / Local-sourced packages. The transitive walker
-# overwrites ``source`` with the human-readable manifest path for registry-
-# backed direct deps; the marker only survives on entries whose origin is
-# not CRAN.
-_OFF_REGISTRY_MARKER = "__off_registry__"
+# name_lower -> (orig_name, version, origin). The origin is empty for a CRAN
+# package and None for a local package of this project.
+SpecInfo = dict[str, "tuple[str, str, str | None]"]
 
-# name_lower -> (orig_name, version, off_registry)
-SpecInfo = dict[str, "tuple[str, str, bool]"]
+# The git hosting sites a lockfile names as a package source, and their hosts.
+_GIT_HOSTS = {"github": "github.com", "gitlab": "gitlab.com", "bitbucket": "bitbucket.org"}
 
 
-def is_off_registry_marker(source: str) -> bool:
-    """True for the off-registry source marker emitted by the lock parsers."""
-    return source == _OFF_REGISTRY_MARKER
+def hosted_origin(source: str, username: str, repository: str, revision: str, host: str) -> str:
+    """Origin of a package a lockfile sources from a git hosting site, or ``""``.
+
+    ``source`` is the lockfile's source label (``GitHub``, ``gitlab``, ...).
+    ``host`` is the API host the lockfile records, when it records one
+    (``api.github.com``, ``github.example.com/api/v3``); the site's public
+    host is used otherwise. Empty when ``source`` is not such a site or the
+    repository is not recorded.
+    """
+    default_host = _GIT_HOSTS.get(source.lower())
+    if default_host is None or not (username and repository):
+        return ""
+    site = host.split("/", 1)[0].removeprefix("api.") or default_host
+    return hosted_git_origin(site, f"{username}/{repository}", revision)
+
+
+def source_label_origin(source: str) -> str:
+    """Origin of a package whose lockfile entry records a source label and no locator."""
+    return source or UNRECORDED
 
 
 def _reachable(edges: dict[str, set[str]], roots: set[str]) -> set[str]:
@@ -80,7 +95,7 @@ def build_lock_dependencies(
         required = {child for children in edges.values() for child in children}
         direct_names = {name for name in spec_info if name not in required}
 
-    name_case = {lower: orig for lower, (orig, _ver, _off) in spec_info.items()}
+    name_case = {lower: orig for lower, (orig, _ver, _origin) in spec_info.items()}
     prod_root_names = direct_names - dev_direct_names
     dev_root_names = dev_direct_names & direct_names
     prod_reachable = _reachable(edges, prod_root_names)
@@ -90,7 +105,9 @@ def build_lock_dependencies(
     ancestors = compute_direct_ancestors(edges, roots_for_attribution)
 
     out: list[Dependency] = []
-    for normalized, (orig_name, version, off_registry) in spec_info.items():
+    for normalized, (orig_name, version, origin) in spec_info.items():
+        if origin is None:
+            continue
         is_direct = normalized in direct_names
         if normalized in dev_reachable:
             group = DependencyGroup.DEV
@@ -114,7 +131,7 @@ def build_lock_dependencies(
                 group=group,
                 depth=0 if is_direct else 1,
                 direct_ancestors=() if is_direct else ancestors.get(normalized, ()),
-                source="" if not off_registry else _OFF_REGISTRY_MARKER,
+                origin=origin,
             )
         )
     return out
@@ -127,12 +144,11 @@ def attach_direct_sources(
     """Stamp the discovery source path onto depth-0 lock-derived deps.
 
     Mirrors the Hex / Bundler path: depth-0 entries get the matching
-    ``DESCRIPTION`` source filename from discovery. Off-registry entries keep
-    the off-registry marker.
+    ``DESCRIPTION`` source filename from discovery.
     """
     out: list[Dependency] = []
     for dep in deps:
-        if dep.depth != 0 or is_off_registry_marker(dep.source):
+        if dep.depth != 0:
             out.append(dep)
             continue
         source = direct_source_by_name.get(dep.name.lower(), "")

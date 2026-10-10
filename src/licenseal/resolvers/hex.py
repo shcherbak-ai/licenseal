@@ -15,8 +15,9 @@ license resolution.
 
 deps.dev does not index Hex, so there is no batch pre-pass: every dep is
 resolved here against hex.pm (lockfile-first keeps this to one GET per unique
-package, deduped by the per-scan cache). Off-registry deps (``:git`` / ``:path``
-in ``mix.lock``, ``git:`` / ``path:`` in ``mix.exs``) short-circuit to UNKNOWN.
+package, deduped by the per-scan cache). A dep with an ``origin`` (``:git`` in
+``mix.lock``, ``git:`` / ``path:`` in ``mix.exs``) is not a hex.pm package; the
+CLI never passes one to this module.
 
 One request per package means a large project exceeds hex.pm's per-window
 request quota. That is handled in the shared HTTP layer, not here: a 429 pauses
@@ -26,12 +27,9 @@ all hex.pm requests until the window resets (``_HostRateLimitWindow`` in
 
 from __future__ import annotations
 
-from dataclasses import replace
-
 import httpx
 
 from licenseal.analysis.spdx import read_license_array
-from licenseal.discovery.hex.mix_lock import is_off_registry_marker
 from licenseal.models import Dependency, DependencyGroup, Ecosystem, LicenseInfo
 from licenseal.resolvers.http import Fetcher, fetch_registry_json
 
@@ -139,13 +137,8 @@ def resolve_hex_license(
 
     One ``GET /api/packages/{name}`` yields the package-level license + links;
     the resolved version is the lockfile pin when present, else the package's
-    ``latest_stable_version``. Off-registry (git/path) deps short-circuit to
-    UNKNOWN without a fetch.
+    ``latest_stable_version``.
     """
-    if is_off_registry_marker(dep.source):
-        # Drop the internal marker so it doesn't surface as the report's Source.
-        return _unknown(replace(dep, source=""), from_registry=False)
-
     # `effective_registry_name` is the real hex.pm package for a `hex:`-renamed
     # dep (declared local app name ≠ published package); else just the name.
     data = fetcher(_hex_package_url(dep.effective_registry_name), client)

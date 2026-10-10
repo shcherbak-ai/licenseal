@@ -68,9 +68,6 @@ from licenseal.discovery.hex.mix_lock import (
     find_mix_lockfiles,
     parse_mix_lock,
 )
-from licenseal.discovery.hex.mix_lock import (
-    is_off_registry_marker as _is_hex_off_registry,
-)
 from licenseal.discovery.hex.rebar_lock import find_rebar_lockfiles, parse_rebar_lock
 from licenseal.discovery.java.gradle_lockfile import (
     find_gradle_lockfiles,
@@ -110,9 +107,6 @@ from licenseal.discovery.ruby.lockfiles import (
 from licenseal.discovery.ruby.lockfiles import (
     find_gemfile_lockfiles,
     parse_gemfile_lock,
-)
-from licenseal.discovery.ruby.lockfiles import (
-    is_off_registry_marker as _is_ruby_off_registry,
 )
 from licenseal.discovery.rust.cargo_toml import cargo_off_registry_root_names
 from licenseal.discovery.rust.lockfiles import find_rust_lockfiles, parse_cargo_lock
@@ -318,6 +312,7 @@ def resolve_transitive(
                         prod_root_names=names_by_group(Ecosystem.NPM, DependencyGroup.PROD),
                         dev_root_names=names_by_group(Ecosystem.NPM, DependencyGroup.DEV),
                         include_dev=include_dev,
+                        scan_root=project_path,
                     )
                 )
             )
@@ -457,6 +452,7 @@ def resolve_transitive(
                 direct_names=direct_ruby_names,
                 dev_direct_names=dev_direct_ruby_names,
                 include_dev=include_dev,
+                scan_root=project_path,
             )
             # Drop workspace-internal lockfile entries — monorepo
             # siblings (one in-tree gem referencing another) are not
@@ -502,6 +498,7 @@ def resolve_transitive(
                         direct_names=direct_hex_names,
                         dev_direct_names=dev_direct_hex_names,
                         include_dev=include_dev,
+                        scan_root=project_path,
                     )
                 )
             )
@@ -830,6 +827,7 @@ def _resolve_r_transitive(
                     direct_names=direct_r_names,
                     dev_direct_names=dev_direct_r_names,
                     include_dev=include_dev,
+                    scan_root=project_path,
                 )
             )
         )
@@ -841,6 +839,7 @@ def _resolve_r_transitive(
                     direct_names=direct_r_names,
                     dev_direct_names=dev_direct_r_names,
                     include_dev=include_dev,
+                    scan_root=project_path,
                 )
             )
         )
@@ -874,10 +873,12 @@ def _r_index_closure(
     the index; versions are the index's current versions (R licenses are
     version-stable). Direct deps absent from the index (off-CRAN / archived) are
     still seeded so they surface and resolve to UNKNOWN at the license stage.
+    A direct dep with an origin is not a CRAN package: it keeps its origin,
+    takes no version from the index, and has no edges.
     Attribution reuses :func:`build_lock_dependencies`: direct deps are the
     roots, the Suggests/Enhances subset the dev roots.
     """
-    spec_info: dict[str, tuple[str, str, bool]] = {}
+    spec_info: dict[str, tuple[str, str, str | None]] = {}
     edges: dict[str, set[str]] = {}
     prod_roots = {d.name.lower() for d in direct_deps if d.group == DependencyGroup.PROD}
     dev_roots = {d.name.lower() for d in direct_deps if d.group == DependencyGroup.DEV}
@@ -889,17 +890,20 @@ def _r_index_closure(
         record = cran_index.get(lower)
         orig = record.get("Package", name) if record else name
         version = record.get("Version", "").strip() if record else ""
-        spec_info[lower] = (orig, version, False)
+        spec_info[lower] = (orig, version, "")
 
     for dep in direct_deps:
-        _seed(dep.name)
+        if dep.origin:
+            spec_info.setdefault(dep.name.lower(), (dep.name, "", dep.origin))
+        else:
+            _seed(dep.name)
 
     frontier = prod_roots | dev_roots
     seen: set[str] = set(frontier)
     while frontier:
         nxt: set[str] = set()
         for node in frontier:
-            record = cran_index.get(node)
+            record = None if spec_info[node][2] else cran_index.get(node)
             children: set[str] = set()
             if record is not None:
                 for child in index_edge_names(record):
@@ -1842,10 +1846,12 @@ def _walk_registry(
     # Python is the only ecosystem with extras; for npm/Rust deps.extras
     # is always the empty frozenset so the key collapses to the prior
     # shape and behavior is unchanged.
-    DedupKey = tuple[str, str, frozenset[str]]  # noqa: N806  (PEP 695-style local type alias)
+    # The origin is part of the key too: a dependency declared from a git
+    # repository, a URL, or a path is not the registry package of that name.
+    DedupKey = tuple[str, str, frozenset[str], str]  # noqa: N806  (PEP 695-style local type alias)
 
     def _key(dep: Dependency) -> DedupKey:
-        return (dep.name.lower(), dep.version_constraint, dep.extras)
+        return (dep.name.lower(), dep.version_constraint, dep.extras, dep.origin)
 
     visited: set[DedupKey] = set()
     out: list[Dependency] = []
@@ -1959,7 +1965,13 @@ def _walk_one_inner(
     client: httpx.Client,
     fetcher: Fetcher,
 ) -> _WalkResult:
-    """Resolve one BFS node: pick a version, then fetch its declared deps."""
+    """Resolve one BFS node: pick a version, then fetch its declared deps.
+
+    A dependency with an origin is not a registry package: nothing is fetched
+    for it, and it is a row as it stands.
+    """
+    if dep.origin:
+        return (dep, "", [])
     resolved_version = _resolve_version(dep, ecosystem, client, fetcher)
     if not resolved_version or dep.depth >= max_depth:
         return (dep, resolved_version, [])
@@ -1995,8 +2007,6 @@ def _walk_one_inner(
             fetcher=fetcher,
         )
     elif ecosystem == Ecosystem.RUBY:
-        # Off-registry gems never reach here: _resolve_version returns "" for
-        # them, so the ``not resolved_version`` early-return above fires first.
         children = fetch_rubygems_dependencies(
             dep.name,
             resolved_version,
@@ -2006,7 +2016,6 @@ def _walk_one_inner(
             fetcher=fetcher,
         )
     elif ecosystem == Ecosystem.HEX:
-        # Off-registry deps never reach here (same reason as Ruby above).
         # `effective_registry_name` is the real hex.pm package for a `hex:`-
         # renamed dep, else just the name.
         children = fetch_hex_dependencies(
@@ -2096,8 +2105,6 @@ def _resolve_version(
         return select_php_version(spec, published_versions) or ""
 
     if ecosystem == Ecosystem.RUBY:
-        if _is_ruby_off_registry(dep.source):
-            return ""
         pinned = _extract_ruby_pinned_version(spec)
         if pinned:
             return pinned
@@ -2111,8 +2118,6 @@ def _resolve_version(
         return v if isinstance(v, str) else ""
 
     if ecosystem == Ecosystem.HEX:
-        if _is_hex_off_registry(dep.source):
-            return ""
         pinned = _extract_hex_pinned_version(spec)
         if pinned:
             return pinned
@@ -2156,7 +2161,11 @@ def _canonical_name(dep: Dependency) -> str:
 
 
 def _dedupe(deps: list[Dependency]) -> list[Dependency]:
-    """Deduplicate by (ecosystem, canonical-name, version_constraint).
+    """Deduplicate by (ecosystem, canonical-name, version_constraint, origin).
+
+    The origin is part of the key: two commits of one repository that declare
+    the same version are two rows, and so are a registry package and a git
+    dependency of the same name.
 
     Direct deps (depth=0) take precedence over transitive entries with the same
     name+version, so a dep declared at the top level keeps an empty
@@ -2180,11 +2189,11 @@ def _dedupe(deps: list[Dependency]) -> list[Dependency]:
     """
     filtered = _drop_phantom_unresolved(deps)
 
-    chosen: dict[tuple[Ecosystem, str, str], Dependency] = {}
-    merged: dict[tuple[Ecosystem, str, str], set[str]] = {}
-    prod_keys: set[tuple[Ecosystem, str, str]] = set()
+    chosen: dict[tuple[Ecosystem, str, str, str], Dependency] = {}
+    merged: dict[tuple[Ecosystem, str, str, str], set[str]] = {}
+    prod_keys: set[tuple[Ecosystem, str, str, str]] = set()
     for dep in filtered:
-        key = (dep.ecosystem, _canonical_name(dep), dep.version_constraint)
+        key = (dep.ecosystem, _canonical_name(dep), dep.version_constraint, dep.origin)
         existing = chosen.get(key)
         if existing is None or existing.depth > dep.depth:
             chosen[key] = dep
@@ -2193,9 +2202,9 @@ def _dedupe(deps: list[Dependency]) -> list[Dependency]:
             prod_keys.add(key)
 
     out: list[Dependency] = []
-    used: set[tuple[Ecosystem, str, str]] = set()
+    used: set[tuple[Ecosystem, str, str, str]] = set()
     for dep in filtered:
-        key = (dep.ecosystem, _canonical_name(dep), dep.version_constraint)
+        key = (dep.ecosystem, _canonical_name(dep), dep.version_constraint, dep.origin)
         if key in used:
             continue
         used.add(key)
@@ -2218,9 +2227,15 @@ def _drop_phantom_unresolved(deps: list[Dependency]) -> list[Dependency]:
     variants of the same distribution name collide) — a discovery-side
     unresolved entry can then phantom-drop against a lockfile-side pinned
     entry even if they spell the name differently.
+
+    An entry with an origin is neither: it is not the registry package of its
+    name, so it is never dropped in favour of a pinned one and never makes an
+    unpinned registry entry a phantom.
     """
     resolved_names: set[tuple[Ecosystem, str]] = {
-        (d.ecosystem, _canonical_name(d)) for d in deps if d.version_constraint.startswith("==")
+        (d.ecosystem, _canonical_name(d))
+        for d in deps
+        if d.version_constraint.startswith("==") and not d.origin
     }
 
     phantom_ancestors: dict[tuple[Ecosystem, str], set[str]] = {}
@@ -2228,7 +2243,7 @@ def _drop_phantom_unresolved(deps: list[Dependency]) -> list[Dependency]:
     for dep in deps:
         key = (dep.ecosystem, _canonical_name(dep))
         is_pinned = dep.version_constraint.startswith("==")
-        if not is_pinned and key in resolved_names:
+        if not is_pinned and not dep.origin and key in resolved_names:
             phantom_ancestors.setdefault(key, set()).update(dep.direct_ancestors)
             continue
         survivors.append(dep)
@@ -2247,6 +2262,7 @@ def _drop_phantom_unresolved(deps: list[Dependency]) -> list[Dependency]:
             ),
         )
         if d.version_constraint.startswith("==")
+        and not d.origin
         and (d.ecosystem, _canonical_name(d)) in phantom_ancestors
         else d
         for d in survivors

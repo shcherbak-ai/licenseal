@@ -10,7 +10,6 @@ import pytest
 import respx
 
 from licenseal.analysis.compatibility import check_compatibility
-from licenseal.discovery.ruby.lockfiles import _OFF_REGISTRY_MARKER
 from licenseal.models import (
     CompatibilityVerdict,
     Dependency,
@@ -369,20 +368,6 @@ class TestResolveRubyLicenseUnpinned:
             info = resolve_ruby_license(_ruby_dep("missing", ""), client)
         assert info.license_id == "UNKNOWN"
         assert info.from_registry is False
-
-
-class TestResolveRubyLicenseOffRegistry:
-    def test_off_registry_short_circuits(self):
-        # No HTTP mock set up — if the resolver tries to fetch, the test
-        # would hang or hit a real network. Off-registry short-circuits
-        # bypass that entirely.
-        dep = _ruby_dep("edge", "==0.0.1", source=_OFF_REGISTRY_MARKER)
-        with httpx.Client() as client:
-            info = resolve_ruby_license(dep, client)
-        assert info.license_id == "UNKNOWN"
-        assert info.from_registry is False
-        # The internal marker is dropped so it doesn't reach the report.
-        assert info.dependency.source == ""
 
 
 class TestFetchRubygemsDependencies:

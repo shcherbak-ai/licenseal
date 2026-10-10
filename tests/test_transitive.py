@@ -8048,7 +8048,6 @@ class TestRubyLockfileFirstPath:
             "\n"
         )
         from licenseal.discovery import discover_all_dependencies
-        from licenseal.discovery.ruby.lockfiles import is_off_registry_marker
 
         direct_deps, _ = discover_all_dependencies(tmp_path)
         # include_dev=True: acme-dev present at depth 0, DEV, off-registry.
@@ -8059,7 +8058,8 @@ class TestRubyLockfileFirstPath:
         acme_dev = next(d for d in with_dev if d.name == "acme-dev")
         assert acme_dev.depth == 0
         assert acme_dev.group == DependencyGroup.DEV
-        assert is_off_registry_marker(acme_dev.source)
+        assert acme_dev.origin == "git+https://github.com/example/acme-dev.git@abc123"
+        assert acme_dev.source == "Gemfile"
         # include_dev=False: acme-dev dropped — no longer leaks in as PROD.
         with httpx.Client() as client:
             prod_only = resolve_transitive(
@@ -8270,19 +8270,6 @@ class TestResolveVersionRuby:
             )
         assert v == "7.1.3"
 
-    def test_off_registry_short_circuits(self):
-        from licenseal.discovery.ruby.lockfiles import _OFF_REGISTRY_MARKER
-        from licenseal.resolvers.http import fetch_registry_json
-
-        with httpx.Client() as client:
-            v = _resolve_version(
-                self._dep(spec="==1.0", source=_OFF_REGISTRY_MARKER),
-                Ecosystem.RUBY,
-                client,
-                fetcher=fetch_registry_json,
-            )
-        assert v == ""
-
     @respx.mock
     def test_unpinned_uses_v1_endpoint(self):
         from licenseal.resolvers.http import fetch_registry_json
@@ -8407,7 +8394,6 @@ class TestHexLockfileFirstPath:
         (tmp_path / "mix.exs").write_text(_HEX_MIX_EXS)
         (tmp_path / "mix.lock").write_text(_HEX_MIX_LOCK)
         from licenseal.discovery import discover_all_dependencies
-        from licenseal.discovery.hex.mix_lock import is_off_registry_marker
 
         direct_deps, _ = discover_all_dependencies(tmp_path)
         with httpx.Client() as client:
@@ -8419,9 +8405,10 @@ class TestHexLockfileFirstPath:
         assert by_name["plug"].depth == 1
         assert by_name["plug"].direct_ancestors == ("phoenix",)
         assert by_name["dev_tool"].group == DependencyGroup.DEV
-        # git-sourced direct dep: depth 0, off-registry marker preserved.
+        # git-sourced direct dep: depth 0, with the repository and locked commit.
         assert by_name["my_fork"].depth == 0
-        assert is_off_registry_marker(by_name["my_fork"].source)
+        assert by_name["my_fork"].origin == "git+https://github.com/me/my_fork.git@sha"
+        assert by_name["my_fork"].source == "mix.exs"
 
     def test_dev_only_chain_dropped_under_no_dev(self, tmp_path):
         (tmp_path / "mix.exs").write_text(_HEX_MIX_EXS)
@@ -8484,7 +8471,6 @@ class TestHexLockfileFirstPath:
             ' {<<"jsx">>,{git,"https://x/y.git",{ref,"abc"}},0}]}.\n'
         )
         from licenseal.discovery import discover_all_dependencies
-        from licenseal.discovery.hex.mix_lock import is_off_registry_marker
 
         direct_deps, _ = discover_all_dependencies(tmp_path)
         with httpx.Client() as client:
@@ -8496,7 +8482,7 @@ class TestHexLockfileFirstPath:
         assert by_name["meck"].group == DependencyGroup.DEV  # test profile
         assert by_name["telemetry"].depth == 1  # level-1 transitive, PROD
         assert by_name["telemetry"].group == DependencyGroup.PROD
-        assert is_off_registry_marker(by_name["jsx"].source)
+        assert by_name["jsx"].origin == "git+https://x/y.git@abc"
         # --no-dev drops the test-profile dep.
         with httpx.Client() as client:
             prod_only = resolve_transitive(
@@ -8586,19 +8572,6 @@ class TestResolveVersionHex:
                 self._dep(spec="==1.7.10"), Ecosystem.HEX, client, fetch_registry_json
             )
         assert v == "1.7.10"
-
-    def test_off_registry_short_circuits(self):
-        from licenseal.discovery.hex.mix_lock import _OFF_REGISTRY_MARKER
-        from licenseal.resolvers.http import fetch_registry_json
-
-        with httpx.Client() as client:
-            v = _resolve_version(
-                self._dep(spec="==1.0", source=_OFF_REGISTRY_MARKER),
-                Ecosystem.HEX,
-                client,
-                fetch_registry_json,
-            )
-        assert v == ""
 
     @respx.mock
     def test_unpinned_uses_latest_stable(self):
@@ -8692,7 +8665,6 @@ class TestRLockfileFirstPath:
         (tmp_path / "DESCRIPTION").write_text(_R_DESCRIPTION)
         (tmp_path / "renv.lock").write_text(_RENV_LOCK_JSON)
         from licenseal.discovery import discover_all_dependencies
-        from licenseal.discovery.r._lock import is_off_registry_marker
 
         direct_deps, _ = discover_all_dependencies(tmp_path)
         with httpx.Client() as client:
@@ -8705,8 +8677,8 @@ class TestRLockfileFirstPath:
         assert by_name["cli"].depth == 1
         assert by_name["cli"].direct_ancestors == ("ggplot2",)
         assert by_name["testthat"].group == DependencyGroup.DEV
-        # GitHub-sourced package: off-registry marker preserved.
-        assert is_off_registry_marker(by_name["myfork"].source)
+        # GitHub-sourced package: not a CRAN package.
+        assert by_name["myfork"].origin == "GitHub"
 
     def test_renv_lock_only_no_description(self, tmp_path):
         # renv.lock with NO DESCRIPTION (analysis-project / web-app layout):

@@ -172,9 +172,11 @@ class TestPnpmLock:
             lockfileVersion: '9.0'
             packages:
               a@link:../a: {}
-              d@file:../d.tgz: {resolution: {tarball: file:../d.tgz}}
+              d@file:local/d.tgz: {resolution: {tarball: file:local/d.tgz}}
             """,
         )
+        # A linked package and an archive inside the scanned directory are the
+        # project's own code: read, and no rows.
         rows, diags = _resolve(tmp_path)
         assert rows == _NPM_UNPINNED
         assert diags == []

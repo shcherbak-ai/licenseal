@@ -11,6 +11,7 @@ from licenseal.discovery._read import (
     typed_field,
 )
 from licenseal.discovery._walk import walk_project_files
+from licenseal.discovery.npm._specs import npm_spec_origin
 from licenseal.models import Dependency, DependencyGroup, Ecosystem
 from licenseal.resolvers.npm_registry import _unpack_npm_alias  # noqa: PLC2701
 
@@ -53,15 +54,21 @@ def _emit_dep(
     Mirrors the transitive walker's alias handling: ``"slash3": "npm:slash@^3"``
     is recorded as ``slash`` so the registry lookup hits the real package, not
     the consumer's local alias name (which 404s).
+
+    A spec that points at a git repository or a tarball URL is not a registry
+    spec: the dependency carries its origin and no version constraint, and is
+    never looked up.
     """
     target_name, target_spec = _unpack_npm_alias(name, spec)
+    origin = npm_spec_origin(target_spec)
     out.append(
         Dependency(
             name=target_name,
-            version_constraint=target_spec,
+            version_constraint="" if origin else target_spec,
             ecosystem=Ecosystem.NPM,
             group=group,
             source=source,
+            origin=origin,
         )
     )
 

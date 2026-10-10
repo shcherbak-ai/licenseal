@@ -97,6 +97,13 @@ class Dependency:
     depth: int = 0
     direct_ancestors: tuple[str, ...] = ()
     source: str = ""
+    # Where the dependency comes from when that is not the registry: a git
+    # repository, a direct URL, or a path outside the scanned directory, as
+    # one normalized string (see `licenseal.discovery._origin`). Empty for a
+    # registry package. A dependency with an origin is never looked up on a
+    # registry: its license is UNKNOWN until a review keyed on the origin
+    # supplies one.
+    origin: str = ""
     # Name to query the registry under when it differs from `name`. Hex `hex:`
     # package-renames declare a local app name (`name` — used for the lock-edge
     # graph, dev attribution, workspace filter, and display) that differs from

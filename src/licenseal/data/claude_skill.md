@@ -159,6 +159,10 @@ Frame the per-dep question by combining verdict, risk, and project context. The 
   - It adds nothing that limits the project's use (a copyright-holder list, an attribution notice) → reviewable with the named license as `license` and `note` saying what the file contains. It adds a restriction → reviewable only when the user confirms the project's use stays inside it, with that recorded in `note`. Unread → leave unreviewed.
   - If the verdict is `incompatible` instead, the named license is itself the violation: walk it under the INCOMPATIBLE patterns above.
 
+- **UNKNOWN — off-registry source** (`origin` is non-empty, `reason` says "comes from an off-registry source"):
+  - The dependency is installed from a git repository, a direct URL, or a path outside the project, not from the registry. licenseal makes no registry request for it, and the registry package of the same name is a different package: do not look the name up on the registry, and expect `package_url` and `actionability.investigate_url` to be empty. Ask: *"{name} comes from {origin}. Can you read the license at that source and tell me what it is?"* Record the answer as the reviewed license. If unknown, leave unreviewed.
+  - The review is keyed on the `origin`, not on the version. When the `origin` of a git dependency ends in a branch or a tag rather than a commit, tell the user that the review keeps applying when that branch or tag moves, and that pinning a commit in the manifest or committing a lockfile makes the key immutable.
+
 - **UNKNOWN — source-available (SSPL-*, BUSL-*, Elastic-*, FSL-*, Parity-*, PolyForm-*)**:
   - `context.commercial` = no **or** `context.competing` = no → source-available terms typically allow non-competing use. Ask: *"{license} restricts competing commercial use. You said this is [non-commercial / non-competing] — confirm and mark as reviewed?"*
   - `context.commercial` = yes **and** `context.competing` = yes → real incompatibility. Recommend removal / alternative.
@@ -181,7 +185,7 @@ Frame the per-dep question by combining verdict, risk, and project context. The 
   - **`Proprietary` as one operand of a compound** (e.g. `license == "MIT AND Proprietary"`, verdict `unknown`): the operand is a custom-terms license, usually a `LicenseRef-*` reference, and `license_raw` shows the declared string. Ask the terms questions above about that operand. With recordable terms → reviewable with the full expression as `license` and the arrangement in `note`.
   - **Never review proprietary deps without recordable terms.** The `Proprietary` sentinel exists because terms vary per vendor; the `note` must name *what permits the use* — an agreement reference, a quoted clause, a ToS URL, or a concise factual description of the binding terms. *"looks fine"* / *"we use it"* / *"we have a contract somewhere"* are not recordable terms and create the audit-trail failure the review file is designed to prevent. The test: a future reviewer reading the `note` alone should be able to verify (or at least re-check) whether the use is still authorized, without going back to the engineer who wrote it.
 
-The general pattern is: state the obligation, anchor it to the user's project context, then ask the targeted yes/no question. Collect decisions as `{(ecosystem, name, version) -> reviewed_license}`. Only entries where the user supplied a concrete SPDX ID / expression go into the review file.
+The general pattern is: state the obligation, anchor it to the user's project context, then ask the targeted yes/no question. Collect decisions as `{(ecosystem, name, version) -> reviewed_license}`, and as `{(ecosystem, name, origin) -> reviewed_license}` for a dep with a non-empty `origin`. Only entries where the user supplied a concrete SPDX ID / expression go into the review file.
 
 ### 5. Scaffold (or extend) the review file
 
@@ -193,7 +197,7 @@ The general pattern is: state the obligation, anchor it to the user's project co
   licenseal init-review-file --from-report "$SCAN_FILE"
   ```
 
-  This writes `licenseal.review.toml` to the project root with one `[[review]]` stanza per flagged dep that has a resolved version, each with `license = ""`.
+  This writes `licenseal.review.toml` to the project root with one `[[review]]` stanza per flagged dep that has a resolved version or an `origin`, each with `license = ""`. The stanza of an off-registry dep carries a `source` line holding its `origin`; that line is its key, and its `version` line is present only when the scan recorded a version.
 
 - **A review file already exists** (a re-audit, or the project committed one earlier) — extend it in place with `--merge`:
 
@@ -201,15 +205,15 @@ The general pattern is: state the obligation, anchor it to the user's project co
   licenseal init-review-file --from-report "$SCAN_FILE" --merge
   ```
 
-  Merge is **append-only, keyed by `(ecosystem, name, version)`**: every existing stanza is preserved verbatim (filled-in reviews keep their `license` / `note`), and a fresh empty stanza is appended only for newly-flagged deps not already present. The command reports `Appended N review entr(y/ies)` or `No new flagged dependencies to add.` Without `--merge` it aborts with `licenseal.review.toml already exists` — that's the cue to re-run with the flag, **not** to delete the file (deleting discards the existing audit trail).
+  Merge is **append-only, keyed by `(ecosystem, name, version)`** (by `(ecosystem, name, source)` for a stanza with a `source` line): every existing stanza is preserved verbatim (filled-in reviews keep their `license` / `note`), and a fresh empty stanza is appended only for newly-flagged deps not already present. The command reports `Appended N review entr(y/ies)` or `No new flagged dependencies to add.` Without `--merge` it aborts with `licenseal.review.toml already exists` — that's the cue to re-run with the flag, **not** to delete the file (deleting discards the existing audit trail).
 
-  **Merge does not reconcile stale entries.** If a previously-reviewed dep changed version, merge appends a *new* empty stanza for the new version and leaves the *old* filled stanza untouched — it can't tell they're the same dep. The old stanza then surfaces on the next `check` (step 7) as a `did not match any resolved package versions` error; resolve that by hand-editing the `version` field on the stale stanza — but only if the new version reports the same license (verify against the fresh scan first; if it changed, delete the stanza so the dep re-flags). Re-merging will not fix a stale pin.
+  **Merge does not reconcile stale entries.** If a previously-reviewed dep changed version, merge appends a *new* empty stanza for the new version and leaves the *old* filled stanza untouched — it can't tell they're the same dep. The old stanza then surfaces on the next `check` (step 7) as a `did not match any resolved package versions` error; resolve that by hand-editing the `version` field on the stale stanza — but only if the new version reports the same license (verify against the fresh scan first; if it changed, delete the stanza so the dep re-flags). Re-merging will not fix a stale pin. A stanza with a `source` line goes stale the same way when the dependency's commit, ref, URL, or path changes: the new source is different code, so ask the user to review it again before updating `source`.
 
 If the command emits a `Note: N flagged dependencies could not be scaffolded (no resolved version) ...` line, surface those names to the user — they signal upstream issues (manifest typo, yanked release, registry miss) that the review file can't paper over.
 
 ### 6. Fill in the review file
 
-For each empty `[[review]]` stanza in `licenseal.review.toml` — on a `--merge` run that's just the freshly-appended ones; leave already-filled stanzas from prior audits untouched — look up the dep's `(ecosystem, package, version)` triple in the decisions collected in step 4 and set `license = "<their answer>"`. Accepted values:
+For each empty `[[review]]` stanza in `licenseal.review.toml` — on a `--merge` run that's just the freshly-appended ones; leave already-filled stanzas from prior audits untouched — look up the dep's `(ecosystem, package, version)` triple (`(ecosystem, package, source)` when the stanza has a `source` line) in the decisions collected in step 4 and set `license = "<their answer>"`. Accepted values:
 
 - a single SPDX ID (e.g. `"MIT"`, `"Apache-2.0"`)
 - an SPDX expression (e.g. `"MIT OR Apache-2.0"`)
@@ -291,6 +295,7 @@ If none resolve, navigate the repository file tree from the bare `repository_url
 | Situation | Write entry? | Why |
 | --- | --- | --- |
 | Registry says `UNKNOWN`; user read the bundled `LICENSE` and confirmed it's `MIT` | ✅ `license = "MIT"` | Detection was wrong, user has direct evidence |
+| Dep has an `origin` (a git fork, a tarball URL, a path outside the project) and is `UNKNOWN`; user read the license at that source and it is `MIT` | ✅ `license = "MIT"` in the stanza whose `source` is the dep's `origin`, with `note` saying where the license was read | No registry describes this code; the review is the only license record, and it applies to that source only |
 | Dep is `GPL-3.0-only` in an MIT project; project is internal-use only, no distribution | ✅ `license = "GPL-3.0-only"` with `note = "internal-use only, no distribution"` | Context-based exception genuinely applies; record the rationale |
 | Dep is `GPL-3.0-only` in an MIT project; project ships a binary to customers | ❌ no entry | Real incompatibility; user must remove, replace, or relicense — outside this skill |
 | Dep is `GPL-3.0-only` in an MIT project; hosted SaaS, server-side only — no browser bundle, no desktop / mobile client, no on-prem tier, no public container image | ✅ `license = "GPL-3.0-only"` with `note = "SaaS-only, server-side, no shipped artifacts; GPL distribution trigger dormant. Re-audit if a shipped channel is added."` | Distribution-based copyleft doesn't trigger when no artifact reaches third parties; brittle if a shipped channel is later added |

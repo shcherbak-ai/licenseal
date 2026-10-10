@@ -37,9 +37,6 @@ from licenseal.discovery.php.lockfiles import (
     extract_composer_lock_licenses,
     find_composer_lockfiles,
 )
-from licenseal.discovery.ruby.lockfiles import (
-    is_off_registry_marker as _ruby_is_off_registry,
-)
 from licenseal.models import (
     AnalysisReport,
     CompatibilityResult,
@@ -95,10 +92,10 @@ from licenseal.review import (
     apply_reviewed_licenses,
     flagged_entries_from_json_report,
     flagged_entries_from_results,
+    info_review_key,
     load_review_file,
     merge_review_template,
     render_review_template,
-    review_key,
 )
 from licenseal.transitive import resolve_transitive
 
@@ -453,6 +450,25 @@ def _echo_rate_limit_pause(host: str, seconds: float) -> None:
     )
 
 
+def _off_registry_license_info(dep: Dependency) -> LicenseInfo:
+    """UNKNOWN for a dependency that does not come from a registry.
+
+    A dependency with an ``origin`` (a git repository, a direct URL, a path
+    outside the scanned directory) has no registry record, and a registry
+    package of the same name is a different package. Nothing is requested
+    for it. ``resolved_version`` is the version a lockfile records for it,
+    empty otherwise.
+    """
+    pinned = dep.version_constraint.startswith("==")
+    return LicenseInfo(
+        dependency=dep,
+        license_id="UNKNOWN",
+        license_raw="",
+        resolved_version=dep.version_constraint[2:].strip() if pinned else "",
+        from_registry=False,
+    )
+
+
 def _resolve_license_infos(
     deps: list[Dependency],
     max_workers: int,
@@ -580,24 +596,22 @@ def _resolve_license_infos(
             # the per-package fallback runs. (.NET follows the same order:
             # the batch cache is checked first, and on a miss
             # ``resolve_nuget_license`` reads the NuGet flatcontainer
-            # ``.nuspec``, then the deps.dev single-version GET. Ruby
-            # off-registry deps, GIT / PATH sourced, are filtered out up
-            # front: their license can't be resolved from rubygems.org at
-            # all.)
+            # ``.nuspec``, then the deps.dev single-version GET.)
+            #
+            # A dependency with an origin (a git repository, a direct URL, a
+            # path) is not a registry package: it is left out of every
+            # request, here and below.
             batch_pre_pass_started = time.perf_counter()
+            registry_deps = [d for d in deps if not d.origin]
             batch_caches = bulk_resolve_licenses(
                 {
-                    "GO": [d for d in deps if d.ecosystem == Ecosystem.GO],
-                    "PYPI": [d for d in deps if d.ecosystem == Ecosystem.PYTHON],
-                    "NPM": [d for d in deps if d.ecosystem == Ecosystem.NPM],
-                    "CARGO": [d for d in deps if d.ecosystem == Ecosystem.RUST],
-                    "MAVEN": [d for d in deps if d.ecosystem == Ecosystem.JAVA],
-                    "NUGET": [d for d in deps if d.ecosystem == Ecosystem.DOTNET],
-                    "RUBYGEMS": [
-                        d
-                        for d in deps
-                        if d.ecosystem == Ecosystem.RUBY and not _ruby_is_off_registry(d.source)
-                    ],
+                    "GO": [d for d in registry_deps if d.ecosystem == Ecosystem.GO],
+                    "PYPI": [d for d in registry_deps if d.ecosystem == Ecosystem.PYTHON],
+                    "NPM": [d for d in registry_deps if d.ecosystem == Ecosystem.NPM],
+                    "CARGO": [d for d in registry_deps if d.ecosystem == Ecosystem.RUST],
+                    "MAVEN": [d for d in registry_deps if d.ecosystem == Ecosystem.JAVA],
+                    "NUGET": [d for d in registry_deps if d.ecosystem == Ecosystem.DOTNET],
+                    "RUBYGEMS": [d for d in registry_deps if d.ecosystem == Ecosystem.RUBY],
                 },
                 client,
                 max_workers=max_workers,
@@ -627,7 +641,7 @@ def _resolve_license_infos(
             # fetch + parse it once here so the per-dep resolver is a local map
             # lookup with no per-package requests. deps.dev doesn't index CRAN,
             # so this index is the official equivalent of a batch pre-pass.
-            r_deps = [d for d in deps if d.ecosystem == Ecosystem.R]
+            r_deps = [d for d in registry_deps if d.ecosystem == Ecosystem.R]
             cran_index = (
                 fetch_cran_index(client, fetcher=registry_cache.fetch_text) if r_deps else {}
             )
@@ -660,6 +674,8 @@ def _resolve_license_infos(
                 return replace(cached, dependency=dep)
 
             def _resolve(dep: Dependency) -> LicenseInfo:
+                if dep.origin:
+                    return _off_registry_license_info(dep)
                 if dep.ecosystem == Ecosystem.PYTHON:
                     cached = _from_advisory_cache(
                         python_batch_cache,
@@ -720,19 +736,6 @@ def _resolve_license_infos(
                         json_fetcher=registry_cache.fetch,
                     )
                 if dep.ecosystem == Ecosystem.RUBY:
-                    # Off-registry (GIT / PATH-sourced) gems can't be
-                    # resolved via rubygems.org; short-circuit before
-                    # touching the batch or per-package resolver. Drop the
-                    # internal off-registry marker from ``source`` so it
-                    # doesn't surface in the report's Source column — these
-                    # deps have no manifest-path source, like a transitive.
-                    if _ruby_is_off_registry(dep.source):
-                        return LicenseInfo(
-                            dependency=replace(dep, source=""),
-                            license_id="UNKNOWN",
-                            license_raw="",
-                            from_registry=False,
-                        )
                     cached = _from_advisory_cache(
                         ruby_batch_cache,
                         dep,
@@ -756,14 +759,11 @@ def _resolve_license_infos(
                     )
                 if dep.ecosystem == Ecosystem.HEX:
                     # Hex / Elixir: hex.pm only (deps.dev doesn't index Hex,
-                    # so no batch pre-pass). The resolver short-circuits
-                    # off-registry (git/path) deps to UNKNOWN and drops the
-                    # internal marker from the reported source.
+                    # so no batch pre-pass).
                     return resolve_hex_license(dep, client, fetcher=registry_cache.fetch)
                 if dep.ecosystem == Ecosystem.R:
                     # R / CRAN: resolve from the official PACKAGES index fetched
-                    # once above (a local map lookup). Off-registry
-                    # (GitHub/Bioconductor/Local) and archived / off-CRAN
+                    # once above (a local map lookup). Archived / off-CRAN
                     # packages resolve to UNKNOWN.
                     return resolve_r_license(dep, cran_index)
                 if dep.ecosystem == Ecosystem.DOTNET:
@@ -1070,13 +1070,10 @@ def check(
 
     if contents.licenses or contents.notes:
         flagged_keys = {
-            review_key(
-                r.license_info.dependency.ecosystem,
-                r.license_info.dependency.name,
-                r.license_info.resolved_version,
-            )
+            key
             for r in report.results
-            if (r.verdict != CompatibilityVerdict.COMPATIBLE and r.license_info.resolved_version)
+            if r.verdict != CompatibilityVerdict.COMPATIBLE
+            and (key := info_review_key(r.license_info))
         }
         apply_reviewed_licenses(license_infos, contents, flagged_keys)
         # Re-classify only the overridden infos in place; the rest is unchanged.

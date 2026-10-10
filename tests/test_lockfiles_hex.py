@@ -5,7 +5,6 @@ from __future__ import annotations
 from pathlib import Path
 
 from licenseal.discovery.hex.mix_lock import (
-    _OFF_REGISTRY_MARKER,
     _extract_edges,
     _first_atom,
     _parse_lock_tuple,
@@ -14,7 +13,6 @@ from licenseal.discovery.hex.mix_lock import (
     _unquote,
     attach_direct_sources,
     find_mix_lockfiles,
-    is_off_registry_marker,
     parse_mix_lock,
 )
 from licenseal.discovery.hex.rebar_lock import (
@@ -133,7 +131,7 @@ class TestParseMixLock:
         # direct deps carry no ancestors.
         assert by_name["phoenix"].direct_ancestors == ()
 
-    def test_git_spec_off_registry_marker(self):
+    def test_git_spec_carries_repository_and_locked_commit(self):
         deps = parse_mix_lock(
             _FIXTURES / "simple" / "mix.lock",
             direct_names=_direct_names(),
@@ -141,9 +139,23 @@ class TestParseMixLock:
             include_dev=True,
         )
         my_fork = next(d for d in deps if d.name == "my_fork")
-        assert is_off_registry_marker(my_fork.source)
+        assert my_fork.origin == "git+https://github.com/me/my_fork.git@abcdef1234567890"
+        assert my_fork.source == ""
         assert my_fork.version_constraint == ""
         assert my_fork.depth == 0  # declared direct
+        assert all(d.origin == "" for d in deps if d.name != "my_fork")
+
+    def test_path_entry_outside_the_scanned_directory_is_a_row(self, tmp_path):
+        project = tmp_path / "project"
+        project.mkdir()
+        (project / "mix.lock").write_text(
+            '%{\n  "elsewhere": {:path, "../elsewhere"},\n  "own": {:path, "apps/own"},\n}\n'
+        )
+        deps = parse_mix_lock(
+            project / "mix.lock", direct_names=set(), dev_direct_names=set(), include_dev=True
+        )
+        # ``apps/own`` is inside the scanned directory: the project's own code.
+        assert [(d.name, d.origin) for d in deps] == [("elsewhere", "../elsewhere")]
 
     def test_ecosystem_stamped_as_hex(self):
         deps = parse_mix_lock(
@@ -323,43 +335,57 @@ class TestMixLockHelpers:
         edges = {"a": {"b", "c"}, "b": {"d"}, "c": {"d"}, "d": set()}
         assert _reachable(edges, {"a"}) == {"a", "b", "c", "d"}
 
-    def test_parse_lock_tuple_hex(self):
-        hex_name, version, children, off = _parse_lock_tuple(
-            ':hex, :n, "1.0", "h", [:mix], [{:a, "~> 1.0", []}], "hexpm", "h2"'
+    def test_parse_lock_tuple_hex(self, tmp_path):
+        hex_name, version, children, origin = _parse_lock_tuple(
+            ':hex, :n, "1.0", "h", [:mix], [{:a, "~> 1.0", []}], "hexpm", "h2"', tmp_path, tmp_path
         )
         assert hex_name == "n"
         assert version == "1.0"
         assert children == ["a"]
-        assert off is False
+        assert origin == ""
 
-    def test_parse_lock_tuple_hex_renamed(self):
+    def test_parse_lock_tuple_hex_renamed(self, tmp_path):
         # Lock key may differ from the hex package name (`hex: :real` rename);
         # the 2nd tuple element carries the real hex.pm package name.
-        hex_name, version, children, off = _parse_lock_tuple(
-            ':hex, :real_pkg, "2.0", "h", [:mix], [], "hexpm", "h2"'
+        hex_name, version, children, origin = _parse_lock_tuple(
+            ':hex, :real_pkg, "2.0", "h", [:mix], [], "hexpm", "h2"', tmp_path, tmp_path
         )
         assert hex_name == "real_pkg"
         assert version == "2.0"
-        assert off is False
+        assert origin == ""
 
-    def test_parse_lock_tuple_git(self):
-        hex_name, version, children, off = _parse_lock_tuple(
-            ':git, "https://github.com/x/y.git", "sha", [branch: "main"]'
+    def test_parse_lock_tuple_git(self, tmp_path):
+        hex_name, version, children, origin = _parse_lock_tuple(
+            ':git, "https://github.com/x/y.git", "sha", [branch: "main"]', tmp_path, tmp_path
         )
         assert hex_name == ""
         assert version == ""
         assert children == []
-        assert off is True
+        assert origin == "git+https://github.com/x/y.git@sha"
 
-    def test_parse_lock_tuple_empty(self):
-        assert _parse_lock_tuple("") == ("", "", [], False)
+    def test_parse_lock_tuple_git_without_a_commit(self, tmp_path):
+        body = ':git, "https://token@github.com/x/y.git"'
+        assert _parse_lock_tuple(body, tmp_path, tmp_path)[3] == "git+https://github.com/x/y.git"
 
-    def test_parse_lock_tuple_hex_no_version(self):
+    def test_parse_lock_tuple_other_scm_keeps_its_name(self, tmp_path):
+        body = ':hg, "https://example.org/repo", "tip"'
+        assert _parse_lock_tuple(body, tmp_path, tmp_path)[3] == "hg+https://example.org/repo@tip"
+
+    def test_parse_lock_tuple_without_a_location_records_no_source(self, tmp_path):
+        assert _parse_lock_tuple(":git", tmp_path, tmp_path)[3] == "unrecorded source"
+
+    def test_parse_lock_tuple_empty(self, tmp_path):
+        assert _parse_lock_tuple("", tmp_path, tmp_path) == ("", "", [], "")
+
+    def test_parse_lock_tuple_hex_no_version(self, tmp_path):
         # Defensive: a :hex tuple truncated before the version element.
-        hex_name, version, children, off = _parse_lock_tuple(":hex, :n")
+        hex_name, version, children, origin = _parse_lock_tuple(":hex, :n", tmp_path, tmp_path)
         assert hex_name == "n"
         assert version == ""
-        assert off is False
+        assert origin == ""
+
+    def test_parse_lock_tuple_hex_without_a_name(self, tmp_path):
+        assert _parse_lock_tuple(":hex", tmp_path, tmp_path) == ("", "", [], "")
 
 
 class TestAttachDirectSources:
@@ -379,7 +405,7 @@ class TestAttachDirectSources:
         assert by_name["phoenix"].source == "mix.exs"
         assert by_name["plug"].source == ""  # transitive untouched
 
-    def test_preserves_off_registry_marker(self):
+    def test_off_registry_direct_dep_gets_its_manifest_and_keeps_its_origin(self):
         deps = [
             Dependency(
                 name="my_fork",
@@ -387,11 +413,12 @@ class TestAttachDirectSources:
                 ecosystem=Ecosystem.HEX,
                 group=DependencyGroup.PROD,
                 depth=0,
-                source=_OFF_REGISTRY_MARKER,
+                origin="git+https://example.org/my_fork.git@abc",
             ),
         ]
         out = attach_direct_sources(deps, {"my_fork": "mix.exs"})
-        assert is_off_registry_marker(out[0].source)
+        assert out[0].source == "mix.exs"
+        assert out[0].origin == "git+https://example.org/my_fork.git@abc"
 
     def test_no_match_keeps_empty_source(self):
         deps = [
@@ -448,7 +475,8 @@ class TestParseRebarLock:
             include_dev=True,
         )
         myfork = next(d for d in deps if d.name == "myfork")
-        assert is_off_registry_marker(myfork.source)
+        assert myfork.origin == "git+https://github.com/me/myfork.git@abc123"
+        assert myfork.source == ""
         assert myfork.version_constraint == ""
 
     def test_dev_excluded_under_no_dev(self):
@@ -489,19 +517,31 @@ class TestRebarLockHelpers:
 
     def test_parse_lock_entry_pkg_three_tuple(self):
         elements = ['<<"cowlib">>', '{pkg,<<"cowlib">>,<<"2.12.1">>}', "0"]
-        assert _parse_lock_entry(elements) == ("cowlib", "2.12.1", 0, False)
+        assert _parse_lock_entry(elements) == ("cowlib", "2.12.1", 0, "")
 
     def test_parse_lock_entry_pkg_four_tuple(self):
         elements = ['<<"t">>', '{pkg,<<"t">>,<<"1.0">>,<<"hash">>}', "1"]
-        assert _parse_lock_entry(elements) == ("t", "1.0", 1, False)
+        assert _parse_lock_entry(elements) == ("t", "1.0", 1, "")
 
     def test_parse_lock_entry_git(self):
         elements = ['<<"jsx">>', '{git,"https://x/y.git",{ref,"abc"}}', "0"]
-        assert _parse_lock_entry(elements) == ("jsx", "", 0, True)
+        assert _parse_lock_entry(elements) == ("jsx", "", 0, "git+https://x/y.git@abc")
+
+    def test_parse_lock_entry_git_subdir_is_a_git_repository(self):
+        elements = ['<<"sub">>', '{git_subdir,"https://x/mono.git",{ref,"abc"},"apps/sub"}', "1"]
+        assert _parse_lock_entry(elements) == ("sub", "", 1, "git+https://x/mono.git@abc")
+
+    def test_parse_lock_entry_other_scm_keeps_its_name(self):
+        elements = ['<<"old">>', '{hg,"https://x/old",{ref,"tip"}}', "0"]
+        assert _parse_lock_entry(elements) == ("old", "", 0, "hg+https://x/old@tip")
+
+    def test_parse_lock_entry_without_a_url_records_no_source(self):
+        elements = ['<<"odd">>', "{raw,something}", "0"]
+        assert _parse_lock_entry(elements) == ("odd", "", 0, "unrecorded source")
 
     def test_parse_lock_entry_pkg_no_binaries_falls_back_to_entry_name(self):
         # Malformed {pkg} with no name binary → fall back to the entry name.
-        assert _parse_lock_entry(['<<"x">>', "{pkg}", "0"]) == ("x", "", 0, False)
+        assert _parse_lock_entry(['<<"x">>', "{pkg}", "0"]) == ("x", "", 0, "")
 
     def test_parse_lock_entry_pkg_only_name_no_version(self):
-        assert _parse_lock_entry(['<<"x">>', '{pkg,<<"x">>}', "0"]) == ("x", "", 0, False)
+        assert _parse_lock_entry(['<<"x">>', '{pkg,<<"x">>}', "0"]) == ("x", "", 0, "")

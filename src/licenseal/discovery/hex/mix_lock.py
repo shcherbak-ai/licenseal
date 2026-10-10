@@ -13,8 +13,10 @@ entry per line::
 A ``:hex`` tuple is a registry dep; its version is the third element and its
 child-dependency edges are the bracketed list of ``{:child, "req", [opts]}``
 tuples (the second ``[...]`` element, after the ``[:mix]`` build-tools list).
-``:git`` / ``:path`` tuples are off-registry — they can't be resolved against
-hex.pm, so the resolver short-circuits them to UNKNOWN.
+Any other tuple (``:git``, ``:path``, another SCM) is not a hex.pm package: it
+is emitted with an ``origin`` (the repository URL plus the locked commit for
+``:git``) and is never looked up. A ``:path`` inside the scanned directory is
+the project's own code and gets no row.
 
 ``mix.lock`` carries no license and no dev/prod env — both live in ``mix.exs``.
 So group attribution mirrors the Bundler model: the Mix-discovered dev-name set
@@ -30,15 +32,10 @@ from dataclasses import replace
 from pathlib import Path
 
 from licenseal._graph import compute_direct_ancestors
+from licenseal.discovery._origin import UNRECORDED, git_origin, path_origin
 from licenseal.discovery._read import decode_lockfile_text, record_unread_entries
 from licenseal.discovery._walk import walk_project_files
 from licenseal.models import Dependency, DependencyGroup, Ecosystem
-
-# Source marker the resolver checks to short-circuit registry fetches on
-# git/path-sourced deps. The transitive walker overwrites ``source`` with the
-# human-readable manifest path for registry-backed direct deps; the marker only
-# survives on entries whose origin is non-hex.pm.
-_OFF_REGISTRY_MARKER = "__off_registry__"
 
 # A top-level lock entry on one line. ``mix deps.get`` emits the keyword-style
 # ``"name": {<tuple>}``; the equivalent map-literal ``"name" => {<tuple>}`` form
@@ -51,11 +48,6 @@ _STRING_RE = re.compile(r'"([^"]*)"')
 
 # The lines of a lock that hold no entry: blank ones and the map's delimiters.
 _MAP_DELIMITERS = frozenset({"", "%{", "}", "%{}"})
-
-
-def is_off_registry_marker(source: str) -> bool:
-    """True for the off-registry source marker emitted by the lock parser."""
-    return source == _OFF_REGISTRY_MARKER
 
 
 def find_mix_lockfiles(
@@ -178,23 +170,35 @@ def _extract_edges(elements: list[str]) -> list[str]:
     return names
 
 
-def _parse_lock_tuple(body: str) -> tuple[str, str, list[str], bool]:
-    """Parse a lock entry's ``{...}`` body → (hex_name, version, child_names, off_registry).
+def _parse_lock_tuple(
+    body: str, lock_dir: Path, scan_root: Path
+) -> tuple[str, str, list[str], str | None]:
+    """Parse a lock entry's ``{...}`` body → (hex_name, version, child_names, origin).
 
-    ``{:hex, :name, "ver", ...}`` → registry dep. The 2nd element is the hex.pm
-    *package* name (which differs from the lock key when the dep was renamed via
-    ``hex:`` in mix.exs), the 3rd is the version, and the edges are the bracketed
-    child-tuple list.
-    ``{:git, ...}`` / ``{:path, ...}`` → off-registry (no registry version/edges).
+    ``{:hex, :name, "ver", ...}`` → registry dep, with an empty origin. The 2nd
+    element is the hex.pm *package* name (which differs from the lock key when
+    the dep was renamed via ``hex:`` in mix.exs), the 3rd is the version, and
+    the edges are the bracketed child-tuple list.
+
+    Any other tuple has no registry version or edges. ``{:git, "url", "sha",
+    ...}`` → the repository and the locked commit; another SCM atom is read
+    the same way under its own name. ``{:path, "dir", ...}`` → the path, or
+    ``None`` when it is inside the scanned directory.
     """
     elements = _split_top_level(body)
     if not elements:
-        return "", "", [], False
-    if elements[0] != ":hex":
-        return "", "", [], True
-    hex_name = _first_atom(elements[1]) if len(elements) > 1 else ""
-    version = _unquote(elements[2]) if len(elements) > 2 else ""
-    return hex_name, version, _extract_edges(elements), False
+        return "", "", [], ""
+    if elements[0] == ":hex":
+        hex_name = _first_atom(elements[1]) if len(elements) > 1 else ""
+        version = _unquote(elements[2]) if len(elements) > 2 else ""
+        return hex_name, version, _extract_edges(elements), ""
+    location = _unquote(elements[1]) if len(elements) > 1 else ""
+    if not location:
+        return "", "", [], UNRECORDED
+    if elements[0] == ":path":
+        return "", "", [], path_origin(location, lock_dir, scan_root)
+    revision = _unquote(elements[2]) if len(elements) > 2 else ""
+    return "", "", [], git_origin(location, revision, vcs=_first_atom(elements[0]) or "git")
 
 
 def _reachable(edges: dict[str, set[str]], roots: set[str]) -> set[str]:
@@ -221,6 +225,7 @@ def parse_mix_lock(
     direct_names: set[str],
     dev_direct_names: set[str],
     include_dev: bool,
+    scan_root: Path | None = None,
 ) -> list[Dependency]:
     """Parse ``mix.lock`` into Dependencies with edge-aware group attribution.
 
@@ -229,13 +234,18 @@ def parse_mix_lock(
     declared only in ``:dev`` / ``:test`` (``only:``) envs. Both feed the
     reverse-BFS that attributes group + direct ancestors per package. With
     ``include_dev=False`` the DEV-attributed entries are filtered out.
+
+    ``scan_root`` is the scanned directory, the lockfile's own directory when
+    omitted. A ``:path`` entry that resolves inside it gets no row.
     """
     text = decode_lockfile_text(path)
     if text is None:
         return []
+    scan_root = scan_root or path.parent
 
-    # name_lower -> (orig_name, registry_name, version, off_registry)
-    spec_info: dict[str, tuple[str, str, str, bool]] = {}
+    # name_lower -> (orig_name, registry_name, version, origin). The origin is
+    # empty for a hex.pm package and None for a path entry of this project.
+    spec_info: dict[str, tuple[str, str, str, str | None]] = {}
     edges: dict[str, set[str]] = {}
     entries = 0
     for raw_line in text.splitlines():
@@ -246,7 +256,9 @@ def parse_mix_lock(
             continue
         name = m.group("name")
         normalized = name.lower()
-        hex_name, version, child_names, off_registry = _parse_lock_tuple(m.group("body"))
+        hex_name, version, child_names, origin = _parse_lock_tuple(
+            m.group("body"), path.parent, scan_root
+        )
         # A `:hex` tuple's 2nd element is the real hex.pm package name; it
         # differs from the lock key only when the dep was renamed (`hex:` in
         # mix.exs). The graph + display stay keyed on the lock key (the app
@@ -254,17 +266,15 @@ def parse_mix_lock(
         # and `_walk_uncovered` covers it — while the dep carries the hex name
         # as `registry_name` so license resolution targets the right package.
         # Empty when not renamed (byte-identical output for the common case).
-        reg_name = (
-            hex_name if hex_name and not off_registry and hex_name.lower() != normalized else ""
-        )
-        spec_info.setdefault(normalized, (name, reg_name, version, off_registry))
+        reg_name = hex_name if hex_name and hex_name.lower() != normalized else ""
+        spec_info.setdefault(normalized, (name, reg_name, version, origin))
         edges.setdefault(normalized, set()).update(c.lower() for c in child_names)
 
     record_unread_entries(path, entries, len(spec_info))
     if not spec_info:
         return []
 
-    name_case = {lower: orig for lower, (orig, _reg, _ver, _off) in spec_info.items()}
+    name_case = {lower: orig for lower, (orig, _reg, _ver, _origin) in spec_info.items()}
     prod_root_names = direct_names - dev_direct_names
     dev_root_names = dev_direct_names & direct_names
     prod_reachable = _reachable(edges, prod_root_names)
@@ -274,7 +284,9 @@ def parse_mix_lock(
     ancestors = compute_direct_ancestors(edges, roots_for_attribution)
 
     out: list[Dependency] = []
-    for normalized, (orig_name, reg_name, version, off_registry) in spec_info.items():
+    for normalized, (orig_name, reg_name, version, origin) in spec_info.items():
+        if origin is None:
+            continue
         is_direct = normalized in direct_names
         if normalized in dev_reachable:
             group = DependencyGroup.DEV
@@ -298,7 +310,7 @@ def parse_mix_lock(
                 group=group,
                 depth=0 if is_direct else 1,
                 direct_ancestors=() if is_direct else ancestors.get(normalized, ()),
-                source="" if not off_registry else _OFF_REGISTRY_MARKER,
+                origin=origin,
                 registry_name=reg_name,
             )
         )
@@ -312,12 +324,11 @@ def attach_direct_sources(
     """Stamp the discovery source path onto depth-0 lock-derived deps.
 
     Mirrors the Bundler path: depth-0 entries get the matching ``mix.exs`` /
-    ``rebar.config`` source filename from discovery. Off-registry entries keep
-    the off-registry marker.
+    ``rebar.config`` source filename from discovery.
     """
     out: list[Dependency] = []
     for dep in deps:
-        if dep.depth != 0 or is_off_registry_marker(dep.source):
+        if dep.depth != 0:
             out.append(dep)
             continue
         source = direct_source_by_name.get(dep.name.lower(), "")

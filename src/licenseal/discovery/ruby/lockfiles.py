@@ -40,9 +40,11 @@ source" (GIT/PATH); the resolved spec lives in its corresponding source
 section. Platform-suffixed versions (``nokogiri (1.16.0-x86_64-linux)``)
 canonicalize to the base version.
 
-GIT / PATH specs are emitted with ``source != "rubygems"`` semantics — they
-won't resolve via the RubyGems registry, so the resolver short-circuits to
-UNKNOWN without a fetch.
+A GIT or PLUGIN SOURCE spec, and a PATH spec outside the scanned directory,
+is not a rubygems.org gem: it is emitted with an ``origin`` (``remote`` plus
+``revision`` for GIT, the path for PATH) and is never looked up. A PATH spec
+inside the scanned directory is the project's own code: it stays in the edge
+graph and gets no row.
 
 Group attribution is the load-bearing reason for the ``dev_direct_names``
 parameter. ``Gemfile.lock`` carries no dev/prod marker; the Gemfile-discovered
@@ -58,6 +60,7 @@ from dataclasses import replace
 from pathlib import Path
 
 from licenseal._graph import compute_direct_ancestors
+from licenseal.discovery._origin import UNRECORDED, git_origin, path_origin, url_origin
 from licenseal.discovery._read import decode_lockfile_text, record_unread_entries
 from licenseal.discovery._walk import walk_project_files
 from licenseal.models import Dependency, DependencyGroup, Ecosystem
@@ -116,12 +119,33 @@ def _indent_level(line: str) -> int:
     return n
 
 
+def _section_origin(
+    section: str, options: dict[str, str], lock_dir: Path, scan_root: Path
+) -> str | None:
+    """Origin of the specs of one source section; ``None`` for the project's own code.
+
+    ``options`` holds the section's ``key: value`` lines (``remote``,
+    ``revision``, ...). GEM specs are registry gems and have no origin.
+    """
+    if section == "GEM":
+        return ""
+    remote = options.get("remote", "")
+    if not remote:
+        return UNRECORDED
+    if section == "GIT" or "revision" in options:
+        return git_origin(remote, options.get("revision", ""))
+    if section == "PATH" or "://" not in remote:
+        return path_origin(remote, lock_dir, scan_root)
+    return url_origin(remote)
+
+
 def parse_gemfile_lock(
     path: Path,
     *,
     direct_names: set[str],
     dev_direct_names: set[str],
     include_dev: bool,
+    scan_root: Path | None = None,
 ) -> list[Dependency]:
     """Parse ``Gemfile.lock`` into a list of Dependencies.
 
@@ -135,17 +159,23 @@ def parse_gemfile_lock(
 
     With ``include_dev=False``, DEV-attributed entries are filtered out
     (mirrors the PHP / Python posture).
+
+    ``scan_root`` is the scanned directory, the lockfile's own directory when
+    omitted. A PATH spec that resolves inside it gets no row.
     """
     text = decode_lockfile_text(path)
     if text is None:
         return []
+    scan_root = scan_root or path.parent
 
-    # Spec metadata: (name_lower, name_orig, version, off_registry).
-    spec_info: dict[str, tuple[str, str, bool]] = {}
+    # Spec metadata: name_lower -> (name_orig, version, origin). The origin
+    # is empty for a registry gem and None for a PATH spec of this project.
+    spec_info: dict[str, tuple[str, str, str | None]] = {}
     # Edges: name_lower -> set of child name_lower.
     edges: dict[str, set[str]] = {}
 
     section: str = ""
+    options: dict[str, str] = {}
     in_specs = False
     current_spec: str | None = None  # name_lower of the most recent 4-space spec
     # Lines where the lockfile names a gem: inside a ``specs:`` block, or
@@ -162,6 +192,7 @@ def parse_gemfile_lock(
 
         if _is_section_header(line):
             section = line.strip()
+            options = {}
             in_specs = False
             current_spec = None
             continue
@@ -174,6 +205,8 @@ def parse_gemfile_lock(
                 continue
             if not in_specs:
                 # Source-options lines (``remote:``, ``revision:``, ...).
+                key, _, value = stripped.partition(":")
+                options[key.strip()] = value.strip()
                 continue
             entries += 1
             indent = _indent_level(line)
@@ -185,8 +218,8 @@ def parse_gemfile_lock(
                 if not name:
                     continue
                 normalized = name.lower()
-                off_registry = section in ("GIT", "PATH", "PLUGIN SOURCE")
-                spec_info.setdefault(normalized, (name, version, off_registry))
+                origin = _section_origin(section, options, path.parent, scan_root)
+                spec_info.setdefault(normalized, (name, version, origin))
                 current_spec = normalized
                 edges.setdefault(normalized, set())
             elif indent == 6 and current_spec is not None:
@@ -219,7 +252,7 @@ def parse_gemfile_lock(
 
     # Attribute group via reverse-BFS. PROD roots first (a dep reachable
     # from any PROD root is PROD); then DEV roots; remainder defaults to PROD.
-    name_case = {lower: orig for lower, (orig, _ver, _off) in spec_info.items()}
+    name_case = {lower: orig for lower, (orig, _ver, _origin) in spec_info.items()}
 
     prod_root_names = direct_names - dev_direct_names
     dev_root_names = dev_direct_names & direct_names
@@ -232,7 +265,9 @@ def parse_gemfile_lock(
     ancestors = compute_direct_ancestors(edges, roots_for_attribution)
 
     out: list[Dependency] = []
-    for normalized, (orig_name, version, off_registry) in spec_info.items():
+    for normalized, (orig_name, version, origin) in spec_info.items():
+        if origin is None:
+            continue
         is_direct = normalized in direct_names
         if normalized in dev_reachable:
             group = DependencyGroup.DEV
@@ -261,22 +296,10 @@ def parse_gemfile_lock(
             group=group,
             depth=0 if is_direct else 1,
             direct_ancestors=() if is_direct else ancestors.get(normalized, ()),
-            source="" if not off_registry else _OFF_REGISTRY_MARKER,
+            origin=origin,
         )
         out.append(dep)
     return out
-
-
-# Source marker that the resolver checks to short-circuit registry fetches
-# on GIT/PATH-sourced gems. The transitive walker overwrites the field
-# with the human-readable source path for direct deps; the marker only
-# survives on entries whose origin is non-rubygems.
-_OFF_REGISTRY_MARKER = "__off_registry__"
-
-
-def is_off_registry_marker(source: str) -> bool:
-    """True for the off-registry source marker emitted by the lockfile parser."""
-    return source == _OFF_REGISTRY_MARKER
 
 
 def _parse_spec_line(content: str) -> tuple[str, str]:
@@ -338,12 +361,11 @@ def attach_direct_sources(
     """Stamp the discovery source path onto depth-0 lockfile-derived deps.
 
     Mirrors the PHP path: lockfile-parsed depth-0 entries get the matching
-    Gemfile / gemspec source filename from discovery. Off-registry entries
-    keep the off-registry marker on the source field.
+    Gemfile / gemspec source filename from discovery.
     """
     out: list[Dependency] = []
     for dep in deps:
-        if dep.depth != 0 or is_off_registry_marker(dep.source):
+        if dep.depth != 0:
             out.append(dep)
             continue
         source = direct_source_by_name.get(dep.name.lower(), "")

@@ -20,7 +20,6 @@ from licenseal.discovery.hex.mix_exs import (
     discover_mix_exs_dependencies,
     workspace_mix_names,
 )
-from licenseal.discovery.hex.mix_lock import is_off_registry_marker
 from licenseal.discovery.hex.rebar_config import (
     _parse_dep,
     discover_rebar_config_dependencies,
@@ -48,21 +47,62 @@ class TestDiscoverMixExsDependencies:
         assert by_name["phoenix"] == "~> 1.7.10"
         assert by_name["jason"] == ">= 1.0.0"
 
-    def test_off_registry_emitted_with_marker(self):
+    def test_off_registry_deps_carry_their_origin(self):
         deps, _ = discover_mix_exs_dependencies(_FIXTURES / "simple")
         by_name = {d.name: d for d in deps}
+        assert by_name["my_fork"].origin == "git+https://github.com/me/my_fork.git@main"
+        # ``../vendored`` is outside the scanned directory.
+        assert by_name["vendored"].origin == "../vendored"
         for nm in ("my_fork", "vendored"):
-            assert nm in by_name, nm
-            assert is_off_registry_marker(by_name[nm].source)
             assert by_name[nm].version_constraint == ""  # url/path, not a version
+        assert {d.name for d in deps if d.origin} == {"my_fork", "vendored"}
 
     def test_ecosystem_and_source_stamped(self):
         deps, _ = discover_mix_exs_dependencies(_FIXTURES / "simple")
         for dep in deps:
             assert dep.ecosystem == Ecosystem.HEX
-            if is_off_registry_marker(dep.source):
-                continue
             assert dep.source == "mix.exs"
+
+    def test_source_options_in_every_form(self, tmp_path):
+        (tmp_path / "mix.exs").write_text(
+            "defmodule M.MixProject do\n"
+            "  defp deps do\n"
+            "    [\n"
+            '      {:by_ref, git: "https://u:p@example.org/by_ref.git", ref: "abc123", tag: "v9"'
+            "},\n"
+            '      {:by_tag, git: "https://example.org/by_tag.git", tag: "v1.0"},\n'
+            '      {:bare, git: "https://example.org/bare.git"},\n'
+            "      {:computed_git, git: repo_url()},\n"
+            '      {:hub, github: "me/hub"},\n'
+            "      {:computed_hub, github: hub_name()},\n"
+            '      {:inside, path: "apps/inside"},\n'
+            "      {:computed_path, path: local_dir()},\n"
+            "      {:sibling, in_umbrella: true},\n"
+            '      {:not_sibling, "~> 1.0", in_umbrella: false},\n'
+            '      {:versioned_sibling, "~> 1.0"},\n'
+            '      {:plain, "~> 2.0"}\n'
+            "    ]\n"
+            "  end\n"
+            "end\n"
+        )
+        deps, filtered = discover_mix_exs_dependencies(
+            tmp_path, workspace_names=frozenset({"sibling", "versioned_sibling"})
+        )
+        assert {d.name: d.origin for d in deps} == {
+            "by_ref": "git+https://example.org/by_ref.git@abc123",
+            "by_tag": "git+https://example.org/by_tag.git@v1.0",
+            "bare": "git+https://example.org/bare.git",
+            "computed_git": "unrecorded source",
+            "hub": "git+https://github.com/me/hub.git",
+            "computed_hub": "unrecorded source",
+            "computed_path": "unrecorded source",
+            "not_sibling": "",
+            "plain": "",
+        }
+        # ``inside`` and ``sibling`` are the project's own apps: neither is a
+        # dependency, and only the one that is a workspace app is counted,
+        # beside the workspace app that is declared by version.
+        assert filtered == 2
 
     def test_umbrella_workspace_filter(self):
         workspace = workspace_mix_names(_FIXTURES / "umbrella")
@@ -293,7 +333,9 @@ class TestDiscoverRebarConfigDependencies:
         assert by_name["ranch"].version_constraint == "1.8.0"
         assert by_name["cowlib"].version_constraint == ""  # bare atom, latest
         assert by_name["real_hex_name"].version_constraint == "2.0.0"
-        assert is_off_registry_marker(by_name["jsx"].source)
+        assert by_name["jsx"].origin == "git+https://github.com/talentdeficit/jsx.git@v3.1.0"
+        assert by_name["jsx"].source == "rebar.config"
+        assert {d.name for d in deps if d.origin} == {"jsx"}
         for dep in deps:
             assert dep.ecosystem == Ecosystem.HEX
 
@@ -452,30 +494,49 @@ class TestDiscoverRebarConfigDependencies:
 
 class TestParseRebarDep:
     def test_bare_atom(self):
-        assert _parse_dep("cowlib") == ("cowlib", "", False)
+        assert _parse_dep("cowlib") == ("cowlib", "", "")
 
     def test_name_version(self):
-        assert _parse_dep('{ranch, "1.8.0"}') == ("ranch", "1.8.0", False)
+        assert _parse_dep('{ranch, "1.8.0"}') == ("ranch", "1.8.0", "")
 
     def test_git_off_registry(self):
-        name, version, off = _parse_dep('{jsx, {git, "https://x/y.git", {tag, "v3"}}}')
-        assert (name, version, off) == ("jsx", "", True)
+        name, version, origin = _parse_dep('{jsx, {git, "https://x/y.git", {tag, "v3"}}}')
+        assert (name, version, origin) == ("jsx", "", "git+https://x/y.git@v3")
+
+    def test_git_branch_and_bare_forms(self):
+        assert _parse_dep('{a, {git, "https://x/a.git", {branch, "main"}}}')[2] == (
+            "git+https://x/a.git@main"
+        )
+        assert _parse_dep('{b, { git , "https://x/b.git"}}')[2] == "git+https://x/b.git"
+
+    def test_legacy_form_with_a_version_pattern_before_the_source(self):
+        entry = '{c, ".*", {git, "https://x/c.git", {ref, "abc"}}}'
+        assert _parse_dep(entry) == ("c", "", "git+https://x/c.git@abc")
+
+    def test_git_subdir_and_hg(self):
+        assert _parse_dep('{d, {git_subdir, "https://x/mono.git", {tag, "v1"}, "apps/d"}}')[2] == (
+            "git+https://x/mono.git@v1"
+        )
+        assert _parse_dep('{e, {hg, "https://x/e", {tag, "tip"}}}')[2] == "hg+https://x/e@tip"
+
+    def test_git_source_with_no_literal_url_records_no_source(self):
+        assert _parse_dep("{f, {git, Url, {tag, Tag}}}") == ("f", "", "unrecorded source")
 
     def test_pkg_rename(self):
         assert _parse_dep('{renamed, {pkg, real_name, "2.0.0"}}') == (
             "real_name",
             "2.0.0",
-            False,
+            "",
         )
 
     def test_empty_entry(self):
-        assert _parse_dep("") == ("", "", False)
+        assert _parse_dep("") == ("", "", "")
 
     def test_atomless_braced_entry(self):
-        assert _parse_dep('{42, "x"}') == ("", "", False)
+        assert _parse_dep('{42, "x"}') == ("", "", "")
 
     def test_atomless_bare_entry(self):
-        assert _parse_dep("123") == ("", "", False)
+        assert _parse_dep("123") == ("", "", "")
 
 
 class TestDiscoverErlangMk:
@@ -500,8 +561,10 @@ class TestDiscoverErlangMk:
         by_name = {d.name: d for d in deps}
         assert by_name["cowlib"].version_constraint == "==2.12.1"
         assert by_name["cowlib"].source == "Makefile"  # registry, manifest path
-        assert is_off_registry_marker(by_name["ranch"].source)
+        assert by_name["ranch"].origin == "git+https://github.com/ninenines/ranch@1.8.1"
+        assert by_name["ranch"].source == "Makefile"
         assert by_name["ranch"].version_constraint == ""
+        assert {d.name for d in deps if d.origin} == {"ranch"}
         assert by_name["jsx_renamed"].version_constraint == "==3.1.0"
         assert by_name["recon"].version_constraint == ""  # hex-by-name (no dep_ line)
         assert by_name["meck"].version_constraint == ""
@@ -541,20 +604,66 @@ class TestDiscoverErlangMk:
 
 
 class TestParseDepDef:
-    def test_hex_with_version(self):
-        assert _parse_dep_def("hex 2.12.1") == (None, "2.12.1", False)
+    @staticmethod
+    def _parse(value: str, tmp_path: Path):
+        return _parse_dep_def(value, tmp_path, tmp_path)
 
-    def test_hex_with_rename(self):
-        assert _parse_dep_def("hex 3.1.0 realpkg") == ("realpkg", "3.1.0", False)
+    def test_hex_with_version(self, tmp_path):
+        assert self._parse("hex 2.12.1", tmp_path) == (None, "2.12.1", "")
 
-    def test_hex_no_version(self):
-        assert _parse_dep_def("hex") == (None, "", False)
+    def test_hex_with_rename(self, tmp_path):
+        assert self._parse("hex 3.1.0 realpkg", tmp_path) == ("realpkg", "3.1.0", "")
 
-    def test_git_off_registry(self):
-        assert _parse_dep_def("git https://x/y 1.0") == (None, "", True)
+    def test_hex_no_version(self, tmp_path):
+        assert self._parse("hex", tmp_path) == (None, "", "")
 
-    def test_empty_off_registry(self):
-        assert _parse_dep_def("") == (None, "", True)
+    def test_git_off_registry(self, tmp_path):
+        assert self._parse("git https://x/y 1.0", tmp_path) == (None, "", "git+https://x/y@1.0")
+
+    def test_git_without_a_commit(self, tmp_path):
+        assert self._parse("git https://x/y", tmp_path)[2] == "git+https://x/y"
+
+    def test_git_subfolder_is_a_git_repository(self, tmp_path):
+        assert self._parse("git-subfolder https://x/mono v2 apps/y", tmp_path)[2] == (
+            "git+https://x/mono@v2"
+        )
+
+    def test_other_vcs_keeps_its_name(self, tmp_path):
+        assert self._parse("hg https://x/y tip", tmp_path)[2] == "hg+https://x/y@tip"
+        assert self._parse("svn https://x/y", tmp_path)[2] == "svn+https://x/y"
+
+    def test_legacy_form_without_a_fetch_method(self, tmp_path):
+        assert self._parse("https://x/y 1.0", tmp_path)[2] == "git+https://x/y@1.0"
+        assert self._parse("git@example.org:x/y.git 1.0", tmp_path)[2] == (
+            "git+example.org:x/y.git@1.0"
+        )
+
+    def test_copied_path_outside_the_scanned_directory(self, tmp_path):
+        assert self._parse("cp ../elsewhere", tmp_path)[2] == "../elsewhere"
+        assert self._parse("ln /opt/elsewhere", tmp_path)[2] == "/opt/elsewhere"
+
+    def test_copied_path_inside_the_scanned_directory_is_own_code(self, tmp_path):
+        assert self._parse("cp local/thing", tmp_path) == (None, "", None)
+
+    def test_method_without_a_source_records_none(self, tmp_path):
+        for value in ("", "git", "cp", "git-submodule", "fail unsupported"):
+            assert self._parse(value, tmp_path) == (None, "", "unrecorded source"), value
+
+
+class TestErlangMkOwnCode:
+    def test_dep_copied_from_inside_the_tree_is_not_a_dependency(self, tmp_path):
+        (tmp_path / "Makefile").write_text(
+            "DEPS = cowlib local_a local_b\n"
+            "dep_local_a = cp apps/local_a\n"
+            "dep_local_b = ln apps/local_b\n"
+            "include erlang.mk\n"
+        )
+        deps, filtered = discover_erlang_mk_dependencies(
+            tmp_path, workspace_names=frozenset({"local_a"})
+        )
+        assert [d.name for d in deps] == ["cowlib"]
+        # Only the one that is a workspace app counts as a filtered reference.
+        assert filtered == 1
 
 
 class TestWorkspaceErlangMkProjectNames:

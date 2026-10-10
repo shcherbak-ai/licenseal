@@ -15,7 +15,10 @@ discovery with false positives. Dependencies live in Make variables::
 
 A ``DEPS`` entry with no ``dep_<name>`` line resolves through erlang.mk's
 package index — for our purposes a hex package looked up by name. ``hex VER``
-pins an exact version (``==VER``); ``git`` / ``cp`` / etc. are off-registry.
+pins an exact version (``==VER``). Every other fetch method is not a hex.pm
+package: the dep is emitted with an ``origin`` (the repository URL plus the
+commit-ish for ``git``, the path for ``cp`` / ``ln``) and never looked up. A
+``cp`` / ``ln`` path inside the scanned directory is the project's own code.
 There is no erlang.mk lockfile, so resolution is manifest-only (the registry
 walk against hex.pm). All deps are :class:`~licenseal.models.Ecosystem.HEX`.
 """
@@ -25,10 +28,10 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
+from licenseal.discovery._origin import UNRECORDED, git_origin, path_origin
 from licenseal.discovery._read import decode_text
 from licenseal.discovery._walk import walk_project_files
 from licenseal.discovery.hex.mix_exs import workspace_mix_names
-from licenseal.discovery.hex.mix_lock import _OFF_REGISTRY_MARKER  # noqa: PLC2701
 from licenseal.models import Dependency, DependencyGroup, Ecosystem
 
 # A project Makefile is treated as erlang.mk only when it includes the build
@@ -77,22 +80,49 @@ def _app_tokens(value: str) -> list[str]:
     return [t for t in value.split() if _APP_NAME_RE.match(t)]
 
 
-def _parse_dep_def(value: str) -> tuple[str | None, str, bool]:
-    """A ``dep_X`` value → (hex_name_override | None, version, off_registry)."""
+# erlang.mk fetch methods that clone a repository, and the VCS each one uses.
+_VCS_METHODS = {"git": "git", "git-subfolder": "git", "hg": "hg", "svn": "svn"}
+# Fetch methods that copy or link a local directory.
+_PATH_METHODS = frozenset({"cp", "ln"})
+
+
+def _parse_dep_def(
+    value: str, makefile_dir: Path, scan_root: Path
+) -> tuple[str | None, str, str | None]:
+    """A ``dep_X`` value → (hex_name_override | None, version, origin).
+
+    The origin is empty for a ``hex`` dep and ``None`` for a ``cp`` / ``ln``
+    path inside the scanned directory. A value in the legacy
+    ``<repository> <commit>`` form, with no fetch method, is a git
+    repository. Anything else (``git-submodule``, ``fail``, a computed or
+    empty value) is not resolvable against hex.pm and records no source.
+    """
     tokens = value.split()
     if tokens and tokens[0] == "hex":
         version = tokens[1] if len(tokens) > 1 else ""
         override = tokens[2] if len(tokens) > 2 else None
-        return override, version, False
-    # git / git-subfolder / cp / ln / hg / svn / … (or empty / computed) →
-    # not resolvable against hex.pm.
-    return None, "", True
+        return override, version, ""
+    method, args = (tokens[0], tokens[1:]) if tokens else ("", [])
+    if method in _PATH_METHODS and args:
+        return None, "", path_origin(args[0], makefile_dir, scan_root)
+    if "://" in method or method.startswith("git@"):
+        method, args = "git", tokens
+    if method in _VCS_METHODS and args:
+        revision = args[1] if len(args) > 1 else ""
+        return None, "", git_origin(args[0], revision, vcs=_VCS_METHODS[method])
+    return None, "", UNRECORDED
 
 
-def _parse_makefile_text(text: str, source: str) -> list[Dependency]:
-    """Extract direct Dependencies from an erlang.mk project Makefile."""
+def _parse_makefile_text(
+    text: str, source: str, makefile_dir: Path, scan_root: Path
+) -> tuple[list[Dependency], list[str]]:
+    """Extract direct Dependencies from an erlang.mk project Makefile.
+
+    Returns ``(deps, own)``: ``own`` names the deps copied or linked from a
+    path inside the scanned directory, which are the project's own code.
+    """
     if not _is_erlang_mk(text):
-        return []
+        return [], []
     prod_apps: list[str] = []
     dev_apps: list[str] = []
     dep_defs: dict[str, str] = {}
@@ -109,6 +139,7 @@ def _parse_makefile_text(text: str, source: str) -> list[Dependency]:
             dep_defs[d.group("name")] = d.group("val")
 
     out: list[Dependency] = []
+    own: list[str] = []
     seen: set[tuple[str, str]] = set()
     for apps, group in ((prod_apps, DependencyGroup.PROD), (dev_apps, DependencyGroup.DEV)):
         for app in apps:
@@ -116,19 +147,23 @@ def _parse_makefile_text(text: str, source: str) -> list[Dependency]:
             if key in seen:
                 continue
             seen.add(key)
-            override, version, off_registry = (None, "", False)
+            override, version, origin = (None, "", "")
             if app in dep_defs:
-                override, version, off_registry = _parse_dep_def(dep_defs[app])
+                override, version, origin = _parse_dep_def(dep_defs[app], makefile_dir, scan_root)
+            if origin is None:
+                own.append(app)
+                continue
             out.append(
                 Dependency(
                     name=override or app,
                     version_constraint=f"=={version}" if version else "",
                     ecosystem=Ecosystem.HEX,
                     group=group,
-                    source=_OFF_REGISTRY_MARKER if off_registry else source,
+                    source=source,
+                    origin=origin,
                 )
             )
-    return out
+    return out, own
 
 
 def discover_erlang_mk_dependencies(
@@ -145,7 +180,9 @@ def discover_erlang_mk_dependencies(
         if text is None:
             continue
         source = makefile.relative_to(project_path).as_posix()
-        for dep in _parse_makefile_text(text, source):
+        deps, own = _parse_makefile_text(text, source, makefile.parent, project_path)
+        filtered += sum(name.lower() in workspace_names for name in own)
+        for dep in deps:
             if dep.name.lower() in workspace_names:
                 filtered += 1
                 continue

@@ -1313,11 +1313,11 @@ class TestCheckCommand:
 
     @respx.mock
     def test_unknown_exits_nonzero_in_strict_mode(self, tmp_path):
-        # Use a git+ spec — it's unsupported (no registry version) but unlike
-        # ``workspace:`` / ``file:`` / ``link:`` it points at an external
-        # source we genuinely can't license-check, so it surfaces as UNKNOWN
-        # and triggers strict-mode failure. Workspace-local specs are filtered
-        # at discovery (no point license-checking the user's own workspace).
+        # Use a git+ spec — unlike ``workspace:`` / ``file:`` / ``link:`` it
+        # points at an external source that is not a registry package, so it
+        # surfaces as UNKNOWN without a lookup and triggers strict-mode
+        # failure. Workspace-local specs are filtered at discovery (no point
+        # license-checking the user's own workspace).
         (tmp_path / "package.json").write_text(
             json.dumps(
                 {
@@ -1371,7 +1371,7 @@ class TestCheckCommand:
     @respx.mock
     def test_reachable_but_unresolved_dep_does_not_trip_gate(self, tmp_path):
         # A reachable registry that can't yield a license must NOT be mistaken
-        # for an outage: the npm metadata fetch returns 200, but the git+ spec
+        # for an outage: the npm metadata fetch returns 200, but the range
         # matches no published version, so the dep is UNKNOWN. That is the
         # normal strict-mode failure path — exit 1 with no unreachable message.
         (tmp_path / "package.json").write_text(
@@ -1379,7 +1379,7 @@ class TestCheckCommand:
                 {
                     "name": "myproject",
                     "license": "MIT",
-                    "dependencies": {"react": "git+https://github.com/facebook/react.git"},
+                    "dependencies": {"react": "^99.0.0"},
                 }
             )
         )
@@ -2894,8 +2894,8 @@ class TestCheckCommand:
 
     @respx.mock
     def test_warns_on_unsupported_npm_spec(self, tmp_path):
-        # ``git+`` URL: unsupported by registry resolution, so it surfaces as
-        # an UNKNOWN with the "could not be resolved" warning. Distinct from
+        # ``git+`` URL: not a registry package, so it surfaces as an UNKNOWN
+        # with the "could not be resolved" warning. Distinct from
         # workspace-local specs (``workspace:`` / ``file:`` / ``link:``) which
         # are filtered at discovery as the user's own workspace, not a third-
         # party dep to license-check.
@@ -5269,9 +5269,9 @@ class TestRubyEcosystem:
 
     @respx.mock
     def test_off_registry_gem_is_unknown_without_fetch(self, tmp_path):
-        # GIT-sourced gem in Gemfile.lock → off-registry marker → resolver
-        # short-circuits to UNKNOWN. The companion regular gem confirms the
-        # rest of the pipeline still resolves normally.
+        # GIT-sourced gem in Gemfile.lock → not a rubygems.org gem → UNKNOWN
+        # with its origin. The companion regular gem confirms the rest of
+        # the pipeline still resolves normally.
         (tmp_path / "Gemfile").write_text(
             'source "https://rubygems.org"\n'
             'gem "regular"\n'
@@ -5321,9 +5321,9 @@ class TestRubyEcosystem:
         edge = next(d for d in data["dependencies"] if d["name"] == "edge")
         assert edge["ecosystem"] == "ruby"
         assert edge["license"] in ("UNKNOWN", "Unknown")
-        # The internal off-registry marker must not leak into the JSON source.
-        assert edge["source"] == ""
-        # Off-registry short-circuits to unknown; no rubygems.org fetch on edge.
+        assert edge["source"] == "Gemfile"
+        assert edge["origin"] == "git+https://github.com/example/edge.git@deadbeef"
+        # No rubygems.org fetch on edge.
         assert edge_route.call_count == 0
 
     # A database adapter in a custom group, a runtime gem in a mixed
@@ -5890,8 +5890,7 @@ class TestHexEcosystem:
 
     @respx.mock
     def test_off_registry_dep_unknown_without_fetch(self, tmp_path):
-        # A git-sourced dep in mix.lock → off-registry → UNKNOWN, no fetch,
-        # internal marker dropped from the JSON source.
+        # A git-sourced dep in mix.lock → off-registry → UNKNOWN, no fetch.
         (tmp_path / "mix.exs").write_text(
             "defmodule M.MixProject do\n"
             "  def project, do: [app: :m, deps: deps()]\n"
@@ -5927,7 +5926,8 @@ class TestHexEcosystem:
         edge = next(d for d in data["dependencies"] if d["name"] == "edge")
         assert edge["ecosystem"] == "hex"
         assert edge["license"] in ("UNKNOWN", "Unknown")
-        assert edge["source"] == ""
+        assert edge["source"] == "mix.exs"
+        assert edge["origin"] == "git+https://github.com/me/edge.git@sha"
         assert edge_route.call_count == 0
 
     @respx.mock

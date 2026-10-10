@@ -6,7 +6,10 @@ pieces:
 
 * the ``deps`` function's returned list of ``{:name, "constraint", opts}`` tuples
   (direct dependencies), with ``only: :dev|:test`` marking dev/test deps and
-  ``git:`` / ``github:`` / ``path:`` / ``in_umbrella:`` marking non-hex.pm sources;
+  ``git:`` / ``github:`` / ``path:`` marking non-hex.pm sources, which are
+  emitted with an ``origin`` and never looked up; ``in_umbrella: true`` and a
+  ``path:`` inside the scanned directory are the project's own apps and are
+  not dependencies;
 * the ``package`` config's ``licenses: ["X", "Y"]`` (the project's own license);
 * each project's ``app: :name`` atom (for the umbrella workspace-internal filter).
 
@@ -21,10 +24,15 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
+from licenseal.discovery._origin import (
+    UNRECORDED,
+    git_origin,
+    hosted_git_origin,
+    path_origin,
+)
 from licenseal.discovery._read import decode_text
 from licenseal.discovery._walk import walk_project_files
 from licenseal.discovery.hex.mix_lock import (  # noqa: PLC2701
-    _OFF_REGISTRY_MARKER,
     _first_atom,
     _split_top_level,
     _strip_line_comments,
@@ -51,11 +59,16 @@ _HEX_RENAME_RE = re.compile(r"\bhex:\s*:(?P<hexname>\w+)")
 
 _STRING_RE = re.compile(r'"([^"]*)"')
 
-# Source kwargs that take a dep off the hex.pm registry. ``in_umbrella:`` and a
-# sibling ``path:`` resolve to a workspace-internal app (dropped by the
-# workspace filter); an external ``git:`` / ``github:`` / ``path:`` stays
-# off-registry.
-_OFF_REGISTRY_KWARGS = ("git:", "github:", "path:", "in_umbrella:")
+# Source options of a dep tuple: where the dep comes from when that is not
+# hex.pm (``git:``, ``github:``, ``path:``) and which revision of a repository
+# (``ref:``, ``tag:``, ``branch:``). The value is captured when it is a string
+# literal.
+_SOURCE_OPTION_RE = re.compile(
+    r'(?<![\w:])(?P<key>git|github|path|ref|tag|branch):\s*(?:"(?P<value>[^"]*)")?'
+)
+
+# ``in_umbrella: true`` names a sibling app of the same umbrella project.
+_IN_UMBRELLA_RE = re.compile(r"(?<![\w:])in_umbrella:\s*true\b")
 
 
 def _strip_comments(text: str) -> str:
@@ -109,17 +122,45 @@ def _is_dev_only(entry: str) -> bool:
     return "prod" not in envs
 
 
-def _has_off_registry_source(entry: str) -> bool:
-    """True when a dep tuple declares a non-hex.pm source kwarg."""
-    return any(token in entry for token in _OFF_REGISTRY_KWARGS)
+def _dep_origin(entry: str, mix_dir: Path, scan_root: Path) -> str | None:
+    """Origin a dep tuple's own options declare.
+
+    Empty for a hex.pm package; ``None`` for one of the project's own apps
+    (``in_umbrella: true``, or a ``path:`` inside the scanned directory). A
+    source option whose value is not a string literal still takes the dep off
+    the registry; its origin then says only that the source is not recorded.
+    """
+    if _IN_UMBRELLA_RE.search(entry):
+        return None
+    options = {m.group("key"): m.group("value") for m in _SOURCE_OPTION_RE.finditer(entry)}
+    revision = options.get("ref") or options.get("tag") or options.get("branch") or ""
+    if "git" in options:
+        url = options["git"]
+        return git_origin(url, revision) if url else UNRECORDED
+    if "github" in options:
+        repository = options["github"]
+        if not repository:
+            return UNRECORDED
+        return hosted_git_origin("github.com", f"{repository}.git", revision)
+    if "path" in options:
+        path = options["path"]
+        return path_origin(path, mix_dir, scan_root) if path else UNRECORDED
+    return ""
 
 
-def _parse_mix_exs_text(text: str, source: str) -> list[Dependency]:
-    """Extract direct Dependencies from a ``mix.exs`` ``deps`` list."""
+def _parse_mix_exs_text(
+    text: str, source: str, mix_dir: Path, scan_root: Path
+) -> tuple[list[Dependency], list[str]]:
+    """Extract direct Dependencies from a ``mix.exs`` ``deps`` list.
+
+    Returns ``(deps, own)``: ``own`` names the entries that are the project's
+    own apps and therefore not dependencies.
+    """
     body = _extract_deps_list_body(_strip_comments(text))
     if body is None:
-        return []
+        return [], []
     out: list[Dependency] = []
+    own: list[str] = []
     seen: set[tuple[str, str]] = set()
     for entry in _split_top_level(body):
         if not entry.startswith("{"):
@@ -127,12 +168,12 @@ def _parse_mix_exs_text(text: str, source: str) -> list[Dependency]:
         name = _first_atom(entry)
         if not name:
             continue
-        off_registry = _has_off_registry_source(entry)
+        origin = _dep_origin(entry, mix_dir, scan_root)
         # The version constraint is the first string literal in the tuple (the
         # element right after the name atom). Off-registry deps have no
         # registry version — their first string is a URL / path, so skip it.
         version = ""
-        if not off_registry:
+        if origin == "":
             vm = _STRING_RE.search(entry)
             version = vm.group(1).strip() if vm else ""
         group = DependencyGroup.DEV if _is_dev_only(entry) else DependencyGroup.PROD
@@ -143,24 +184,28 @@ def _parse_mix_exs_text(text: str, source: str) -> list[Dependency]:
         rename = _HEX_RENAME_RE.search(entry)
         registry_name = (
             rename.group("hexname")
-            if rename and not off_registry and rename.group("hexname").lower() != name.lower()
+            if rename and origin == "" and rename.group("hexname").lower() != name.lower()
             else ""
         )
         key = (name.lower(), group.value)
         if key in seen:
             continue
         seen.add(key)
+        if origin is None:
+            own.append(name)
+            continue
         out.append(
             Dependency(
                 name=name,
                 version_constraint=version,
                 ecosystem=Ecosystem.HEX,
                 group=group,
-                source=_OFF_REGISTRY_MARKER if off_registry else source,
+                source=source,
+                origin=origin,
                 registry_name=registry_name,
             )
         )
-    return out
+    return out, own
 
 
 def discover_mix_exs_dependencies(
@@ -182,7 +227,9 @@ def discover_mix_exs_dependencies(
         if text is None:
             continue
         source = mix_exs.relative_to(project_path).as_posix()
-        for dep in _parse_mix_exs_text(text, source):
+        deps, own = _parse_mix_exs_text(text, source, mix_exs.parent, project_path)
+        filtered += sum(name.lower() in workspace_names for name in own)
+        for dep in deps:
             if dep.name.lower() in workspace_names:
                 filtered += 1
                 continue

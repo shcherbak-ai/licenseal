@@ -196,8 +196,13 @@ def _package_url(result: CompatibilityResult) -> str:
 
     The name and version are percent-encoded (see :func:`_url_quote`), so the
     result is a well-formed URL on the registry's host whatever the name holds.
+
+    Empty for a dependency that does not come from the registry: the registry
+    page of its name describes another package.
     """
     dep = result.license_info.dependency
+    if dep.origin:
+        return ""
     name = _url_quote(dep.name)
     version = _url_quote(result.license_info.resolved_version)
     if dep.ecosystem == Ecosystem.PYTHON:
@@ -319,7 +324,14 @@ def _actionability(
     license_id = result.license_info.effective_license_id or "the detected license"
     code_url = repository_url or homepage_url
     file_hint = _license_file_hint_url(code_url)
-    if verdict == CompatibilityVerdict.UNKNOWN:
+    origin = result.license_info.dependency.origin
+    if verdict == CompatibilityVerdict.UNKNOWN and origin:
+        steps.append(f"Read the license of the code at {origin}; no registry is consulted for it")
+        steps.append(
+            "Record it in licenseal.review.toml, in a stanza whose `source` is this "
+            "dependency's `origin`"
+        )
+    elif verdict == CompatibilityVerdict.UNKNOWN:
         if file_hint:
             steps.append(f"Inspect LICENSE file at {file_hint}")
         steps.append("Resolve dependency license manually; current detection found none")
@@ -333,7 +345,8 @@ def _actionability(
         steps.append(f"{license_id} is incompatible with the project license")
         if code_url:
             steps.append(f"Check newer versions or relicensing notes at {code_url}")
-        steps.append(f"Consult registry at {package_url} for alternatives")
+        if package_url:
+            steps.append(f"Consult registry at {package_url} for alternatives")
     return {"investigate_url": investigate_url, "next_steps": steps}
 
 
@@ -466,9 +479,15 @@ def _reviewed_results(results: list[CompatibilityResult]) -> list[CompatibilityR
 
 
 def _detected_license_label(result: CompatibilityResult) -> str:
-    """Render the originally detected license with raw metadata when useful."""
+    """Render the originally detected license with raw metadata when useful.
+
+    For a dependency that does not come from the registry, the origin stands
+    where the raw metadata would: it is what the review was keyed on.
+    """
     license_info = result.license_info
     detected = license_info.detected_license_id
+    if license_info.dependency.origin:
+        return f"{detected} (source: {license_info.dependency.origin})"
     if license_info.license_raw and license_info.license_raw not in {"", detected}:
         return f"{detected} (raw: {license_info.license_raw})"
     return detected
@@ -957,6 +976,7 @@ def _dep_to_dict(r: CompatibilityResult) -> dict[str, Any]:
         "is_transitive": r.license_info.dependency.is_transitive,
         "source": r.license_info.dependency.source,
         "source_url": _source_url(r),
+        "origin": r.license_info.dependency.origin,
         "license": r.license_info.effective_license_id,
         "license_raw": r.license_info.license_raw,
         "detected_license": r.license_info.detected_license_id,

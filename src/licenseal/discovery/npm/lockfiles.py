@@ -23,6 +23,7 @@ from typing import Any, cast
 import yaml
 
 from licenseal._graph import compute_direct_ancestors
+from licenseal.discovery._origin import git_origin, path_origin, url_origin
 from licenseal.discovery._read import (
     check_lockfile_version,
     decode_lockfile_text,
@@ -36,6 +37,7 @@ from licenseal.discovery._read import (
     typed_field,
 )
 from licenseal.discovery._walk import walk_project_files
+from licenseal.discovery.npm._specs import npm_spec_origin
 from licenseal.models import Dependency, DependencyGroup, Ecosystem
 
 _NPM_LOCKFILES = ("package-lock.json", "pnpm-lock.yaml", "yarn.lock", "bun.lock")
@@ -91,12 +93,19 @@ def parse_npm_lockfile(
     prod_root_names: set[str],
     dev_root_names: set[str],
     include_dev: bool,
+    scan_root: Path | None = None,
 ) -> list[Dependency]:
-    """Dispatch to the appropriate parser based on filename."""
+    """Dispatch to the appropriate parser based on filename.
+
+    ``scan_root`` is the scanned directory, the lockfile's own directory when
+    omitted. A package the lockfile takes from a path inside it is the
+    project's own code and gets no row.
+    """
+    scan_root = scan_root or path.parent
     if path.name == "package-lock.json":
         return parse_package_lock_json(path, prod_root_names, dev_root_names, include_dev)
     if path.name == "pnpm-lock.yaml":
-        return parse_pnpm_lock(path, prod_root_names, dev_root_names, include_dev)
+        return parse_pnpm_lock(path, prod_root_names, dev_root_names, include_dev, scan_root)
     if path.name == "yarn.lock":
         return parse_yarn_lock(path, prod_root_names, dev_root_names, include_dev)
     if path.name == "bun.lock":
@@ -421,6 +430,7 @@ def parse_pnpm_lock(
     prod_root_names: set[str],
     dev_root_names: set[str],
     include_dev: bool,
+    scan_root: Path | None = None,
 ) -> list[Dependency]:
     """Parse a `pnpm-lock.yaml` into a flat dep list.
 
@@ -429,7 +439,14 @@ def parse_pnpm_lock(
     packages as ``/name/version``, which this parser does not read: such a
     lockfile is a gap, by its declared version or, failing that, because
     none of its keys can be read. Any other version is read as it stands.
+
+    A package that does not come from the registry (a git repository, a
+    tarball URL, a directory or archive outside ``scan_root``) is a row with
+    an origin, read from its ``resolution``; it is never looked up. One
+    inside ``scan_root``, or linked from the workspace, is the project's own
+    code and gets no row.
     """
+    scan_root = scan_root or path.parent
     data = root_table(path, load_yaml(path))
     if data is None or not check_lockfile_version(
         path,
@@ -446,30 +463,49 @@ def parse_pnpm_lock(
     edges: dict[str, set[str]] = {}
     name_case: dict[str, str] = {}
     non_registry = 0
+    seen_off_registry: set[tuple[str, str, str]] = set()
     for key, raw in packages.items():
         # A package key always holds an ``@``, so YAML never reads a real one
         # as anything but a string.
         if not isinstance(key, str) or not isinstance(raw, dict):
             record_unexpected_type(path, _PACKAGES_ENTRY)
             continue
+        meta = cast("dict[str, Any]", raw)
         # pnpm-lock keys for non-registry deps embed the spec after the `@`:
         # ``'pkg@file:../tmp/pkg-0.0.0.tgz'``, ``'pkg@link:../sibling'``,
         # ``'pkg@workspace:^1'``, ``'pkg@git+ssh://...'``. These resolve to a
         # local tarball / sibling / workspace pkg / git repo, NOT a registry
         # version — there's no package on npmjs.org under that name+version.
-        # Emitting them creates a phantom-pinned dep that the resolver 404s
-        # on, and worse blocks ``_drop_phantom_unresolved`` from dropping the
-        # genuine unresolved entry of the same name (which IS resolvable
-        # from another path).
-        if _is_non_registry_pnpm_key(key):
+        # Such a package is a row of its own, with an origin, or no row at
+        # all when it is the project's own code.
+        off_registry = _pnpm_off_registry_package(path, key, meta, scan_root)
+        if off_registry is not None:
             non_registry += 1
+            name, version, origin = off_registry
+            # Its edges stay in the graph either way: the registry packages
+            # it depends on are reached through it.
+            edges.setdefault(name.lower(), set()).update(
+                _collect_npm_edge_children(path, meta, _PACKAGES_ENTRY, pnpm_references=True)
+            )
+            if origin is not None and (name.lower(), version, origin) not in seen_off_registry:
+                seen_off_registry.add((name.lower(), version, origin))
+                name_case.setdefault(name.lower(), name)
+                deps.append(
+                    Dependency(
+                        name=name,
+                        version_constraint=f"=={version}" if version else "",
+                        ecosystem=Ecosystem.NPM,
+                        group=DependencyGroup.PROD,
+                        depth=1,
+                        origin=origin,
+                    )
+                )
             continue
 
         name, version = _parse_pnpm_package_key(key)
         if not name or not version:
             continue
 
-        meta = cast("dict[str, Any]", raw)
         normalized = name.lower()
         edges.setdefault(normalized, set()).update(
             _collect_npm_edge_children(path, meta, _PACKAGES_ENTRY, pnpm_references=True)
@@ -489,7 +525,7 @@ def parse_pnpm_lock(
                 depth=1,
             )
         )
-    record_unread_entries(path, len(packages), len(deps) + non_registry)
+    record_unread_entries(path, len(packages), len(seen) + non_registry)
 
     # pnpm-lock v9 split dependency edges out of ``packages:`` into a separate
     # ``snapshots:`` block. v6/v8 lockfiles don't have this block, so this loop
@@ -533,25 +569,70 @@ _PNPM_NON_REGISTRY_PREFIXES = (
 )
 
 
-def _is_non_registry_pnpm_key(key: str) -> bool:
-    """Return True if ``key`` is a pnpm-lock entry for a non-registry source."""
+def _pnpm_key_spec(key: str) -> tuple[str, str]:
+    """Split a pnpm packages-map key into ``(name, spec)``; empty when it has no ``@``."""
     # Strip leading slash (pnpm v6 prefix) and the name segment; what's left
     # after the rightmost `@` (before any peer-qualifier paren) is the spec.
     head = key[1:] if key.startswith("/") else key
-    # Strip a leading scope (@scope/name) so the next `@` separates name@spec.
-    if head.startswith("@"):
-        slash_at = head.find("/")
-        if slash_at < 0:
-            return False
-        head = head[slash_at + 1 :]
-    sep = head.find("@")
-    if sep < 0:
-        return False
+    # Skip a leading scope (@scope/name) so the next `@` separates name@spec.
+    scope_end = head.find("/") + 1 if head.startswith("@") else 0
+    sep = head.find("@", scope_end)
+    if sep < 0 or (head.startswith("@") and not scope_end):
+        return "", ""
     spec = head[sep + 1 :]
     paren = spec.find("(")
     if paren >= 0:
         spec = spec[:paren]
-    return spec.startswith(_PNPM_NON_REGISTRY_PREFIXES)
+    return head[:sep], spec
+
+
+# Key specs that name the project's own code: a workspace member or a link.
+_PNPM_OWN_PREFIXES = ("link:", "workspace:")
+
+
+def _pnpm_off_registry_package(
+    path: Path, key: str, meta: dict[str, Any], scan_root: Path
+) -> tuple[str, str, str | None] | None:
+    """Read a pnpm ``packages`` entry that does not come from the registry.
+
+    Returns ``(name, version, origin)``, with a ``None`` origin for the
+    project's own code, or ``None`` when the entry is a registry package.
+
+    Such an entry is recognised by the spec its key embeds
+    (``pkg@git+https://…``, ``pkg@https://…/pkg.tgz``, ``pkg@file:../pkg``),
+    or, when the key holds no ``name@`` at all (``github.com/user/repo/<sha>``),
+    by a ``name`` field beside a ``resolution`` that names a repository or a
+    tarball. The origin comes from ``resolution`` (the repository and commit,
+    the tarball URL and integrity, the directory) and from the key's spec
+    when ``resolution`` holds none of those.
+    """
+    name, spec = _pnpm_key_spec(key)
+    resolution = meta.get("resolution")
+    resolution = cast("dict[str, Any]", resolution) if isinstance(resolution, dict) else {}
+    repo, commit = resolution.get("repo"), resolution.get("commit")
+    tarball, directory = resolution.get("tarball"), resolution.get("directory")
+    if not spec.startswith(_PNPM_NON_REGISTRY_PREFIXES):
+        declared = meta.get("name")
+        located = isinstance(repo, str) or isinstance(tarball, str)
+        if name or not (isinstance(declared, str) and declared and located):
+            return None
+        name = declared
+    version = meta.get("version")
+    version = version if isinstance(version, str) else ""
+    if spec.startswith(_PNPM_OWN_PREFIXES):
+        return name, version, None
+    if isinstance(repo, str) and repo:
+        return name, version, git_origin(repo, commit if isinstance(commit, str) else "")
+    if isinstance(directory, str) and directory:
+        return name, version, path_origin(directory, path.parent, scan_root)
+    if isinstance(tarball, str) and tarball.startswith("file:"):
+        return name, version, path_origin(tarball, path.parent, scan_root)
+    if isinstance(tarball, str) and tarball:
+        integrity = resolution.get("integrity")
+        return name, version, url_origin(tarball, integrity if isinstance(integrity, str) else "")
+    if spec.startswith("file:"):
+        return name, version, path_origin(spec, path.parent, scan_root)
+    return name, version, npm_spec_origin(spec) or url_origin(spec)
 
 
 def _parse_pnpm_package_key(key: str) -> tuple[str, str]:

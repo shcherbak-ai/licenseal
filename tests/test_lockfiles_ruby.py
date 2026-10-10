@@ -7,7 +7,6 @@ from pathlib import Path
 from licenseal.discovery.ruby.lockfiles import (
     attach_direct_sources,
     find_gemfile_lockfiles,
-    is_off_registry_marker,
     parse_gemfile_lock,
 )
 from licenseal.models import DependencyGroup, Ecosystem
@@ -119,7 +118,7 @@ class TestParseGemfileLock:
         # rack is reached only via actionpack which is reached via rails
         assert "rails" in by_name["rack"].direct_ancestors
 
-    def test_off_registry_marker_on_git_path_specs(self):
+    def test_git_spec_carries_remote_and_revision(self):
         deps = parse_gemfile_lock(
             _FIXTURES / "simple" / "Gemfile.lock",
             direct_names=_direct_names(),
@@ -127,9 +126,20 @@ class TestParseGemfileLock:
             include_dev=True,
         )
         edge = next(d for d in deps if d.name == "edge")
-        assert is_off_registry_marker(edge.source)
-        vendored = next(d for d in deps if d.name == "vendored")
-        assert is_off_registry_marker(vendored.source)
+        assert edge.origin == "git+https://github.com/example/edge.git@deadbeef"
+        assert edge.version_constraint == "==0.0.1"
+        assert edge.source == ""
+
+    def test_path_spec_inside_the_scanned_directory_has_no_row(self):
+        # ``PATH remote: vendor/foo`` is the project's own code.
+        deps = parse_gemfile_lock(
+            _FIXTURES / "simple" / "Gemfile.lock",
+            direct_names=_direct_names(),
+            dev_direct_names=_dev_direct_names(),
+            include_dev=True,
+        )
+        assert "vendored" not in {d.name for d in deps}
+        assert all(d.origin == "" for d in deps if d.name != "edge")
 
     def test_ecosystem_stamped_as_ruby(self):
         deps = parse_gemfile_lock(
@@ -351,8 +361,7 @@ class TestAttachDirectSources:
         assert by_name["rails"].source == "Gemfile"
         assert by_name["activesupport"].source == ""
 
-    def test_preserves_off_registry_marker(self):
-        from licenseal.discovery.ruby.lockfiles import _OFF_REGISTRY_MARKER
+    def test_off_registry_direct_dep_gets_its_manifest_and_keeps_its_origin(self):
         from licenseal.models import Dependency
 
         deps = [
@@ -362,11 +371,12 @@ class TestAttachDirectSources:
                 ecosystem=Ecosystem.RUBY,
                 group=DependencyGroup.PROD,
                 depth=0,
-                source=_OFF_REGISTRY_MARKER,
+                origin="git+https://example.org/edge.git@abc",
             ),
         ]
         out = attach_direct_sources(deps, {"edge": "Gemfile"})
-        assert is_off_registry_marker(out[0].source)
+        assert out[0].source == "Gemfile"
+        assert out[0].origin == "git+https://example.org/edge.git@abc"
 
     def test_no_match_keeps_empty_source(self):
         from licenseal.models import Dependency

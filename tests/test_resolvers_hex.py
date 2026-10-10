@@ -9,7 +9,6 @@ import httpx
 import respx
 
 from licenseal.analysis.compatibility import check_compatibility
-from licenseal.discovery.hex.mix_lock import _OFF_REGISTRY_MARKER
 from licenseal.models import CompatibilityVerdict, Dependency, DependencyGroup, Ecosystem
 from licenseal.resolvers.hex import (
     _extract_homepage_url,
@@ -264,15 +263,6 @@ class TestResolveHexLicense:
             info = resolve_hex_license(_hex_dep("arr", "==1.0.0"), client)
         assert info.license_id == "UNKNOWN"
         assert info.from_registry is False
-
-    def test_off_registry_short_circuits(self):
-        # No HTTP mock — off-registry must not fetch.
-        dep = _hex_dep("edge", "==0.0.1", source=_OFF_REGISTRY_MARKER)
-        with httpx.Client() as client:
-            info = resolve_hex_license(dep, client)
-        assert info.license_id == "UNKNOWN"
-        assert info.from_registry is False
-        assert info.dependency.source == ""  # internal marker dropped
 
 
 class TestFetchHexDependencies:

@@ -6,13 +6,13 @@ the source statically with a line-oriented regex + a small state machine for
 ``group :development do ... end`` blocks (with a block-nesting counter so a
 nested ``platforms do`` / ``if`` block doesn't lose the enclosing group).
 
-``git:`` / ``github:`` / ``path:`` gems are emitted with an off-registry source
-marker rather than skipped. They can't be resolved against rubygems.org (the
-resolver short-circuits them to UNKNOWN), but emitting them keeps their group
-and direct-ness — so a git-sourced dev tool is still attributed DEV and dropped
-under ``--no-dev`` instead of leaking in as a PROD UNKNOWN. ``Gemfile.lock``
-carries no group of its own, so the Gemfile is the only place that signal
-exists.
+``git:`` / ``github:`` / ``path:`` gems are emitted with an ``origin`` rather
+than skipped. They are not rubygems.org gems and are never looked up there,
+but emitting them keeps their group and direct-ness — so a git-sourced dev
+tool is still attributed DEV and dropped under ``--no-dev`` instead of leaking
+in as a PROD UNKNOWN. ``Gemfile.lock`` carries no group of its own, so the
+Gemfile is the only place that signal exists. A ``path:`` gem inside the
+scanned directory is the project's own code and is not emitted.
 
 Group attribution is the load-bearing reason to parse the Gemfile at all —
 ``Gemfile.lock`` carries no dev/prod marker, only the Gemfile does (via
@@ -31,9 +31,14 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
+from licenseal.discovery._origin import (
+    UNRECORDED,
+    git_origin,
+    hosted_git_origin,
+    path_origin,
+)
 from licenseal.discovery._read import decode_text
 from licenseal.discovery._walk import walk_project_files
-from licenseal.discovery.ruby.lockfiles import _OFF_REGISTRY_MARKER  # noqa: PLC2701
 from licenseal.models import Dependency, DependencyGroup, Ecosystem
 
 # A bare ``gem`` call: ``gem "name"`` or ``gem 'name'``, followed by an
@@ -78,10 +83,21 @@ _GROUP_NAME_RE = re.compile(r""":(\w+)|(['"])(\w+)\2""")
 _WORD_LIST_ARG_RE = re.compile(rf"\*?({_WORD_LIST})")
 _KEYWORD_OPTION_RE = re.compile(r"\w+:(?!:)|:\w+\s*=>")
 
-# Off-registry source kwargs — gems carrying one are emitted with the
-# off-registry marker (the lockfile parser is the authority for what
-# actually shipped, but the Gemfile is the only place the gem's group lives).
-_OFF_REGISTRY_KWARGS = ("git:", "github:", "path:", "gist:", "bitbucket:")
+# Source options of a gem line: where the gem comes from when that is not
+# rubygems.org (``git:``, ``github:``, ``gist:``, ``bitbucket:``, ``path:``)
+# and which revision of a repository (``ref:``, ``tag:``, ``branch:``). The
+# value is captured when it is a string literal.
+_SOURCE_OPTION_RE = re.compile(
+    r"""(?<![\w:])(?P<key>git|github|gist|bitbucket|path|ref|tag|branch):\s*"""
+    r"""(?:(?P<quote>['"])(?P<value>[^'"]*)(?P=quote))?"""
+)
+
+# The git hosting shorthands Bundler expands, and the host each one names.
+_HOSTED_GIT_OPTIONS = {
+    "github": "github.com",
+    "gist": "gist.github.com",
+    "bitbucket": "bitbucket.org",
+}
 
 # Block-opener detection for nesting balance. A line opens a ``...end`` block
 # when it ends with ``do`` (optionally ``do |args|``) — covers ``platforms``,
@@ -165,9 +181,34 @@ def _parse_inline_groups(rest: str) -> tuple[str, ...]:
     return _group_names(inner) or (value,)
 
 
-def _has_off_registry_source(rest: str) -> bool:
-    """True when the gem line declares a non-rubygems source."""
-    return any(token in rest for token in _OFF_REGISTRY_KWARGS)
+def _gem_origin(rest: str, gemfile_dir: Path, scan_root: Path) -> str | None:
+    """Origin a gem line's own options declare.
+
+    Empty for a rubygems.org gem, ``None`` for a ``path:`` gem inside the
+    scanned directory. A source option whose value is not a string literal
+    still takes the gem off the registry; its origin then says only that the
+    source is not recorded.
+    """
+    options = {m.group("key"): m.group("value") for m in _SOURCE_OPTION_RE.finditer(rest)}
+    revision = options.get("ref") or options.get("tag") or options.get("branch") or ""
+    if "git" in options:
+        url = options["git"]
+        return git_origin(url, revision) if url else UNRECORDED
+    for option, host in _HOSTED_GIT_OPTIONS.items():
+        if option in options:
+            repository = options[option]
+            if not repository:
+                return UNRECORDED
+            if "://" in repository:
+                return git_origin(repository, revision)
+            # ``github: "name"`` is Bundler's shorthand for ``name/name``.
+            if option != "gist" and "/" not in repository:
+                repository = f"{repository}/{repository}"
+            return hosted_git_origin(host, f"{repository}.git", revision)
+    if "path" in options:
+        path = options["path"]
+        return path_origin(path, gemfile_dir, scan_root) if path else UNRECORDED
+    return ""
 
 
 def _join_continuations(lines: list[str]) -> list[str]:
@@ -196,13 +237,20 @@ def _join_continuations(lines: list[str]) -> list[str]:
     return out
 
 
-def _parse_gemfile_text(text: str, source: str) -> list[Dependency]:
+def _parse_gemfile_text(
+    text: str, source: str, gemfile_dir: Path, scan_root: Path
+) -> tuple[list[Dependency], list[str]]:
     """Parse Gemfile text into Dependencies.
 
-    ``source`` is the lockfile-style relative path used to attribute the
-    dep's origin in the report.
+    ``source`` is the Gemfile's project-relative path, reported as the file
+    that declares each gem. ``gemfile_dir`` is the directory a ``path:``
+    option is relative to and ``scan_root`` the scanned directory.
+
+    Returns ``(deps, own)``: ``own`` names the ``path:`` gems inside the
+    scanned directory, which are the project's own code.
     """
     out: list[Dependency] = []
+    own: list[str] = []
     seen: set[tuple[str, str]] = set()
     # ``block_depth`` counts every open ``...end`` block; ``group_frames``
     # records the (depth-at-open, group-symbols) of each enclosing ``group``
@@ -267,25 +315,30 @@ def _parse_gemfile_text(text: str, source: str) -> list[Dependency]:
         current += _parse_inline_groups(rest)
         group = DependencyGroup.DEV if _is_dev_group(current) else DependencyGroup.PROD
 
-        # Git / path / github gems can't be resolved against rubygems.org;
-        # tag them off-registry so the resolver short-circuits to UNKNOWN
-        # while their group + direct-ness still feed attribution.
-        dep_source = _OFF_REGISTRY_MARKER if _has_off_registry_source(rest) else source
+        # A git / path / github gem is not on rubygems.org: it carries an
+        # origin and is never looked up, while its group and direct-ness
+        # still feed attribution. A path gem of this project is not a
+        # dependency at all.
+        origin = _gem_origin(rest, gemfile_dir, scan_root)
 
         key = (name.lower(), group.value)
         if key in seen:
             continue
         seen.add(key)
+        if origin is None:
+            own.append(name)
+            continue
         out.append(
             Dependency(
                 name=name,
                 version_constraint=version_constraint,
                 ecosystem=Ecosystem.RUBY,
                 group=group,
-                source=dep_source,
+                source=source,
+                origin=origin,
             )
         )
-    return out
+    return out, own
 
 
 def discover_gemfile_dependencies(
@@ -308,7 +361,9 @@ def discover_gemfile_dependencies(
         if text is None:
             continue
         source = gemfile.relative_to(project_path).as_posix()
-        for dep in _parse_gemfile_text(text, source):
+        deps, own = _parse_gemfile_text(text, source, gemfile.parent, project_path)
+        filtered += sum(name.lower() in workspace_names for name in own)
+        for dep in deps:
             if dep.name.lower() in workspace_names:
                 filtered += 1
                 continue

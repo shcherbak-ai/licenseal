@@ -15,7 +15,9 @@ dependency list.
 
 Dep entries come as a bare atom, ``{name, "version"}``, ``{name, "version",
 [opts]}``, ``{name, {pkg, hexname, "version"}}`` (hex package rename), or
-``{name, {git, ...}}`` (off-registry). All resolve from hex.pm.
+``{name, {git, ...}}`` (also ``git_subdir`` and ``hg``). The source-control
+forms are emitted with an ``origin`` and never looked up; the others resolve
+from hex.pm.
 """
 
 from __future__ import annotations
@@ -26,11 +28,10 @@ from pathlib import Path
 from licenseal.discovery._read import decode_text
 from licenseal.discovery._walk import walk_project_files
 from licenseal.discovery.hex.mix_lock import (  # noqa: PLC2701
-    _OFF_REGISTRY_MARKER,
     _split_top_level,
     _strip_line_comments,
 )
-from licenseal.discovery.hex.rebar_lock import _balanced_braces  # noqa: PLC2701
+from licenseal.discovery.hex.rebar_lock import _balanced_braces, scm_origin  # noqa: PLC2701
 from licenseal.models import Dependency, DependencyGroup, Ecosystem
 
 # Leading lowercase atom (a dep name or the ``pkg`` hex-rename target).
@@ -38,6 +39,9 @@ _ATOM_RE = re.compile(r"[a-z][a-zA-Z0-9_]*")
 # ``{pkg, hexname, ...}`` — the real hex package name to resolve.
 _PKG_NAME_RE = re.compile(r"\{\s*pkg\s*,\s*([a-z][a-zA-Z0-9_]*)")
 _STRING_RE = re.compile(r'"([^"]*)"')
+# A source-control source inside a dep entry: ``{git, …}``, ``{git_subdir, …}``,
+# ``{hg, …}``.
+_SCM_RE = re.compile(r"\{\s*(?:git|git_subdir|hg)\s*,")
 # rebar3 profiles whose deps are development-only.
 _DEV_PROFILES = ("test", "dev")
 
@@ -80,16 +84,17 @@ def _values_for(terms: list[str], key: str) -> list[str]:
     return out
 
 
-def _parse_dep(entry: str) -> tuple[str, str, bool]:
-    """Parse one dep entry → (name, version, off_registry)."""
+def _parse_dep(entry: str) -> tuple[str, str, str]:
+    """Parse one dep entry → (name, version, origin); the origin is empty for hex.pm."""
     entry = entry.strip()
     if not entry:
-        return "", "", False
-    off_registry = "{git" in entry  # covers {git, ...} and {git_subdir, ...}
+        return "", "", ""
+    scm = _SCM_RE.search(entry)
+    origin = scm_origin(entry[scm.start() :]) if scm else ""
     if not entry.startswith("{"):
         # Bare atom dep, e.g. ``cowlib`` (latest).
         m = _ATOM_RE.match(entry)
-        return (m.group(0), "", False) if m else ("", "", False)
+        return (m.group(0), "", "") if m else ("", "", "")
     pkg = _PKG_NAME_RE.search(entry)
     if pkg:
         name = pkg.group(1)  # hex-rename target
@@ -97,19 +102,19 @@ def _parse_dep(entry: str) -> tuple[str, str, bool]:
         m = _ATOM_RE.match(entry[1:].strip())
         name = m.group(0) if m else ""
     if not name:
-        return "", "", False
+        return "", "", ""
     version = ""
-    if not off_registry:
+    if not origin:
         sm = _STRING_RE.search(entry)
         version = sm.group(1).strip() if sm else ""
-    return name, version, off_registry
+    return name, version, origin
 
 
 def _parse_dep_list(dep_list: str, group: DependencyGroup, source: str) -> list[Dependency]:
     """Parse the ``[...]`` value of a ``{deps, [...]}`` term into Dependencies."""
     out: list[Dependency] = []
     for entry in _elements(dep_list, "[]"):
-        name, version, off_registry = _parse_dep(entry)
+        name, version, origin = _parse_dep(entry)
         if not name:
             continue
         out.append(
@@ -118,7 +123,8 @@ def _parse_dep_list(dep_list: str, group: DependencyGroup, source: str) -> list[
                 version_constraint=version,
                 ecosystem=Ecosystem.HEX,
                 group=group,
-                source=_OFF_REGISTRY_MARKER if off_registry else source,
+                source=source,
+                origin=origin,
             )
         )
     return out

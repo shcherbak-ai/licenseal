@@ -3,6 +3,11 @@
 The review file lets a maintainer override the license of a dependency that
 the resolver could not classify cleanly. Each entry is keyed on the resolved
 ecosystem+package@version triple, so reviews never apply across versions.
+
+A dependency that does not come from a registry (a git repository, a direct
+URL, a path outside the scanned directory) is keyed on ecosystem, package, and
+its origin instead: the entry carries a ``source`` key holding the origin
+string. The two kinds of key never match each other's rows.
 """
 
 from __future__ import annotations
@@ -41,6 +46,10 @@ class FlaggedEntry:
     detected_license: str
     license_raw: str
     verdict: str
+    # Origin of a dependency that does not come from a registry; empty for a
+    # registry package. Such an entry is keyed on it, and ``version`` may be
+    # empty.
+    origin: str = ""
 
 
 @dataclass
@@ -50,6 +59,9 @@ class ReviewFileContents:
     licenses: dict[str, str] = field(default_factory=dict)
     notes: dict[str, str] = field(default_factory=dict)
     incomplete: list[str] = field(default_factory=list)
+    # The ``version`` of each ``source``-keyed entry that names one. Such an
+    # entry applies only to a row with that origin and that version.
+    versions: dict[str, str] = field(default_factory=dict)
 
     @property
     def all_keys(self) -> set[str]:
@@ -73,6 +85,32 @@ def review_key(ecosystem: Ecosystem | str, name: str, version_text: str) -> str:
     """Build the canonical review key for a resolved package version."""
     eco = ecosystem.value if isinstance(ecosystem, Ecosystem) else ecosystem
     return f"{eco}:{canonical_name(ecosystem, name)}@{version_text.strip()}"
+
+
+def source_review_key(ecosystem: Ecosystem | str, name: str, source: str) -> str:
+    """Build the review key for a dependency that does not come from a registry.
+
+    ``source`` is the dependency's origin string. The key starts with a word
+    no ecosystem is named, so it cannot equal a :func:`review_key` whatever
+    the package, version, and source hold: an entry without ``source`` never
+    matches an off-registry row, and an entry with one never matches a
+    registry row.
+    """
+    eco = ecosystem.value if isinstance(ecosystem, Ecosystem) else ecosystem
+    return f"off-registry {eco}:{canonical_name(ecosystem, name)} from {source.strip()}"
+
+
+def info_review_key(info: LicenseInfo) -> str:
+    """Return the key a review entry needs to apply to ``info``.
+
+    Empty when no entry can: a registry package with no resolved version.
+    """
+    dep = info.dependency
+    if dep.origin:
+        return source_review_key(dep.ecosystem, dep.name, dep.origin)
+    if not info.resolved_version:
+        return ""
+    return review_key(dep.ecosystem, dep.name, info.resolved_version)
 
 
 def _normalize_reviewed_license(raw_license: str) -> str:
@@ -110,6 +148,7 @@ def load_review_file(project_path: Path) -> ReviewFileContents:
     licenses: dict[str, str] = {}
     notes: dict[str, str] = {}
     incomplete: list[str] = []
+    versions: dict[str, str] = {}
     seen: set[str] = set()
     for index, entry in enumerate(entries, start=1):
         if not isinstance(entry, dict):
@@ -121,6 +160,7 @@ def load_review_file(project_path: Path) -> ReviewFileContents:
         ecosystem = fields.get("ecosystem", "")
         package = fields.get("package", "")
         version_text = fields.get("version", "")
+        source = fields.get("source")
         license_value = fields.get("license", "")
         note = fields.get("note", "")
 
@@ -132,7 +172,16 @@ def load_review_file(project_path: Path) -> ReviewFileContents:
             raise click.ClickException(
                 f"Invalid {REVIEW_FILE_NAME}: review entry {index} is missing a string 'package'."
             )
-        if not isinstance(version_text, str) or not version_text.strip():
+        if source is not None and (not isinstance(source, str) or not source.strip()):
+            raise click.ClickException(
+                f"Invalid {REVIEW_FILE_NAME}: review entry {index} has an empty or "
+                "non-string 'source'."
+            )
+        # ``version`` is the key of a registry entry and is required there. A
+        # ``source``-keyed entry may leave it out; when present it must be a
+        # version all the same.
+        version_required = source is None or "version" in fields
+        if version_required and (not isinstance(version_text, str) or not version_text.strip()):
             raise click.ClickException(
                 f"Invalid {REVIEW_FILE_NAME}: review entry {index} is missing a string 'version'."
             )
@@ -145,13 +194,19 @@ def load_review_file(project_path: Path) -> ReviewFileContents:
                 f"Invalid {REVIEW_FILE_NAME}: review entry {index} has a non-string 'note'."
             )
 
-        key = review_key(ecosystem, package, version_text)
+        if source is None:
+            key = review_key(ecosystem, package, version_text)
+            label = f"{ecosystem}:{package}@{version_text}"
+        else:
+            key = source_review_key(ecosystem, package, source)
+            label = f"{ecosystem}:{package} from {source}"
         if key in seen:
             raise click.ClickException(
-                f"Invalid {REVIEW_FILE_NAME}: duplicate review entry for "
-                f"{ecosystem}:{package}@{version_text}."
+                f"Invalid {REVIEW_FILE_NAME}: duplicate review entry for {label}."
             )
         seen.add(key)
+        if source is not None and version_text.strip():
+            versions[key] = version_text.strip()
 
         if not license_value.strip():
             incomplete.append(key)
@@ -160,7 +215,9 @@ def load_review_file(project_path: Path) -> ReviewFileContents:
         if note.strip():
             notes[key] = note.strip()
 
-    return ReviewFileContents(licenses=licenses, notes=notes, incomplete=incomplete)
+    return ReviewFileContents(
+        licenses=licenses, notes=notes, incomplete=incomplete, versions=versions
+    )
 
 
 def apply_reviewed_licenses(
@@ -172,6 +229,11 @@ def apply_reviewed_licenses(
 
     Sets `reviewed_license_id` and `review_note` on matching infos. The
     detected license stays in `license_id` so reports can show both.
+
+    A registry row matches the entry for its ecosystem, package, and resolved
+    version. An off-registry row matches the ``source``-keyed entry for its
+    ecosystem, package, and origin; when that entry also names a ``version``,
+    the row's version must equal it.
     """
     if not contents.licenses and not contents.notes:
         return
@@ -187,15 +249,11 @@ def apply_reviewed_licenses(
     matched: set[str] = set()
     ineligible: list[str] = []
     for info in license_infos:
-        if not info.resolved_version:
-            continue
-        key = review_key(
-            info.dependency.ecosystem,
-            info.dependency.name,
-            info.resolved_version,
-        )
+        key = info_review_key(info)
         reviewed = contents.licenses.get(key)
         if not reviewed:
+            continue
+        if contents.versions.get(key, info.resolved_version) != info.resolved_version:
             continue
         if key not in flagged_keys:
             ineligible.append(key)
@@ -222,7 +280,11 @@ def apply_reviewed_licenses(
             "review. Licenses may change between versions, so verify against "
             "the latest scan first. If the license changed, or the dep is no "
             "longer in the dependency tree, delete the stanza so the next "
-            "scan re-flags the dep for fresh review."
+            "scan re-flags the dep for fresh review. A stanza with a `source` "
+            "key applies only to that exact source: when the commit, ref, "
+            "URL, or path the dependency comes from has changed, review the "
+            "new source and update `source` (and `version`, when the stanza "
+            "has one)."
         )
 
 
@@ -237,6 +299,9 @@ def flagged_entries_from_results(
     them so the user knows the gap exists — these are usually upstream
     resolution failures (typo, yanked package, name collision) worth
     investigating regardless of the review flow.
+
+    An off-registry dependency is keyed on its origin, so it is always an
+    entry, with or without a version.
     """
     entries: list[FlaggedEntry] = []
     unscaffoldable: list[str] = []
@@ -244,7 +309,7 @@ def flagged_entries_from_results(
         if result.verdict == CompatibilityVerdict.COMPATIBLE:
             continue
         info = result.license_info
-        if not info.resolved_version:
+        if not info.resolved_version and not info.dependency.origin:
             unscaffoldable.append(f"{info.dependency.ecosystem.value}:{info.dependency.name}")
             continue
         entries.append(
@@ -255,6 +320,7 @@ def flagged_entries_from_results(
                 detected_license=info.detected_license_id or "UNKNOWN",
                 license_raw=info.license_raw or "",
                 verdict=result.verdict.value,
+                origin=info.dependency.origin,
             )
         )
     return entries, unscaffoldable
@@ -303,7 +369,12 @@ def flagged_entries_from_json_report(
         if not isinstance(name, str) or not name:
             continue
         version_text = raw.get("resolved_version", "")
-        if not isinstance(version_text, str) or not version_text:
+        if not isinstance(version_text, str):
+            version_text = ""
+        origin = raw.get("origin", "")
+        if not isinstance(origin, str):
+            origin = ""
+        if not version_text and not origin:
             unscaffoldable.append(f"{ecosystem}:{name}")
             continue
         detected = raw.get("detected_license") or raw.get("license") or "UNKNOWN"
@@ -315,6 +386,7 @@ def flagged_entries_from_json_report(
                 detected_license=str(detected),
                 license_raw=str(raw.get("license_raw") or ""),
                 verdict=str(verdict or "unknown"),
+                origin=origin,
             )
         )
     return entries, unscaffoldable
@@ -373,6 +445,9 @@ def render_review_template(
     and are written as data only: each comment stays one comment line and
     each value one escaped string, so an entry can never add, alter, or
     pre-fill a ``[[review]]`` stanza.
+
+    An off-registry entry gets a ``source`` line holding its origin, which is
+    what keys it; its ``version`` line is written only when it has a version.
     """
     if not entries:
         return ""
@@ -393,11 +468,21 @@ def render_review_template(
         lines.append("[[review]]")
         lines.append(f"ecosystem = {_toml_basic_string(entry.ecosystem)}")
         lines.append(f"package = {_toml_basic_string(entry.name)}")
-        lines.append(f"version = {_toml_basic_string(entry.version)}")
+        if entry.version or not entry.origin:
+            lines.append(f"version = {_toml_basic_string(entry.version)}")
+        if entry.origin:
+            lines.append(f"source = {_toml_basic_string(entry.origin)}")
         lines.append('license = ""')
         lines.append('note = ""')
         lines.append("")
     return "\n".join(lines).rstrip() + "\n"
+
+
+def _entry_review_key(entry: FlaggedEntry) -> str:
+    """The key the stanza scaffolded for ``entry`` loads under."""
+    if entry.origin:
+        return source_review_key(entry.ecosystem, entry.name, entry.origin)
+    return review_key(entry.ecosystem, entry.name, entry.version)
 
 
 def merge_review_template(
@@ -409,9 +494,7 @@ def merge_review_template(
 
     Returns the merged text and the number of stanzas appended.
     """
-    pending = [
-        e for e in new_entries if review_key(e.ecosystem, e.name, e.version) not in existing_keys
-    ]
+    pending = [e for e in new_entries if _entry_review_key(e) not in existing_keys]
     if not pending:
         return existing_text, 0
     appended = render_review_template(pending, include_header=False)

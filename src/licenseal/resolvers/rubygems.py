@@ -15,19 +15,16 @@ field, so there is **no lockfile-license pre-pass** for Ruby — every dep
 either hits the deps.dev batch cache (handled in the CLI dispatch) or
 falls through to one of the rubygems.org endpoints here.
 
-Off-registry deps (``GIT`` / ``PATH`` sections in Gemfile.lock) short-
-circuit to UNKNOWN without any fetch — they don't have a rubygems.org
-record and a 404 would be wasted bandwidth.
+A gem with an ``origin`` (a ``GIT`` / ``PATH`` section in Gemfile.lock, a
+``git:`` / ``path:`` gem in a Gemfile) is not a rubygems.org gem. The CLI
+never passes one to this module.
 """
 
 from __future__ import annotations
 
-from dataclasses import replace
-
 import httpx
 
 from licenseal.analysis.spdx import read_license_array
-from licenseal.discovery.ruby.lockfiles import is_off_registry_marker
 from licenseal.models import Dependency, DependencyGroup, Ecosystem, LicenseInfo
 from licenseal.resolvers.http import Fetcher, fetch_registry_json
 
@@ -140,15 +137,8 @@ def resolve_ruby_license(
     """Resolve license for a Ruby gem via rubygems.org.
 
     Pinned (``==X.Y.Z``) deps hit the v2 per-version endpoint; unpinned
-    deps fall back to the v1 latest-version endpoint. GIT / PATH-sourced
-    gems (off-registry marker set by the lockfile parser) short-circuit
-    to UNKNOWN without a fetch.
+    deps fall back to the v1 latest-version endpoint.
     """
-    if is_off_registry_marker(dep.source):
-        # Drop the internal marker so it doesn't surface as the report's
-        # Source — off-registry gems carry no manifest-path source.
-        return _unknown(replace(dep, source=""), from_registry=False)
-
     name = dep.name
     pinned = _extract_pinned_version(dep.version_constraint)
 

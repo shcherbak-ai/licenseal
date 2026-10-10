@@ -13,7 +13,9 @@ Each lock entry is ``{<<"name">>, <source>, Level}`` — a 3-tuple whose last
 element is the integer dependency level (0 = direct, ≥1 = transitive). The
 2-tuple ``{<<"name">>,<<"hash">>}`` entries in the trailing ``pkg_hash``
 sections are distinguished by arity and skipped. ``{pkg, …}`` sources are
-registry-backed; ``{git, …}`` sources are off-registry.
+registry-backed. Any other source (``{git, …}``, ``{git_subdir, …}``,
+``{hg, …}``) is emitted with an ``origin`` (the repository URL plus the
+locked ``{ref, …}``) and is never looked up.
 
 Group attribution: level-0 (direct) entries are PROD unless the name is in the
 ``rebar.config`` test/dev-profile set; level-≥1 transitives default to PROD with
@@ -25,10 +27,10 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
+from licenseal.discovery._origin import UNRECORDED, git_origin
 from licenseal.discovery._read import decode_text
 from licenseal.discovery._walk import walk_project_files
 from licenseal.discovery.hex.mix_lock import (  # noqa: PLC2701
-    _OFF_REGISTRY_MARKER,
     _split_top_level,
     _strip_line_comments,
 )
@@ -39,6 +41,26 @@ _BINARY_RE = re.compile(r'<<"([^"]*)">>')
 # accepts characters ``int()`` rejects, and ``int()`` refuses very long digit
 # strings.
 _LEVEL_RE = re.compile(r"[0-9]{1,9}")
+# A source-control source: ``{git, "url", …}``, ``{git_subdir, "url", …}``,
+# ``{hg, "url", …}``.
+_SCM_SOURCE_RE = re.compile(r'\{\s*(?P<scm>[a-z][a-z0-9_]*)\s*,\s*"(?P<url>[^"]*)"')
+# The revision of one: ``{ref, "sha"}``, ``{tag, "v1"}``, ``{branch, "main"}``.
+_SCM_REVISION_RE = re.compile(r'\{\s*(?:ref|tag|branch)\s*,\s*"(?P<revision>[^"]*)"\s*\}')
+
+
+def scm_origin(source: str) -> str:
+    """Origin of an Erlang-terms source-control source such as ``{git, "url", {ref, "sha"}}``.
+
+    ``git_subdir`` is a git repository; any other SCM keeps its own name.
+    When the term holds no URL string the origin says only that the source
+    is not recorded.
+    """
+    scm = _SCM_SOURCE_RE.search(source)
+    if scm is None or not scm.group("url"):
+        return UNRECORDED
+    revision = _SCM_REVISION_RE.search(source)
+    vcs = "git" if scm.group("scm").startswith("git") else scm.group("scm")
+    return git_origin(scm.group("url"), revision.group("revision") if revision else "", vcs=vcs)
 
 
 def find_rebar_lockfiles(
@@ -74,8 +96,11 @@ def _balanced_braces(text: str, start: int) -> str | None:
     return None
 
 
-def _parse_lock_entry(elements: list[str]) -> tuple[str, str, int, bool]:
-    """``[<<"name">>, <source>, Level]`` → (name, version, level, off_registry)."""
+def _parse_lock_entry(elements: list[str]) -> tuple[str, str, int, str]:
+    """``[<<"name">>, <source>, Level]`` → (name, version, level, origin).
+
+    The origin is empty for a ``{pkg, …}`` source.
+    """
     level = int(elements[2].strip())
     # The caller has checked that elements[0] holds a complete ``<<"name">>``
     # binary, so the name is always recoverable.
@@ -87,9 +112,9 @@ def _parse_lock_entry(elements: list[str]) -> tuple[str, str, int, bool]:
         bins = _BINARY_RE.findall(source)
         name = bins[0] if bins else entry_name
         version = bins[1] if len(bins) > 1 else ""
-        return name, version, level, False
-    # {git, ...} / other → off-registry, keyed by the entry name.
-    return entry_name, "", level, True
+        return name, version, level, ""
+    # {git, ...} / other → not a hex.pm package, keyed by the entry name.
+    return entry_name, "", level, scm_origin(source)
 
 
 def parse_rebar_lock(
@@ -126,7 +151,7 @@ def parse_rebar_lock(
             or not _LEVEL_RE.fullmatch(elements[2].strip())
         ):
             continue
-        name, version, level, off_registry = _parse_lock_entry(elements)
+        name, version, level, origin = _parse_lock_entry(elements)
         is_direct = level == 0
         if is_direct and name.lower() in dev_direct_names:
             group = DependencyGroup.DEV
@@ -142,7 +167,7 @@ def parse_rebar_lock(
                 group=group,
                 depth=0 if is_direct else 1,
                 direct_ancestors=(),
-                source="" if not off_registry else _OFF_REGISTRY_MARKER,
+                origin=origin,
             )
         )
     return out

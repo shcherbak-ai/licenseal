@@ -206,6 +206,7 @@ licenseal is intentionally narrow:
 - It is a **license compatibility checker**, not a legal approval workflow or policy-exception manager.
 - It checks **published dependency license metadata**, not vulnerability status, provenance, or SBOM completeness.
 - It reads **manifests, lockfiles, and public registry metadata endpoints** only. It does not honor private registry declarations from scanned manifests, because that would expand the network trust boundary.
+- A dependency installed from a **git repository, a direct URL, or a path outside the scanned directory** has no registry record. It is reported as `UNKNOWN` with its source, nothing is requested or downloaded for it, and a review keyed on that source records its license (see [USAGE.md](USAGE.md#off-registry-dependencies)).
 - It does not infer dependency licenses by pattern-matching local `LICENSE` files or source comments. Free-form license text is easy to misread, spoof, or partially match; missing structured metadata is reported as `UNKNOWN` and routed to manual review instead.
 - It produces Markdown/JSON dependency license reports, but not standards-compliant CycloneDX or SPDX SBOMs; use a dedicated SBOM tool when you need that artifact.
 - Manual review can override flagged findings when a maintainer has better information, but the review file is an audit record, not hidden legal sign-off.
@@ -274,7 +275,7 @@ licenseal init-review-file --from-report report.json         # 2. scaffold blank
 licenseal check                                              # 4. overrides apply
 ```
 
-Reviews can only override flagged dependencies, never compatible ones. A reviewed dependency passes strict mode while staying visible in its warning, violation, or unknown bucket with both the detected and reviewed licenses shown.
+Reviews can only override flagged dependencies, never compatible ones. A reviewed dependency passes strict mode while staying visible in its warning, violation, or unknown bucket with both the detected and reviewed licenses shown. A dependency that does not come from a registry is reviewed by its source instead of its version: the scaffolded entry carries a `source` line.
 
 licenseal also ships a [Claude Code](https://claude.com/claude-code) skill (`licenseal install-skill`, then `/licenseal-review`) that walks through unknowns, warnings, and violations interactively. It can inspect package links, license links, and project context, then ask the questions that matter for how your software is distributed, hosted, or modified. Full review rules are in [USAGE.md](USAGE.md#manual-review-file).
 

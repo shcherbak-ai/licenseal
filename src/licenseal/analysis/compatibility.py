@@ -426,6 +426,10 @@ _RISK_LABELS = {
     RiskLevel.UNKNOWN: "unknown license — manual review required",
 }
 
+# Longest origin shown in a reason. The full string is the report's ``origin``
+# field and the ``source`` line of a scaffolded review stanza.
+_ORIGIN_REASON_MAX = 200
+
 
 def is_recognised_project_license(project_license: str) -> bool:
     """Whether ``project_license`` gives the compatibility check a row to judge against.
@@ -711,6 +715,17 @@ def _build_reason(
 
     # Unknown
     if license_info.is_unknown:
+        origin = " ".join(license_info.dependency.origin.split())
+        if origin:
+            # Not a registry package, so no license was looked up. The reason
+            # names the source: it is what tells this row from a registry
+            # package of the same name, and what a review of it is keyed on.
+            if len(origin) > _ORIGIN_REASON_MAX:
+                origin = origin[: _ORIGIN_REASON_MAX - 1] + "…"
+            return (
+                f"{dep_name} comes from an off-registry source ({origin}); its license "
+                f"is not looked up — manual review required"
+            )
         # Metadata WAS present, it just didn't normalize to a recognized
         # license. Surface the raw string so a reviewer can resolve it at a
         # glance instead of being told (falsely) there's nothing there.
