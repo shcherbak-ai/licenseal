@@ -2608,8 +2608,8 @@ class TestPep658MetadataFallback:
         respx.get("https://pypi.org/pypi/pkg-a/1.0.0/json").mock(
             return_value=httpx.Response(200, json=self._PYPI_JSON_NO_LICENSE)
         )
-        # Project-level fallback (existing pre-PEP-658 path) also empty;
-        # PEP 658 sidecar is what supplies the license.
+        # The PEP 658 sidecar supplies the license. The project-level endpoint
+        # is only read when the sidecar yields nothing.
         respx.get("https://pypi.org/pypi/pkg-a/json").mock(
             return_value=httpx.Response(200, json={"info": {"version": "1.0.0"}})
         )
@@ -3359,6 +3359,112 @@ class TestPep658CacheIntegration:
         with httpx.Client() as client:
             info = resolve_python_license(dep, client, fetcher=cache.fetch)
         assert info.license_id == "MIT"
+
+
+class TestSidecarBeforeProjectLevel:
+    """A release whose own JSON carries no usable license: its PEP 658 sidecar
+    is read before the project-level endpoint, which describes the latest
+    release. Read through ``RegistryCache.fetch``.
+    """
+
+    _RELEASE_URL = "https://pypi.org/pypi/pkg-a/1.0.0/json"
+    _PROJECT_URL = "https://pypi.org/pypi/pkg-a/json"
+    _WHEEL_URL = "https://files.pythonhosted.org/packages/aa/bb/pkg_a-1.0.0-py3-none-any.whl"
+    _SIDECAR_URL = _WHEEL_URL + ".metadata"
+
+    def _mock(self, sidecar_status: int, sidecar_text: str = ""):
+        """Release 1.0.0 has no license metadata; the latest release is MIT.
+
+        Returns the project-level route.
+        """
+        respx.get(self._RELEASE_URL).mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "info": {"version": "1.0.0"},
+                    "urls": [{"packagetype": "bdist_wheel", "url": self._WHEEL_URL}],
+                },
+            )
+        )
+        respx.get(self._SIDECAR_URL).mock(
+            return_value=httpx.Response(sidecar_status, text=sidecar_text)
+        )
+        return respx.get(self._PROJECT_URL).mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "info": {
+                        "version": "2.0.0",
+                        "license_expression": "MIT",
+                        "project_urls": {"Source": "https://example.test/pkg-a"},
+                    },
+                    "releases": {"1.0.0": [], "2.0.0": []},
+                },
+            )
+        )
+
+    @staticmethod
+    def _resolve(spec: str):
+        cache = RegistryCache()
+        with httpx.Client() as client:
+            return resolve_python_license(
+                _python_dep("pkg-a", version=spec), client, fetcher=cache.fetch
+            )
+
+    @respx.mock
+    def test_pinned_release_sidecar_wins_over_latest_release_license(self):
+        project_route = self._mock(
+            200, "Metadata-Version: 2.4\nLicense-Expression: GPL-3.0-only\n\n"
+        )
+        info = self._resolve("==1.0.0")
+        assert info.license_id == "GPL-3.0-only"
+        assert info.license_raw == "GPL-3.0-only"
+        assert info.resolved_version == "1.0.0"
+        assert info.from_registry is True
+        # The release answered for itself: the latest release is not consulted.
+        assert not project_route.called
+
+    @pytest.mark.parametrize(
+        ("sidecar_status", "sidecar_text"),
+        [(404, ""), (200, "Metadata-Version: 2.4\nName: pkg-a\n\n")],
+        ids=["no-sidecar", "sidecar-without-license"],
+    )
+    @respx.mock
+    def test_project_level_license_borrowed_when_sidecar_gives_nothing(
+        self, sidecar_status, sidecar_text
+    ):
+        self._mock(sidecar_status, sidecar_text)
+        info = self._resolve("==1.0.0")
+        assert info.license_id == "MIT"
+        assert info.resolved_version == "1.0.0"
+        assert info.repository_url == "https://example.test/pkg-a"
+        assert [str(call.request.url) for call in respx.calls] == [
+            self._RELEASE_URL,
+            self._SIDECAR_URL,
+            self._PROJECT_URL,
+        ]
+
+    @respx.mock
+    def test_range_selected_release_reads_its_sidecar_first(self):
+        # A range is resolved against the project-level release list, so that
+        # response is already in hand when the selected release turns out to
+        # carry no license. It is still not used while the selected release's
+        # sidecar declares one.
+        self._mock(200, "Metadata-Version: 2.4\nLicense-Expression: GPL-3.0-only\n\n")
+        info = self._resolve(">=1.0,<2.0")
+        assert info.resolved_version == "1.0.0"
+        assert info.license_id == "GPL-3.0-only"
+
+    @respx.mock
+    def test_sidecar_license_that_cannot_be_classified_is_not_replaced(self):
+        # The release's own metadata names a license the normalizer does not
+        # know. That is the release's declaration, so it stays UNKNOWN rather
+        # than taking the latest release's license.
+        project_route = self._mock(200, "Metadata-Version: 2.4\nLicense: mystery\n\n")
+        info = self._resolve("==1.0.0")
+        assert info.license_id == "UNKNOWN"
+        assert info.license_raw == "mystery"
+        assert not project_route.called
 
 
 class TestCustomReferenceExpressionThroughCache:

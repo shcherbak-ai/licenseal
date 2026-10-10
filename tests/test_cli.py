@@ -1007,6 +1007,50 @@ class TestCheckCommand:
         result = runner.invoke(main, ["check", "--path", str(tmp_path)])
         assert result.exit_code == 1
 
+    @respx.mock
+    def test_pinned_release_sidecar_license_beats_latest_release_license(self, tmp_path):
+        # The pinned release's JSON carries no license and its wheel metadata
+        # declares GPL; the latest release declares MIT. The pinned release is
+        # the one checked, so the scan reports GPL and fails.
+        (tmp_path / "pyproject.toml").write_text(
+            textwrap.dedent("""\
+            [project]
+            name = "myproject"
+            license = {text = "MIT"}
+            dependencies = ["pkg-a==1.0.0"]
+            """)
+        )
+        wheel_url = "https://files.pythonhosted.org/packages/aa/bb/pkg_a-1.0.0-py3-none-any.whl"
+        respx.get("https://pypi.org/pypi/pkg-a/1.0.0/json").mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "info": {"version": "1.0.0", "requires_dist": []},
+                    "urls": [{"packagetype": "bdist_wheel", "url": wheel_url}],
+                },
+            )
+        )
+        project_route = respx.get("https://pypi.org/pypi/pkg-a/json").mock(
+            return_value=httpx.Response(
+                200, json={"info": {"version": "2.0.0", "license_expression": "MIT"}}
+            )
+        )
+        respx.get(wheel_url + ".metadata").mock(
+            return_value=httpx.Response(
+                200, text="Metadata-Version: 2.4\nLicense-Expression: GPL-3.0-only\n\n"
+            )
+        )
+
+        result = CliRunner().invoke(main, ["check", "--path", str(tmp_path), "-f", "json"])
+        assert result.exit_code == 1
+        data = json.loads(result.output[result.output.index("{") :])
+        (dep,) = data["dependencies"]
+        assert dep["license"] == "GPL-3.0-only"
+        assert dep["resolved_version"] == "1.0.0"
+        assert dep["verdict"] == "incompatible"
+        assert data["summary"]["violations"] == 1
+        assert not project_route.called
+
     @pytest.mark.parametrize(
         "project_license, dep_license",
         [

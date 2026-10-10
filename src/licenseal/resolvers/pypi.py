@@ -356,20 +356,6 @@ def resolve_python_license(
 
     raw_license = _extract_raw_license(info)
 
-    # Older releases publish sparse per-version metadata (no license_expression,
-    # no classifiers); the project-level endpoint reflects current metadata for
-    # the same package, so consult it as a last resort.
-    if not raw_license:
-        if project_data is None:
-            project_data = fetcher(f"{_PYPI_URL}/{name}/json", client)
-        if project_data is not None and project_data is not data:
-            project_info = object_field(project_data, "info")
-            raw_license = _extract_raw_license(project_info)
-            if not repository_url:
-                repository_url = _extract_repository_url(project_info)
-            if not homepage_url:
-                homepage_url = _extract_homepage_url(project_info)
-
     # PEP 658 fallback. The PyPI JSON API does generally surface PEP 639's
     # ``License-Expression``, the legacy ``license`` field, and classifiers
     # (warehouse PEP 639 implementation landed late 2024) — most Python deps
@@ -385,10 +371,28 @@ def resolve_python_license(
     # ``normalize_license(...) == "UNKNOWN"`` catches "field present but
     # unparseable" so a maintainer publishing PEP 639 metadata isn't overruled
     # by a stale-classifier holdover.
+    #
+    # The sidecar is this release's own metadata, so it is read before the
+    # project-level endpoint below, which describes the latest release.
     if not raw_license or normalize_license(raw_license) == "UNKNOWN":
         pep658_license = _license_from_pep658(data, client, pep658_fetcher)
         if pep658_license:
             raw_license = pep658_license
+
+    # Older releases publish sparse per-version metadata (no license_expression,
+    # no classifiers); the project-level endpoint reflects current metadata for
+    # the same package, so consult it as a last resort — only when neither the
+    # release's JSON nor its sidecar declared anything.
+    if not raw_license:
+        if project_data is None:
+            project_data = fetcher(f"{_PYPI_URL}/{name}/json", client)
+        if project_data is not None and project_data is not data:
+            project_info = object_field(project_data, "info")
+            raw_license = _extract_raw_license(project_info)
+            if not repository_url:
+                repository_url = _extract_repository_url(project_info)
+            if not homepage_url:
+                homepage_url = _extract_homepage_url(project_info)
 
     normalized = normalize_license(raw_license)
 
