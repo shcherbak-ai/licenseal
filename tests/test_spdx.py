@@ -482,6 +482,73 @@ class TestSpdxOperandCanonicalization:
         assert normalize_license(expr) == expr
 
 
+class TestDanglingOperators:
+    """An operator with an operand missing is not an expression: the string is
+    UNKNOWN rather than passed through for the classifier to salvage."""
+
+    @pytest.mark.parametrize(
+        "raw",
+        [
+            # Leading or trailing, alone.
+            "MIT AND",
+            "AND MIT",
+            "MIT OR",
+            "OR MIT",
+            "MIT WITH",
+            "WITH MIT",
+            # Leading or trailing, next to a well-formed part.
+            "MIT OR GPL-3.0-only AND",
+            "AND GPL-3.0-only OR MIT",
+            "MIT OR GPL-3.0-only OR",
+            "OR GPL-3.0-only OR MIT",
+            "MIT OR GPL-3.0-only WITH",
+            "MIT AND GPL-3.0-only AND",
+            # Two operators in a row.
+            "MIT OR AND GPL-3.0-only",
+            "GPL-3.0-only AND OR MIT",
+            "MIT OR OR GPL-3.0-only",
+            "MIT AND AND Apache-2.0",
+            "GPL-2.0-only WITH AND MIT",
+            # At the edge of a group.
+            "MIT OR (AND)",
+            "MIT OR (GPL-3.0-only AND)",
+            "MIT OR (AND GPL-3.0-only)",
+            "(MIT AND) OR Apache-2.0",
+            # With an unbalanced paren as well.
+            "MIT OR (GPL-3.0-only AND",
+            # Left dangling by a prose separator.
+            "MIT / AND",
+            "MIT AND, Apache-2.0",
+            # Operators only.
+            "AND",
+            "OR AND",
+        ],
+    )
+    def test_dangling_operator_is_unknown(self, raw):
+        assert normalize_license(raw) == "UNKNOWN"
+
+    @pytest.mark.parametrize(
+        "raw, expected",
+        [
+            ("MIT AND Apache-2.0", "Apache-2.0 AND MIT"),
+            ("MIT OR GPL-3.0-only", "GPL-3.0-only OR MIT"),
+            ("MIT OR GPL-3.0-only AND Apache-2.0", "Apache-2.0 AND GPL-3.0-only OR MIT"),
+            ("(MIT) AND (Apache-2.0)", "Apache-2.0 AND MIT"),
+            ("(MIT OR ISC) AND (Apache-2.0 OR Zlib)", "(Apache-2.0 OR Zlib) AND (ISC OR MIT)"),
+            (
+                "GPL-2.0-only WITH Classpath-exception-2.0 OR MIT",
+                "GPL-2.0-only WITH Classpath-exception-2.0 OR MIT",
+            ),
+            # An unrecognized leaf in a well-formed expression is not dangling.
+            ("MIT OR CustomLicense", "CustomLicense OR MIT"),
+            # Unbalanced parens alone still pass through.
+            ("(MIT OR Apache-2.0", "(MIT OR Apache-2.0"),
+        ],
+    )
+    def test_well_formed_expression_is_the_control(self, raw, expected):
+        assert normalize_license(raw) == expected
+
+
 class TestOversizedLicenseString:
     """A license string over the length cap is not normalized, so a hostile
     registry field cannot stall the scan."""
@@ -1118,3 +1185,13 @@ class TestSpdxLooksLike:
 
     def test_very_long_string_not_spdx(self):
         assert _looks_like_spdx("MIT " * 100) is False
+
+    def test_operator_needs_a_leaf_on_both_sides(self):
+        assert _looks_like_spdx("MIT AND Apache-2.0") is True
+        assert _looks_like_spdx("(MIT) AND (Apache-2.0)") is True
+        # Leading, trailing, doubled, and against a paren.
+        assert _looks_like_spdx("AND MIT") is False
+        assert _looks_like_spdx("MIT AND") is False
+        assert _looks_like_spdx("MIT AND OR Apache-2.0") is False
+        assert _looks_like_spdx("MIT OR (AND)") is False
+        assert _looks_like_spdx("(MIT AND) OR Apache-2.0") is False

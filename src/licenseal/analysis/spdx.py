@@ -1298,6 +1298,12 @@ def _looks_like_spdx(value: str) -> bool:
       identifier (every word is individually ID-shaped) and pollutes the
       compatibility engine with an unmatchable pseudo-license that reads as
       ``UNKNOWN`` only after the matrix lookup, losing the real signal.
+    * **Every operator must sit between two leaves** — one that leads,
+      trails, follows another operator, or touches a paren (the edge of a
+      group) has an operand missing. Such a string is not an expression:
+      passed through, the dangling half becomes an unresolvable ``OR`` arm
+      that the classifier drops, and the remaining arm alone decides the
+      verdict (``MIT OR GPL-3.0-only AND`` would read as compatible).
     """
     if len(value) > 200:
         return False
@@ -1306,22 +1312,25 @@ def _looks_like_spdx(value: str) -> bool:
         return False
     spdx_keywords = {"OR", "AND", "WITH"}
     prev_was_leaf = False
-    saw_leaf = False
     for tok in parts:
-        if tok in spdx_keywords:
+        # Strip grouping parens before testing the token, so `(MIT` and
+        # `Apache-2.0)` are judged on the ID.
+        bare = tok.strip("()")
+        if bare in spdx_keywords:
+            if not prev_was_leaf or bare != tok:
+                return False
             prev_was_leaf = False
             continue
-        # Strip grouping parens / the SPDX `+` suffix before shape-testing the
-        # leaf, so `(MIT`, `Apache-2.0)`, and `GPL-2.0+` are judged on the ID.
-        leaf = tok.strip("()").rstrip("+")
+        # Likewise the SPDX `+` suffix: `GPL-2.0+` is judged on the ID.
+        leaf = bare.rstrip("+")
         if not any(c.isupper() or c.isdigit() or c == "-" for c in leaf):
             return False
         if prev_was_leaf:
             # Two ID leaves with no operator between them ⇒ prose.
             return False
         prev_was_leaf = True
-        saw_leaf = True
-    return saw_leaf
+    # The last token has to be a leaf: an operator there is dangling.
+    return prev_was_leaf
 
 
 # --- R / CRAN license translation -------------------------------------------

@@ -6685,6 +6685,76 @@ class TestDeprecatedIdExitCode:
         assert dep["verdict"] == "incompatible"
 
 
+class TestDanglingOperatorExitCode:
+    """A PEP 639 expression with a dangling operator is UNKNOWN and fails
+    strict mode, instead of passing on its well-formed half."""
+
+    @staticmethod
+    def _check(tmp_path, expression: str):
+        (tmp_path / "pyproject.toml").write_text(
+            textwrap.dedent("""\
+            [project]
+            name = "myapp"
+            version = "0.1.0"
+            license = "MIT"
+            dependencies = ["cutoff==1.0.0"]
+            """)
+        )
+        respx.get("https://pypi.org/pypi/cutoff/1.0.0/json").mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "info": {
+                        "license": None,
+                        "license_expression": expression,
+                        "version": "1.0.0",
+                        "classifiers": [],
+                    }
+                },
+            )
+        )
+        result = CliRunner().invoke(
+            main, ["check", "--path", str(tmp_path), "--no-transitive", "-f", "json"]
+        )
+        data = json.loads(result.output[result.output.index("{") :])
+        return result.exit_code, data["dependencies"][0]
+
+    @pytest.mark.parametrize(
+        "expression",
+        ["MIT OR GPL-3.0-only AND", "AND GPL-3.0-only OR MIT", "MIT OR AND GPL-3.0-only"],
+    )
+    @respx.mock
+    def test_dangling_operator_fails_strict(self, tmp_path, expression):
+        exit_code, dep = self._check(tmp_path, expression)
+        assert exit_code == 1
+        assert dep["license"] == "UNKNOWN"
+        assert dep["license_raw"] == expression
+        assert dep["verdict"] == "unknown"
+
+    @respx.mock
+    def test_well_formed_expression_passes_strict(self, tmp_path):
+        exit_code, dep = self._check(tmp_path, "MIT OR GPL-3.0-only")
+        assert exit_code == 0
+        assert dep["license"] == "GPL-3.0-only OR MIT"
+        assert dep["verdict"] == "compatible"
+
+    @pytest.mark.parametrize("license_value", ["MIT OR", "AND MIT", "MIT OR GPL-3.0-only AND"])
+    def test_review_license_with_a_dangling_operator_is_rejected(self, tmp_path, license_value):
+        # A reviewed entry is excluded from the failure check, so a typo here
+        # must be an error rather than an accepted, unclassifiable override.
+        (tmp_path / "licenseal.review.toml").write_text(
+            textwrap.dedent(f"""\
+            [[review]]
+            ecosystem = "python"
+            package = "requests"
+            version = "1.0.0"
+            license = "{license_value}"
+            """)
+        )
+        with pytest.raises(click.ClickException, match="Invalid reviewed license"):
+            load_review_file(tmp_path)
+
+
 class TestOversizedLicenseExitCode:
     """A registry license string over the length cap is reported UNKNOWN with
     its raw value intact: strict fails on it, ``--no-strict`` passes."""

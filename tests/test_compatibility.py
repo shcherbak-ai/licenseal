@@ -470,6 +470,57 @@ class TestLicenseRefOperandOrder:
         assert report.project_license == "AGPL-3.0-only OR Proprietary"
 
 
+class TestDanglingOperatorVerdict:
+    """A license string with a dangling operator is UNKNOWN. It must not come
+    back compatible because its well-formed half happens to be electable."""
+
+    @staticmethod
+    def _check(project: str, raw: str):
+        li = _make_license_info(normalize_license(raw), name="dep")
+        li.license_raw = raw
+        return check_compatibility(project, li)
+
+    @pytest.mark.parametrize(
+        "project, raw",
+        [
+            ("MIT", "MIT OR GPL-3.0-only AND"),
+            ("MIT", "AND GPL-3.0-only OR MIT"),
+            ("MIT", "MIT OR GPL-3.0-only WITH"),
+            ("MIT", "MIT OR AND"),
+            ("MIT", "MIT OR AND GPL-3.0-only"),
+            ("MIT", "GPL-3.0-only AND OR MIT"),
+            ("MIT", "MIT OR (GPL-3.0-only AND"),
+            ("GPL-3.0-only", "GPL-2.0-only AND OR GPL-3.0-only"),
+            ("MIT", "MIT AND"),
+            ("MIT", "MIT AND GPL-3.0-only AND"),
+        ],
+    )
+    def test_dangling_operator_is_unknown_under_any_project(self, project, raw):
+        result = self._check(project, raw)
+        assert result.verdict == CompatibilityVerdict.UNKNOWN
+        assert result.risk_level == RiskLevel.UNKNOWN
+        assert result.reason == (
+            f"dep declares '{raw}' which did not resolve to a recognized license — "
+            "manual review required"
+        )
+
+    def test_completed_expression_is_the_control(self):
+        # The same strings with the missing operand supplied classify normally.
+        completed = self._check("MIT", "MIT OR GPL-3.0-only AND Apache-2.0")
+        assert completed.verdict == CompatibilityVerdict.COMPATIBLE
+        unelectable = self._check("MIT", "GPL-3.0-only AND Apache-2.0")
+        assert unelectable.verdict == CompatibilityVerdict.INCOMPATIBLE
+
+    def test_unknown_leaf_in_a_well_formed_or_stays_electable(self):
+        result = self._check("MIT", "MIT OR CustomLicense")
+        assert result.verdict == CompatibilityVerdict.COMPATIBLE
+
+    def test_project_license_with_a_dangling_operator_is_unknown(self):
+        assert analyze("MIT OR AND", []).project_license == "UNKNOWN"
+        result = check_compatibility("MIT OR AND", _make_license_info("MIT"))
+        assert result.verdict == CompatibilityVerdict.UNKNOWN
+
+
 class TestSourceAvailableProjectLicense:
     """When the *project's own* license is source-available (BUSL-1.1,
     SSPL-1.0, Elastic-2.0, ...) it should behave like a permissive license
