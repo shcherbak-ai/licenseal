@@ -3,9 +3,12 @@
 composer.json carries production deps under ``require`` and development deps
 under ``require-dev``. Both maps are ``{vendor/package: version-constraint}``.
 
-Platform pseudo-packages (``php``, ``ext-*``, ``lib-*``, ``hhvm``) are filtered
-out — they aren't published artifacts on Packagist (any HTTP fetch would 404),
-they're the runtime / engine the project requires.
+Platform pseudo-packages (``php``, ``php-64bit``, ``ext-*``, ``lib-*``,
+``hhvm``, ``composer-plugin-api``, …) are filtered out — they aren't published
+artifacts on Packagist (any HTTP fetch would 404), they're the runtime / engine
+the project requires. They are recognized by having no ``/``: an installable
+package is always ``vendor/package``, so a vendor that merely starts with
+``php-`` / ``ext-`` / ``lib-`` is a real package.
 
 ``replace`` and ``provides`` are out of scope for the initial PHP ecosystem
 landing — a small fraction of real projects fulfill another package via
@@ -28,26 +31,6 @@ from pathlib import Path
 from licenseal.discovery._read import load_json
 from licenseal.discovery._walk import walk_project_files
 from licenseal.models import Dependency, DependencyGroup, Ecosystem
-
-# Platform pseudo-packages — Composer recognizes these as runtime / engine
-# requirements rather than installable artifacts. They never have a Packagist
-# entry, so filtering them at manifest time avoids a noisy UNKNOWN per project.
-_PLATFORM_PREFIXES = ("ext-", "lib-", "php-")
-_PLATFORM_EXACT: frozenset[str] = frozenset(
-    {"php", "hhvm", "composer-plugin-api", "composer-runtime-api"}
-)
-
-
-def _is_platform_package(name: str) -> bool:
-    """Return True for Composer platform pseudo-packages.
-
-    Includes ``php-64bit`` / ``php-ipv6`` (declared by Composer as platform
-    sub-variants of the engine) via the ``php-`` prefix.
-    """
-    lowered = name.lower()
-    if lowered in _PLATFORM_EXACT:
-        return True
-    return lowered.startswith(_PLATFORM_PREFIXES)
 
 
 def _license_field_to_raw(value: object) -> str:
@@ -89,7 +72,9 @@ def _parse_composer_json(filepath: Path, source: str) -> list[Dependency]:
         for name, spec in require.items():
             if not isinstance(name, str) or not isinstance(spec, str):
                 continue
-            if "/" not in name or _is_platform_package(name):
+            # No ``/`` means a platform pseudo-package (or a malformed name),
+            # never an installable ``vendor/package``.
+            if "/" not in name:
                 continue
             deps.append(
                 Dependency(

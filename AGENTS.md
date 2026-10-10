@@ -57,7 +57,7 @@ src/licenseal/
       paket.py                paket.dependencies + paket.lock (Paket package manager; NUGET group resolves through api.nuget.org)
       lockfiles.py            packages.lock.json + project.assets.json parsers (transitive; per-TFM resolved graph unioned across target frameworks)
     php/
-      composer_json.py        composer.json parser (require + require-dev; platform pseudo-packages filtered; license-field array → OR-joined disjunction)
+      composer_json.py        composer.json parser (require + require-dev; platform pseudo-packages — names without a `/` — filtered; license-field array → OR-joined disjunction)
       lockfiles.py            composer.lock parser (packages + packages-dev; trusts explicit `dev` flag; extracts embedded SPDX license map for lockfile-first resolver)
     ruby/
       gemfile.py              Static Gemfile parser (line-oriented regex + block-nesting state machine; never executes Ruby; git/path/github sources flagged off-registry; dev attribution from :development/:test groups)

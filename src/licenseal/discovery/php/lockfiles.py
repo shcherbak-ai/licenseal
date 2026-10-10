@@ -80,8 +80,14 @@ def _is_path_source(meta: dict[str, Any]) -> bool:
 
 
 def _is_platform_require(name: str) -> bool:
-    """Skip platform requirements in a package's ``require`` edge map."""
+    """Skip platform requirements in a package's ``require`` edge map.
+
+    Platform names never contain a ``/``, so a ``vendor/package`` edge is kept
+    even when its vendor starts with ``php-`` / ``ext-`` / ``lib-``.
+    """
     lowered = name.lower()
+    if "/" in lowered:
+        return False
     if lowered in {"php", "hhvm", "composer-plugin-api", "composer-runtime-api"}:
         return True
     return lowered.startswith(("ext-", "lib-", "php-"))

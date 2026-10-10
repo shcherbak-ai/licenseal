@@ -257,6 +257,54 @@ class TestLockfileFirstPath:
         # Manifest-only walker pulls the direct dep AND its transitive.
         assert names == {"acme/lib", "acme/transitive"}
 
+    @respx.mock
+    def test_php_registry_walk_follows_vendor_with_platform_prefix(self, tmp_path):
+        # A child whose vendor starts with ``php-`` is a real package, not a
+        # platform requirement: the walk must request it and report it.
+        (tmp_path / "composer.json").write_text(json.dumps({"require": {"acme/lib": "^1.0"}}))
+        respx.get("https://repo.packagist.org/p2/acme/lib.json").mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "packages": {
+                        "acme/lib": [
+                            {
+                                "version": "1.2.3",
+                                "license": ["MIT"],
+                                "require": {"php-vendor/client": "^2.0", "php-64bit": "*"},
+                            }
+                        ]
+                    }
+                },
+            )
+        )
+        child_route = respx.get("https://repo.packagist.org/p2/php-vendor/client.json").mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "packages": {"php-vendor/client": [{"version": "2.1.0", "license": ["MIT"]}]}
+                },
+            )
+        )
+        with httpx.Client() as client:
+            deps = resolve_transitive(
+                [
+                    Dependency(
+                        name="acme/lib",
+                        version_constraint="^1.0",
+                        ecosystem=Ecosystem.PHP,
+                        group=DependencyGroup.PROD,
+                    )
+                ],
+                tmp_path,
+                include_dev=False,
+                max_depth=50,
+                client=client,
+            )
+        child = next(d for d in deps if d.name == "php-vendor/client")
+        assert (child.depth, child.direct_ancestors) == (1, ("acme/lib",))
+        assert child_route.called
+
     def test_uses_npm_lockfile_when_present(self, tmp_path):
         (tmp_path / "package-lock.json").write_text(
             json.dumps(

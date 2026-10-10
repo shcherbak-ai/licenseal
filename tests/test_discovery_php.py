@@ -5,8 +5,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+from licenseal.discovery import discover_all_dependencies
 from licenseal.discovery.php.composer_json import (
-    _is_platform_package,
     _license_field_to_raw,
     detect_project_license_composer_json,
     discover_composer_dependencies,
@@ -16,30 +16,56 @@ from licenseal.models import DependencyGroup, Ecosystem
 _FIXTURES = Path(__file__).parent / "fixtures" / "composer"
 
 
-class TestIsPlatformPackage:
-    def test_php_engine(self):
-        assert _is_platform_package("php") is True
-        assert _is_platform_package("PHP") is True
+class TestPlatformPackages:
+    """Platform pseudo-packages never contain a ``/``. A vendor that merely
+    starts with a platform prefix is an ordinary, installable package."""
 
-    def test_ext_prefix(self):
-        assert _is_platform_package("ext-mbstring") is True
-        assert _is_platform_package("ext-json") is True
+    def test_platform_names_are_not_dependencies(self, tmp_path):
+        (tmp_path / "composer.json").write_text(
+            json.dumps(
+                {
+                    "require": {
+                        "php": "^8.1",
+                        "PHP": "^8.1",
+                        "php-64bit": "*",
+                        "php-ipv6": "*",
+                        "ext-mbstring": "*",
+                        "ext-json": "*",
+                        "lib-openssl": "*",
+                        "hhvm": "*",
+                        "composer-plugin-api": "^2.0",
+                        "composer-runtime-api": "^2.0",
+                        "real-vendor/real-lib": "^1.0",
+                    }
+                }
+            )
+        )
+        deps, _ = discover_all_dependencies(tmp_path)
+        assert [d.name for d in deps] == ["real-vendor/real-lib"]
 
-    def test_lib_prefix(self):
-        assert _is_platform_package("lib-openssl") is True
-
-    def test_php_subkind(self):
-        assert _is_platform_package("php-64bit") is True
-        assert _is_platform_package("php-ipv6") is True
-
-    def test_hhvm_and_composer_api(self):
-        assert _is_platform_package("hhvm") is True
-        assert _is_platform_package("composer-plugin-api") is True
-        assert _is_platform_package("composer-runtime-api") is True
-
-    def test_regular_package_not_platform(self):
-        assert _is_platform_package("vendor-a/lib-one") is False
-        assert _is_platform_package("monolog/monolog") is False
+    def test_vendor_starting_with_a_platform_prefix_is_a_dependency(self, tmp_path):
+        (tmp_path / "composer.json").write_text(
+            json.dumps(
+                {
+                    "require": {
+                        "php": "^8.1",
+                        "php-vendor/client": "^1.0",
+                        "ext-vendor/bridge": "^2.0",
+                        "lib-vendor/toolkit": "^3.0",
+                        "PHP-Vendor/Mixed-Case": "^4.0",
+                    },
+                    "require-dev": {"php-vendor/dev-tool": "^5.0"},
+                }
+            )
+        )
+        deps, _ = discover_all_dependencies(tmp_path)
+        assert {d.name: (d.version_constraint, d.group) for d in deps} == {
+            "php-vendor/client": ("^1.0", DependencyGroup.PROD),
+            "ext-vendor/bridge": ("^2.0", DependencyGroup.PROD),
+            "lib-vendor/toolkit": ("^3.0", DependencyGroup.PROD),
+            "PHP-Vendor/Mixed-Case": ("^4.0", DependencyGroup.PROD),
+            "php-vendor/dev-tool": ("^5.0", DependencyGroup.DEV),
+        }
 
 
 class TestLicenseFieldToRaw:

@@ -263,8 +263,8 @@ def fetch_packagist_dependencies(
     aren't followed transitively (matches the npm / Python / Rust posture
     of dev being a top-level concern, not a transitive one).
 
-    Platform pseudo-packages (``php``, ``ext-*``, ``lib-*``, ``hhvm``) are
-    filtered out.
+    Platform pseudo-packages (``php``, ``ext-*``, ``lib-*``, ``hhvm`` — names
+    without a ``/``) are filtered out.
     """
     data = fetcher(_packagist_url(name), client)
     if data is None:
@@ -291,14 +291,13 @@ def fetch_packagist_dependencies(
     out: list[Dependency] = []
     seen: set[str] = set()
     for child_name, child_spec in require.items():
+        # No ``/`` means a platform pseudo-package, never an installable
+        # ``vendor/package``. A vendor that merely starts with ``php-`` /
+        # ``ext-`` / ``lib-`` is a real package and is walked.
         if not isinstance(child_name, str) or "/" not in child_name:
             continue
         lowered = child_name.lower()
-        if (
-            lowered in {"php", "hhvm", "composer-plugin-api", "composer-runtime-api"}
-            or lowered.startswith(("ext-", "lib-", "php-"))
-            or lowered in seen
-        ):
+        if lowered in seen:
             continue
         seen.add(lowered)
         spec_str = child_spec if isinstance(child_spec, str) else ""

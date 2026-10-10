@@ -3799,6 +3799,95 @@ class TestPhpEcosystem:
         # Critical: lockfile-first path returned without hitting Packagist.
         assert packagist_route.call_count == 0
 
+    @staticmethod
+    def _mock_packagist(name: str, license_id: str, require: dict[str, str] | None = None):
+        return respx.get(f"https://repo.packagist.org/p2/{name}.json").mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "packages": {
+                        name: [
+                            {"version": "1.0.0", "license": [license_id], "require": require or {}}
+                        ]
+                    }
+                },
+            )
+        )
+
+    @respx.mock
+    def test_vendor_with_platform_prefix_is_checked_without_lockfile(self, tmp_path):
+        # A package whose vendor starts with ``php-`` is not a platform
+        # requirement. Declared directly it must be resolved and can fail the
+        # check; as a registry-walk child it must be reported under its parent.
+        (tmp_path / "composer.json").write_text(
+            json.dumps(
+                {
+                    "name": "acme/demo",
+                    "license": "MIT",
+                    "require": {
+                        "php": "^8.1",
+                        "ext-json": "*",
+                        "acme/lib": "^1.0",
+                        "php-vendor/copyleft": "^1.0",
+                    },
+                }
+            )
+        )
+        self._mock_packagist("acme/lib", "MIT", {"php-vendor/child": "^1.0", "php-64bit": "*"})
+        copyleft_route = self._mock_packagist("php-vendor/copyleft", "GPL-3.0-only")
+        self._mock_packagist("php-vendor/child", "MIT")
+        out = tmp_path / "report.json"
+
+        result = CliRunner().invoke(
+            main, ["check", "--path", str(tmp_path), "-f", "json", "-o", str(out)]
+        )
+        assert result.exit_code == 1
+        assert copyleft_route.called
+        data = json.loads(out.read_text(encoding="utf-8"))
+        by_name = {d["name"]: d for d in data["dependencies"]}
+        assert set(by_name) == {"acme/lib", "php-vendor/copyleft", "php-vendor/child"}
+        assert by_name["php-vendor/copyleft"]["verdict"] == "incompatible"
+        assert by_name["php-vendor/child"]["direct_ancestors"] == ["acme/lib"]
+        assert data["summary"]["violations"] == 1
+
+    @respx.mock
+    def test_vendor_with_platform_prefix_keeps_lockfile_ancestor(self, tmp_path):
+        # With a composer.lock the edge to a ``php-`` vendor package must
+        # survive, so the transitive is nested under the direct dep that
+        # pulls it in rather than reported with no ancestor.
+        (tmp_path / "composer.json").write_text(
+            json.dumps({"name": "acme/demo", "license": "MIT", "require": {"acme/lib": "^1.0"}})
+        )
+        (tmp_path / "composer.lock").write_text(
+            json.dumps(
+                {
+                    "packages": [
+                        {
+                            "name": "acme/lib",
+                            "version": "1.0.0",
+                            "license": ["MIT"],
+                            "require": {"php": ">=8.1", "php-vendor/child": "^1.0"},
+                        },
+                        {
+                            "name": "php-vendor/child",
+                            "version": "1.0.0",
+                            "license": ["GPL-3.0-only"],
+                        },
+                    ]
+                }
+            )
+        )
+        out = tmp_path / "report.json"
+
+        result = CliRunner().invoke(
+            main, ["check", "--path", str(tmp_path), "-f", "json", "-o", str(out)]
+        )
+        assert result.exit_code == 1
+        data = json.loads(out.read_text(encoding="utf-8"))
+        child = next(d for d in data["dependencies"] if d["name"] == "php-vendor/child")
+        assert child["is_transitive"] is True
+        assert child["direct_ancestors"] == ["acme/lib"]
+
 
 class TestRubyEcosystem:
     @respx.mock

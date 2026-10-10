@@ -537,6 +537,43 @@ class TestFetchPackagistDependencies:
         bad_spec_dep = next(c for c in children if c.name == "vendor/bad-spec")
         assert bad_spec_dep.version_constraint == ""
 
+    @respx.mock
+    def test_vendor_with_platform_prefix_is_walked(self):
+        # Platform pseudo-packages never contain a ``/``; a child whose vendor
+        # merely starts with ``php-`` / ``ext-`` / ``lib-`` is a real package.
+        respx.get(_packagist_url("vendor/pkg")).mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "packages": {
+                        "vendor/pkg": [
+                            {
+                                "version": "1.0.0",
+                                "require": {
+                                    "php": ">=8.1",
+                                    "php-64bit": "*",
+                                    "ext-json": "*",
+                                    "lib-openssl": "*",
+                                    "hhvm": "*",
+                                    "composer-runtime-api": "^2.0",
+                                    "php-vendor/client": "^1.0",
+                                    "ext-vendor/bridge": "^2.0",
+                                    "lib-vendor/toolkit": "^3.0",
+                                },
+                            }
+                        ]
+                    }
+                },
+            )
+        )
+        with httpx.Client() as client:
+            children = fetch_packagist_dependencies("vendor/pkg", "1.0.0", client, parent_depth=0)
+        assert {c.name: c.version_constraint for c in children} == {
+            "php-vendor/client": "^1.0",
+            "ext-vendor/bridge": "^2.0",
+            "lib-vendor/toolkit": "^3.0",
+        }
+
 
 # ---------------------------------------------------------------------------
 # RegistryCache keep-set regression — ensure trim doesn't drop fields the

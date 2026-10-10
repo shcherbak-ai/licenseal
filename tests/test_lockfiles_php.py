@@ -227,6 +227,48 @@ class TestParseComposerLockfile:
         assert len(deps) == 1
         assert deps[0].group == DependencyGroup.DEV
 
+    def test_edge_to_vendor_with_platform_prefix_is_kept(self, tmp_path):
+        # Platform requirements never contain a ``/``. An edge to a package
+        # whose vendor merely starts with ``php-`` / ``ext-`` / ``lib-`` is a
+        # real edge: the child keeps its ancestor instead of floating at
+        # depth 1 with none.
+        (tmp_path / "composer.lock").write_text(
+            json.dumps(
+                {
+                    "packages": [
+                        {
+                            "name": "acme/lib",
+                            "version": "1.0.0",
+                            "license": ["MIT"],
+                            "require": {
+                                "php": ">=8.1",
+                                "php-64bit": "*",
+                                "ext-json": "*",
+                                "lib-openssl": "*",
+                                "php-vendor/client": "^1.0",
+                                "ext-vendor/bridge": "^2.0",
+                                "lib-vendor/toolkit": "^3.0",
+                            },
+                        },
+                        {"name": "php-vendor/client", "version": "1.2.0", "license": ["MIT"]},
+                        {"name": "ext-vendor/bridge", "version": "2.1.0", "license": ["MIT"]},
+                        {"name": "lib-vendor/toolkit", "version": "3.4.0", "license": ["MIT"]},
+                    ]
+                }
+            )
+        )
+        deps, _ = parse_composer_lockfile(
+            tmp_path / "composer.lock",
+            direct_names={"acme/lib"},
+            include_dev=False,
+        )
+        assert {d.name: (d.depth, d.direct_ancestors) for d in deps} == {
+            "acme/lib": (0, ()),
+            "php-vendor/client": (1, ("acme/lib",)),
+            "ext-vendor/bridge": (1, ("acme/lib",)),
+            "lib-vendor/toolkit": (1, ("acme/lib",)),
+        }
+
 
 class TestExtractComposerLockLicenses:
     def test_returns_license_map(self):
