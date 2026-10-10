@@ -38,6 +38,25 @@ project-level," the fixture needs **two** files:
 Both URLs must be mocked via `respx` in the same test. `attrs/` and
 `maturin/` follow this pattern.
 
+## Packagist fixtures are minified
+
+`packagist/{vendor}/{package}.json` is a captured
+`repo.packagist.org/p2/{vendor}/{package}.json` response in the form the
+registry serves: a top-level `"minified": "composer/2.0"` marker, and a
+version list in which every entry after the first holds only the keys that
+differ from the entry before it (`"__unset"` for a key that entry does not
+have). Tests in `tests/test_resolvers_packagist.py` serve it via `respx`.
+
+- Keep the marker and the entry order.
+- Cut each entry to the keys in `_PACKAGIST_VERSION_KEEP`
+  (`resolvers/http.py`), and nothing else: removing a whole key from every
+  entry leaves the remaining deltas valid.
+- Shorten the list only by dropping its tail. An entry depends on every
+  entry before it, so removing one from the middle changes what the later
+  ones mean.
+- Do not expand it by hand. A hand-written fixture with every field on every
+  entry does not exercise the expansion.
+
 ## Adding a fixture
 
 1. Identify the bug or shape. Capture the registry's actual JSON
@@ -57,6 +76,9 @@ Both URLs must be mocked via `respx` in the same test. `attrs/` and
 
 ```text
 registry-responses/
+├── packagist/
+│   └── monolog/
+│       └── monolog.json          minified p2 response: newest 24 versions, kept keys only
 └── pypi/
     ├── attrs/
     │   ├── 24.3.0.json          per-version: sparse, no license metadata

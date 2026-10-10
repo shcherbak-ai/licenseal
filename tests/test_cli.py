@@ -4852,6 +4852,54 @@ class TestPhpEcosystem:
         assert data["summary"]["violations"] == 1
 
     @respx.mock
+    def test_older_release_in_minified_metadata_keeps_license_and_children(self, tmp_path):
+        # No lockfile, and the constraint selects a release that is not the
+        # newest. The registry's minified response states that release's
+        # license and requirements only on a newer entry, so both are
+        # inherited: the release resolves, and the copyleft package it requires
+        # is reported under it and fails the check.
+        (tmp_path / "composer.json").write_text(
+            json.dumps({"name": "acme/demo", "license": "MIT", "require": {"acme/lib": "~1.4.0"}})
+        )
+        respx.get("https://repo.packagist.org/p2/acme/lib.json").mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "minified": "composer/2.0",
+                    "packages": {
+                        "acme/lib": [
+                            {
+                                "version": "2.0.0",
+                                "version_normalized": "2.0.0.0",
+                                "license": ["MIT"],
+                                "require": {"php": ">=8.1", "acme/child": "^1.0"},
+                            },
+                            {"version": "1.4.2", "version_normalized": "1.4.2.0"},
+                            {"version": "1.4.1", "version_normalized": "1.4.1.0"},
+                        ]
+                    },
+                },
+            )
+        )
+        self._mock_packagist("acme/child", "GPL-3.0-only")
+        out = tmp_path / "report.json"
+
+        result = CliRunner().invoke(
+            main, ["check", "--path", str(tmp_path), "-f", "json", "-o", str(out)]
+        )
+        assert result.exit_code == 1
+        data = json.loads(out.read_text(encoding="utf-8"))
+        by_name = {d["name"]: d for d in data["dependencies"]}
+        assert set(by_name) == {"acme/lib", "acme/child"}
+        assert by_name["acme/lib"]["resolved_version"] == "1.4.2"
+        assert by_name["acme/lib"]["license"] == "MIT"
+        assert by_name["acme/lib"]["verdict"] == "compatible"
+        assert by_name["acme/child"]["verdict"] == "incompatible"
+        assert by_name["acme/child"]["direct_ancestors"] == ["acme/lib"]
+        assert data["summary"]["violations"] == 1
+        assert data["summary"]["unknown"] == 0
+
+    @respx.mock
     def test_vendor_with_platform_prefix_keeps_lockfile_ancestor(self, tmp_path):
         # With a composer.lock the edge to a ``php-`` vendor package must
         # survive, so the transitive is nested under the direct dep that

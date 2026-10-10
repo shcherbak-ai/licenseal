@@ -248,7 +248,10 @@ class TestVersionsFromResponse:
     def test_extracts_descending_list(self):
         data = json.loads((_FIXTURES / "monolog" / "monolog.json").read_text())
         entries = _versions_from_response(data, "monolog/monolog")
-        assert [e["version"] for e in entries] == ["3.5.0", "2.9.0"]
+        versions = [e["version"] for e in entries]
+        assert len(versions) == 24
+        assert versions[0] == "3.12.1"
+        assert versions[-1] == "2.9.0"
 
     def test_missing_package_returns_empty(self):
         assert _versions_from_response({"packages": {}}, "monolog/monolog") == []
@@ -257,10 +260,65 @@ class TestVersionsFromResponse:
         # Packagist is case-insensitive; lookup uses lowercase.
         data = json.loads((_FIXTURES / "monolog" / "monolog.json").read_text())
         entries = _versions_from_response(data, "Monolog/Monolog")
-        assert len(entries) == 2
+        assert len(entries) == 24
 
     def test_non_dict_packages_returns_empty(self):
         assert _versions_from_response({"packages": []}, "x/y") == []
+
+    def test_minified_entries_are_returned_complete(self):
+        # The fixture is in the registry's minified form: only its first entry
+        # lists ``license``, ``homepage`` and ``require``. Every returned entry
+        # must carry them.
+        data = json.loads((_FIXTURES / "monolog" / "monolog.json").read_text())
+        raw = data["packages"]["monolog/monolog"]
+        assert [i for i, e in enumerate(raw) if "license" in e] == [0]
+        entries = _versions_from_response(data, "monolog/monolog")
+        assert all(e["license"] == ["MIT"] for e in entries)
+        assert all(e["homepage"] == "https://github.com/Seldaek/monolog" for e in entries)
+        assert all("psr/log" in e["require"] for e in entries)
+        # Each entry keeps its own ``source``; nothing leaks backwards.
+        assert len({e["source"]["reference"] for e in entries}) == 24
+        # The response itself is left as it was received.
+        assert "license" not in raw[1]
+
+    def test_entries_without_the_marker_are_not_expanded(self):
+        # Without the marker each entry is complete as written: a missing key
+        # is missing, and ``__unset`` is not a deletion.
+        packages = {
+            "vendor/pkg": [
+                {"version": "2.0.0", "license": ["MIT"], "require": {"vendor/child": "^1.0"}},
+                {"version": "1.0.0", "homepage": "__unset"},
+            ]
+        }
+        for envelope in ({}, {"minified": "composer/9.9"}, {"minified": True}):
+            entries = _versions_from_response({"packages": packages, **envelope}, "vendor/pkg")
+            assert entries == packages["vendor/pkg"]
+
+    def test_non_dict_entries_do_not_break_the_delta_chain(self):
+        data = {
+            "minified": "composer/2.0",
+            "packages": {
+                "vendor/pkg": [
+                    {"version": "2.0.0", "license": ["MIT"]},
+                    "not-an-entry",
+                    {"version": "1.0.0"},
+                ]
+            },
+        }
+        entries = _versions_from_response(data, "vendor/pkg")
+        assert entries == [
+            {"version": "2.0.0", "license": ["MIT"]},
+            {"version": "1.0.0", "license": ["MIT"]},
+        ]
+
+    def test_unset_in_the_first_entry_is_not_a_value(self):
+        # The first entry has nothing to inherit, so a deletion marker there
+        # removes nothing; it must not surface as the field's value.
+        data = {
+            "minified": "composer/2.0",
+            "packages": {"vendor/pkg": [{"version": "1.0.0", "license": "__unset"}]},
+        }
+        assert _versions_from_response(data, "vendor/pkg") == [{"version": "1.0.0"}]
 
 
 # ---------------------------------------------------------------------------
@@ -337,7 +395,6 @@ class TestResolvePackagistFallback:
             info = resolve_php_license(dep, client)
         assert info.license_id == "MIT"
         assert info.resolved_version == "2.9.0"
-        # SSH-form source URL gets rewritten to HTTPS.
         assert info.repository_url == "https://github.com/Seldaek/monolog"
 
     @respx.mock
@@ -351,7 +408,7 @@ class TestResolvePackagistFallback:
         dep = _php_dep("monolog/monolog", "^3.0")
         with httpx.Client() as client:
             info = resolve_php_license(dep, client)
-        assert info.resolved_version == "3.5.0"
+        assert info.resolved_version == "3.12.1"
 
     @respx.mock
     def test_404_returns_unknown(self):
@@ -657,6 +714,38 @@ class TestRegistryCacheTrim:
         # Non-dict entries dropped; the dict entry survives.
         assert trimmed["packages"]["vendor/pkg"] == [{"version": "1.0"}]
 
+    def test_trim_keeps_minified_marker_and_delta_entries(self):
+        # The cached response stays in the minified form it arrived in: the
+        # marker survives, a delta entry keeps only its own kept keys, and a
+        # deletion marker on a kept key is still there for the resolver.
+        raw = {
+            "minified": "composer/2.0",
+            "security-advisories": [],
+            "packages": {
+                "vendor/pkg": [
+                    {"version": "2.0.0", "license": ["MIT"], "description": "d"},
+                    {"version": "1.0.0", "license": "__unset", "extra": "__unset"},
+                ]
+            },
+        }
+        assert _trim_packagist(raw) == {
+            "minified": "composer/2.0",
+            "packages": {
+                "vendor/pkg": [
+                    {"version": "2.0.0", "license": ["MIT"]},
+                    {"version": "1.0.0", "license": "__unset"},
+                ]
+            },
+        }
+
+    def test_trim_adds_no_marker_of_its_own(self):
+        packages = {"vendor/pkg": [{"version": "1.0"}]}
+        assert _trim_packagist({"packages": packages}) == {"packages": packages}
+        # A marker that is not a string names no format and is not cached.
+        assert _trim_packagist({"packages": packages, "minified": {"x": 1}}) == {
+            "packages": packages
+        }
+
     def test_select_php_version_picks_highest_matching(self):
         # Caret range against a descending Packagist version list.
         published = ["3.5.0", "3.4.0", "2.9.0"]
@@ -716,3 +805,143 @@ class TestRegistryCacheTrim:
         assert info.license_id == "MIT"
         assert info.resolved_version == "3.5.0"
         assert info.repository_url == "https://github.com/Seldaek/monolog"
+
+
+# ---------------------------------------------------------------------------
+# Minified metadata — a version entry lists only what changed from the entry
+# before it. Read through RegistryCache.fetch, so the trim has to keep the
+# marker for any of this to hold on the production path.
+# ---------------------------------------------------------------------------
+
+
+class TestMinifiedMetadataThroughCache:
+    @staticmethod
+    def _mock_fixture():
+        return respx.get(_packagist_url("monolog/monolog")).mock(
+            return_value=httpx.Response(
+                200,
+                json=json.loads((_FIXTURES / "monolog" / "monolog.json").read_text()),
+            )
+        )
+
+    @staticmethod
+    def _children(cache: RegistryCache, client: httpx.Client, name: str, version: str):
+        children = fetch_packagist_dependencies(
+            name, version, client, parent_depth=0, fetcher=cache.fetch
+        )
+        return {c.name: c.version_constraint for c in children}
+
+    @respx.mock
+    def test_older_version_inherits_license_and_dependencies(self):
+        # The pinned entry lists only its version and source. Its license,
+        # homepage and requirements are the newest entry's, unchanged since.
+        route = self._mock_fixture()
+        cache = RegistryCache()
+        with httpx.Client() as client:
+            info = resolve_php_license(
+                _php_dep("monolog/monolog", "==3.5.0"), client, fetcher=cache.fetch
+            )
+            children = self._children(cache, client, "monolog/monolog", "3.5.0")
+        assert info.license_id == "MIT"
+        assert info.license_raw == "MIT"
+        assert info.from_registry is True
+        assert info.resolved_version == "3.5.0"
+        assert info.homepage_url == "https://github.com/Seldaek/monolog"
+        assert children == {"psr/log": "^2.0 || ^3.0"}
+        assert route.call_count == 1
+
+    @respx.mock
+    def test_range_selecting_an_older_entry_reads_it_complete(self):
+        self._mock_fixture()
+        cache = RegistryCache()
+        with httpx.Client() as client:
+            info = resolve_php_license(
+                _php_dep("monolog/monolog", "~2.9.0"), client, fetcher=cache.fetch
+            )
+        assert info.resolved_version == "2.9.3"
+        assert info.license_id == "MIT"
+
+    @respx.mock
+    def test_changed_field_replaces_the_inherited_value(self):
+        # ``require`` is restated once, part-way down the list. The entry that
+        # restates it and every older entry use the new value, the entries
+        # above it keep the old one, and the license — never restated — still
+        # comes from the newest entry.
+        self._mock_fixture()
+        cache = RegistryCache()
+        with httpx.Client() as client:
+            before_change = self._children(cache, client, "monolog/monolog", "3.0.0-RC1")
+            at_change = self._children(cache, client, "monolog/monolog", "2.11.1")
+            after_change = self._children(cache, client, "monolog/monolog", "2.9.0")
+            info = resolve_php_license(
+                _php_dep("monolog/monolog", "==2.9.0"), client, fetcher=cache.fetch
+            )
+        assert before_change == {"psr/log": "^2.0 || ^3.0"}
+        assert at_change == {"psr/log": "^1.0.1 || ^2.0 || ^3.0"}
+        assert after_change == at_change
+        assert info.license_id == "MIT"
+        assert info.resolved_version == "2.9.0"
+
+    @respx.mock
+    def test_unset_removes_the_inherited_field(self):
+        # The captured fixture uses the deletion marker only on keys the
+        # resolver does not read, so this response is written by hand in the
+        # same form. A removed license must not be inherited from a newer
+        # release, and the removal holds for older entries until one of them
+        # states the field again.
+        respx.get(_packagist_url("vendor/pkg")).mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "minified": "composer/2.0",
+                    "packages": {
+                        "vendor/pkg": [
+                            {
+                                "version": "3.0.0",
+                                "version_normalized": "3.0.0.0",
+                                "license": ["MIT"],
+                                "homepage": "https://example.test/pkg",
+                                "require": {"php": ">=8.1", "vendor/child": "^2.0"},
+                            },
+                            {"version": "2.0.0", "version_normalized": "2.0.0.0"},
+                            {
+                                "version": "1.1.0",
+                                "version_normalized": "1.1.0.0",
+                                "license": "__unset",
+                                "homepage": "__unset",
+                                "require": "__unset",
+                            },
+                            {"version": "1.0.0", "version_normalized": "1.0.0.0"},
+                            {
+                                "version": "0.9.0",
+                                "version_normalized": "0.9.0.0",
+                                "license": ["GPL-3.0-only"],
+                            },
+                        ]
+                    },
+                },
+            )
+        )
+        cache = RegistryCache()
+        with httpx.Client() as client:
+            infos = {
+                version: resolve_php_license(
+                    _php_dep("vendor/pkg", f"=={version}"), client, fetcher=cache.fetch
+                )
+                for version in ("2.0.0", "1.1.0", "1.0.0", "0.9.0")
+            }
+            children = {
+                version: self._children(cache, client, "vendor/pkg", version) for version in infos
+            }
+        assert infos["2.0.0"].license_id == "MIT"
+        assert infos["2.0.0"].homepage_url == "https://example.test/pkg"
+        assert children["2.0.0"] == {"vendor/child": "^2.0"}
+        for removed in ("1.1.0", "1.0.0"):
+            assert infos[removed].license_id == "UNKNOWN"
+            assert infos[removed].license_raw == ""
+            assert infos[removed].from_registry is True
+            assert infos[removed].resolved_version == removed
+            assert infos[removed].homepage_url == ""
+            assert children[removed] == {}
+        assert infos["0.9.0"].license_id == "GPL-3.0-only"
+        assert children["0.9.0"] == {}

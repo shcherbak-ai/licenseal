@@ -792,7 +792,9 @@ _NUSPEC_KEEP_TAGS = frozenset(
 # ``require`` (for the manifest-only transitive walker's per-version
 # dependency edges). Trimming matters here because popular Composer
 # packages ship hundreds of historical versions and the per-version
-# dict is the bulky one.
+# dict is the bulky one. The top-level ``minified`` marker is kept too:
+# it tells the resolver that each entry lists only what changed from the
+# entry before it, and the trimmed entries are still in that form.
 _PACKAGIST_VERSION_KEEP = frozenset(
     {"version", "version_normalized", "license", "source", "homepage", "require"}
 )
@@ -1019,6 +1021,11 @@ def _trim_packagist(data: dict) -> dict:
     where the version-entry list is in descending version order. Trim each
     entry to ``_PACKAGIST_VERSION_KEEP``; preserve the outer envelope so
     callers can look up by package name.
+
+    A minified response is cached minified, with its ``minified`` marker.
+    Trimming removes whole keys and keeps the entries in order, so the
+    resolver's expansion gives the same result on the cached response as
+    on the original.
     """
     packages = data.get("packages", {})
     if not isinstance(packages, dict):
@@ -1033,7 +1040,11 @@ def _trim_packagist(data: dict) -> dict:
                 continue
             trimmed_entries.append({k: v for k, v in entry.items() if k in _PACKAGIST_VERSION_KEEP})
         trimmed_packages[name] = trimmed_entries
-    return {"packages": trimmed_packages}
+    trimmed: dict = {"packages": trimmed_packages}
+    minified = data.get("minified")
+    if isinstance(minified, str):
+        trimmed["minified"] = minified
+    return trimmed
 
 
 def _trim_deps_dev_v3(data: dict) -> dict:

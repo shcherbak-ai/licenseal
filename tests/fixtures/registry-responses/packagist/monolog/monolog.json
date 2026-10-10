@@ -1,35 +1,130 @@
 {
+    "minified": "composer/2.0",
     "packages": {
         "monolog/monolog": [
             {
+                "homepage": "https://github.com/Seldaek/monolog",
+                "version": "3.12.1",
+                "version_normalized": "3.12.1.0",
+                "license": ["MIT"],
+                "source": {"url": "https://github.com/Seldaek/monolog.git", "type": "git", "reference": "d7059e4c691d05ea1222b5124bed0f961be46e15"},
+                "require": {"php": ">=8.1", "psr/log": "^2.0 || ^3.0"}
+            },
+            {
+                "version": "3.12.0",
+                "version_normalized": "3.12.0.0",
+                "source": {"url": "https://github.com/Seldaek/monolog.git", "type": "git", "reference": "72c534fc0ab181ef52d92a68382318631e301608"}
+            },
+            {
+                "version": "3.11.0",
+                "version_normalized": "3.11.0.0",
+                "source": {"url": "https://github.com/Seldaek/monolog.git", "type": "git", "reference": "147f303310f06334f03f409e49d7ad1e275ff05a"}
+            },
+            {
+                "version": "3.10.0",
+                "version_normalized": "3.10.0.0",
+                "source": {"url": "https://github.com/Seldaek/monolog.git", "type": "git", "reference": "b321dd6749f0bf7189444158a3ce785cc16d69b0"}
+            },
+            {
+                "version": "3.9.0",
+                "version_normalized": "3.9.0.0",
+                "source": {"url": "https://github.com/Seldaek/monolog.git", "type": "git", "reference": "10d85740180ecba7896c87e06a166e0c95a0e3b6"}
+            },
+            {
+                "version": "3.8.1",
+                "version_normalized": "3.8.1.0",
+                "source": {"url": "https://github.com/Seldaek/monolog.git", "type": "git", "reference": "aef6ee73a77a66e404dd6540934a9ef1b3c855b4"}
+            },
+            {
+                "version": "3.8.0",
+                "version_normalized": "3.8.0.0",
+                "source": {"url": "https://github.com/Seldaek/monolog.git", "type": "git", "reference": "32e515fdc02cdafbe4593e30a9350d486b125b67"}
+            },
+            {
+                "version": "3.7.0",
+                "version_normalized": "3.7.0.0",
+                "source": {"url": "https://github.com/Seldaek/monolog.git", "type": "git", "reference": "f4393b648b78a5408747de94fca38beb5f7e9ef8"}
+            },
+            {
+                "version": "3.6.0",
+                "version_normalized": "3.6.0.0",
+                "source": {"url": "https://github.com/Seldaek/monolog.git", "type": "git", "reference": "4b18b21a5527a3d5ffdac2fd35d3ab25a9597654"}
+            },
+            {
                 "version": "3.5.0",
                 "version_normalized": "3.5.0.0",
-                "license": ["MIT"],
-                "source": {
-                    "type": "git",
-                    "url": "https://github.com/Seldaek/monolog.git",
-                    "reference": "0000000000000000000000000000000000000000"
-                },
-                "homepage": "https://github.com/Seldaek/monolog",
-                "require": {
-                    "php": ">=8.1",
-                    "psr/log": "^2.0 || ^3.0"
-                }
+                "source": {"url": "https://github.com/Seldaek/monolog.git", "type": "git", "reference": "c915e2634718dbc8a4a15c61b0e62e7a44e14448"}
+            },
+            {
+                "version": "3.4.0",
+                "version_normalized": "3.4.0.0",
+                "source": {"url": "https://github.com/Seldaek/monolog.git", "type": "git", "reference": "e2392369686d420ca32df3803de28b5d6f76867d"}
+            },
+            {
+                "version": "3.3.1",
+                "version_normalized": "3.3.1.0",
+                "source": {"url": "https://github.com/Seldaek/monolog.git", "type": "git", "reference": "9b5daeaffce5b926cac47923798bba91059e60e2"}
+            },
+            {
+                "version": "3.3.0",
+                "version_normalized": "3.3.0.0",
+                "source": {"url": "https://github.com/Seldaek/monolog.git", "type": "git", "reference": "852643b696e755f7936e80afffc6721a20f0d15c"}
+            },
+            {
+                "version": "3.2.0",
+                "version_normalized": "3.2.0.0",
+                "source": {"url": "https://github.com/Seldaek/monolog.git", "type": "git", "reference": "305444bc6fb6c89e490f4b34fa6e979584d7fa81"}
+            },
+            {
+                "version": "3.1.0",
+                "version_normalized": "3.1.0.0",
+                "source": {"url": "https://github.com/Seldaek/monolog.git", "type": "git", "reference": "0c375495d40df0207e5833dca333f963b171ff43"}
+            },
+            {
+                "version": "3.0.0",
+                "version_normalized": "3.0.0.0",
+                "source": {"url": "https://github.com/Seldaek/monolog.git", "type": "git", "reference": "60ad5183b5e5d6c9d4047e9f3072d36071dcc161"}
+            },
+            {
+                "version": "3.0.0-RC1",
+                "version_normalized": "3.0.0.0-RC1",
+                "source": {"url": "https://github.com/Seldaek/monolog.git", "type": "git", "reference": "a71c4e02502dd04d91f1c7d72ffccf0bd11310eb"}
+            },
+            {
+                "version": "2.11.1",
+                "version_normalized": "2.11.1.0",
+                "source": {"url": "https://github.com/Seldaek/monolog.git", "type": "git", "reference": "bf2403f591c5a431b6e0e1170cbadd3d64499564"},
+                "require": {"php": ">=7.2", "psr/log": "^1.0.1 || ^2.0 || ^3.0"}
+            },
+            {
+                "version": "2.11.0",
+                "version_normalized": "2.11.0.0",
+                "source": {"url": "https://github.com/Seldaek/monolog.git", "type": "git", "reference": "37308608e599f34a1a4845b16440047ec98a172a"}
+            },
+            {
+                "version": "2.10.0",
+                "version_normalized": "2.10.0.0",
+                "source": {"url": "https://github.com/Seldaek/monolog.git", "type": "git", "reference": "5cf826f2991858b54d5c3809bee745560a1042a7"}
+            },
+            {
+                "version": "2.9.3",
+                "version_normalized": "2.9.3.0",
+                "source": {"url": "https://github.com/Seldaek/monolog.git", "type": "git", "reference": "a30bfe2e142720dfa990d0a7e573997f5d884215"}
+            },
+            {
+                "version": "2.9.2",
+                "version_normalized": "2.9.2.0",
+                "source": {"url": "https://github.com/Seldaek/monolog.git", "type": "git", "reference": "437cb3628f4cf6042cc10ae97fc2b8472e48ca1f"}
+            },
+            {
+                "version": "2.9.1",
+                "version_normalized": "2.9.1.0",
+                "source": {"url": "https://github.com/Seldaek/monolog.git", "type": "git", "reference": "f259e2b15fb95494c83f52d3caad003bbf5ffaa1"}
             },
             {
                 "version": "2.9.0",
                 "version_normalized": "2.9.0.0",
-                "license": ["MIT"],
-                "source": {
-                    "type": "git",
-                    "url": "git@github.com:Seldaek/monolog.git",
-                    "reference": "1111111111111111111111111111111111111111"
-                },
-                "homepage": "https://github.com/Seldaek/monolog",
-                "require": {
-                    "php": ">=7.2",
-                    "psr/log": "^1.0.1 || ^2.0 || ^3.0"
-                }
+                "source": {"url": "https://github.com/Seldaek/monolog.git", "type": "git", "reference": "e1c0ae1528ce313a450e5e1ad782765c4a8dd3cb"}
             }
         ]
     }

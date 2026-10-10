@@ -25,6 +25,13 @@ from licenseal.resolvers.version_selection import select_php_version
 
 _PACKAGIST_REGISTRY_URL = "https://repo.packagist.org/p2"
 
+# Composer 2 metadata is served minified. A response marked
+# ``"minified": "composer/2.0"`` lists, for every version entry after the
+# first, only the keys whose value differs from the entry before it; the
+# string ``"__unset"`` stands for a key the entry does not have.
+_MINIFIED_FORMAT = "composer/2.0"
+_MINIFIED_UNSET = "__unset"
+
 
 def _packagist_url(name: str) -> str:
     """Build the canonical Packagist v2 metadata URL for a package."""
@@ -112,12 +119,38 @@ def _license_field_to_raw(value: object) -> str:
     return ""
 
 
+def _expand_minified(entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Rebuild complete version entries from Composer's minified deltas.
+
+    Each entry is applied on top of the one before it: a key it lists replaces
+    the inherited value, ``"__unset"`` removes the key, and a key it does not
+    list is inherited unchanged. A removed key stays removed for the entries
+    that follow until one of them lists it again.
+    """
+    expanded: list[dict[str, Any]] = []
+    current: dict[str, Any] = {}
+    for entry in entries:
+        for key, value in entry.items():
+            if value == _MINIFIED_UNSET:
+                current.pop(key, None)
+            else:
+                current[key] = value
+        expanded.append(dict(current))
+    return expanded
+
+
 def _versions_from_response(data: dict, name: str) -> list[dict[str, Any]]:
     """Extract the ordered version-entries list from a Packagist response.
 
     The v2 endpoint returns ``{"packages": {"<name>": [<version-entries>]}}``
     where the list is in descending version order. Lookup uses lowercase
     name (Packagist is case-insensitive).
+
+    Every returned entry is complete. A minified response (see
+    ``_MINIFIED_FORMAT``) is expanded here, before any version is selected,
+    so an older entry carries the license and requirements it inherits. The
+    cache trim keeps the marker and drops whole keys only, so a cached
+    response expands to the same entries as an untrimmed one.
     """
     packages = data.get("packages", {})
     if not isinstance(packages, dict):
@@ -125,7 +158,10 @@ def _versions_from_response(data: dict, name: str) -> list[dict[str, Any]]:
     entries = packages.get(name.lower())
     if not isinstance(entries, list):
         return []
-    return [e for e in entries if isinstance(e, dict)]
+    versions = [e for e in entries if isinstance(e, dict)]
+    if data.get("minified") == _MINIFIED_FORMAT:
+        return _expand_minified(versions)
+    return versions
 
 
 def _select_version_entry(
