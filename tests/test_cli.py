@@ -929,6 +929,48 @@ class TestCheckCommand:
         assert data["summary"]["gaps"] == 0
 
     @respx.mock
+    def test_dependency_declared_only_in_nested_setup_cfg_is_checked(self, tmp_path):
+        # A legacy package below the scan root declares its dependency solely
+        # in setup.cfg: the scan must report it rather than come back empty.
+        (tmp_path / "pyproject.toml").write_text(
+            textwrap.dedent("""\
+            [project]
+            name = "myproject"
+            license = {text = "MIT"}
+            """)
+        )
+        (tmp_path / "pkg").mkdir()
+        (tmp_path / "pkg" / "setup.cfg").write_text(
+            "[options]\ninstall_requires =\n    gpl-lib==1.0.0\n", encoding="utf-8"
+        )
+        _mock_pypi("gpl-lib", "GPL-3.0")
+        out = tmp_path / "report.json"
+
+        result = CliRunner().invoke(
+            main, ["check", "--path", str(tmp_path), "-f", "json", "-o", str(out)]
+        )
+        assert result.exit_code == 1
+        data = json.loads(out.read_text(encoding="utf-8"))
+        assert data["summary"]["violations"] == 1
+        assert [d["source"] for d in data["dependencies"]] == ["pkg/setup.cfg"]
+
+    @respx.mock
+    def test_malformed_nested_setup_cfg_surfaces_gap_and_fails_strict(self, tmp_path):
+        (tmp_path / "pkg").mkdir()
+        (tmp_path / "pkg" / "setup.cfg").write_text(
+            "[options]\ninstall_requires = one\ninstall_requires = two\n", encoding="utf-8"
+        )
+        runner = CliRunner()
+
+        warn = runner.invoke(main, ["check", "--path", str(tmp_path), "--no-strict"])
+        assert warn.exit_code == 0
+        assert "pkg/setup.cfg: is not valid INI" in warn.output
+
+        strict = runner.invoke(main, ["check", "--path", str(tmp_path)])
+        assert strict.exit_code == 1
+        assert "fails --strict" in strict.output
+
+    @respx.mock
     def test_warning_exits_nonzero_in_strict_mode(self, tmp_path):
         (tmp_path / "pyproject.toml").write_text(
             textwrap.dedent("""\

@@ -165,7 +165,7 @@ def _discover_all_dependencies(
     )
     deps.extend(py_deps)
     deps.extend(discover_requirements_dependencies(project_path, exclude_paths=exclude_paths))
-    deps.extend(discover_setup_cfg_dependencies(project_path))
+    deps.extend(discover_setup_cfg_dependencies(project_path, exclude_paths=exclude_paths))
     deps.extend(discover_setup_py_dependencies(project_path, exclude_paths=exclude_paths))
     deps.extend(discover_pipfile_dependencies(project_path, exclude_paths=exclude_paths))
 

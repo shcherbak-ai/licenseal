@@ -6,22 +6,27 @@ import configparser
 from pathlib import Path
 
 from licenseal.discovery._read import decode_text, record_parse_failure
+from licenseal.discovery._walk import walk_project_files
 from licenseal.discovery.python import DEV_GROUP_NAMES, parse_pep508_dep
 from licenseal.models import Dependency, DependencyGroup, Ecosystem
 
 
-def discover_setup_cfg_dependencies(project_path: Path) -> list[Dependency]:
-    """Discover dependencies from setup.cfg in project."""
-    setup_cfg = project_path / "setup.cfg"
-    if not setup_cfg.exists():
-        return []
-
+def _parse_setup_cfg(setup_cfg: Path, source: str) -> list[Dependency]:
+    """Parse a single setup.cfg file into Dependencies."""
     text = decode_text(setup_cfg)
     if text is None:
         return []
     config = configparser.ConfigParser()
     try:
         config.read_string(text)
+        # Values are interpolated when read, so a stray ``%`` raises here
+        # rather than in ``read_string``.
+        install_requires = config.get("options", "install_requires", fallback="")
+        extras_require = (
+            config.items("options.extras_require")
+            if config.has_section("options.extras_require")
+            else []
+        )
     except configparser.Error:
         # Malformed setup.cfg (duplicate option/section, bad interpolation).
         # Match every other Python discovery parser and the sibling
@@ -33,27 +38,45 @@ def discover_setup_cfg_dependencies(project_path: Path) -> list[Dependency]:
     deps: list[Dependency] = []
 
     # [options] install_requires
-    install_requires = config.get("options", "install_requires", fallback="")
     for line in install_requires.strip().splitlines():
-        dep = _parse_dep_line(line.strip(), DependencyGroup.PROD)
+        dep = _parse_dep_line(line.strip(), DependencyGroup.PROD, source)
         if dep:
             deps.append(dep)
 
     # [options.extras_require]
-    if config.has_section("options.extras_require"):
-        dev_names = DEV_GROUP_NAMES
-        for extra_name, extra_deps_str in config.items("options.extras_require"):
-            group = DependencyGroup.DEV if extra_name.lower() in dev_names else DependencyGroup.PROD
-            for line in extra_deps_str.strip().splitlines():
-                dep = _parse_dep_line(line.strip(), group)
-                if dep:
-                    deps.append(dep)
+    for extra_name, extra_deps_str in extras_require:
+        group = (
+            DependencyGroup.DEV if extra_name.lower() in DEV_GROUP_NAMES else DependencyGroup.PROD
+        )
+        for line in extra_deps_str.strip().splitlines():
+            dep = _parse_dep_line(line.strip(), group, source)
+            if dep:
+                deps.append(dep)
 
     return deps
 
 
+def discover_setup_cfg_dependencies(
+    project_path: Path,
+    *,
+    exclude_paths: frozenset[Path] = frozenset(),
+) -> list[Dependency]:
+    """Discover dependencies from every setup.cfg in the project tree.
+
+    Walks recursively (mirroring the other Python manifest walkers) so a
+    nested legacy package's ``setup.cfg`` is covered. Each emitted dep carries
+    the project-relative path of its declaring file in ``source``.
+    """
+    deps: list[Dependency] = []
+    for setup_cfg in walk_project_files(project_path, "setup.cfg", exclude_paths=exclude_paths):
+        # Paths come from os.walk rooted at project_path, so relative_to is safe.
+        source = setup_cfg.relative_to(project_path).as_posix()
+        deps.extend(_parse_setup_cfg(setup_cfg, source))
+    return deps
+
+
 def detect_project_license_setup_cfg(project_path: Path) -> str:
-    """Detect the project's own license from setup.cfg.
+    """Detect the project's own license from the root setup.cfg.
 
     Reads ``[metadata] license`` (a raw SPDX-ish string) and falls back to
     the first ``License :: OSI Approved :: *`` trove classifier in
@@ -86,7 +109,7 @@ def detect_project_license_setup_cfg(project_path: Path) -> str:
     return ""
 
 
-def _parse_dep_line(line: str, group: DependencyGroup) -> Dependency | None:
+def _parse_dep_line(line: str, group: DependencyGroup, source: str) -> Dependency | None:
     """Parse a single dependency line from setup.cfg."""
     if not line or line.startswith("#"):
         return None
@@ -100,6 +123,6 @@ def _parse_dep_line(line: str, group: DependencyGroup) -> Dependency | None:
         version_constraint=version,
         ecosystem=Ecosystem.PYTHON,
         group=group,
-        source="setup.cfg",
+        source=source,
         extras=extras,
     )

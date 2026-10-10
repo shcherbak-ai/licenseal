@@ -7,6 +7,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from licenseal.discovery import detect_project_license, discover_all_dependencies
+from licenseal.discovery._read import collect_read_diagnostics
 from licenseal.discovery._walk import walk_project_files
 from licenseal.discovery.python import parse_pep508_dep
 from licenseal.discovery.python.pipfile import discover_pipfile_dependencies
@@ -939,6 +940,119 @@ class TestSetupCfgDiscovery:
         assert len(deps) == 1
 
 
+def _write_setup_cfg(directory: Path, *requirements: str) -> None:
+    directory.mkdir(parents=True, exist_ok=True)
+    lines = "".join(f"    {req}\n" for req in requirements)
+    (directory / "setup.cfg").write_text(
+        f"[options]\ninstall_requires =\n{lines}", encoding="utf-8"
+    )
+
+
+class TestSetupCfgNestedDiscovery:
+    """``setup.cfg`` is walked like every other Python manifest, so a legacy
+    package below the scan root is not silently left out."""
+
+    def test_dependency_declared_only_in_nested_setup_cfg(self, tmp_path):
+        _write_setup_cfg(tmp_path / "pkg", "nested-only>=1.0")
+        deps, _ = discover_all_dependencies(tmp_path)
+        assert [(d.name, d.version_constraint, d.source) for d in deps] == [
+            ("nested-only", ">=1.0", "pkg/setup.cfg")
+        ]
+
+    def test_root_and_sibling_files_carry_relative_sources(self, tmp_path):
+        _write_setup_cfg(tmp_path, "root-dep")
+        _write_setup_cfg(tmp_path / "packages" / "alpha", "alpha-dep")
+        _write_setup_cfg(tmp_path / "packages" / "beta", "beta-dep")
+        deps, _ = discover_all_dependencies(tmp_path)
+        assert {d.name: d.source for d in deps} == {
+            "root-dep": "setup.cfg",
+            "alpha-dep": "packages/alpha/setup.cfg",
+            "beta-dep": "packages/beta/setup.cfg",
+        }
+
+    def test_nested_extras_keep_their_group(self, tmp_path):
+        (tmp_path / "pkg").mkdir()
+        (tmp_path / "pkg" / "setup.cfg").write_text(
+            textwrap.dedent("""\
+            [options.extras_require]
+            test =
+                nested-test-tool
+            export =
+                nested-export-lib
+            """)
+        )
+        deps, _ = discover_all_dependencies(tmp_path)
+        assert {d.name: d.group for d in deps} == {
+            "nested-test-tool": DependencyGroup.DEV,
+            "nested-export-lib": DependencyGroup.PROD,
+        }
+
+    def test_all_five_manifest_types_in_one_nested_package(self, tmp_path):
+        pkg = tmp_path / "pkg"
+        _write_setup_cfg(pkg, "from-setup-cfg")
+        (pkg / "pyproject.toml").write_text(
+            '[project]\nname = "pkg"\ndependencies = ["from-pyproject"]\n'
+        )
+        (pkg / "requirements.txt").write_text("from-requirements\n")
+        (pkg / "setup.py").write_text(
+            'from setuptools import setup\nsetup(install_requires=["from-setup-py"])\n'
+        )
+        (pkg / "Pipfile").write_text('[packages]\nfrom-pipfile = "*"\n')
+        deps, _ = discover_all_dependencies(tmp_path)
+        assert {d.name for d in deps} == {
+            "from-setup-cfg",
+            "from-pyproject",
+            "from-requirements",
+            "from-setup-py",
+            "from-pipfile",
+        }
+
+    def test_exclude_paths_honored(self, tmp_path):
+        _write_setup_cfg(tmp_path / "kept", "kept-dep")
+        _write_setup_cfg(tmp_path / "dropped", "dropped-dep")
+        excluded = frozenset({(tmp_path / "dropped").resolve()})
+        deps, _ = discover_all_dependencies(tmp_path, exclude_paths=excluded)
+        assert [d.name for d in deps] == ["kept-dep"]
+
+    def test_shared_skip_dirs_apply(self, tmp_path):
+        _write_setup_cfg(tmp_path / "pkg", "real-dep")
+        _write_setup_cfg(tmp_path / "examples" / "demo", "example-dep")
+        _write_setup_cfg(tmp_path / "node_modules" / "bundled", "bundled-dep")
+        deps, _ = discover_all_dependencies(tmp_path)
+        assert [d.name for d in deps] == ["real-dep"]
+
+    def test_malformed_nested_file_is_a_gap_and_others_still_parse(self, tmp_path):
+        _write_setup_cfg(tmp_path / "good", "good-dep")
+        (tmp_path / "bad").mkdir()
+        (tmp_path / "bad" / "setup.cfg").write_text(
+            "[options]\ninstall_requires = one\ninstall_requires = two\n"
+        )
+        with collect_read_diagnostics() as diags:
+            deps, _ = discover_all_dependencies(tmp_path)
+        assert [d.name for d in deps] == ["good-dep"]
+        assert [(d.path, d.is_gap) for d in diags] == [(tmp_path / "bad" / "setup.cfg", True)]
+        assert "not valid INI" in diags[0].reason
+
+    def test_bad_interpolation_is_a_gap_not_a_crash(self, tmp_path):
+        # Values are interpolated when read, not when the file is loaded: a
+        # stray ``%`` in a requirement (or in ``[DEFAULT]``, which every
+        # section inherits) must be recorded like any other malformed file.
+        _write_setup_cfg(tmp_path / "percent", "broken%name")
+        (tmp_path / "defaults").mkdir()
+        (tmp_path / "defaults" / "setup.cfg").write_text(
+            "[DEFAULT]\nfmt = %(missing)s\n\n[options.extras_require]\ndev =\n    some-tool\n"
+        )
+        with collect_read_diagnostics() as diags:
+            deps, _ = discover_all_dependencies(tmp_path)
+        assert deps == []
+        assert sorted(d.path.parent.name for d in diags if d.is_gap) == ["defaults", "percent"]
+
+    def test_project_license_detection_stays_root_only(self, tmp_path):
+        (tmp_path / "pkg").mkdir()
+        (tmp_path / "pkg" / "setup.cfg").write_text("[metadata]\nlicense = GPL-3.0-only\n")
+        assert detect_project_license(tmp_path) == ""
+
+
 class TestExtrasCapture:
     """Discovery must preserve PEP 508 extras on direct deps so the
     transitive walker can evaluate the target's `extra ==` markers against
@@ -1237,15 +1351,15 @@ class TestPyprojectEdgeCases:
 
 class TestSetupCfgEdgeCases:
     def test_parse_dep_line_empty(self):
-        result = _parse_dep_line("", DependencyGroup.PROD)
+        result = _parse_dep_line("", DependencyGroup.PROD, "setup.cfg")
         assert result is None
 
     def test_parse_dep_line_comment(self):
-        result = _parse_dep_line("# comment", DependencyGroup.PROD)
+        result = _parse_dep_line("# comment", DependencyGroup.PROD, "setup.cfg")
         assert result is None
 
     def test_parse_dep_line_no_match(self):
-        result = _parse_dep_line("!!!", DependencyGroup.PROD)
+        result = _parse_dep_line("!!!", DependencyGroup.PROD, "setup.cfg")
         assert result is None
 
     def test_no_options_section(self, tmp_path):
