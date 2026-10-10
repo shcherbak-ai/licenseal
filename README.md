@@ -293,6 +293,8 @@ licenseal classifies each dependency license into a risk level and compares that
 
 A dependency licensed under an **`OR` expression** gets the verdict of the single choice that suits the project best, and each choice is checked as a whole: its risk level, any pair-level override, and any license in it that did not resolve. `GPL-3.0-only OR MIT` in a `GPL-2.0-only` project is OK through its MIT choice. `AGPL-1.0-only OR Apache-2.0` in the same project is a warning: `Apache-2.0` is a pair-level violation there, which leaves the AGPL choice. A choice that includes an unrecognized license is never preferred over a fully recognized one, and when every choice has a pair-level conflict the most severe one is reported. The Risk column still shows the dependency's least restrictive choice, so it can read lower than the license class named in the reason.
 
+A **`WITH` exception** is matched whole against a fixed list. `Classpath-exception-2.0` (or `Classpath-exception-2.0-short`) on a GPL license makes the dependency weak copyleft, and the GPL version conflicts above do not apply to it. An exception that only adds a permission (`LLVM-exception`, `GCC-exception-3.1`, `Bison-exception-2.2`, and the others listed in [USAGE.md](USAGE.md#license-expressions)) leaves the dependency judged as its bare license, pair-level overrides included: `Apache-2.0 WITH LLVM-exception` in a `GPL-2.0-only` project is a violation, as `Apache-2.0` is. Any other text after `WITH` makes the term Unknown, so `Apache-2.0 WITH Commons-Clause` is not judged as `Apache-2.0`.
+
 A **dual-licensed project** (e.g. `AGPL-3.0-only OR Proprietary`) is checked against the strictest of its arms: dependencies must be compatible with every license the project distributes under, so the commercial arm of an open-core project still flags copyleft dependencies.
 
 When `--dev` is set, copyleft violations on dev dependencies are downgraded to warnings — licenseal treats dev deps as lower risk because they usually do not ship with the project.
@@ -303,9 +305,9 @@ When `--dev` is set, copyleft violations on dev dependencies are downgraded to w
 | Weak Copyleft | LGPL, MPL-2.0, EPL, CDDL, GPL with Classpath exception | File-scope reciprocity; linking from other files is usually allowed |
 | Strong Copyleft | GPL, OSL, EUPL, CC-BY-SA | Share-alike obligations can extend to the derivative work |
 | Network Copyleft | AGPL-3.0-only | Strong copyleft with network-use source-offer obligations |
-| Unknown | SSPL, BUSL, Elastic, CC-BY-NC, BSD-3-Clause-No-Military-License, Unicode-TOU; missing or unrecognized licenses | Cannot be auto-classified; routed to manual review |
+| Unknown | SSPL, BUSL, Elastic, CC-BY-NC, BSD-3-Clause-No-Military-License, Unicode-TOU; missing or unrecognized licenses; unrecognized `WITH` exceptions | Cannot be auto-classified; routed to manual review |
 
-A dependency is **Unknown** when the registry returns no license, a non-SPDX string, or a source-available / use-restricted license (`SSPL`, `BUSL`, `Elastic`, `FSL`, `Parity`, `PolyForm`, `CC-BY-NC*` / `CC-BY-ND*`, `BSD-3-Clause-No-Military-License`, `BSD-3-Clause-No-Nuclear-License`, `BSD-3-Clause-No-Nuclear-License-2014`, `BSD-Protection`, `Unicode-TOU`) whose custom terms are not auto-evaluated. `BSD-3-Clause-No-Nuclear-Warranty` is a warranty disclaimer rather than a use restriction and stays Permissive. The full matrix rationale is in [USAGE.md](USAGE.md).
+A dependency is **Unknown** when the registry returns no license, a non-SPDX string, a license `WITH` an exception outside the recognized list, or a source-available / use-restricted license (`SSPL`, `BUSL`, `Elastic`, `FSL`, `Parity`, `PolyForm`, `CC-BY-NC*` / `CC-BY-ND*`, `BSD-3-Clause-No-Military-License`, `BSD-3-Clause-No-Nuclear-License`, `BSD-3-Clause-No-Nuclear-License-2014`, `BSD-Protection`, `Unicode-TOU`) whose custom terms are not auto-evaluated. `BSD-3-Clause-No-Nuclear-Warranty` is a warranty disclaimer rather than a use restriction and stays Permissive. The full matrix rationale is in [USAGE.md](USAGE.md).
 
 ## Learn More
 

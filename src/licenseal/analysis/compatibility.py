@@ -9,6 +9,7 @@ from licenseal.analysis.risk import (
     _split_top_level,
     _strip_outer_parens,
     classify_risk,
+    split_exception,
 )
 from licenseal.analysis.spdx import canonical_license_id, normalize_license
 from licenseal.models import (
@@ -227,8 +228,18 @@ def _pair_conflict(project_spdx: str, dep_leaf: str) -> tuple[CompatibilityVerdi
     rewritten first: ``GPL-3.0`` is ``GPL-3.0-only`` and ``GPL-3.0+`` is
     ``GPL-3.0-or-later``. That has to happen before the ``+`` is stripped —
     stripped first, an 'or later' grant would read as the bare, 'only' ID.
+
+    A ``WITH`` leaf is looked up by its bare license when the exception
+    leaves the risk class of that license unchanged (``Apache-2.0 WITH
+    LLVM-exception`` conflicts like ``Apache-2.0``). An exception that
+    changes the class has no entry: a linking exception on a strong-copyleft
+    license permits the combination whatever the other license is, and a
+    leaf with an unrecognized exception is already UNKNOWN.
     """
-    leaf = canonical_license_id(dep_leaf).rstrip("+")
+    base, exception = split_exception(dep_leaf)
+    if exception and classify_risk(dep_leaf) != classify_risk(base):
+        return None
+    leaf = canonical_license_id(base).rstrip("+")
     if project_spdx == "GPL-2.0-only":
         if leaf in _GPL3_FAMILY_DEP_IDS:
             return (
@@ -625,6 +636,21 @@ def _build_reason(
                 f"license — manual review required"
             )
         return f"{dep_name} has no license information — manual review required"
+    # A single license whose own class is known but whose ``WITH`` exception
+    # is not one the rules recognize: name the exception, since the license
+    # itself is not what needs review.
+    base, exception = split_exception(dep_license)
+    if (
+        exception
+        and " AND " not in dep_license
+        and " OR " not in dep_license
+        and dep_risk == RiskLevel.UNKNOWN
+        and classify_risk(base) != RiskLevel.UNKNOWN
+    ):
+        return (
+            f"{dep_name} uses {dep_license} — '{exception}' is not an exception licenseal "
+            f"recognizes, so the terms it adds were not evaluated; manual review required"
+        )
     return f"{dep_name} uses {dep_license} — could not determine compatibility with {project_spdx}"
 
 

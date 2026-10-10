@@ -4,7 +4,13 @@ from __future__ import annotations
 
 import pytest
 
-from licenseal.analysis.risk import KNOWN_SPDX_IDS, classify_risk
+from licenseal.analysis.risk import (
+    _ADDED_PERMISSION_EXCEPTIONS,
+    _LINKING_EXCEPTIONS,
+    KNOWN_SPDX_IDS,
+    classify_risk,
+    split_exception,
+)
 from licenseal.models import RiskLevel
 
 
@@ -299,13 +305,26 @@ class TestPrefixOvermatchDoesNotFalseClean:
 
 
 class TestWithExpressionRisk:
-    def test_with_exception_strips_to_base(self):
-        """WITH exception should classify based on the base license."""
+    def test_added_permission_exception_classifies_on_the_license(self):
+        """An exception that only adds a permission leaves the class of the
+        license it follows."""
 
         assert classify_risk("Apache-2.0 WITH LLVM-exception") == RiskLevel.PERMISSIVE
         assert classify_risk("GPL-3.0-only WITH Autoconf-exception-3.0") == (
             RiskLevel.STRONG_COPYLEFT
         )
+
+    @pytest.mark.parametrize("exception", sorted(_ADDED_PERMISSION_EXCEPTIONS))
+    def test_every_added_permission_exception_keeps_the_class_of_its_license(self, exception):
+        for license_id, risk in (
+            ("Apache-2.0", RiskLevel.PERMISSIVE),
+            ("LGPL-2.1-or-later", RiskLevel.WEAK_COPYLEFT),
+            ("GPL-3.0-or-later", RiskLevel.STRONG_COPYLEFT),
+            ("GPL-2.0+", RiskLevel.STRONG_COPYLEFT),
+            ("AGPL-3.0-only", RiskLevel.NETWORK_COPYLEFT),
+            ("SomeCustomLicense", RiskLevel.UNKNOWN),
+        ):
+            assert classify_risk(f"{license_id} WITH {exception}") == risk, license_id
 
     def test_classpath_exception_relaxes_strong_to_weak(self):
         """The Classpath exception grants LGPL-style linking permission, so a
@@ -316,3 +335,60 @@ class TestWithExpressionRisk:
             RiskLevel.WEAK_COPYLEFT
         )
         assert classify_risk("GPL-2.0-with-classpath-exception") == RiskLevel.WEAK_COPYLEFT
+
+    @pytest.mark.parametrize("exception", sorted(_LINKING_EXCEPTIONS))
+    def test_linking_exception_relaxes_only_a_strong_copyleft_license(self, exception):
+        for license_id, risk in (
+            ("GPL-2.0-only", RiskLevel.WEAK_COPYLEFT),
+            ("GPL-3.0-or-later", RiskLevel.WEAK_COPYLEFT),
+            ("LGPL-3.0-only", RiskLevel.WEAK_COPYLEFT),
+            ("AGPL-3.0-only", RiskLevel.NETWORK_COPYLEFT),
+            ("Apache-2.0", RiskLevel.PERMISSIVE),
+            ("SomeCustomLicense", RiskLevel.UNKNOWN),
+        ):
+            assert classify_risk(f"{license_id} WITH {exception}") == risk, license_id
+
+    @pytest.mark.parametrize(
+        "expression",
+        [
+            # A use restriction written where an exception belongs.
+            "Apache-2.0 WITH Commons-Clause",
+            "MIT WITH NonCommercialRestriction",
+            # A license where an exception belongs.
+            "MIT WITH GPL-3.0-only",
+            # Names that only start like a recognized exception, or differ
+            # from one in case.
+            "GPL-3.0-only WITH Classpath-exception-evil",
+            "GPL-3.0-only WITH Classpath-exception",
+            "GPL-3.0-only WITH Classpath-exception-2.0-shorter",
+            "GPL-2.0-only WITH classpath-exception-2.0",
+            "Apache-2.0 WITH LLVM-exception-2",
+            "Apache-2.0 WITH llvm-exception",
+            # A real SPDX exception the rules do not reason about.
+            "GPL-2.0-only WITH Qwt-exception-1.0",
+            # Not a single exception.
+            "Apache-2.0 WITH LLVM-exception WITH Commons-Clause",
+            "Apache-2.0 WITH (LLVM-exception)",
+        ],
+    )
+    def test_unrecognized_exception_makes_the_term_unknown(self, expression):
+        assert classify_risk(expression) == RiskLevel.UNKNOWN
+        # In a conjunction the term is an unresolved operand; in a choice the
+        # other arm is still electable.
+        assert classify_risk(f"MIT AND {expression}") == RiskLevel.UNKNOWN
+        assert classify_risk(f"MIT OR {expression}") == RiskLevel.PERMISSIVE
+        assert classify_risk(f"AGPL-3.0-only AND {expression}") == RiskLevel.NETWORK_COPYLEFT
+
+    def test_recognized_exceptions_are_real_spdx_exception_ids(self):
+        # The vendored list holds license IDs only; an exception ID that also
+        # named a license would make ``X WITH <id>`` ambiguous.
+        assert not (_LINKING_EXCEPTIONS | _ADDED_PERMISSION_EXCEPTIONS) & KNOWN_SPDX_IDS
+        assert not _LINKING_EXCEPTIONS & _ADDED_PERMISSION_EXCEPTIONS
+
+    def test_split_exception(self):
+        assert split_exception("MIT") == ("MIT", "")
+        assert split_exception("Apache-2.0 WITH LLVM-exception") == (
+            "Apache-2.0",
+            "LLVM-exception",
+        )
+        assert split_exception("A WITH B WITH C") == ("A", "B WITH C")

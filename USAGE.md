@@ -118,6 +118,12 @@ The report nests transitives directly beneath the depth-0 dependency that pulls 
 
 licenseal is a license resolver, not a dependency resolver. It does not evaluate Python environment markers, `Requires-Python`, npm `engines`, or transitive-version conflict resolution beyond first-encountered-wins. That keeps resolution fast and predictable but does not model environment-specific installability.
 
+## License expressions
+
+How a declared license string is read before the matrix and the pair-level overrides in the [README](README.md) apply.
+
+- **`WITH` exceptions.** The text after `WITH` is matched whole and case-sensitively against a fixed list; a name that only starts like a listed exception does not match. `Classpath-exception-2.0` and `Classpath-exception-2.0-short` on a GPL license make the term weak copyleft, and the pair-level rules of the bare GPL license do not apply to it (`GPL-3.0-only WITH Classpath-exception-2.0` is compatible in a `GPL-2.0-only` project). An exception that only adds a permission leaves the term judged as its bare license, pair-level rules included, so `Apache-2.0 WITH LLVM-exception` in a `GPL-2.0-only` project is a violation like `Apache-2.0`; these are `Autoconf-exception-2.0`, `Autoconf-exception-3.0`, `Bison-exception-2.2`, `Bootloader-exception`, `Font-exception-2.0`, `GCC-exception-2.0`, `GCC-exception-3.1`, `Libtool-exception`, `Linux-syscall-note`, `LLVM-exception`, `OCaml-LGPL-linking-exception`, `Swift-exception`, `Universal-FOSS-exception-1.0`, and `WxWindows-exception-3.1`. Any other text after `WITH` makes the term unknown, whatever license it follows (`Apache-2.0 WITH Commons-Clause`, `MIT WITH GPL-3.0-only`, `GPL-3.0-only WITH Classpath-exception-3.0`), because what follows `WITH` in a registry field can restrict use as well as permit it. In an `AND` such a term sends the dependency to review unless another operand is a violation; in an `OR` the other choices stay open. A project license with an unrecognized exception cannot be classified, and every dependency of that project is then unknown.
+
 ## Supported ecosystems
 
 | Language | Registry | Manifest files | Lockfiles |

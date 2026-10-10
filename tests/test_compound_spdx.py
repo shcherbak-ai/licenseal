@@ -96,10 +96,16 @@ class TestCompoundSpdxRisk:
         assert classify_risk("GPL-3.0-only WITH Classpath-exception-2.0") == RiskLevel.WEAK_COPYLEFT
         assert classify_risk("GPL-2.0-only WITH Classpath-exception-2.0") == RiskLevel.WEAK_COPYLEFT
 
-    def test_with_unknown_exception_keeps_base_copyleft(self):
-        # Exceptions other than Classpath keep the base classification —
-        # ignoring an exception can only add scrutiny, never remove it.
+    def test_with_added_permission_exception_keeps_base_copyleft(self):
+        # A recognized exception that only adds a permission keeps the base
+        # classification — leaving the permission out can only add scrutiny.
         assert classify_risk("GPL-3.0-only WITH Bison-exception-2.2") == RiskLevel.STRONG_COPYLEFT
+
+    def test_with_unrecognized_exception_is_unknown(self):
+        # The operand after WITH is registry text; one the rules do not
+        # recognize may be a restriction, so the term is not classified.
+        assert classify_risk("GPL-3.0-only WITH Bison-exception-9.9") == RiskLevel.UNKNOWN
+        assert classify_risk("Apache-2.0 WITH Commons-Clause") == RiskLevel.UNKNOWN
 
     def test_with_classpath_exception_keeps_network_copyleft(self):
         # The relaxation is deliberately scoped to STRONG bases: an AGPL base
