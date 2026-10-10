@@ -177,7 +177,7 @@ All HTTP is mocked with `respx` — no real network requests.
 
 ### Stress-test repos
 
-Add at least one `<eco>`-only repo under `licenseal-scans/` (gitignored) plus one polyglot repo that includes the new ecosystem. Pick repos with non-trivial lockfile graphs so the edge-attribution paths actually fire. Then run the four-stage stress-test protocol below in **both** `--no-dev` and `--dev` modes:
+Add at least one `<eco>`-only repo plus one polyglot repo that includes the new ecosystem to the local stress corpus (`licenseal-scans/corpus.json`, gitignored). Pick repos with non-trivial lockfile graphs so the edge-attribution paths actually fire. Then run the four-stage stress-test protocol below, through the Docker harness, in **both** `--no-dev` and `--dev` modes:
 
 - Save pre-change baselines (`<repo>.scan_baseline.json`, `<repo>.scan_baseline_dev.json`) before the change.
 - JSON parity in both modes against the baselines.
@@ -205,7 +205,7 @@ Same untrusted-code rules apply: manifests and lockfiles only — never install,
 - When two ecosystems share an identical type or helper, give the shared definition a domain-neutral name both reference (e.g. `_TransitiveDepsFetcher`), rather than aliasing one ecosystem's name to another's (`_DotnetDepsFetcher = _MavenDepsFetcher`). The cross-domain alias couples the two and makes the borrowed name lie about its scope.
 - No specific stress-test repository or package names in source or test comments. Describe the pattern (`large Python projects`, `Cargo workspaces`, `packages with extras-heavy transitives`) instead of the project where you happened to observe it.
 - No hardcoded benchmark numbers in comments (MB, timings, `~3.3x` style speedups). They go stale and add noise to readers who aren't running the same workload.
-- When stress-testing licenseal against external repositories, treat them as untrusted code. Read their manifest and lockfile contents only; never install their dependencies, run their setup or build scripts, execute their code, or import their packages. licenseal is metadata-only — there's no legitimate development reason to execute code from a scan target, and doing so opens an arbitrary-code-execution surface from third-party projects on local disk.
+- When stress-testing licenseal against external repositories, treat them as untrusted code. Clone and scan them only through the Docker harness in `scripts/stress/`; never clone one onto the host filesystem. Read their manifest and lockfile contents only; never install their dependencies, run their setup or build scripts, execute their code, or import their packages. licenseal is metadata-only — there's no legitimate development reason to execute code from a scan target, and doing so opens an arbitrary-code-execution surface from third-party projects on local disk.
 - Branch from `dev`, PR to `dev`. `main` is releases only.
 
 ## Documentation and package description
@@ -227,50 +227,56 @@ uv run pytest -n 8 --cov=licenseal --cov-report=term-missing
 
 ### Stress-testing on real repos
 
-For changes that touch discovery, resolvers, analysis, report rendering, or the review flow, also stress-test against cloned third-party repos. Keep them under `licenseal-scans/` (gitignored) — at minimum one Python-only, one npm-only, one Rust-only, and one polyglot project. Treat scan targets as untrusted code: read manifests and lockfiles only; never install their deps, run their scripts, or import their packages.
+For changes that touch discovery, resolvers, analysis, report rendering, or the review flow, also stress-test against third-party repos — at minimum one Python-only, one npm-only, one Rust-only, and one polyglot project. Treat scan targets as untrusted code: read manifests and lockfiles only; never install their deps, run their scripts, or import their packages.
 
-If `licenseal-scans/` is missing or doesn't contain coverage for the ecosystems the change touches, ask the user which repos to clone before proceeding. Do not pick repos unilaterally and do not skip the stress-test stages silently.
+Scan targets are cloned and scanned only through the Docker harness in `scripts/stress/`. Clones live in the `licenseal-corpus` Docker volume, never on the host filesystem. Scans run in a Linux container that mounts the working tree's `src/` read-only, so they always exercise the current code; only licenseal's own output is written to `licenseal-scans/` (gitignored).
 
-Skip repos whose primary purpose is distributing offensive payloads, malware samples, exploit binaries, or operational pentest tradecraft (e.g., `metasploit-framework`, `theZoo`, `vx-underground` mirrors, named NSA/APT-toolkit dumps, RAT/loader/stealer source, pentest-tradecraft skill packs). The on-disk binaries trip AV mid-walk — leaving locked directory shells that only release on reboot — and ship no manifest-only signal for licenseal anyway. Filter by repo description and topic tags before cloning, not after; this applies equally to manual clones and to batch-clone scripts under `licenseal-scans/`.
+```bash
+uv run python scripts/stress/stress.py build      # runner image; rebuild when pyproject.toml or uv.lock changes
+uv run python scripts/stress/stress.py clone      # shallow-clone the corpus into the volume
+uv run python scripts/stress/stress.py inventory  # manifests + lockfiles per clone
+```
+
+The corpus list is local: `licenseal-scans/corpus.json`, in the format of `scripts/stress/corpus.example.json`. If it is missing or doesn't cover the ecosystems the change touches, ask the user which repos to add before proceeding. Do not pick repos unilaterally and do not skip the stress-test stages silently. Every action accepts `--only repo1,repo2`.
+
+Skip repos whose primary purpose is distributing offensive payloads, malware samples, exploit binaries, or operational pentest tradecraft (e.g., `metasploit-framework`, `theZoo`, `vx-underground` mirrors, named NSA/APT-toolkit dumps, RAT/loader/stealer source, pentest-tradecraft skill packs). The on-disk binaries trip AV mid-walk — leaving locked directory shells that only release on reboot — and ship no manifest-only signal for licenseal anyway. Filter by repo description and topic tags before cloning, not after; this applies equally to one-off clones and to corpus entries.
 
 **Conventions for stress-test runs:**
 
 - All scratch artifacts (fresh scans, comparison scripts, filled review files, probes) live under `licenseal-scans/`. Never write them to the repo root.
 - Report licenseal-side issues only (parser bugs, dropped deps, classification regressions, format-path failures). The scanned repo's actual license findings are not part of the stress-test output.
-- Save a pre-change baseline per repo before starting: `licenseal-scans/<repo>.scan_baseline.json` for `--no-dev` and `<repo>.scan_baseline_dev.json` for `--dev`.
+- Baseline and post-change runs both go through the harness. A scan run on the host is not comparable with one run in the container.
+- Save a pre-change baseline per repo before starting: `stress.py baseline` writes `licenseal-scans/<repo>.scan_baseline.json` for `--no-dev` and `<repo>.scan_baseline_dev.json` for `--dev`, and keeps an existing baseline unless `--force` is passed. Repos without a lockfile resolve against live registry state, so retake their baselines immediately before the change.
 
 Run all four stages per repo touched by the change:
 
 **1. JSON parity in both modes.** `--no-dev` is the default; `--dev` exercises dev-discovery, dev-reachability attribution, and the dev→warning downgrade paths — run both.
 
 ```bash
-uv run licenseal check -p licenseal-scans/<repo> --no-dev -f json --no-strict -o licenseal-scans/_fresh_<repo>.json
-uv run licenseal check -p licenseal-scans/<repo> --dev    -f json --no-strict -o licenseal-scans/_fresh_<repo>_dev.json
+uv run python scripts/stress/stress.py fresh   # _fresh_<repo>.json and _fresh_<repo>_dev.json
+uv run python scripts/stress/stress.py diff    # fresh vs baseline, written to _diff_summary.md
 ```
 
-Diff against the baselines on (a) `summary` totals, (b) the set of `(ecosystem, name)` keys, and (c) per-dep `(license, risk, verdict)` tuples. Zero diff confirms no regression. Any diff has to be explained by the change.
+`diff` compares (a) `summary` totals, (b) the set of `(ecosystem, name, version)` keys, and (c) per-dep `(license, risk, verdict, group, depth)` tuples. Zero diff confirms no regression. Any diff has to be explained by the change.
 
-**2. Per-ecosystem verification (polyglot repos).** Total-count parity hides per-ecosystem bugs — verify each present ecosystem actually fired its expected pipeline path (Python lockfile parsed, npm seeds planted, Rust crates resolved, etc.) by counting deps per `ecosystem` field in the fresh JSON and comparing to the baseline per-ecosystem.
+**2. Per-ecosystem verification (polyglot repos).** Total-count parity hides per-ecosystem bugs — verify each present ecosystem actually fired its expected pipeline path (Python lockfile parsed, npm seeds planted, Rust crates resolved, etc.) by comparing the per-ecosystem counts from `stress.py report --label fresh` with `stress.py report --label baseline`. The report also notes any ecosystem whose manifests are present in a clone but contribute zero dependencies.
 
 **3. Markdown report path.**
 
 ```bash
-uv run licenseal check -p licenseal-scans/<repo> --no-dev -f markdown --no-strict -o licenseal-scans/_fresh_<repo>.md
+uv run python scripts/stress/stress.py markdown   # _fresh_<repo>.md
 ```
 
-Confirm the file is non-empty, starts with a heading, and contains the expected number of table rows (≈ `summary.total` + header rows).
+Confirm each file is non-empty, starts with a heading, and contains the expected number of table rows (≈ `summary.total` + header rows).
 
 **4. Gap-fill loop (review mechanism).** Validates `init-review-file` end-to-end.
 
 ```bash
-mkdir -p licenseal-scans/_review_tmp/<repo>
-uv run licenseal init-review-file -p licenseal-scans/_review_tmp/<repo> --from-report licenseal-scans/_fresh_<repo>.json
+uv run python scripts/stress/stress.py gapfill
 ```
 
-If the command emits `Note: N flagged dependencies could not be scaffolded ...`, record N — those deps have no resolved version and can't be keyed by the review file. Replace every `license = ""` with `license = "MIT"` in the generated scaffold, drop the filled file at `licenseal-scans/<repo>/licenseal.review.toml`, then re-run `check --no-dev -f json`. Expected:
+Per repo, this scaffolds a review file from `_fresh_<repo>.json`, replaces every `license = ""` with `license = "MIT"`, places the filled file in the clone, re-runs `check --no-dev -f json`, and removes the file again, so clones don't accumulate state between runs. N is the count from `Note: N flagged dependencies could not be scaffolded ...` — those deps have no resolved version and can't be keyed by the review file. Expected:
 
 - `summary.reviewed` equals the number of filled stanzas
 - `summary.warnings + violations + unknown` drops by the same number
 - residual flagged count equals N (the unscaffoldable ones)
-
-Remove the dropped `licenseal.review.toml` from the scan repo after the test — clones don't accumulate state between runs.
