@@ -461,7 +461,7 @@ class TestCheckCommand:
         _mock_pypi("left-pad", "MIT")
 
         def reported(*flags: str) -> list[tuple[str, str, str]]:
-            result, data = _check_json(tmp_path, "--strict", *flags)
+            result, data = _check_json(tmp_path, "--strict", "--no-require-lockfile", *flags)
             assert result.exit_code == 0
             assert data["summary"]["gaps"] == 0
             return sorted((d["name"], d["group"], d["source"]) for d in data["dependencies"])

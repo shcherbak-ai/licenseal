@@ -8,6 +8,12 @@ manifest's direct deps via the registry's per-version dependency metadata.
 
 Notes on registry-recursion fallback:
 
+- The result is an estimate of the graph the project installs. Every row the
+  fallback adds, and every direct dep whose manifest constraint is not an
+  exact pin, is marked ``version_estimated``; each manifest that declares a
+  direct dep resolved this way is recorded as lacking a lockfile (see
+  :func:`_record_missing_lockfiles`).
+
 - Multiple versions of the same package coexist in the output when paths
   resolve to different concrete versions (e.g. ``lodash@^4`` and ``lodash@^3``
   in different sub-trees both surface in the report). Each version is
@@ -37,6 +43,7 @@ from licenseal._graph import compute_direct_ancestors
 from licenseal.discovery._read import (
     decode_text,
     read_xml_bytes,
+    record_missing_lockfile,
     record_parse_failure,
     record_unlisted_dependencies,
 )
@@ -112,6 +119,9 @@ from licenseal.discovery.rust.cargo_toml import cargo_sources
 from licenseal.discovery.rust.lockfiles import find_rust_lockfiles, parse_cargo_lock
 from licenseal.models import Dependency, DependencyGroup, Ecosystem
 from licenseal.resolvers.cran import CranIndex, fetch_cran_index, index_edge_names
+from licenseal.resolvers.cran import (
+    _extract_pinned_version as _extract_r_pinned_version,  # noqa: PLC2701
+)
 from licenseal.resolvers.crates_io import (
     _extract_pinned_version as _extract_rust_pinned_version,  # noqa: PLC2701
 )
@@ -149,6 +159,7 @@ from licenseal.resolvers.npm_registry import (
     fetch_npm_dependencies,
 )
 from licenseal.resolvers.nuget import (
+    _declares_exact_version_nuget,
     _extract_pinned_version_nuget,
     fetch_nuget_dependencies,
 )
@@ -178,6 +189,68 @@ from licenseal.resolvers.version_selection import (
     select_php_version,
     select_python_version,
 )
+
+# What tells an exact version from a range, per ecosystem: each returns
+# something truthy for a lockfile entry (``==X.Y.Z``) and for the ecosystem's
+# exact-pin form in a manifest. Go is absent: ``go.mod`` and ``go.sum`` name
+# exact versions only.
+_EXACT_VERSION_CHECKS: dict[Ecosystem, Callable[[str], str | bool | None]] = {
+    Ecosystem.PYTHON: _extract_python_pinned_version,
+    Ecosystem.NPM: _extract_npm_pinned_version,
+    Ecosystem.RUST: _extract_rust_pinned_version,
+    Ecosystem.JAVA: _extract_pinned_version_maven,
+    Ecosystem.DOTNET: _declares_exact_version_nuget,
+    Ecosystem.PHP: _extract_php_pinned_version,
+    Ecosystem.RUBY: _extract_ruby_pinned_version,
+    Ecosystem.HEX: _extract_hex_pinned_version,
+    Ecosystem.R: _extract_r_pinned_version,
+}
+
+
+def declares_exact_version(dep: Dependency) -> bool:
+    """Whether ``dep``'s constraint fixes the version reported for it.
+
+    True for a lockfile entry and for an exact pin in a manifest. False for a
+    range and for no constraint at all: the version then reported is the one
+    licenseal picks from what the registry publishes.
+    """
+    check = _EXACT_VERSION_CHECKS.get(dep.ecosystem)
+    return check is None or bool(check(dep.version_constraint))
+
+
+def flag_version_estimate(dep: Dependency) -> Dependency:
+    """Return ``dep`` marked ``version_estimated`` unless its constraint is exact.
+
+    A dep with an origin is returned as it is: no registry is asked about it,
+    so no version is picked for it.
+    """
+    if dep.origin or declares_exact_version(dep):
+        return dep
+    return replace(dep, version_estimated=True)
+
+
+# Manifests of tools that have no lockfile format licenseal reads. A project
+# that uses one cannot supply a lockfile, so none is asked of it.
+_MANIFESTS_WITHOUT_LOCKFILE_FORMAT = frozenset({"pom.xml", "packages.config", "Makefile"})
+
+
+def _record_missing_lockfiles(project_path: Path, deps: list[Dependency]) -> None:
+    """Record each manifest that declares one of ``deps`` as lacking a lockfile.
+
+    ``deps`` are the direct deps resolved through the registry because no
+    lockfile covers them. A manifest is recorded once, however many of them
+    it declares. Nothing is recorded for a dep with an origin (it is not
+    resolved through the registry, and a lockfile would not change its row),
+    for a dep without a manifest path, or for a manifest of a tool with no
+    lockfile format: Maven ``pom.xml``, NuGet ``packages.config``, an
+    erlang.mk ``Makefile``.
+    """
+    for source in sorted({d.source for d in deps if not d.origin}):
+        if not source:
+            continue
+        if source.rsplit("/", 1)[-1] in _MANIFESTS_WITHOUT_LOCKFILE_FORMAT:
+            continue
+        record_missing_lockfile(project_path / source)
 
 
 @with_scan_exclusions
@@ -270,6 +343,7 @@ def resolve_transitive(
         ]
         if not uncovered:
             return []
+        _record_missing_lockfiles(project_path, uncovered)
         return _walk_registry(
             uncovered,
             ecosystem,
@@ -594,6 +668,7 @@ def resolve_transitive(
         ]
         if not seeds:
             continue
+        _record_missing_lockfiles(project_path, seeds)
         walked = _walk_registry(
             seeds,
             ecosystem,
@@ -620,7 +695,8 @@ def _keep_declared_origins(
     came from, must not turn the UNKNOWN row the manifest calls for into a
     registry lookup: a direct row without an origin takes the declared one.
     A name that some manifest also declares as a registry requirement is
-    left as the lockfile has it.
+    left as the lockfile has it. A row that takes an origin is not a version
+    estimate: no registry is asked about it.
     """
     declared: dict[tuple[Ecosystem, str], str] = {}
     registry_names: set[tuple[Ecosystem, str]] = set()
@@ -638,7 +714,9 @@ def _keep_declared_origins(
     for dep in deps:
         origin = declared.get((dep.ecosystem, _canonical_name(dep)), "")
         out.append(
-            replace(dep, origin=origin) if origin and dep.depth == 0 and not dep.origin else dep
+            replace(dep, origin=origin, version_estimated=False)
+            if origin and dep.depth == 0 and not dep.origin
+            else dep
         )
     return out
 
@@ -909,6 +987,7 @@ def _resolve_r_transitive(
     if uncovered:
         # Manifest-only / lock-uncovered closure walks the CRAN index locally;
         # fetch + parse it lazily (only when there's something to walk).
+        _record_missing_lockfiles(project_path, uncovered)
         cran_index = fetch_cran_index(client, fetcher=fetcher)
         out.extend(_attach_and_filter(_r_index_closure(uncovered, cran_index, include_dev)))
     return out
@@ -923,10 +1002,11 @@ def _r_index_closure(
 
     BFS follows the runtime/build edges (:func:`index_edge_names`) recorded in
     the index; versions are the index's current versions (R licenses are
-    version-stable). Direct deps absent from the index (off-CRAN / archived) are
-    still seeded so they surface and resolve to UNKNOWN at the license stage.
+    version-stable), so every row from the index is ``version_estimated``.
+    Direct deps absent from the index (off-CRAN / archived) are still seeded
+    so they surface and resolve to UNKNOWN at the license stage.
     A direct dep with an origin is not a CRAN package: it keeps its origin,
-    takes no version from the index, and has no edges.
+    takes no version from the index, has no edges, and is not an estimate.
     Attribution reuses :func:`build_lock_dependencies`: direct deps are the
     roots, the Suggests/Enhances subset the dev roots.
     """
@@ -968,13 +1048,14 @@ def _r_index_closure(
             edges[node] = children
         frontier = nxt
 
-    return build_lock_dependencies(
+    closure = build_lock_dependencies(
         spec_info,
         edges,
         direct_names=prod_roots | dev_roots,
         dev_direct_names=dev_roots,
         include_dev=include_dev,
     )
+    return [dep if dep.origin else replace(dep, version_estimated=True) for dep in closure]
 
 
 # A transitive deps fetcher returns ``(nodes, edges)``: ``nodes`` is a list of
@@ -1128,19 +1209,23 @@ def _resolve_dotnet_transitive(
     ]
     if not direct_uncovered:
         return out
+    _record_missing_lockfiles(project_path, direct_uncovered)
 
     # Direct deps whose version parses to a concrete NuGet pin can be
     # walked; ones that don't (unresolved $() tokens, floating versions)
-    # still surface in the output so the license resolver sees them.
+    # still surface in the output so the license resolver sees them. A
+    # version taken from a range is an estimate; a bare version or
+    # ``[1.2.3]`` is the version NuGet restores.
     walkable: list[tuple[Dependency, str]] = []
     first_direct = len(out)
     for d in direct_uncovered:
+        declared = flag_version_estimate(d)
         pinned = _extract_pinned_version_nuget(d.version_constraint)
         if pinned is None:
-            out.append(d)
+            out.append(declared)
             continue
         walkable.append((d, pinned))
-        out.append(replace(d, version_constraint=f"=={pinned}"))
+        out.append(replace(declared, version_constraint=f"=={pinned}"))
 
     if not walkable:
         return out
@@ -1205,6 +1290,7 @@ def _resolve_dotnet_transitive(
                 group=group,
                 depth=1,
                 direct_ancestors=ancestors,
+                version_estimated=True,
             )
         )
     return out
@@ -1660,6 +1746,8 @@ def _resolve_java_transitive(
     direct_uncovered = [d for d in direct_uncovered if not d.origin]
     if not direct_uncovered:
         return out
+    # Recorded for Gradle build files only: Maven has no lockfile format.
+    _record_missing_lockfiles(project_path, direct_uncovered)
 
     # ---- Parent-chain version resolution ----
     # Two patterns are handled here, both requiring a walk up the parent
@@ -1720,13 +1808,14 @@ def _resolve_java_transitive(
 
     # Direct deps whose version parses to a concrete Maven pin can be
     # walked; ones that don't (range syntax, unresolved ``${…}``) still
-    # surface in the output so the license resolver sees them.
+    # surface in the output so the license resolver sees them. A pin is
+    # exact whether the declaration states it or the parent chain manages it.
     walkable: list[tuple[Dependency, str]] = []
     first_direct = len(out)
     for d in direct_uncovered:
         pinned = _extract_pinned_version_maven(d.version_constraint)
         if pinned is None:
-            out.append(d)
+            out.append(replace(d, version_estimated=True))
             continue
         walkable.append((d, pinned))
         out.append(replace(d, version_constraint=f"=={pinned}"))
@@ -1800,6 +1889,7 @@ def _resolve_java_transitive(
                 group=group,
                 depth=1,
                 direct_ancestors=tuple(sorted(owners)),
+                version_estimated=True,
             )
         )
     return out
@@ -1890,6 +1980,9 @@ def _walk_registry(
     same ``/pypi/{name}/json`` etc.). A :class:`RegistryCache`-backed
     ``fetcher`` collapses those into one round-trip.
 
+    Every row is marked ``version_estimated``, except a seed whose manifest
+    pins it exactly: the walk picks the versions, no lockfile does.
+
     Records the graph it follows so that, after BFS terminates, every row can
     be stamped with its group and with the seeds that reach it. A node of
     that graph is a package at one resolved version (with its extras), not a
@@ -1953,11 +2046,18 @@ def _walk_registry(
             results = list(pool.map(_walk_one, snapshots, wave))
         next_level: list[Dependency] = []
         for dep, resolved_version, children in results:
+            # Decided on the declared constraint, before it is rewritten to
+            # the version picked for it. A transitive is always the walk's
+            # pick; a seed is unless its manifest pins it exactly. A dep with
+            # an origin has no version picked for it at all.
+            estimated = not dep.origin and (dep.depth > 0 or not declares_exact_version(dep))
             if not resolved_version:
                 node_of_spec[_key(dep)] = _key(dep)
-                out.append(dep)
+                out.append(replace(dep, version_estimated=estimated))
                 continue
-            resolved = replace(dep, version_constraint=f"=={resolved_version}")
+            resolved = replace(
+                dep, version_constraint=f"=={resolved_version}", version_estimated=estimated
+            )
             node = node_of_spec[_key(dep)] = _key(resolved)
             if node in visited:
                 continue
@@ -2261,6 +2361,9 @@ def _dedupe(deps: list[Dependency]) -> list[Dependency]:
     the same package differently (dev-only in one subproject, shipped by
     another), and the result must not depend on the order they were read in.
 
+    A version is estimated only when every duplicate is: a lockfile entry or
+    an exact pin for the same version fixes it, whichever entry came first.
+
     When the same (ecosystem, name) appears with both resolved (``==X.Y.Z``)
     and unresolved specs, the unresolved variants are dropped. They arise
     when the registry walker resolves one occurrence successfully (e.g. from
@@ -2275,6 +2378,7 @@ def _dedupe(deps: list[Dependency]) -> list[Dependency]:
     chosen: dict[tuple[Ecosystem, str, str, str], Dependency] = {}
     merged: dict[tuple[Ecosystem, str, str, str], set[str]] = {}
     prod_keys: set[tuple[Ecosystem, str, str, str]] = set()
+    exact_keys: set[tuple[Ecosystem, str, str, str]] = set()
     for dep in filtered:
         key = (dep.ecosystem, _canonical_name(dep), dep.version_constraint, dep.origin)
         existing = chosen.get(key)
@@ -2283,6 +2387,8 @@ def _dedupe(deps: list[Dependency]) -> list[Dependency]:
         merged.setdefault(key, set()).update(dep.direct_ancestors)
         if dep.group == DependencyGroup.PROD:
             prod_keys.add(key)
+        if not dep.version_estimated:
+            exact_keys.add(key)
 
     out: list[Dependency] = []
     used: set[tuple[Ecosystem, str, str, str]] = set()
@@ -2294,6 +2400,8 @@ def _dedupe(deps: list[Dependency]) -> list[Dependency]:
         winner = chosen[key]
         if key in prod_keys:
             winner = replace(winner, group=DependencyGroup.PROD)
+        if key in exact_keys:
+            winner = replace(winner, version_estimated=False)
         if winner.depth == 0:
             out.append(winner)
         else:

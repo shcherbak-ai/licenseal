@@ -33,6 +33,11 @@ sink, partitioned into:
   version the parser does not know, read on a best-effort basis. Worth a
   warning, not a failure.
 
+One gap can be accepted by the user: a manifest whose dependencies no lockfile
+covers (``missing_lockfile=True``). The analysis ran, on versions and a
+dependency graph estimated from the registry. It is a gap by default;
+``check --no-require-lockfile`` reports it as an estimate instead.
+
 The CLI drains the sink to stderr after a scan. Outside an active sink
 ``_record`` is a no-op, so unit tests that call parsers directly need no setup.
 """
@@ -68,6 +73,7 @@ __all__ = [
     "load_yaml",
     "read_bytes",
     "read_xml_bytes",
+    "record_missing_lockfile",
     "record_parse_failure",
     "record_unexpected_type",
     "record_unfollowed_reference",
@@ -98,11 +104,14 @@ class ReadDiagnostic:
     ``reason`` completes "``<path>``: ``<reason>``". ``is_gap`` marks whether a
     dependency-bearing file was *lost* (incomplete analysis → ``--strict``
     fails) versus merely *recovered with a caveat* (latin-1 fallback).
+    ``missing_lockfile`` marks the gap :func:`record_missing_lockfile`
+    records, the only one a flag can accept.
     """
 
     path: Path
     reason: str
     is_gap: bool
+    missing_lockfile: bool = False
 
 
 _DIAGNOSTICS: contextvars.ContextVar[list[ReadDiagnostic] | None] = contextvars.ContextVar(
@@ -132,10 +141,14 @@ def collect_read_diagnostics() -> Iterator[list[ReadDiagnostic]]:
         _DIAGNOSTICS.reset(token)
 
 
-def _record(path: Path, reason: str, *, is_gap: bool) -> None:
+def _record(path: Path, reason: str, *, is_gap: bool, missing_lockfile: bool = False) -> None:
     sink = _DIAGNOSTICS.get()
     if sink is not None:
-        sink.append(ReadDiagnostic(path=path, reason=reason, is_gap=is_gap))
+        sink.append(
+            ReadDiagnostic(
+                path=path, reason=reason, is_gap=is_gap, missing_lockfile=missing_lockfile
+            )
+        )
 
 
 def record_parse_failure(path: Path, fmt: str) -> None:
@@ -271,6 +284,24 @@ def decode_lockfile_text(path: Path) -> str | None:
         _record(path, "contains merge-conflict markers; skipped", is_gap=True)
         return None
     return text
+
+
+def record_missing_lockfile(manifest: Path) -> None:
+    """Record that ``manifest`` declares dependencies no lockfile covers.
+
+    Those dependencies were resolved through the registry: the version of
+    each one that is not pinned exactly, and every transitive dependency, is
+    what the registry offers today, not what the project installs. The
+    manifest itself was read in full, so this is the one gap the user can
+    accept (``check --no-require-lockfile``).
+    """
+    _record(
+        manifest,
+        "declares dependencies that no lockfile covers; their versions and "
+        "transitive dependencies are estimated from the registry",
+        is_gap=True,
+        missing_lockfile=True,
+    )
 
 
 def record_walk_error(exc: OSError) -> None:

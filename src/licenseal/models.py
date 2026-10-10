@@ -118,6 +118,11 @@ class Dependency:
     # install. Empty for npm/Rust (those ecosystems express opt-in deps via
     # separate fields, not markers).
     extras: frozenset[str] = field(default_factory=frozenset)
+    # True when the reported version was chosen by licenseal from a registry:
+    # no lockfile entry and no exact pin in a manifest fixes it. Set by the
+    # registry walks and for a direct dep declared with a range or with no
+    # constraint; False for every row a lockfile supplies.
+    version_estimated: bool = False
 
     @property
     def is_transitive(self) -> bool:
@@ -209,8 +214,10 @@ class ReportDiagnostic:
 
     ``path`` is project-relative when possible. ``severity`` is ``"gap"`` (a
     dependency-bearing manifest lost to the scan — incomplete analysis, fails
-    ``--strict``) or ``"recovered"`` (decoded with a caveat, e.g. a latin-1
-    fallback that still recovered the ASCII dependency lines).
+    ``--strict``), ``"recovered"`` (decoded with a caveat, e.g. a latin-1
+    fallback that still recovered the ASCII dependency lines), or
+    ``"estimate"`` (a manifest whose dependencies no lockfile covers, scanned
+    with ``--no-require-lockfile``: reported, not a gap).
     """
 
     path: str
@@ -227,7 +234,8 @@ class AnalysisReport:
     results: list[CompatibilityResult] = field(default_factory=list)
     # Manifest read/parse anomalies surfaced during the scan (set by the CLI,
     # like ``elapsed_seconds``). Emitted in the JSON report's ``diagnostics``;
-    # the gaps among them are also listed in the table and Markdown reports.
+    # the gaps and the estimates among them are also listed in the table and
+    # Markdown reports.
     read_diagnostics: list[ReportDiagnostic] = field(default_factory=list)
     # File name of the manifest in the scanned directory that supplied
     # ``project_license`` (set by the CLI, like ``elapsed_seconds``). Empty

@@ -248,6 +248,10 @@ def _verdicts(data: dict) -> dict[str, str]:
     return {dep["name"]: dep["verdict"] for dep in data["dependencies"]}
 
 
+# The projects scanned here have no lockfile. That is accepted, so that the
+# licenses alone decide each exit code.
+_NO_LOCKFILE = "--no-require-lockfile"
+
 _ASSUMED = (
     "Project license: Proprietary (assumed: no manifest in the scanned directory declares a "
     "license). Scanning a subproject with --path uses that subproject's license."
@@ -268,7 +272,7 @@ class TestCheckProjectLicense:
         _mock_npm("left-pad", "MIT")
         _mock_npm("gpl-lib", "GPL-3.0-only")
 
-        result, data = _check_json(tmp_path)
+        result, data = _check_json(tmp_path, _NO_LOCKFILE)
         assert result.exit_code == 1
         assert (data["project_license"], data["project_license_source"]) == ("Proprietary", "")
         assert _verdicts(data) == {"left-pad": "compatible", "gpl-lib": "incompatible"}
@@ -277,7 +281,7 @@ class TestCheckProjectLicense:
         assert "declare different licenses" not in result.stderr
 
         # Scanned on its own, each sub-package is judged by its own manifest.
-        result, data = _check_json(tmp_path / "tools")
+        result, data = _check_json(tmp_path / "tools", _NO_LOCKFILE)
         assert result.exit_code == 0
         assert (data["project_license"], data["project_license_source"]) == (
             "GPL-3.0-only",
@@ -295,7 +299,7 @@ class TestCheckProjectLicense:
         _mock_npm("left-pad", "MIT")
         _mock_npm("gpl-lib", "GPL-3.0-only")
 
-        result, data = _check_json(tmp_path)
+        result, data = _check_json(tmp_path, _NO_LOCKFILE)
         assert result.exit_code == 1
         assert (data["project_license"], data["project_license_source"]) == ("Proprietary", "")
         assert _verdicts(data) == {"left-pad": "compatible", "gpl-lib": "incompatible"}
@@ -317,7 +321,7 @@ class TestCheckProjectLicense:
         _write(tmp_path / "Cargo.toml", '[package]\nname = "app"\nlicense = "MIT"\n')
         _mock_npm("gpl-lib", "GPL-3.0-only")
 
-        result, data = _check_json(tmp_path)
+        result, data = _check_json(tmp_path, _NO_LOCKFILE)
         assert result.exit_code == 1
         assert (data["project_license"], data["project_license_source"]) == (
             "MIT",
@@ -338,11 +342,13 @@ class TestCheckProjectLicense:
         _package_json(tmp_path / "web" / "package.json", "GPL-3.0-only", **{"left-pad": "1.0.0"})
         _mock_npm("left-pad", "MIT")
 
-        table = CliRunner().invoke(main, ["check", "--path", str(tmp_path)])
+        table = CliRunner().invoke(main, ["check", "--path", str(tmp_path), _NO_LOCKFILE])
         assert table.exit_code == 0
         assert "Project license: MIT (from pyproject.toml)" in table.stdout
 
-        markdown = CliRunner().invoke(main, ["check", "--path", str(tmp_path), "-f", "markdown"])
+        markdown = CliRunner().invoke(
+            main, ["check", "--path", str(tmp_path), "-f", "markdown", _NO_LOCKFILE]
+        )
         assert markdown.exit_code == 0
         assert (
             "**Project license:** MIT (from [pyproject.toml](pyproject.toml))"
@@ -354,9 +360,11 @@ class TestCheckProjectLicense:
         _package_json(tmp_path / "web" / "package.json", "MIT", **{"left-pad": "1.0.0"})
         _mock_npm("left-pad", "MIT")
 
-        table = CliRunner().invoke(main, ["check", "--path", str(tmp_path)])
+        table = CliRunner().invoke(main, ["check", "--path", str(tmp_path), _NO_LOCKFILE])
         assert "Project license: Proprietary\n" in table.stdout
-        markdown = CliRunner().invoke(main, ["check", "--path", str(tmp_path), "-f", "markdown"])
+        markdown = CliRunner().invoke(
+            main, ["check", "--path", str(tmp_path), "-f", "markdown", _NO_LOCKFILE]
+        )
         assert "**Project license:** Proprietary" in markdown.stdout.splitlines()
 
     @respx.mock
@@ -367,7 +375,7 @@ class TestCheckProjectLicense:
         _package_json(tmp_path / "package.json", text, **{"left-pad": "1.0.0"})
         _mock_npm("left-pad", "MIT")
 
-        result, _ = _check_json(tmp_path)
+        result, _ = _check_json(tmp_path, _NO_LOCKFILE)
         assert result.exit_code == 0
         assert "\x1b" not in result.stderr
         warning = next(

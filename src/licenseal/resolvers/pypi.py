@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from dataclasses import replace
 
 import httpx
 from packaging.markers import Marker
@@ -402,6 +403,10 @@ def resolve_python_license(
     info = object_field(data, "info")
     version = info.get("version")
     resolved_version = version if isinstance(version, str) else ""
+    if pinned_version and data is project_data:
+        # The pinned release has no metadata on PyPI, so the version reported
+        # below is the project's latest release, not the pinned one.
+        dep = replace(dep, version_estimated=True)
     repository_url = _extract_repository_url(info)
     homepage_url = _extract_homepage_url(info)
 

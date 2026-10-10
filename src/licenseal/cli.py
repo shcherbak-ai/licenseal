@@ -97,7 +97,7 @@ from licenseal.review import (
     merge_review_template,
     render_review_template,
 )
-from licenseal.transitive import resolve_transitive
+from licenseal.transitive import flag_version_estimate, resolve_transitive
 
 _STDERR_CONSOLE = Console(stderr=True)
 
@@ -230,9 +230,10 @@ def _should_fail(report: AnalysisReport, strict: bool, *, had_analysis_gaps: boo
     entries lets all three properties coexist.
 
     ``had_analysis_gaps`` is set when a manifest couldn't be read or parsed
-    (a dependency-bearing file lost to the scan). That's an *incomplete
-    analysis* — morally an UNKNOWN, since the scan can't vouch for what it
-    never saw — so ``--strict`` fails on it just like an unknown license.
+    (a dependency-bearing file lost to the scan), or has no lockfile while
+    one is required. That's an *incomplete analysis* — morally an UNKNOWN,
+    since the scan can't vouch for what it never saw — so ``--strict`` fails
+    on it just like an unknown license.
     """
     return bool(_failing_results(report, strict)) or (strict and had_analysis_gaps)
 
@@ -385,7 +386,7 @@ def _discover_dependencies(
 
 
 def _read_diagnostics_view(
-    diagnostics: list[ReadDiagnostic], project_path: Path
+    diagnostics: list[ReadDiagnostic], project_path: Path, *, require_lockfile: bool = True
 ) -> list[ReportDiagnostic]:
     """Dedup + relativize raw read diagnostics into report-facing values.
 
@@ -393,6 +394,9 @@ def _read_diagnostics_view(
     passes, so the same anomaly can be recorded more than once — and shows paths
     relative to the scan root when possible. Shared by the stderr drain and the
     JSON report's ``diagnostics`` array so both see exactly the same set.
+
+    A manifest that lacks a lockfile is a gap while ``require_lockfile``
+    holds; without it the same diagnostic is reported as an ``"estimate"``.
     """
     seen: set[tuple[str, str]] = set()
     view: list[ReportDiagnostic] = []
@@ -404,13 +408,11 @@ def _read_diagnostics_view(
         if (shown, diag.reason) in seen:
             continue
         seen.add((shown, diag.reason))
-        view.append(
-            ReportDiagnostic(
-                path=shown,
-                reason=diag.reason,
-                severity="gap" if diag.is_gap else "recovered",
-            )
-        )
+        if diag.missing_lockfile and not require_lockfile:
+            severity = "estimate"
+        else:
+            severity = "gap" if diag.is_gap else "recovered"
+        view.append(ReportDiagnostic(path=shown, reason=diag.reason, severity=severity))
     return view
 
 
@@ -419,10 +421,11 @@ def _echo_read_diagnostics(view: list[ReportDiagnostic]) -> int:
 
     A *silent* skip is a silent false-negative (a dropped dependency reads as
     "no problem"), so every anomaly is echoed. Returns the number of distinct
-    manifests lost to *gaps* (unreadable / unparseable / blind subtree),
-    excluding *recoveries* (a latin-1 fallback, a lockfile in an unknown
-    version read on a best-effort basis) — the caller folds this into the
-    ``--strict`` exit decision and a one-line summary.
+    manifests lost to *gaps* (unreadable / unparseable / blind subtree, or
+    no lockfile when one is required), excluding *recoveries* (a latin-1
+    fallback, a lockfile in an unknown version read on a best-effort basis)
+    and accepted *estimates* — the caller folds this into the ``--strict``
+    exit decision and a one-line summary.
     """
     gap_paths: set[str] = set()
     for diag in view:
@@ -469,6 +472,34 @@ def _off_registry_license_info(dep: Dependency) -> LicenseInfo:
     )
 
 
+def _echo_missing_lockfiles(diagnostics: list[ReadDiagnostic], *, require_lockfile: bool) -> None:
+    """Say what a scan without a lockfile means and how to settle it.
+
+    One stderr line for all the manifests recorded as lacking a lockfile,
+    after the per-file warnings: the report is an estimate for them, and the
+    user either commits a lockfile or accepts the estimate.
+    """
+    count = len({diag.path for diag in diagnostics if diag.missing_lockfile})
+    if not count:
+        return
+    estimated = (
+        f"Warning: {count} manifest(s) declare dependencies that no lockfile covers, so the "
+        "report is an estimate for them"
+    )
+    if require_lockfile:
+        click.echo(
+            f"{estimated}. Commit a lockfile, or pass --no-require-lockfile to accept the "
+            "estimate.",
+            err=True,
+        )
+    else:
+        click.echo(
+            f"{estimated} (accepted by --no-require-lockfile). Commit a lockfile for an "
+            "exact report.",
+            err=True,
+        )
+
+
 def _resolve_license_infos(
     deps: list[Dependency],
     max_workers: int,
@@ -486,7 +517,9 @@ def _resolve_license_infos(
 
     With `transitive=True`, the dep list is first expanded via lockfile-first
     transitive resolution (`licenseal.transitive.resolve_transitive`) before
-    license resolution. `all_direct_deps` is the unfiltered direct-dep list
+    license resolution. Without it, `deps` are resolved as declared, and each
+    one whose constraint is not an exact pin is marked `version_estimated`.
+    `all_direct_deps` is the unfiltered direct-dep list
     (both prod and dev) — the lockfile path needs it to attribute group by
     reachability and to drop dev-only chains when `include_dev=False`. The
     transitive walk runs inside the same `tethered.scope()` block so its
@@ -573,6 +606,11 @@ def _resolve_license_infos(
                             on_wave=_on_wave,
                             exclude_paths=exclude_paths,
                         )
+            else:
+                # No lockfile is consulted here: a direct dep declared with a
+                # range, or with no constraint, is reported at the version
+                # its registry lookup picks.
+                deps = [flag_version_estimate(dep) for dep in deps]
 
             # Cross-ecosystem batch pre-pass against ``api.deps.dev``'s
             # ``/v3alpha/versionbatch`` endpoint. Each POST returns at
@@ -926,8 +964,19 @@ def _resolve_license_infos(
     show_default=True,
     help=(
         "Whether warnings, unknowns, and analysis gaps (manifests that couldn't "
-        "be read or parsed) fail CI in addition to violations. Violations always "
-        "fail regardless of this flag."
+        "be read or parsed, or that have no lockfile) fail CI in addition to "
+        "violations. Violations always fail regardless of this flag."
+    ),
+)
+@click.option(
+    "--require-lockfile/--no-require-lockfile",
+    default=True,
+    show_default=True,
+    help=(
+        "Whether a manifest whose dependencies no lockfile covers is an analysis "
+        "gap. Without a lockfile the versions and the transitive graph are "
+        "estimated from the registry; --no-require-lockfile accepts that "
+        "estimate and reports it without failing."
     ),
 )
 @click.option(
@@ -966,6 +1015,7 @@ def check(
     include_dev: bool,
     max_workers: int,
     strict: bool,
+    require_lockfile: bool,
     transitive: bool,
     max_depth: int,
     exclude_dirs: tuple[str, ...],
@@ -1045,7 +1095,7 @@ def check(
     # hosts. Always at least the discovery entry, so never an empty line.
     click.echo(timings.summary_line(), err=True)
 
-    diag_view = _read_diagnostics_view(read_diags, project_path)
+    diag_view = _read_diagnostics_view(read_diags, project_path, require_lockfile=require_lockfile)
     gap_count = _echo_read_diagnostics(diag_view)
     if gap_count:
         click.echo(
@@ -1054,6 +1104,7 @@ def check(
             + (" (fails --strict)." if strict else "."),
             err=True,
         )
+    _echo_missing_lockfiles(read_diags, require_lockfile=require_lockfile)
 
     # A dependency with an origin was never looked up: it is counted on a
     # line of its own, not among the lookups that failed.

@@ -374,13 +374,41 @@ def _source_terminal_url(result: CompatibilityResult, project_path: Path | None)
     return (project_path / src).resolve().as_uri()
 
 
+_ESTIMATE_MARK = "~"
+_ESTIMATE_LEGEND = "marks an estimated version: picked from the registry, not locked or pinned"
+
+
+def _estimated_fields(result: CompatibilityResult) -> list[str]:
+    """Which reported values of ``result`` are estimates, sorted.
+
+    ``"version"`` when the resolved version was picked from the registry
+    rather than fixed by a lockfile entry or an exact pin. A dependency with
+    no resolved version has no version to qualify.
+    """
+    info = result.license_info
+    if info.dependency.version_estimated and info.resolved_version:
+        return ["version"]
+    return []
+
+
+def _any_estimated(results: list[CompatibilityResult]) -> bool:
+    """Whether any row carries the estimate mark, so the legend is needed."""
+    return any(_estimated_fields(result) for result in results)
+
+
 def _package_label(result: CompatibilityResult) -> str:
-    """Render the package label with the resolved version when available."""
+    """Render the package label with the resolved version when available.
+
+    An estimated version is written ``~1.2.3``. The mark is ASCII and is not
+    one of the characters the Markdown escaping rewrites, so it reads the same
+    in every format and on every stdout encoding.
+    """
     name = result.license_info.dependency.name
     resolved_version = result.license_info.resolved_version
     if not resolved_version:
         return name
-    return f"{name} ({resolved_version})"
+    mark = _ESTIMATE_MARK if "version" in _estimated_fields(result) else ""
+    return f"{name} ({mark}{resolved_version})"
 
 
 def _rich_link(label: str, url: str) -> Text:
@@ -631,6 +659,24 @@ def _gap_rows(gaps: list[ReportDiagnostic]) -> list[tuple[str, str, str]]:
     return sorted((*_gap_file(d.path), d.reason) for d in gaps)
 
 
+_ESTIMATE_NOTE = "the versions and transitive dependencies reported for them are estimates"
+
+
+def _estimate_diagnostics(report: AnalysisReport) -> list[ReportDiagnostic]:
+    """Diagnostics for manifests whose missing lockfile the scan was told to accept.
+
+    Not gaps, but a saved report still has to say that it is an estimate for
+    these manifests. They are counted and laid out the way gaps are.
+    """
+    return [d for d in report.read_diagnostics if d.severity == "estimate"]
+
+
+def _estimate_summary(estimates: list[ReportDiagnostic]) -> str:
+    """Estimate count for a summary line, e.g. ``2 estimated manifests``."""
+    count = _gap_count(estimates)
+    return f"{count} estimated manifest{'s' if count != 1 else ''}"
+
+
 def _other_ancestors_suffix(result: CompatibilityResult) -> str:
     """Return ' (also: X, Y)' for transitives shared across multiple direct deps."""
     dep = result.license_info.dependency
@@ -702,6 +748,8 @@ def render_table(
 
     _fit_table(console, table)
     console.print(table)
+    if _any_estimated(grouped):
+        console.print(f"  [dim]{_ESTIMATE_MARK} {_ESTIMATE_LEGEND}[/dim]")
     console.print()
 
     # Summary line
@@ -726,6 +774,9 @@ def render_table(
     gaps = _gap_diagnostics(report)
     if gaps:
         summary += f", [yellow]{_gap_summary(gaps)}[/yellow]"
+    estimates = _estimate_diagnostics(report)
+    if estimates:
+        summary += f", [dim]{_estimate_summary(estimates)}[/dim]"
     console.print(f"  Summary: {summary}")
     console.print(
         f"  Completed in: [bold]{_format_elapsed(report.elapsed_seconds)}[/bold]",
@@ -736,6 +787,12 @@ def render_table(
     if gaps:
         console.print(f"  [bold]Analysis gaps[/bold] ({_GAP_NOTE}):")
         for label, _, reason in _gap_rows(gaps):
+            console.print(f"    {_rich_escape(label)}: {_rich_escape(reason)}")
+        console.print()
+
+    if estimates:
+        console.print(f"  [bold]Estimates[/bold] ({_ESTIMATE_NOTE}):")
+        for label, _, reason in _gap_rows(estimates):
             console.print(f"    {_rich_escape(label)}: {_rich_escape(reason)}")
         console.print()
 
@@ -878,13 +935,21 @@ def render_markdown(report: AnalysisReport, *, encoding: str = "utf-8") -> str:
         )
 
     lines.append("")
+    if _any_estimated(grouped):
+        # A paragraph of its own: a line directly under the rows would be
+        # read as one more table row.
+        lines.append(f"`{_ESTIMATE_MARK}` {_ESTIMATE_LEGEND}")
+        lines.append("")
 
     # No run time here, unlike the table output: the Markdown report is meant
     # to be checked in (LICENSES.md), so it must depend only on the findings.
     gaps = _gap_diagnostics(report)
+    estimates = _estimate_diagnostics(report)
     summary = _summary_text(report)
     if gaps:
         summary += f", {_gap_summary(gaps)}"
+    if estimates:
+        summary += f", {_estimate_summary(estimates)}"
     lines.append(f"**Summary:** {summary}")
 
     if gaps:
@@ -896,6 +961,17 @@ def render_markdown(report: AnalysisReport, *, encoding: str = "utf-8") -> str:
         lines.append(_markdown_row(["File", "Reason"]))
         lines.append(_markdown_row(["------", "--------"]))
         for label, url, reason in _gap_rows(gaps):
+            lines.append(_markdown_row([_markdown_link(label, url), _escape_md(reason)]))
+
+    if estimates:
+        lines.append("")
+        lines.append("## Estimates")
+        lines.append("")
+        lines.append(f"These manifests were scanned without a lockfile; {_ESTIMATE_NOTE}.")
+        lines.append("")
+        lines.append(_markdown_row(["File", "Reason"]))
+        lines.append(_markdown_row(["------", "--------"]))
+        for label, url, reason in _gap_rows(estimates):
             lines.append(_markdown_row([_markdown_link(label, url), _escape_md(reason)]))
 
     detail_results = [r for r in grouped if r.verdict != CompatibilityVerdict.COMPATIBLE]
@@ -939,7 +1015,8 @@ def _report_to_dict(report: AnalysisReport) -> dict[str, Any]:
     every surfaced read/parse anomaly — so a CI consumer reading only the JSON
     can see what the scan couldn't. Both are always present (``0`` / ``[]`` on
     a clean scan); the table and Markdown reports list the gaps only when
-    there are any.
+    there are any. A diagnostic of severity ``"estimate"`` is in
+    ``diagnostics`` and is not counted in ``summary.gaps``.
     """
     return {
         "project_license": report.project_license,
@@ -986,6 +1063,7 @@ def _dep_to_dict(r: CompatibilityResult) -> dict[str, Any]:
         "reviewed": r.license_info.reviewed,
         "review_note": r.license_info.review_note,
         "resolved_version": r.license_info.resolved_version,
+        "estimated": _estimated_fields(r),
         "repository_url": repository_url,
         "homepage_url": homepage_url,
         "package_url": package_url,

@@ -19,6 +19,7 @@ from rich.console import Console
 
 from licenseal import __version__
 from licenseal.cli import (
+    _echo_missing_lockfiles,
     _echo_read_diagnostics,
     _http_headers,
     _package_version,
@@ -52,7 +53,18 @@ from licenseal.review import (
     render_review_template,
     review_key,
 )
-from tests._helpers import _DEEP, _assert_gap_fails_only_strict, _check_json, _record_path_io
+from tests._helpers import (
+    _DEEP,
+    _assert_gap_fails_only_strict,
+    _check_json,
+    _file_diagnostics,
+    _record_path_io,
+)
+
+_MISSING_LOCKFILE = (
+    "declares dependencies that no lockfile covers; their versions and "
+    "transitive dependencies are estimated from the registry"
+)
 
 _REVIEW_STANZA = (
     '[[review]]\necosystem = "python"\npackage = "pkg-a"\nversion = "1.0.0"\nlicense = "MIT"\n'
@@ -151,7 +163,57 @@ class TestEchoReadDiagnostics:
     def test_empty_is_silent(self, tmp_path, capsys):
         assert _read_diagnostics_view([], tmp_path) == []
         assert _echo_read_diagnostics([]) == 0
+        _echo_missing_lockfiles([], require_lockfile=True)
         assert capsys.readouterr().err == ""
+
+    def test_missing_lockfile_is_a_gap_unless_estimates_are_accepted(self, tmp_path, capsys):
+        # Only that diagnostic changes severity; a lost file stays a gap, and
+        # an accepted estimate is echoed without being counted.
+        diags = [
+            ReadDiagnostic(
+                path=tmp_path / "package.json",
+                reason=_MISSING_LOCKFILE,
+                is_gap=True,
+                missing_lockfile=True,
+            ),
+            ReadDiagnostic(path=tmp_path / "pom.xml", reason="is not valid XML", is_gap=True),
+        ]
+        required = _read_diagnostics_view(diags, tmp_path)
+        assert [(d.path, d.severity) for d in required] == [
+            ("package.json", "gap"),
+            ("pom.xml", "gap"),
+        ]
+        assert _echo_read_diagnostics(required) == 2
+
+        accepted = _read_diagnostics_view(diags, tmp_path, require_lockfile=False)
+        assert [(d.path, d.severity) for d in accepted] == [
+            ("package.json", "estimate"),
+            ("pom.xml", "gap"),
+        ]
+        assert _echo_read_diagnostics(accepted) == 1
+        assert capsys.readouterr().err.count(f"Warning: package.json: {_MISSING_LOCKFILE}") == 2
+
+    def test_missing_lockfile_summary_counts_manifests_once(self, tmp_path, capsys):
+        diags = [
+            ReadDiagnostic(
+                path=tmp_path / name, reason=_MISSING_LOCKFILE, is_gap=True, missing_lockfile=True
+            )
+            for name in ("package.json", "package.json", "Gemfile")
+        ]
+        diags.append(ReadDiagnostic(path=tmp_path / "pom.xml", reason="lost", is_gap=True))
+        _echo_missing_lockfiles(diags, require_lockfile=True)
+        _echo_missing_lockfiles(diags, require_lockfile=False)
+        required, accepted = capsys.readouterr().err.splitlines()
+        assert required == (
+            "Warning: 2 manifest(s) declare dependencies that no lockfile covers, so the "
+            "report is an estimate for them. Commit a lockfile, or pass "
+            "--no-require-lockfile to accept the estimate."
+        )
+        assert accepted == (
+            "Warning: 2 manifest(s) declare dependencies that no lockfile covers, so the "
+            "report is an estimate for them (accepted by --no-require-lockfile). Commit a "
+            "lockfile for an exact report."
+        )
 
 
 class TestRegistriesUnreachable:
@@ -209,7 +271,7 @@ class TestCheckCommand:
         _mock_pypi("flask", "BSD-3-Clause")
 
         runner = CliRunner()
-        result = runner.invoke(main, ["check", "--path", str(tmp_path)])
+        result = runner.invoke(main, ["check", "--path", str(tmp_path), "--no-require-lockfile"])
         assert result.exit_code == 0
         assert "Warning: requirements.txt: decoded as latin-1" in result.output
 
@@ -313,7 +375,17 @@ class TestCheckCommand:
 
         lenient = runner.invoke(
             main,
-            ["check", "--path", str(tmp_path), "--no-strict", "-f", "json", "-o", str(out)],
+            [
+                "check",
+                "--path",
+                str(tmp_path),
+                "--no-require-lockfile",
+                "--no-strict",
+                "-f",
+                "json",
+                "-o",
+                str(out),
+            ],
         )
         assert lenient.exit_code == 0
         data = json.loads(out.read_text(encoding="utf-8"))
@@ -321,11 +393,11 @@ class TestCheckCommand:
             ("flask", "BSD-3-Clause")
         ]
         assert data["summary"]["gaps"] == 1
-        assert data["diagnostics"] == [
+        assert _file_diagnostics(data) == [
             {"path": f"svc/{manifest}", "reason": reason, "severity": "gap"}
         ]
 
-        strict = runner.invoke(main, ["check", "--path", str(tmp_path)])
+        strict = runner.invoke(main, ["check", "--path", str(tmp_path), "--no-require-lockfile"])
         assert strict.exit_code == 1
         assert f"Warning: svc/{manifest}: {reason}" in strict.output
         assert "1 manifest(s) could not be fully analyzed" in strict.output
@@ -341,14 +413,16 @@ class TestCheckCommand:
         _mock_pypi("flask", "BSD-3-Clause")
 
         runner = CliRunner()
-        result = runner.invoke(main, ["check", "--path", str(tmp_path), "-f", "json"])
+        result = runner.invoke(
+            main, ["check", "--path", str(tmp_path), "--no-require-lockfile", "-f", "json"]
+        )
         assert result.exit_code == 0
         assert "Warning: requirements.txt: decoded as latin-1" in result.stderr
         assert "could not be fully analyzed" not in result.stderr
         data = json.loads(result.stdout)
         assert [d["name"] for d in data["dependencies"]] == ["flask"]
         assert data["summary"]["gaps"] == 0
-        assert [d["severity"] for d in data["diagnostics"]] == ["recovered"]
+        assert [d["severity"] for d in _file_diagnostics(data)] == ["recovered"]
 
     @respx.mock
     @pytest.mark.parametrize(
@@ -368,18 +442,23 @@ class TestCheckCommand:
         _mock_pypi("flask", "BSD-3-Clause")
 
         runner = CliRunner()
-        result = runner.invoke(main, ["check", "--path", str(tmp_path), "-f", "json"])
+        result = runner.invoke(
+            main, ["check", "--path", str(tmp_path), "--no-require-lockfile", "-f", "json"]
+        )
         assert result.exit_code == 0
-        assert "Warning:" not in result.stderr
+        # The project has no lockfile; that is all there is to warn about.
+        warnings = [line for line in result.stderr.splitlines() if line.startswith("Warning:")]
+        assert all("no lockfile covers" in line for line in warnings)
         data = json.loads(result.stdout)
         assert data["project_license"] == "MIT"
         assert [d["name"] for d in data["dependencies"]] == ["flask"]
-        assert data["diagnostics"] == []
+        assert _file_diagnostics(data) == []
 
     @respx.mock
     def test_lockfile_nested_too_deeply_is_a_gap_and_the_manifest_is_still_walked(self, tmp_path):
         # The lockfile is lost, so it is a gap. The direct dependency declared
-        # in package.json is still resolved through the registry.
+        # in package.json is still resolved through the registry, which leaves
+        # the manifest without a lockfile: a second gap, on the manifest.
         (tmp_path / "package.json").write_text(
             json.dumps({"name": "app", "license": "MIT", "dependencies": {"left-pad": "1.0.0"}}),
             encoding="utf-8",
@@ -404,12 +483,22 @@ class TestCheckCommand:
         data = json.loads(out.read_text(encoding="utf-8"))
         assert [(d["name"], d["license"]) for d in data["dependencies"]] == [("left-pad", "MIT")]
         assert data["diagnostics"] == [
-            {"path": "package-lock.json", "reason": "is not valid JSON; skipped", "severity": "gap"}
+            {
+                "path": "package-lock.json",
+                "reason": "is not valid JSON; skipped",
+                "severity": "gap",
+            },
+            {"path": "package.json", "reason": _MISSING_LOCKFILE, "severity": "gap"},
         ]
 
         strict = runner.invoke(main, ["check", "--path", str(tmp_path)])
         assert strict.exit_code == 1
-        assert "1 manifest(s) could not be fully analyzed" in strict.output
+        assert "2 manifest(s) could not be fully analyzed" in strict.output
+
+        # Accepting the estimate leaves the lost lockfile, which still fails.
+        accepted = runner.invoke(main, ["check", "--path", str(tmp_path), "--no-require-lockfile"])
+        assert accepted.exit_code == 1
+        assert "1 manifest(s) could not be fully analyzed" in accepted.output
 
     @respx.mock
     @pytest.mark.parametrize(
@@ -443,13 +532,24 @@ class TestCheckCommand:
         assert "which is not a relative path; not followed" in advisory.output
 
         strict = runner.invoke(
-            main, ["check", "--path", str(tmp_path), "--strict", "-f", "json", "-o", str(out)]
+            main,
+            [
+                "check",
+                "--path",
+                str(tmp_path),
+                "--no-require-lockfile",
+                "--strict",
+                "-f",
+                "json",
+                "-o",
+                str(out),
+            ],
         )
         assert strict.exit_code == 1
         assert "fails --strict" in strict.output
         data = json.loads(out.read_text(encoding="utf-8"))
         assert data["summary"]["gaps"] == 1
-        assert [(d["path"], d["severity"]) for d in data["diagnostics"]] == [(manifest, "gap")]
+        assert [(d["path"], d["severity"]) for d in _file_diagnostics(data)] == [(manifest, "gap")]
 
         assert [call for call in calls if "example.invalid" in call[1]] == []
 
@@ -947,7 +1047,7 @@ class TestCheckCommand:
         _mock_pypi("requests", "Apache 2.0")
 
         runner = CliRunner()
-        result = runner.invoke(main, ["check", "--path", str(tmp_path)])
+        result = runner.invoke(main, ["check", "--path", str(tmp_path), "--no-require-lockfile"])
         assert result.exit_code == 0
 
     @respx.mock
@@ -987,7 +1087,7 @@ class TestCheckCommand:
         )
 
         runner = CliRunner()
-        result = runner.invoke(main, ["check", "--path", str(tmp_path)])
+        result = runner.invoke(main, ["check", "--path", str(tmp_path), "--no-require-lockfile"])
         assert result.exit_code == 0
         request = route.calls[0].request
         assert request.headers["Accept"] == "application/json"
@@ -1006,7 +1106,7 @@ class TestCheckCommand:
         _mock_pypi("gpl-lib", "GPL-3.0")
 
         runner = CliRunner()
-        result = runner.invoke(main, ["check", "--path", str(tmp_path)])
+        result = runner.invoke(main, ["check", "--path", str(tmp_path), "--no-require-lockfile"])
         assert result.exit_code == 1
 
     @respx.mock
@@ -1043,7 +1143,9 @@ class TestCheckCommand:
             )
         )
 
-        result = CliRunner().invoke(main, ["check", "--path", str(tmp_path), "-f", "json"])
+        result = CliRunner().invoke(
+            main, ["check", "--path", str(tmp_path), "--no-require-lockfile", "-f", "json"]
+        )
         assert result.exit_code == 1
         data = json.loads(result.output[result.output.index("{") :])
         (dep,) = data["dependencies"]
@@ -1083,7 +1185,9 @@ class TestCheckCommand:
         _mock_pypi("some-lib", dep_license)
 
         runner = CliRunner()
-        result = runner.invoke(main, ["check", "--path", str(tmp_path), "-f", "json"])
+        result = runner.invoke(
+            main, ["check", "--path", str(tmp_path), "--no-require-lockfile", "-f", "json"]
+        )
         assert result.exit_code == 1
         data = json.loads(result.output[result.output.index("{") :])
         assert data["project_license"] == project_license.strip("()")
@@ -1120,7 +1224,9 @@ class TestCheckCommand:
         _mock_npm("npm-url-lib", license_url)
 
         runner = CliRunner()
-        result = runner.invoke(main, ["check", "--path", str(tmp_path), "-f", "json"])
+        result = runner.invoke(
+            main, ["check", "--path", str(tmp_path), "--no-require-lockfile", "-f", "json"]
+        )
         assert result.exit_code == 1
         data = json.loads(result.output[result.output.index("{") :])
         by_name = {dep["name"]: dep for dep in data["dependencies"]}
@@ -1156,7 +1262,9 @@ class TestCheckCommand:
         _mock_npm("restricted-lib", spdx_id)
 
         runner = CliRunner()
-        result = runner.invoke(main, ["check", "--path", str(tmp_path), "-f", "json"])
+        result = runner.invoke(
+            main, ["check", "--path", str(tmp_path), "--no-require-lockfile", "-f", "json"]
+        )
         assert result.exit_code == 1
         data = json.loads(result.output[result.output.index("{") :])
         (dep,) = data["dependencies"]
@@ -1179,7 +1287,7 @@ class TestCheckCommand:
         _mock_npm("disclaimer-lib", "BSD-3-Clause-No-Nuclear-Warranty")
 
         runner = CliRunner()
-        result = runner.invoke(main, ["check", "--path", str(tmp_path)])
+        result = runner.invoke(main, ["check", "--path", str(tmp_path), "--no-require-lockfile"])
         assert result.exit_code == 0
 
     @respx.mock
@@ -1201,7 +1309,17 @@ class TestCheckCommand:
         out = tmp_path / "report.json"
 
         result = CliRunner().invoke(
-            main, ["check", "--path", str(tmp_path), "-f", "json", "-o", str(out)]
+            main,
+            [
+                "check",
+                "--path",
+                str(tmp_path),
+                "--no-require-lockfile",
+                "-f",
+                "json",
+                "-o",
+                str(out),
+            ],
         )
         assert result.exit_code == 1
         data = json.loads(out.read_text(encoding="utf-8"))
@@ -1228,7 +1346,17 @@ class TestCheckCommand:
         out = tmp_path / "report.json"
 
         result = CliRunner().invoke(
-            main, ["check", "--path", str(tmp_path), "-f", "json", "-o", str(out)]
+            main,
+            [
+                "check",
+                "--path",
+                str(tmp_path),
+                "--no-require-lockfile",
+                "-f",
+                "json",
+                "-o",
+                str(out),
+            ],
         )
         assert result.exit_code == 1
         data = json.loads(out.read_text(encoding="utf-8"))
@@ -1247,7 +1375,7 @@ class TestCheckCommand:
         assert warn.exit_code == 0
         assert "pkg/setup.cfg: is not valid INI" in warn.output
 
-        strict = runner.invoke(main, ["check", "--path", str(tmp_path)])
+        strict = runner.invoke(main, ["check", "--path", str(tmp_path), "--no-require-lockfile"])
         assert strict.exit_code == 1
         assert "fails --strict" in strict.output
 
@@ -1267,7 +1395,17 @@ class TestCheckCommand:
 
         warn = runner.invoke(
             main,
-            ["check", "--path", str(tmp_path), "--no-strict", "-f", "json", "-o", str(out)],
+            [
+                "check",
+                "--path",
+                str(tmp_path),
+                "--no-require-lockfile",
+                "--no-strict",
+                "-f",
+                "json",
+                "-o",
+                str(out),
+            ],
         )
         assert warn.exit_code == 0
         assert warn.output.count("Warning: setup.py: is not valid Python 3; skipped") == 1
@@ -1275,7 +1413,7 @@ class TestCheckCommand:
         assert data["summary"]["gaps"] == 1
         assert [dep["name"] for dep in data["dependencies"]] == ["requests"]
 
-        strict = runner.invoke(main, ["check", "--path", str(tmp_path)])
+        strict = runner.invoke(main, ["check", "--path", str(tmp_path), "--no-require-lockfile"])
         assert strict.exit_code == 1
         assert "fails --strict" in strict.output
 
@@ -1292,7 +1430,7 @@ class TestCheckCommand:
         _mock_pypi("lgpl-lib", "LGPL-3.0-only")
 
         runner = CliRunner()
-        result = runner.invoke(main, ["check", "--path", str(tmp_path)])
+        result = runner.invoke(main, ["check", "--path", str(tmp_path), "--no-require-lockfile"])
         assert result.exit_code == 1
 
     @respx.mock
@@ -1335,7 +1473,7 @@ class TestCheckCommand:
         )
 
         runner = CliRunner()
-        result = runner.invoke(main, ["check", "--path", str(tmp_path)])
+        result = runner.invoke(main, ["check", "--path", str(tmp_path), "--no-require-lockfile"])
         assert result.exit_code == 1
 
     @pytest.mark.no_default_deps_dev_mock
@@ -1408,7 +1546,9 @@ class TestCheckCommand:
         _mock_pypi("requests", "MIT")
 
         runner = CliRunner()
-        result = runner.invoke(main, ["check", "--path", str(tmp_path), "-f", "json"])
+        result = runner.invoke(
+            main, ["check", "--path", str(tmp_path), "--no-require-lockfile", "-f", "json"]
+        )
         assert result.exit_code == 0
         # Click mixes stderr into output by default; extract JSON part
         output = result.output
@@ -1432,7 +1572,16 @@ class TestCheckCommand:
         runner = CliRunner()
         result = runner.invoke(
             main,
-            ["check", "--path", str(tmp_path), "-f", "json", "-o", str(out_file)],
+            [
+                "check",
+                "--path",
+                str(tmp_path),
+                "--no-require-lockfile",
+                "-f",
+                "json",
+                "-o",
+                str(out_file),
+            ],
         )
         assert result.exit_code == 0
         assert out_file.exists()
@@ -1456,7 +1605,16 @@ class TestCheckCommand:
         runner = CliRunner()
         result = runner.invoke(
             main,
-            ["check", "--path", str(tmp_path), "-f", "markdown", "-o", str(out_file)],
+            [
+                "check",
+                "--path",
+                str(tmp_path),
+                "--no-require-lockfile",
+                "-f",
+                "markdown",
+                "-o",
+                str(out_file),
+            ],
         )
         assert result.exit_code == 0
         content = out_file.read_text(encoding="utf-8")
@@ -1483,7 +1641,16 @@ class TestCheckCommand:
         runner = CliRunner()
         result = runner.invoke(
             main,
-            ["check", "--path", str(tmp_path), "-f", "table", "-o", str(out_file)],
+            [
+                "check",
+                "--path",
+                str(tmp_path),
+                "--no-require-lockfile",
+                "-f",
+                "table",
+                "-o",
+                str(out_file),
+            ],
         )
         assert result.exit_code == 0
         content = out_file.read_text(encoding="utf-8")
@@ -1507,7 +1674,16 @@ class TestCheckCommand:
         runner = CliRunner()
         result = runner.invoke(
             main,
-            ["check", "--path", str(tmp_path), "-f", "json", "-o", str(out_file)],
+            [
+                "check",
+                "--path",
+                str(tmp_path),
+                "--no-require-lockfile",
+                "-f",
+                "json",
+                "-o",
+                str(out_file),
+            ],
         )
         assert result.exit_code == 0
         assert out_file.exists()
@@ -1531,7 +1707,16 @@ class TestCheckCommand:
         runner = CliRunner()
         result = runner.invoke(
             main,
-            ["check", "--path", str(tmp_path), "-f", "json", "-o", str(out_file)],
+            [
+                "check",
+                "--path",
+                str(tmp_path),
+                "--no-require-lockfile",
+                "-f",
+                "json",
+                "-o",
+                str(out_file),
+            ],
         )
         # MIT project + GPL-3.0 dep → violation → strict-mode failure.
         assert result.exit_code == 1
@@ -1559,7 +1744,17 @@ class TestCheckCommand:
         out_file = tmp_path / "LICENSES.md"
 
         result = CliRunner().invoke(
-            main, ["check", "--path", str(tmp_path), "-f", "markdown", "-o", str(out_file)]
+            main,
+            [
+                "check",
+                "--path",
+                str(tmp_path),
+                "--no-require-lockfile",
+                "-f",
+                "markdown",
+                "-o",
+                str(out_file),
+            ],
         )
         assert result.exit_code == 1
         assert "License check failed: 0 violations, 1 warning, 0 unknown, 1 ok" in result.stderr
@@ -1611,7 +1806,17 @@ class TestCheckCommand:
         out_file = tmp_path / "report.json"
 
         result = CliRunner().invoke(
-            main, ["check", "--path", str(tmp_path), "-f", "json", "-o", str(out_file)]
+            main,
+            [
+                "check",
+                "--path",
+                str(tmp_path),
+                "--no-require-lockfile",
+                "-f",
+                "json",
+                "-o",
+                str(out_file),
+            ],
         )
         assert result.exit_code == 1
         assert (
@@ -1631,7 +1836,9 @@ class TestCheckCommand:
         )
         _mock_pypi("lgpl-lib", "LGPL-3.0-only")
 
-        result = CliRunner().invoke(main, ["check", "--path", str(tmp_path)])
+        result = CliRunner().invoke(
+            main, ["check", "--path", str(tmp_path), "--no-require-lockfile"]
+        )
         assert result.exit_code == 1
         assert "License check failed" not in result.stderr
 
@@ -1657,7 +1864,16 @@ class TestCheckCommand:
         ):
             result = runner.invoke(
                 main,
-                ["check", "--path", str(tmp_path), "-f", "json", "-o", str(out_file)],
+                [
+                    "check",
+                    "--path",
+                    str(tmp_path),
+                    "--no-require-lockfile",
+                    "-f",
+                    "json",
+                    "-o",
+                    str(out_file),
+                ],
             )
         assert result.exit_code == 1
         assert f"Failed to write report to {out_file}" in result.output
@@ -1693,6 +1909,7 @@ class TestCheckCommand:
                 "check",
                 "--path",
                 str(tmp_path),
+                "--no-require-lockfile",
                 "-f",
                 "json",
             ],
@@ -1733,7 +1950,9 @@ class TestCheckCommand:
         _mock_pypi("requests", "MIT", version="2.31.0")
 
         runner = CliRunner()
-        result = runner.invoke(main, ["check", "--path", str(tmp_path), "-f", "json"])
+        result = runner.invoke(
+            main, ["check", "--path", str(tmp_path), "--no-require-lockfile", "-f", "json"]
+        )
         assert result.exit_code == 0
         data = json.loads(result.output[result.output.index("{") :])
         by_name = {dep["name"]: dep for dep in data["dependencies"]}
@@ -1766,7 +1985,9 @@ class TestCheckCommand:
         _mock_pypi("gpl-lib", "GPL-3.0", version="1.0.0")
 
         runner = CliRunner()
-        result = runner.invoke(main, ["check", "--path", str(tmp_path), "-f", "json"])
+        result = runner.invoke(
+            main, ["check", "--path", str(tmp_path), "--no-require-lockfile", "-f", "json"]
+        )
         assert result.exit_code == 0
         data = json.loads(result.output[result.output.index("{") :])
         dep = data["dependencies"][0]
@@ -1799,7 +2020,7 @@ class TestCheckCommand:
         _mock_pypi("requests", "MIT")
 
         runner = CliRunner()
-        result = runner.invoke(main, ["check", "--path", str(tmp_path)])
+        result = runner.invoke(main, ["check", "--path", str(tmp_path), "--no-require-lockfile"])
         assert result.exit_code != 0
         assert "Invalid reviewed license" in result.output
 
@@ -1825,7 +2046,7 @@ class TestCheckCommand:
         _mock_pypi("requests", "MIT", version="1.0.0")
 
         runner = CliRunner()
-        result = runner.invoke(main, ["check", "--path", str(tmp_path)])
+        result = runner.invoke(main, ["check", "--path", str(tmp_path), "--no-require-lockfile"])
         assert result.exit_code != 0
         assert "did not match any resolved package versions" in result.output
         assert "python:requests@2.0.0" in result.output
@@ -1882,7 +2103,7 @@ class TestCheckCommand:
         runner = CliRunner()
 
         # Step 1: check fails because the review pins 1.0.0 but 2.0.0 resolves.
-        result1 = runner.invoke(main, ["check", "--path", str(tmp_path)])
+        result1 = runner.invoke(main, ["check", "--path", str(tmp_path), "--no-require-lockfile"])
         assert result1.exit_code != 0
         assert "did not match any resolved package versions" in result1.output
 
@@ -1898,7 +2119,7 @@ class TestCheckCommand:
         # Step 3: check now passes. If the hint ever drifts back to advice
         # that doesn't actually fix the situation (e.g. recommending a
         # command that only appends new stanzas), this assertion fails.
-        result2 = runner.invoke(main, ["check", "--path", str(tmp_path)])
+        result2 = runner.invoke(main, ["check", "--path", str(tmp_path), "--no-require-lockfile"])
         assert result2.exit_code == 0, (
             f"Following the stale-pin hint should resolve the error; got "
             f"exit {result2.exit_code} with output:\n{result2.output}"
@@ -1927,7 +2148,7 @@ class TestCheckCommand:
         _mock_pypi("requests", "MIT", version="1.0.0")
 
         runner = CliRunner()
-        result = runner.invoke(main, ["check", "--path", str(tmp_path)])
+        result = runner.invoke(main, ["check", "--path", str(tmp_path), "--no-require-lockfile"])
         assert result.exit_code != 0
         assert "non-string 'note'" in result.output
 
@@ -1954,7 +2175,7 @@ class TestCheckCommand:
         _mock_pypi("mystery-lib", "Unknown", version="1.0.0")
 
         runner = CliRunner()
-        result = runner.invoke(main, ["check", "--path", str(tmp_path)])
+        result = runner.invoke(main, ["check", "--path", str(tmp_path), "--no-require-lockfile"])
         assert result.exit_code == 1
         assert (
             "incomplete review entries were not applied: python:mystery-lib@1.0.0" in result.output
@@ -2430,7 +2651,7 @@ class TestCheckCommand:
         assert "# raw: Custom license All rights reserved.\n" in content
         assert load_review_file(tmp_path).incomplete == ["npm:custom-lib@1.0.0"]
 
-        result = runner.invoke(main, ["check", "--path", str(tmp_path)])
+        result = runner.invoke(main, ["check", "--path", str(tmp_path), "--no-require-lockfile"])
         assert "Invalid licenseal.review.toml" not in result.output
         assert "incomplete review entries were not applied: npm:custom-lib@1.0.0" in result.output
 
@@ -2487,7 +2708,9 @@ class TestCheckCommand:
         assert text.count('license = ""') == 1
         review_path.write_text(text.replace('license = ""', 'license = "MIT"'), encoding="utf-8")
 
-        result = runner.invoke(main, ["check", "--path", str(tmp_path), "-f", "json"])
+        result = runner.invoke(
+            main, ["check", "--path", str(tmp_path), "--no-require-lockfile", "-f", "json"]
+        )
         assert result.exit_code == 1
         data = json.loads(result.output[result.output.index("{") :])
         by_name = {dep["name"]: dep for dep in data["dependencies"]}
@@ -2645,7 +2868,9 @@ class TestCheckCommand:
         _mock_pypi("requests", "MIT")
 
         runner = CliRunner()
-        result = runner.invoke(main, ["check", "--path", str(tmp_path), "-f", "markdown"])
+        result = runner.invoke(
+            main, ["check", "--path", str(tmp_path), "--no-require-lockfile", "-f", "markdown"]
+        )
         assert result.exit_code == 0
         assert "# License Analysis Report" in result.output
         assert "Completed in" not in result.output
@@ -2728,7 +2953,9 @@ class TestCheckCommand:
         _mock_pypi("requests", "MIT")
 
         runner = CliRunner()
-        result = runner.invoke(main, ["check", "--path", str(tmp_path), "-f", "json"])
+        result = runner.invoke(
+            main, ["check", "--path", str(tmp_path), "--no-require-lockfile", "-f", "json"]
+        )
         assert result.exit_code == 0
         output = result.output
         json_start = output.index("{")
@@ -2753,7 +2980,9 @@ class TestCheckCommand:
         _mock_pypi("gpl-lib", "GPL-3.0", version="1.0.0")
 
         runner = CliRunner()
-        result = runner.invoke(main, ["check", "--path", str(tmp_path), "-f", "json"])
+        result = runner.invoke(
+            main, ["check", "--path", str(tmp_path), "--no-require-lockfile", "-f", "json"]
+        )
         assert result.exit_code == 0
         data = json.loads(result.output[result.output.index("{") :])
         assert [dep["name"] for dep in data["dependencies"]] == ["requests"]
@@ -2775,7 +3004,9 @@ class TestCheckCommand:
         _mock_pypi("gpl-lib", "GPL-3.0", version="1.0.0")
 
         runner = CliRunner()
-        result = runner.invoke(main, ["check", "--path", str(tmp_path), "--dev"])
+        result = runner.invoke(
+            main, ["check", "--path", str(tmp_path), "--no-require-lockfile", "--dev"]
+        )
         assert result.exit_code == 1
 
     @respx.mock
@@ -2837,7 +3068,7 @@ class TestCheckCommand:
         _mock_npm("react", "MIT", version="18.2.0")
 
         runner = CliRunner()
-        result = runner.invoke(main, ["check", "--path", str(tmp_path)])
+        result = runner.invoke(main, ["check", "--path", str(tmp_path), "--no-require-lockfile"])
         assert result.exit_code == 0
 
     @respx.mock
@@ -2870,7 +3101,7 @@ class TestCheckCommand:
             runner = CliRunner()
             result = runner.invoke(
                 main,
-                ["check", "--path", str(tmp_path), "--max-workers", "1"],
+                ["check", "--path", str(tmp_path), "--no-require-lockfile", "--max-workers", "1"],
             )
         assert result.exit_code == 0
         assert seen == [1]
@@ -2889,7 +3120,7 @@ class TestCheckCommand:
         _mock_npm("express", "MIT", version="4.0.0")
 
         runner = CliRunner()
-        result = runner.invoke(main, ["check", "--path", str(tmp_path)])
+        result = runner.invoke(main, ["check", "--path", str(tmp_path), "--no-require-lockfile"])
         assert result.exit_code == 0
 
     @respx.mock
@@ -2934,7 +3165,18 @@ class TestCheckWithUnusableRegistryAnswers:
         """Run ``check`` with a JSON report file; return the result and the report."""
         out = tmp_path / "report.json"
         result = CliRunner().invoke(
-            main, ["check", "--path", str(tmp_path), "-f", "json", "-o", str(out), *flags]
+            main,
+            [
+                "check",
+                "--path",
+                str(tmp_path),
+                "--no-require-lockfile",
+                "-f",
+                "json",
+                "-o",
+                str(out),
+                *flags,
+            ],
         )
         report = json.loads(out.read_text(encoding="utf-8")) if out.exists() else None
         return result, report
@@ -3287,7 +3529,9 @@ class TestTetheredIntegration:
             )
 
         runner = CliRunner()
-        result = runner.invoke(main, ["check", "--path", str(tmp_path), "--max-workers", "4"])
+        result = runner.invoke(
+            main, ["check", "--path", str(tmp_path), "--no-require-lockfile", "--max-workers", "4"]
+        )
         assert result.exit_code == 0
         assert result.exception is None
         assert "context is already entered" not in result.output
@@ -3306,7 +3550,9 @@ class TestTetheredIntegration:
 
         with patch.object(tethered, "scope", wraps=tethered.scope) as mock_scope:
             runner = CliRunner()
-            result = runner.invoke(main, ["check", "--path", str(tmp_path)])
+            result = runner.invoke(
+                main, ["check", "--path", str(tmp_path), "--no-require-lockfile"]
+            )
             assert result.exit_code == 0
             mock_scope.assert_called_once()
             kwargs = mock_scope.call_args.kwargs
@@ -3353,7 +3599,7 @@ class TestTetheredIntegration:
 
         tethered.activate(allow=["pypi.org:443", "registry.npmjs.org:443"])
         runner = CliRunner()
-        result = runner.invoke(main, ["check", "--path", str(tmp_path)])
+        result = runner.invoke(main, ["check", "--path", str(tmp_path), "--no-require-lockfile"])
         assert result.exit_code == 0
 
     def test_host_activate_without_registries_yields_clean_error(self, tmp_path):
@@ -3432,7 +3678,7 @@ class TestTetheredIntegration:
         _mock_pypi("goodpkg", "MIT")
 
         runner = CliRunner()
-        result = runner.invoke(main, ["check", "--path", str(tmp_path)])
+        result = runner.invoke(main, ["check", "--path", str(tmp_path), "--no-require-lockfile"])
         assert "could not be resolved" in result.output
         assert "Could not resolve any of the" not in result.output
 
@@ -3698,7 +3944,9 @@ class TestSkillStaleness:
         path.parent.mkdir(parents=True)
         path.write_bytes(b"\xff\xfe" + "notes\n".encode("utf-16-le"))
         _mock_pypi("flask", "BSD-3-Clause")
-        result = CliRunner().invoke(main, ["check", "--path", str(tmp_path)])
+        result = CliRunner().invoke(
+            main, ["check", "--path", str(tmp_path), "--no-require-lockfile"]
+        )
         assert result.exit_code == 0
         assert "flask" in result.output
         assert "install-skill" not in result.output
@@ -3911,7 +4159,9 @@ class TestRustEcosystem:
         )
 
         runner = CliRunner()
-        result = runner.invoke(main, ["check", "--path", str(tmp_path), "-f", "json"])
+        result = runner.invoke(
+            main, ["check", "--path", str(tmp_path), "--no-require-lockfile", "-f", "json"]
+        )
         assert result.exit_code == 0
         data = json.loads(result.output[result.output.index("{") :])
         rust_dep = next(d for d in data["dependencies"] if d["name"] == "serde")
@@ -3995,7 +4245,9 @@ class TestRustEcosystem:
         ]
 
         runner = CliRunner()
-        result = runner.invoke(main, ["check", "--path", str(tmp_path), "-f", "json"])
+        result = runner.invoke(
+            main, ["check", "--path", str(tmp_path), "--no-require-lockfile", "-f", "json"]
+        )
         assert result.exit_code == 0
         data = json.loads(result.output[result.output.index("{") :])
         licenses = {d["name"]: d["license"] for d in data["dependencies"]}
@@ -4506,8 +4758,8 @@ class TestJavaEcosystem:
         # A build that leaves versions to a BOM declares bare
         # ``group:artifact`` coordinates. They are reported — unresolved,
         # since the version is not knowable without a lockfile — so strict
-        # fails instead of passing an empty scan. The build file itself is
-        # not a gap.
+        # fails instead of passing an empty scan. The build file is read in
+        # full; the one thing recorded on it is that it has no lockfile.
         (tmp_path / filename).write_text(content, encoding="utf-8")
         runner = CliRunner()
 
@@ -4516,8 +4768,10 @@ class TestJavaEcosystem:
         data = json.loads(strict.output[strict.output.index("{") :])
         assert data["summary"]["total"] == 2
         assert data["summary"]["unknown"] == 2
-        assert data["summary"]["gaps"] == 0
-        assert data["diagnostics"] == []
+        assert data["summary"]["gaps"] == 1
+        assert data["diagnostics"] == [
+            {"path": filename, "reason": _MISSING_LOCKFILE, "severity": "gap"}
+        ]
         assert {(d["name"], d["license"], d["group"]) for d in data["dependencies"]} == {
             ("org.example:web", "UNKNOWN", "prod"),
             ("org.example:driver", "UNKNOWN", "prod"),
@@ -4631,7 +4885,18 @@ class TestDotnetEcosystem:
     def _check(tmp_path, *flags: str):
         out = tmp_path / "report.json"
         result = CliRunner().invoke(
-            main, ["check", "--path", str(tmp_path), *flags, "-f", "json", "-o", str(out)]
+            main,
+            [
+                "check",
+                "--path",
+                str(tmp_path),
+                "--no-require-lockfile",
+                *flags,
+                "-f",
+                "json",
+                "-o",
+                str(out),
+            ],
         )
         data = json.loads(out.read_text(encoding="utf-8"))
         return result.exit_code, {d["name"]: d for d in data["dependencies"]}
@@ -5067,7 +5332,17 @@ class TestPhpEcosystem:
         out = tmp_path / "report.json"
 
         result = CliRunner().invoke(
-            main, ["check", "--path", str(tmp_path), "-f", "json", "-o", str(out)]
+            main,
+            [
+                "check",
+                "--path",
+                str(tmp_path),
+                "--no-require-lockfile",
+                "-f",
+                "json",
+                "-o",
+                str(out),
+            ],
         )
         assert result.exit_code == 1
         assert copyleft_route.called
@@ -5112,7 +5387,17 @@ class TestPhpEcosystem:
         out = tmp_path / "report.json"
 
         result = CliRunner().invoke(
-            main, ["check", "--path", str(tmp_path), "-f", "json", "-o", str(out)]
+            main,
+            [
+                "check",
+                "--path",
+                str(tmp_path),
+                "--no-require-lockfile",
+                "-f",
+                "json",
+                "-o",
+                str(out),
+            ],
         )
         assert result.exit_code == 1
         data = json.loads(out.read_text(encoding="utf-8"))
@@ -5430,7 +5715,17 @@ class TestRubyEcosystem:
         out = tmp_path / "report.json"
 
         result = CliRunner().invoke(
-            main, ["check", "--path", str(tmp_path), "-f", "json", "-o", str(out)]
+            main,
+            [
+                "check",
+                "--path",
+                str(tmp_path),
+                "--no-require-lockfile",
+                "-f",
+                "json",
+                "-o",
+                str(out),
+            ],
         )
         assert result.exit_code == 1
         data = json.loads(out.read_text(encoding="utf-8"))
@@ -5568,7 +5863,17 @@ class TestRubyEcosystem:
         out = tmp_path / "report.json"
 
         result = CliRunner().invoke(
-            main, ["check", "--path", str(tmp_path), "-f", "json", "-o", str(out)]
+            main,
+            [
+                "check",
+                "--path",
+                str(tmp_path),
+                "--no-require-lockfile",
+                "-f",
+                "json",
+                "-o",
+                str(out),
+            ],
         )
         assert result.exit_code == 1
         data = json.loads(out.read_text(encoding="utf-8"))
@@ -6008,7 +6313,18 @@ class TestHexEcosystem:
         def check(*flags: str):
             out = tmp_path / "report.json"
             result = CliRunner().invoke(
-                main, ["check", "--path", str(tmp_path), *flags, "-f", "json", "-o", str(out)]
+                main,
+                [
+                    "check",
+                    "--path",
+                    str(tmp_path),
+                    "--no-require-lockfile",
+                    *flags,
+                    "-f",
+                    "json",
+                    "-o",
+                    str(out),
+                ],
             )
             data = json.loads(out.read_text(encoding="utf-8"))
             rows = {d["name"]: (d["group"], d["verdict"]) for d in data["dependencies"]}
@@ -6226,7 +6542,16 @@ class TestTransitiveFlag:
 
         runner = CliRunner()
         result = runner.invoke(
-            main, ["check", "--path", str(tmp_path), "-f", "json", "--transitive"]
+            main,
+            [
+                "check",
+                "--path",
+                str(tmp_path),
+                "--no-require-lockfile",
+                "-f",
+                "json",
+                "--transitive",
+            ],
         )
         assert result.exit_code == 0
         data = json.loads(result.output[result.output.index("{") :])
@@ -7923,7 +8248,9 @@ class TestRegistryCacheDedupe:
             """)
         )
         runner = CliRunner()
-        result = runner.invoke(main, ["check", "--path", str(tmp_path), "-f", "json"])
+        result = runner.invoke(
+            main, ["check", "--path", str(tmp_path), "--no-require-lockfile", "-f", "json"]
+        )
         assert result.exit_code == 0
         # Walker fetches once; license resolution finds the cache and skips
         # the network. Without dedupe this would be 2.
@@ -8035,7 +8362,9 @@ class TestRegistryCacheDedupe:
             """)
         )
         runner = CliRunner()
-        result = runner.invoke(main, ["check", "--path", str(tmp_path), "-f", "json"])
+        result = runner.invoke(
+            main, ["check", "--path", str(tmp_path), "--no-require-lockfile", "-f", "json"]
+        )
         assert result.exit_code == 0
         # /pypi/numpy/json is the version-selection endpoint. Both parents
         # depend on numpy with different specs; without dedupe each would
@@ -8076,7 +8405,16 @@ class TestExcludeDirsAndNestedGit:
         runner = CliRunner()
         result = runner.invoke(
             main,
-            ["check", "--path", str(tmp_path), "-f", "json", "--exclude-dirs", "vendored"],
+            [
+                "check",
+                "--path",
+                str(tmp_path),
+                "--no-require-lockfile",
+                "-f",
+                "json",
+                "--exclude-dirs",
+                "vendored",
+            ],
         )
         assert result.exit_code == 0
         data = json.loads(result.output[result.output.index("{") :])
@@ -8109,7 +8447,16 @@ class TestExcludeDirsAndNestedGit:
         runner = CliRunner()
         result = runner.invoke(
             main,
-            ["check", "--path", str(tmp_path), "-f", "json", "--exclude-dirs", str(inner)],
+            [
+                "check",
+                "--path",
+                str(tmp_path),
+                "--no-require-lockfile",
+                "-f",
+                "json",
+                "--exclude-dirs",
+                str(inner),
+            ],
         )
         assert result.exit_code == 0
         data = json.loads(result.output[result.output.index("{") :])
@@ -8147,6 +8494,7 @@ class TestExcludeDirsAndNestedGit:
                 "check",
                 "--path",
                 str(tmp_path),
+                "--no-require-lockfile",
                 "-f",
                 "json",
                 "--exclude-dirs",
@@ -8189,7 +8537,16 @@ class TestExcludeDirsAndNestedGit:
         runner = CliRunner()
         result = runner.invoke(
             main,
-            ["check", "--path", str(tmp_path), "-f", "json", "--exclude-dirs", "a,b"],
+            [
+                "check",
+                "--path",
+                str(tmp_path),
+                "--no-require-lockfile",
+                "-f",
+                "json",
+                "--exclude-dirs",
+                "a,b",
+            ],
         )
         assert result.exit_code == 0
         data = json.loads(result.output[result.output.index("{") :])
@@ -8244,7 +8601,9 @@ class TestExcludeDirsAndNestedGit:
         )
         _mock_pypi("requests", "MIT")
         runner = CliRunner()
-        result = runner.invoke(main, ["check", "--path", str(tmp_path), "-f", "json"])
+        result = runner.invoke(
+            main, ["check", "--path", str(tmp_path), "--no-require-lockfile", "-f", "json"]
+        )
         assert result.exit_code == 0
         assert "Excluded 1 local Python workspace package reference(s)" in result.stderr
         data = json.loads(result.stdout[result.stdout.index("{") :])
@@ -8277,7 +8636,9 @@ class TestExcludeDirsAndNestedGit:
         _mock_pypi("requests", "MIT")
         _mock_pypi("gpl-lib", "GPL-3.0")
         runner = CliRunner()
-        result = runner.invoke(main, ["check", "--path", str(tmp_path), "-f", "json"])
+        result = runner.invoke(
+            main, ["check", "--path", str(tmp_path), "--no-require-lockfile", "-f", "json"]
+        )
         assert result.exit_code == 0
         data = json.loads(result.output[result.output.index("{") :])
         names = {dep["name"] for dep in data["dependencies"]}
@@ -8403,7 +8764,9 @@ class TestDepsDevBatchHitShortcut:
         )
 
         runner = CliRunner()
-        result = runner.invoke(main, ["check", "--path", str(tmp_path), "-f", "json"])
+        result = runner.invoke(
+            main, ["check", "--path", str(tmp_path), "--no-require-lockfile", "-f", "json"]
+        )
         assert result.exit_code == 0
         data = json.loads(result.output[result.output.index("{") :])
         py_dep = next(d for d in data["dependencies"] if d["name"] == "requests")
@@ -8443,7 +8806,9 @@ class TestDepsDevBatchHitShortcut:
         )
 
         runner = CliRunner()
-        result = runner.invoke(main, ["check", "--path", str(tmp_path), "-f", "json"])
+        result = runner.invoke(
+            main, ["check", "--path", str(tmp_path), "--no-require-lockfile", "-f", "json"]
+        )
         assert result.exit_code == 0
         data = json.loads(result.output[result.output.index("{") :])
         npm_dep = next(d for d in data["dependencies"] if d["name"] == "lodash")
@@ -8486,7 +8851,9 @@ class TestDepsDevBatchHitShortcut:
         )
 
         runner = CliRunner()
-        result = runner.invoke(main, ["check", "--path", str(tmp_path), "-f", "json"])
+        result = runner.invoke(
+            main, ["check", "--path", str(tmp_path), "--no-require-lockfile", "-f", "json"]
+        )
         assert result.exit_code == 0
         data = json.loads(result.output[result.output.index("{") :])
         rust_dep = next(d for d in data["dependencies"] if d["name"] == "serde")
@@ -8586,7 +8953,9 @@ class TestDepsDevBatchHitShortcut:
         )
 
         runner = CliRunner()
-        result = runner.invoke(main, ["check", "--path", str(tmp_path), "-f", "json"])
+        result = runner.invoke(
+            main, ["check", "--path", str(tmp_path), "--no-require-lockfile", "-f", "json"]
+        )
         assert result.exit_code == 0
         data = json.loads(result.output[result.output.index("{") :])
         dotnet_dep = next(d for d in data["dependencies"] if d["name"] == "Newtonsoft.Json")
@@ -8656,7 +9025,14 @@ class TestDeprecatedIdExitCode:
     @staticmethod
     def _run(tmp_path, name: str):
         result = CliRunner().invoke(
-            main, ["check", "--path", str(tmp_path), *TestDeprecatedIdExitCode._ARGS]
+            main,
+            [
+                "check",
+                "--path",
+                str(tmp_path),
+                "--no-require-lockfile",
+                *TestDeprecatedIdExitCode._ARGS,
+            ],
         )
         data = json.loads(result.output[result.output.index("{") :])
         dep = next(d for d in data["dependencies"] if d["name"] == name)
@@ -8954,7 +9330,7 @@ class TestCliMarkdownViolation:
         runner = CliRunner()
         result = runner.invoke(
             main,
-            ["check", "--path", str(tmp_path), "-f", "markdown"],
+            ["check", "--path", str(tmp_path), "--no-require-lockfile", "-f", "markdown"],
         )
         assert result.exit_code == 1
         assert "# License Analysis Report" in result.output

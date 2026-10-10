@@ -122,7 +122,7 @@ uv add --dev licenseal
 pip install licenseal
 ```
 
-The exit code is non-zero when there are unreviewed violations, warnings, unknown licenses, or analysis gaps. See [USAGE.md](USAGE.md) for every flag and report format.
+The exit code is non-zero when there are unreviewed violations, warnings, unknown licenses, or analysis gaps. A manifest with no lockfile is an analysis gap: commit a lockfile, or pass `--no-require-lockfile` to accept versions estimated from the registry. See [USAGE.md](USAGE.md) for every flag and report format.
 
 ## 🤖 Claude Code Review Skill
 
@@ -195,6 +195,7 @@ No tool clears every row. The discovery rows are about source-tree analysis: man
 | `--transitive` | Scans the transitive dependency tree by default. Use `--no-transitive` for direct deps only. |
 | `--no-dev` | Dev dependencies are excluded unless `--dev` is set. |
 | `--strict` | Warnings, unknowns, and analysis gaps fail CI in addition to violations. |
+| `--require-lockfile` | A manifest whose dependencies no lockfile covers is an analysis gap. `--no-require-lockfile` scans it anyway and marks the versions as estimates (`~1.2.3`). |
 | Violations always fail | `--no-strict` demotes warnings, unknowns, and gaps only; definite incompatibilities still fail. |
 | Project license from the scanned directory, else `Proprietary` | The project's own license is read from a manifest in the scanned directory itself (`pyproject.toml`, `package.json`, `Cargo.toml`, …), never from a nested package, and the scan prints which file supplied it. If none declares a recognised license, licenseal labels the project `Proprietary` and checks dependencies as if it were permissively licensed — copyleft dependencies are still flagged, so the default errs strict, not lenient. Scan a subproject with `--path` to check it against its own license. See [USAGE.md](USAGE.md#project-license). |
 | Registry-only resolution | No installs, builds, package archive downloads, or source-prose license extraction. |

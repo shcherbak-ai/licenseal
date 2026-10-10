@@ -15,6 +15,8 @@ uvx licenseal check
   running builds, or downloading package archives.
 - Fails strict checks on unreviewed violations, warnings, unknown licenses, and
   analysis gaps. Development dependencies are included with `--dev`.
+- Treats a manifest without a lockfile as an analysis gap; `--no-require-lockfile`
+  accepts versions estimated from the registry and marks them in the report.
 - Produces terminal, Markdown, and JSON reports, with checked-in manual review records.
 
 For a persistent installation:

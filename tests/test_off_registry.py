@@ -41,7 +41,7 @@ from licenseal.review import (
     review_key,
     source_review_key,
 )
-from tests._helpers import _check_json, _dirs, _write
+from tests._helpers import _check_json, _dirs, _file_diagnostics, _write
 
 
 def _refuse_everything_else() -> None:
@@ -1822,7 +1822,7 @@ class TestPythonSourceTables:
         # looked up on PyPI.
         _mock_pypi_release("mirrored", "2.0.0")
         _refuse_everything_else()
-        result, data = _check_json(project, "--dev", "--no-strict")
+        result, data = _check_json(project, "--dev", "--no-strict", "--no-require-lockfile")
         assert result.exit_code == 0
         assert _origins(data) == {
             "regular": "",
@@ -1843,8 +1843,9 @@ class TestPythonSourceTables:
         assert rows["dev-git"]["group"] == "dev"
         assert _requests_mentioning(*forks, "path-inside", "dev-inside") == []
         assert _requests_mentioning("mirrored")
-        # The value that is not a string is on record.
-        assert data["diagnostics"] == [
+        # The value that is not a string is on record. The other entry says
+        # that the two registry requirements were resolved without a lockfile.
+        assert _file_diagnostics(data) == [
             {
                 "path": "pyproject.toml",
                 "reason": "an entry of tool.poetry.dependencies has an unexpected type; ignored",
@@ -4130,9 +4131,11 @@ class TestDotnetProjectReferences:
 
     @respx.mock
     def test_unknown_rows_fail_a_strict_scan_until_reviewed(self, tmp_path):
+        # The two registry references have no lockfile; that is accepted here
+        # so that the unknown rows alone decide the exit code.
         project = self._project(tmp_path)
         self._mock_registry()
-        result, data = _check_json(project)
+        result, data = _check_json(project, "--no-require-lockfile")
         assert result.exit_code == 1
         # A path holds backslashes: the stanza is written by the scaffold.
         report = project / "report.json"
@@ -4145,7 +4148,7 @@ class TestDotnetProjectReferences:
         (project / REVIEW_FILE_NAME).write_text(
             scaffold.replace('license = ""', 'license = "MIT"'), encoding="utf-8", newline="\n"
         )
-        result, data = _check_json(project)
+        result, data = _check_json(project, "--no-require-lockfile")
         assert result.exit_code == 0
         assert data["summary"]["reviewed"] == len(self._OUTSIDE)
         assert _requests_mentioning(*self._OUTSIDE, "Sibling") == []
@@ -4368,8 +4371,10 @@ class TestPathsInsideTheScanThatNothingReads:
 
     @respx.mock
     def test_such_a_row_fails_a_strict_scan_until_it_is_reviewed(self, tmp_path):
+        # The registry requirements beside these rows have no lockfile; that
+        # is accepted here so that the unknown rows alone decide the exit code.
         project = self._project(tmp_path)
-        result, data = _check_json(project)
+        result, data = _check_json(project, "--no-require-lockfile")
         assert result.exit_code == 1
         report = project / "report.json"
         result = CliRunner().invoke(
@@ -4381,7 +4386,7 @@ class TestPathsInsideTheScanThatNothingReads:
         (project / REVIEW_FILE_NAME).write_text(
             scaffold.replace('license = ""', 'license = "MIT"'), encoding="utf-8", newline="\n"
         )
-        result, data = _check_json(project)
+        result, data = _check_json(project, "--no-require-lockfile")
         assert result.exit_code == 0
         assert data["summary"]["reviewed"] == len(self._UNREAD)
         assert _requests_mentioning(*self._UNREAD, *self._OWN) == []
@@ -4444,14 +4449,17 @@ class TestComposerRepositoryGap:
         ids=["vcs", "github", "artifact", "path-outside", "path-glob", "path-unread", "several"],
     )
     def test_gap_fails_a_strict_scan_that_is_otherwise_clean(self, tmp_path, repositories, kinds):
+        # A composer.json with no composer.lock is also recorded as lacking
+        # a lockfile. That is accepted here (it is then an estimate, not a
+        # gap), so that the repository gap is the one gap left.
         project = self._project(tmp_path, repositories)
-        result, data = _check_json(project, "--no-strict")
+        result, data = _check_json(project, "--no-strict", "--no-require-lockfile")
         assert result.exit_code == 0
         assert self._gaps(data) == [("composer.json", _repository_gap(*kinds))]
         assert data["summary"]["gaps"] == 1
         # Every row resolves to a permissive license: the gap alone fails.
         assert {d["license"] for d in data["dependencies"]} == {"MIT"}
-        result, _ = _check_json(project)
+        result, _ = _check_json(project, "--no-require-lockfile")
         assert result.exit_code == 1
         assert _repository_gap(*kinds) in result.output
 
@@ -4475,7 +4483,7 @@ class TestComposerRepositoryGap:
     )
     def test_repositories_the_file_maps_to_packages_are_no_gap(self, tmp_path, repositories):
         project = self._project(tmp_path, repositories)
-        result, data = _check_json(project)
+        result, data = _check_json(project, "--no-require-lockfile")
         assert result.exit_code == 0
         assert self._gaps(data) == []
 

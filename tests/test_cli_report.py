@@ -268,8 +268,8 @@ class TestRowCardinality:
         _, raw_json = _check_to_file(tmp_path, "json")
         data = json.loads(raw_json)
         assert data["summary"]["total"] == 3
-        exit_code, markdown = _check_to_file(tmp_path, "markdown")
-        _, table = _check_to_file(tmp_path, "table")
+        exit_code, markdown = _check_to_file(tmp_path, "markdown", "--no-require-lockfile")
+        _, table = _check_to_file(tmp_path, "table", "--no-require-lockfile")
 
         assert exit_code == 0
         rows = _markdown_rows(markdown)
@@ -336,14 +336,15 @@ class TestUntrustedStrings:
             assert "\x1b" not in table
             assert "\x9b" not in table
             assert "brack[et (1.0.0)" in table
-            assert f"└─ {self.LINK_NAME} (1.0.0)" in table
+            # The child's version was picked by the registry walk: marked.
+            assert f"└─ {self.LINK_NAME} (~1.0.0)" in table
             assert "\\x1b[2JEvil\\x9b31m<b>|`x`" in table
             assert "Summary: 1 unknown, 2 ok" in table
 
     @respx.mock
     def test_strict_fails_on_the_finding_not_on_rendering(self, tmp_path):
         self._project(tmp_path)
-        exit_code, saved = _check_to_file(tmp_path, "table")
+        exit_code, saved = _check_to_file(tmp_path, "table", "--no-require-lockfile")
         assert exit_code == 1
         assert "brack[et (1.0.0)" in saved
 
@@ -361,7 +362,7 @@ class TestUntrustedStrings:
             "[package.json](package.json)|[MIT](https://spdx.org/licenses/MIT.html)|permissive|✓|",
             "|[parent (1.0.0)](https://www.npmjs.com/package/parent)|npm|prod|"
             "[package.json](package.json)|[MIT](https://spdx.org/licenses/MIT.html)|permissive|✓|",
-            "|  └─ [a\\](https://evil.example)\\[b (1.0.0)]"
+            "|  └─ [a\\](https://evil.example)\\[b (~1.0.0)]"
             "(https://www.npmjs.com/package/a%5D%28https%3A//evil.example%29%5Bb)|npm|prod||"
             "\\\\x1b\\[2JEvil\\\\x9b31m\\<b\\>\\|\\`x\\`|unknown|?|",
         ]
@@ -451,7 +452,17 @@ class TestUntrustedStrings:
         for output_format in ("table", "markdown", "json"):
             out_file = tmp_path / f"strict.{output_format}"
             result = CliRunner().invoke(
-                main, ["check", "--path", str(tmp_path), "-f", output_format, "-o", str(out_file)]
+                main,
+                [
+                    "check",
+                    "--path",
+                    str(tmp_path),
+                    "--no-require-lockfile",
+                    "-f",
+                    output_format,
+                    "-o",
+                    str(out_file),
+                ],
             )
             assert result.exit_code == 1
             assert isinstance(result.exception, SystemExit)
@@ -475,43 +486,55 @@ class TestAnalysisGaps:
         (project / "broken" / "pyproject.toml").write_text("[project\nname = ")
         _mock_pypi("flask", "BSD-3-Clause")
 
+    # The healthy manifest has no lockfile. These scans accept that, so the
+    # broken manifest is the one gap; the estimate is listed apart from it.
+    ADVISORY = ("--no-strict", "--no-require-lockfile")
+    ESTIMATE_ROW = (
+        "|[requirements.txt](requirements.txt)|declares dependencies that no lockfile covers; "
+        "their versions and transitive dependencies are estimated from the registry|"
+    )
+
     @respx.mock
     def test_markdown_names_the_gap(self, tmp_path):
         self._healthy_manifest_beside_a_broken_one(tmp_path)
-        _, raw_json = _check_to_file(tmp_path, "json", "--no-strict")
+        _, raw_json = _check_to_file(tmp_path, "json", *self.ADVISORY)
         assert json.loads(raw_json)["summary"]["gaps"] == 1
 
-        exit_code, stdout = _check(tmp_path, "-f", "markdown", "--no-strict")
-        file_exit_code, saved = _check_to_file(tmp_path, "markdown", "--no-strict")
+        exit_code, stdout = _check(tmp_path, "-f", "markdown", *self.ADVISORY)
+        file_exit_code, saved = _check_to_file(tmp_path, "markdown", *self.ADVISORY)
 
         # Advisory mode passes, and this is the mode a saved audit is made in:
         # the report itself has to say that a manifest is missing from it.
         assert exit_code == file_exit_code == 0
         assert saved == stdout
         lines = saved.splitlines()
-        assert "**Summary:** 0 violations, 0 warnings, 0 unknown, 1 ok, 1 analysis gap" in lines
-        assert "## Analysis gaps" in lines
-        assert self.GAP_ROW in lines
+        assert (
+            "**Summary:** 0 violations, 0 warnings, 0 unknown, 1 ok, 1 analysis gap, "
+            "1 estimated manifest"
+        ) in lines
+        gaps, estimates = lines.index("## Analysis gaps"), lines.index("## Estimates")
+        assert lines.index(self.GAP_ROW) in range(gaps, estimates)
+        assert lines.index(self.ESTIMATE_ROW) > estimates
 
     @respx.mock
     def test_table_names_the_gap(self, tmp_path):
         self._healthy_manifest_beside_a_broken_one(tmp_path)
 
-        exit_code, stdout = _check(tmp_path, "--no-strict")
-        file_exit_code, saved = _check_to_file(tmp_path, "table", "--no-strict")
+        exit_code, stdout = _check(tmp_path, *self.ADVISORY)
+        file_exit_code, saved = _check_to_file(tmp_path, "table", *self.ADVISORY)
 
         assert exit_code == file_exit_code == 0
         for table in (stdout, saved):
             lines = table.splitlines()
-            assert "  Summary: 1 ok, 1 analysis gap" in lines
+            assert "  Summary: 1 ok, 1 analysis gap, 1 estimated manifest" in lines
             assert "  Analysis gaps (their dependencies may be missing from this report):" in lines
             assert self.GAP_LINE in lines
 
     @respx.mock
     def test_strict_fails_and_the_saved_report_still_names_the_gap(self, tmp_path):
         self._healthy_manifest_beside_a_broken_one(tmp_path)
-        exit_code, markdown = _check_to_file(tmp_path, "markdown")
-        table_exit_code, table = _check_to_file(tmp_path, "table")
+        exit_code, markdown = _check_to_file(tmp_path, "markdown", "--no-require-lockfile")
+        table_exit_code, table = _check_to_file(tmp_path, "table", "--no-require-lockfile")
 
         assert exit_code == table_exit_code == 1
         assert self.GAP_ROW in markdown.splitlines()
@@ -539,15 +562,17 @@ class TestAnalysisGaps:
         (tmp_path / "requirements.txt").write_bytes(b"# maintainer: Jos\xe9\nflask\n")
         _mock_pypi("flask", "BSD-3-Clause")
 
-        _, raw_json = _check_to_file(tmp_path, "json")
+        # Neither is the missing lockfile, once the scan is told to accept it.
+        accept = "--no-require-lockfile"
+        _, raw_json = _check_to_file(tmp_path, "json", accept)
         data = json.loads(raw_json)
         assert data["summary"]["gaps"] == 0
-        assert [d["severity"] for d in data["diagnostics"]] == ["recovered"]
+        assert [d["severity"] for d in data["diagnostics"]] == ["recovered", "estimate"]
         for exit_code, report in (
-            _check(tmp_path, "-f", "markdown"),
-            _check_to_file(tmp_path, "markdown"),
-            _check(tmp_path),
-            _check_to_file(tmp_path, "table"),
+            _check(tmp_path, "-f", "markdown", accept),
+            _check_to_file(tmp_path, "markdown", accept),
+            _check(tmp_path, accept),
+            _check_to_file(tmp_path, "table", accept),
         ):
             assert exit_code == 0
             assert "nalysis gap" not in report
@@ -623,7 +648,7 @@ class TestTableWidth:
                     "✓",
                 ],
                 [
-                    f"└─ {self.CHILD} (1.0.0)",
+                    f"└─ {self.CHILD} (~1.0.0)",
                     "python",
                     "prod",
                     "",
@@ -658,7 +683,8 @@ class TestLegacyCodePageStdout:
         assert [(row[0], row[4], row[6]) for row in rows] == [
             ("odd (1.0.0)", "?" * len(self.UNENCODABLE), "?"),
             ("parent (1.0.0)", "MIT", "OK"),
-            ("+- child (1.0.0)", "LGPL-3.0-only", "!"),
+            # The mark on an estimated version is ASCII: written as it is.
+            ("+- child (~1.0.0)", "LGPL-3.0-only", "!"),
         ]
         assert "    ! child uses LGPL-3.0-only" in table
         assert "✓" not in table and "└" not in table
@@ -672,7 +698,7 @@ class TestLegacyCodePageStdout:
         rows = _markdown_rows(markdown)
         assert [row.split("|")[-2] for row in rows] == ["?", "OK", "!"]
         assert rows[0].split("|")[5] == "?" * len(self.UNENCODABLE)
-        assert rows[2].startswith("|  +- [child (1.0.0)](https://pypi.org/project/child/)|")
+        assert rows[2].startswith("|  +- [child (~1.0.0)](https://pypi.org/project/child/)|")
         assert "- ! child uses LGPL-3.0-only" in markdown
 
     @respx.mock

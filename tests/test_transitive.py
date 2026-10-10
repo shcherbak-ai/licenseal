@@ -6739,7 +6739,8 @@ class TestJavaTransitiveResolution:
     def test_versionless_gradle_dependency_is_not_read_as_a_pom(self, tmp_path):
         # A Gradle coordinate without a concrete version has no POM whose
         # parent chain could supply one. It stays as declared, and the build
-        # file is never parsed as XML (which would surface as a gap on it).
+        # file is never parsed as XML (which would surface as a gap on it):
+        # all that is recorded on it is that it has no lockfile.
         (tmp_path / "build.gradle").write_text(
             "dependencies {\n"
             "    implementation 'org.example:managed'\n"
@@ -6760,7 +6761,7 @@ class TestJavaTransitiveResolution:
             ("org.example:managed", "", "build.gradle"),
             ("org.example:templated", "${libVersion}", "build.gradle"),
         ]
-        assert diags == []
+        assert [(d.path, d.missing_lockfile) for d in diags] == [(tmp_path / "build.gradle", True)]
 
     @respx.mock
     def test_versionless_gradle_dependency_pinned_by_lockfile(self, tmp_path):

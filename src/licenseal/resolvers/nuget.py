@@ -130,6 +130,18 @@ def _extract_pinned_version_nuget(version_constraint: str) -> str | None:
     return None
 
 
+def _declares_exact_version_nuget(version_constraint: str) -> bool:
+    """Whether the constraint names one version rather than bounding a range.
+
+    A bare version and the ``[1.2.3]`` form each name the version NuGet
+    restores. A bracket range does not, even though
+    :func:`_extract_pinned_version_nuget` picks a version for it.
+    """
+    return "," not in version_constraint and (
+        _extract_pinned_version_nuget(version_constraint) is not None
+    )
+
+
 def _nuspec_url(package_id: str, version: str) -> str:
     """Build the canonical NuGet flatcontainer ``.nuspec`` URL.
 

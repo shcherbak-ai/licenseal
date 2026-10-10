@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import re
+from dataclasses import replace
 from io import BytesIO, StringIO, TextIOWrapper
 from pathlib import Path
 
@@ -2606,3 +2607,177 @@ class TestGlyphFallback:
         assert "    ! Weak copyleft, review needed" in output
         # Nothing had to be replaced: the borders are ASCII too.
         assert output.isascii()
+
+
+def _estimated(result: CompatibilityResult) -> CompatibilityResult:
+    """``result`` with its version marked as picked from the registry."""
+    info = result.license_info
+    dependency = replace(info.dependency, version_estimated=True)
+    return replace(result, license_info=replace(info, dependency=dependency))
+
+
+_ESTIMATE = ReportDiagnostic(
+    path="web/package.json",
+    reason="declares dependencies that no lockfile covers",
+    severity="estimate",
+)
+_LEGEND = "marks an estimated version: picked from the registry, not locked or pinned"
+
+
+class TestEstimates:
+    """An estimated version is marked in every format; an accepted estimate is listed."""
+
+    @staticmethod
+    def _report() -> AnalysisReport:
+        # A locked row, an estimated direct row, an estimated transitive, and
+        # an estimated row that never resolved to a version.
+        ok = (RiskLevel.PERMISSIVE, CompatibilityVerdict.COMPATIBLE)
+        unknown = (RiskLevel.UNKNOWN, CompatibilityVerdict.UNKNOWN)
+        return AnalysisReport(
+            project_license="MIT",
+            results=[
+                _make_result("locked", "MIT", *ok, resolved_version="1.0.0"),
+                _estimated(_make_result("ranged", "MIT", *ok, resolved_version="2.3.0")),
+                _estimated(
+                    _make_result(
+                        "we|rd[x]",
+                        "MIT",
+                        *ok,
+                        resolved_version="0.1.0",
+                        depth=1,
+                        direct_ancestors=("locked", "ranged"),
+                    )
+                ),
+                _estimated(_make_result("unresolved", "UNKNOWN", *unknown)),
+            ],
+        )
+
+    @staticmethod
+    def _table(report: AnalysisReport) -> str:
+        console, buf = _make_console(width=200)
+        render_table(report, console)
+        return buf.getvalue()
+
+    def test_json_names_what_is_estimated(self):
+        data = json.loads(render_json(self._report()))
+        assert {d["name"]: d["estimated"] for d in data["dependencies"]} == {
+            "locked": [],
+            "ranged": ["version"],
+            "we|rd[x]": ["version"],
+            # No version was reported, so there is none to qualify.
+            "unresolved": [],
+        }
+
+    def test_markdown_marks_the_version_inside_the_escaped_label(self):
+        md = render_markdown(self._report())
+        assert "|[locked (1.0.0)](https://pypi.org/project/locked/)|" in md
+        assert "|[ranged (~2.3.0)](https://pypi.org/project/ranged/)|" in md
+        assert (
+            "|  └─ [we\\|rd\\[x\\] (~0.1.0)](https://pypi.org/project/we%7Crd%5Bx%5D/) "
+            "(also: ranged)|"
+        ) in md
+        assert "|[unresolved](https://pypi.org/project/unresolved/)|" in md
+        assert md.count(f"`~` {_LEGEND}") == 1
+
+    def test_table_marks_the_version_and_explains_the_mark_once(self):
+        table = self._table(self._report())
+        assert "ranged (~2.3.0)" in table
+        assert "└─ we|rd[x] (~0.1.0) (also: ranged)" in table
+        assert "locked (1.0.0)" in table
+        assert table.count(f"  ~ {_LEGEND}\n") == 1
+
+    def test_report_with_nothing_estimated_has_no_mark_and_no_legend(self):
+        report = _sample_report()
+        assert all(d["estimated"] == [] for d in json.loads(render_json(report))["dependencies"])
+        for rendered in (render_markdown(report), self._table(report)):
+            assert "~" not in rendered
+            assert "estimated" not in rendered
+
+    def test_reviewed_section_shows_the_same_label(self):
+        report = AnalysisReport(
+            project_license="MIT",
+            results=[
+                _estimated(
+                    _make_result(
+                        "odd",
+                        "UNKNOWN",
+                        RiskLevel.PERMISSIVE,
+                        CompatibilityVerdict.COMPATIBLE,
+                        resolved_version="1.0.0",
+                        reviewed_license_id="MIT",
+                        review_note="read the LICENSE file",
+                    )
+                )
+            ],
+        )
+        assert render_markdown(report).count("[odd (~1.0.0)](https://pypi.org/project/odd/)") == 2
+        assert self._table(report).count("odd (~1.0.0)") == 2
+
+    def test_mark_is_written_as_it_is_on_a_legacy_code_page(self):
+        md = render_markdown(self._report(), encoding="cp1252")
+        md.encode("cp1252")
+        assert "|[ranged (~2.3.0)]" in md
+        assert "|  +- [we\\|rd\\[x\\] (~0.1.0)]" in md
+
+        raw = BytesIO()
+        stream = TextIOWrapper(raw, encoding="cp1252", newline="")
+        console = Console(
+            file=stream, force_terminal=False, width=200, legacy_windows=False, _environ={}
+        )
+        render_table(self._report(), console)
+        stream.flush()
+        output = raw.getvalue().decode("cp1252")
+        assert "ranged (~2.3.0)" in output
+        assert "+- we|rd[x] (~0.1.0)" in output
+        assert f"  ~ {_LEGEND}" in output
+        assert output.isascii()
+
+    def test_accepted_estimate_is_listed_apart_from_the_gaps(self):
+        report = self._report()
+        report.read_diagnostics = [_gap("broken/pyproject.toml"), _ESTIMATE, _RECOVERED]
+
+        data = json.loads(render_json(report))
+        assert data["summary"]["gaps"] == 1
+        assert [d["severity"] for d in data["diagnostics"]] == ["gap", "estimate", "recovered"]
+
+        md = render_markdown(report)
+        assert (
+            "**Summary:** 0 violations, 0 warnings, 1 unknown, 3 ok, 1 analysis gap, "
+            "1 estimated manifest\n"
+        ) in md
+        assert (
+            "## Analysis gaps\n\n"
+            "These manifests could not be fully analyzed; their dependencies may be missing "
+            "from this report.\n\n"
+            "|File|Reason|\n|------|--------|\n"
+            "|[broken/pyproject.toml](broken/pyproject.toml)|is not valid TOML; skipped|\n\n"
+            "## Estimates\n\n"
+            "These manifests were scanned without a lockfile; the versions and transitive "
+            "dependencies reported for them are estimates.\n\n"
+            "|File|Reason|\n|------|--------|\n"
+            "|[web/package.json](web/package.json)|declares dependencies that no lockfile "
+            "covers|\n"
+        ) in md
+
+        table = self._table(report)
+        assert "  Summary: 1 unknown, 3 ok, 1 analysis gap, 1 estimated manifest\n" in table
+        assert (
+            "  Estimates (the versions and transitive dependencies reported for them are "
+            "estimates):\n"
+            "    web/package.json: declares dependencies that no lockfile covers\n"
+        ) in table
+
+    def test_estimates_alone_add_no_gap_section(self):
+        report = _sample_report()
+        report.read_diagnostics = [
+            _ESTIMATE,
+            ReportDiagnostic(path="Gemfile", reason=_ESTIMATE.reason, severity="estimate"),
+            ReportDiagnostic(path="Gemfile", reason="another reason", severity="estimate"),
+        ]
+        assert json.loads(render_json(report))["summary"]["gaps"] == 0
+        md = render_markdown(report)
+        assert "3 ok, 2 estimated manifests\n" in md
+        assert "## Estimates" in md and "## Analysis gaps" not in md
+        table = self._table(report)
+        assert "3 ok, 2 estimated manifests\n" in table
+        assert "Estimates (" in table and "Analysis gaps" not in table

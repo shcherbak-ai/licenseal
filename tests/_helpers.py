@@ -104,9 +104,12 @@ def _resolve(
 ) -> tuple[set[tuple[str, str, DependencyGroup]], list[ReadDiagnostic]]:
     """Scan ``project`` from its files alone: discovery, then transitive resolution.
 
-    Returns the ``(name, version, group)`` rows and everything recorded on
-    the read-diagnostics sink. No registry answers, so a direct dependency a
-    lockfile does not pin comes back with its manifest constraint.
+    Returns the ``(name, version, group)`` rows and what was recorded on the
+    read-diagnostics sink about the files themselves. No registry answers, so
+    a direct dependency a lockfile does not pin comes back with its manifest
+    constraint. Its manifest is then also recorded as lacking a lockfile;
+    that diagnostic is left out here (``tests/test_lockless_estimates.py``
+    covers it), so a test sees only what it did to a file.
     """
     with collect_read_diagnostics() as diags:
         direct, _ = discover_all_dependencies(project)
@@ -120,7 +123,8 @@ def _resolve(
                 fetcher=_no_registry,
                 pom_fetcher=_no_registry,
             )
-    return {(d.name, d.version_constraint, d.group) for d in deps}, diags
+    rows = {(d.name, d.version_constraint, d.group) for d in deps}
+    return rows, [diag for diag in diags if not diag.missing_lockfile]
 
 
 def _mock_pypi(name: str, license_str: str, version: str = "1.0.0") -> None:
@@ -170,16 +174,21 @@ def _assert_gap_fails_only_strict(
     gap; ``--strict`` fails and names it on stderr. ``repair`` then removes
     the cause, and the same scan passes ``--strict`` with no gap: the control
     that shows the gap, and nothing else, is what failed it.
+
+    Every scan runs with ``--no-require-lockfile``: the manifests here have
+    no lockfile, or one the scan cannot use, and that must not be a second
+    gap. It is reported as an estimate, which ``_file_diagnostics`` leaves out.
     """
     shown = gapped.relative_to(project).as_posix()
+    accept_estimates = ("--dev", "--no-require-lockfile")
 
-    lenient, data = _check_json(project, "--no-strict", "--dev")
+    lenient, data = _check_json(project, "--no-strict", *accept_estimates)
     assert lenient.exit_code == 0
     assert sorted((d["name"], d["license"]) for d in data["dependencies"]) == sorted(rows)
     assert data["summary"]["gaps"] == 1
-    assert data["diagnostics"] == [{"path": shown, "reason": reason, "severity": "gap"}]
+    assert _file_diagnostics(data) == [{"path": shown, "reason": reason, "severity": "gap"}]
 
-    strict, data = _check_json(project, "--strict", "--dev")
+    strict, data = _check_json(project, "--strict", *accept_estimates)
     assert strict.exit_code == 1
     assert f"Warning: {shown}: {reason}" in strict.output
     assert "1 manifest(s) could not be fully analyzed" in strict.output
@@ -187,10 +196,15 @@ def _assert_gap_fails_only_strict(
     assert data["summary"]["gaps"] == 1
 
     repair()
-    control, data = _check_json(project, "--strict", "--dev")
+    control, data = _check_json(project, "--strict", *accept_estimates)
     assert control.exit_code == 0
     assert data["summary"]["gaps"] == 0
-    assert data["diagnostics"] == []
+    assert _file_diagnostics(data) == []
+
+
+def _file_diagnostics(report: dict) -> list[dict]:
+    """A JSON report's diagnostics without the accepted estimates."""
+    return [diag for diag in report["diagnostics"] if diag["severity"] != "estimate"]
 
 
 def _java_dep(

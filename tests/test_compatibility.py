@@ -1512,8 +1512,11 @@ class TestWithExceptionDrivesTheExitCode:
             return_value=httpx.Response(200, json={"version": "1.0.0", "license": declared})
         )
 
+        # The project has no lockfile; that is accepted here so that the
+        # license alone decides the exit code.
         result = CliRunner().invoke(
-            main, ["check", "--path", str(tmp_path), "-f", "json", *extra_args]
+            main,
+            ["check", "--path", str(tmp_path), "-f", "json", "--no-require-lockfile", *extra_args],
         )
         assert result.exit_code == exit_code
         data = json.loads(result.output[result.output.index("{") :])
@@ -2008,7 +2011,8 @@ class TestOrArmVerdictDrivesTheExitCode:
             respx.get(url).mock(return_value=httpx.Response(200, json=payload))
 
         result = CliRunner().invoke(
-            main, ["check", "--path", str(tmp_path), "-f", "json", *extra_args]
+            main,
+            ["check", "--path", str(tmp_path), "--no-require-lockfile", "-f", "json", *extra_args],
         )
         assert result.exit_code == exit_code
         data = json.loads(result.output[result.output.index("{") :])
@@ -2081,8 +2085,11 @@ class TestMalformedExpressionDrivesTheExitCode:
         ):
             respx.get(url).mock(return_value=httpx.Response(200, json=payload))
 
+        # The project has no lockfile; that is accepted here so that the
+        # license alone decides the exit code.
         result = CliRunner().invoke(
-            main, ["check", "--path", str(tmp_path), "-f", "json", *extra_args]
+            main,
+            ["check", "--path", str(tmp_path), "-f", "json", "--no-require-lockfile", *extra_args],
         )
         assert result.exit_code == exit_code
         dependency = json.loads(result.output[result.output.index("{") :])["dependencies"][0]
