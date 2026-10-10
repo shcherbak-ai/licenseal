@@ -5730,6 +5730,65 @@ class TestRubyLockfileFirstPath:
             "test-child",
         }
 
+    def test_string_and_word_list_group_names_seed_dev_roots(self, tmp_path):
+        # From files on disk: dev groups named with a quoted string or a
+        # %i[...] / %w[...] word list are DEV roots exactly like the :symbol
+        # spelling, so each tool and its exclusive transitive leave the
+        # default scan. A group name the parser can't read stays a PROD root.
+        (tmp_path / "Gemfile").write_text(
+            'source "https://rubygems.org"\n'
+            'gem "runtime-gem"\n'
+            "group :test do\n"
+            '  gem "symbol-tool"\n'
+            "end\n"
+            'group "test" do\n'
+            '  gem "string-tool"\n'
+            "end\n"
+            "group *%w[development test] do\n"
+            '  gem "list-tool"\n'
+            "end\n"
+            'gem "inline-string-tool", group: "development"\n'
+            'gem "inline-list-tool", groups: %i[development test]\n'
+            'gem "unreadable-group-gem", group: BUILD_GROUP\n'
+        )
+        tools = ("symbol", "string", "list", "inline-string", "inline-list")
+        (tmp_path / "Gemfile.lock").write_text(
+            "GEM\n"
+            "  remote: https://rubygems.org/\n"
+            "  specs:\n"
+            + "".join(
+                f"    {tool}-tool (1.0.0)\n      {tool}-child (>= 0)\n    {tool}-child (2.0.0)\n"
+                for tool in tools
+            )
+            + "    runtime-gem (3.0.0)\n"
+            "    unreadable-group-gem (4.0.0)\n"
+            "      unreadable-child (>= 0)\n"
+            "    unreadable-child (5.0.0)\n"
+            "\n"
+        )
+        direct_deps, _ = discover_all_dependencies(tmp_path)
+        assert {d.name for d in direct_deps if d.group == DependencyGroup.DEV} == {
+            f"{tool}-tool" for tool in tools
+        }
+
+        with httpx.Client() as client:
+            prod_only = resolve_transitive(
+                direct_deps, tmp_path, include_dev=False, max_depth=50, client=client
+            )
+        assert {d.name: d.group for d in prod_only} == dict.fromkeys(
+            ("runtime-gem", "unreadable-group-gem", "unreadable-child"), DependencyGroup.PROD
+        )
+
+        with httpx.Client() as client:
+            with_dev = resolve_transitive(
+                direct_deps, tmp_path, include_dev=True, max_depth=50, client=client
+            )
+        dev = {d.name: d.direct_ancestors for d in with_dev if d.group == DependencyGroup.DEV}
+        assert dev == {
+            **{f"{tool}-tool": () for tool in tools},
+            **{f"{tool}-child": (f"{tool}-tool",) for tool in tools},
+        }
+
     @respx.mock
     def test_ruby_manifest_only_falls_back_to_rubygems(self, tmp_path):
         # No Gemfile.lock — walker hits rubygems.org per direct dep.

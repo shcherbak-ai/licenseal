@@ -259,12 +259,33 @@ class TestGemfileGroupClassification:
             ("group :production, :test do", DependencyGroup.PROD),
             ("group :development, :staging do", DependencyGroup.PROD),
             ("group :test, :web do", DependencyGroup.PROD),
-            # A name the parser can't read as a symbol is never assumed dev.
-            ('group "test" do', DependencyGroup.PROD),
+            # A quoted string names a group like a symbol does.
+            ('group "test" do', DependencyGroup.DEV),
+            ("group 'development', 'test' do", DependencyGroup.DEV),
+            ('group :development, "test" do', DependencyGroup.DEV),
+            ('group("development", "test") do', DependencyGroup.DEV),
+            ('group "production" do', DependencyGroup.PROD),
             ('group :test, "ci" do', DependencyGroup.PROD),
+            # A splatted word list names one group per word, in any bracket
+            # delimiter.
+            ("group *%w[development test] do", DependencyGroup.DEV),
+            ("group(*%i[development test]) do", DependencyGroup.DEV),
+            ("group *%i(development test) do", DependencyGroup.DEV),
+            ("group(*%w(development test)) do", DependencyGroup.DEV),
+            ("group *%w{development test} do", DependencyGroup.DEV),
+            ("group *%i<development test> do", DependencyGroup.DEV),
+            ("group *%W[development test], optional: true do", DependencyGroup.DEV),
+            ("group *%w[development production] do", DependencyGroup.PROD),
+            ("group *%i[test], :assets do", DependencyGroup.PROD),
+            # A name the parser can't read is never assumed dev.
             ("group :test, EXTRA_GROUP do", DependencyGroup.PROD),
+            ("group *DEV_GROUPS do", DependencyGroup.PROD),
+            ('group "test" + SUFFIX do', DependencyGroup.PROD),
+            ("group *%w|development test| do", DependencyGroup.PROD),
+            ("group *%w[development test) do", DependencyGroup.PROD),
             # No names at all: Bundler's implicit default group.
             ("group do", DependencyGroup.PROD),
+            ("group *%w[] do", DependencyGroup.PROD),
         ],
     )
     def test_block_form(self, tmp_path, header, expected):
@@ -291,11 +312,33 @@ class TestGemfileGroupClassification:
             ("groups: [:development, :assets]", DependencyGroup.PROD),
             (":group => :web", DependencyGroup.PROD),
             (":groups => [:staging, :development]", DependencyGroup.PROD),
-            # Values the parser can't read as symbols are never assumed dev.
-            ('group: "test"', DependencyGroup.PROD),
-            ("groups: %i[development test]", DependencyGroup.PROD),
+            # A quoted string names a group like a symbol does.
+            ('group: "test"', DependencyGroup.DEV),
+            ("group: 'development'", DependencyGroup.DEV),
+            ('groups: ["development", "test"]', DependencyGroup.DEV),
+            ('groups: [:development, "test"]', DependencyGroup.DEV),
+            ('group: "production"', DependencyGroup.PROD),
             ('groups: [:test, "ci"]', DependencyGroup.PROD),
+            # A word list names one group per word, in any bracket delimiter.
+            ("groups: %i[development test]", DependencyGroup.DEV),
+            ("groups: %w[development test]", DependencyGroup.DEV),
+            ("groups: %w(development test)", DependencyGroup.DEV),
+            ("groups: %i{development test}", DependencyGroup.DEV),
+            ("groups: %w<development test>", DependencyGroup.DEV),
+            ("groups: %I[development test]", DependencyGroup.DEV),
+            (":groups => %w[development test]", DependencyGroup.DEV),
+            ('"~> 1.0", groups: %i[development test], require: false', DependencyGroup.DEV),
+            ("groups: %w[development production]", DependencyGroup.PROD),
+            ("groups: %i[test assets]", DependencyGroup.PROD),
+            # Values the parser can't read are never assumed dev.
             ("groups: []", DependencyGroup.PROD),
+            ("groups: %w[]", DependencyGroup.PROD),
+            ("groups: %w|development test|", DependencyGroup.PROD),
+            ("groups: %w[development test] + EXTRA_GROUPS", DependencyGroup.PROD),
+            ("groups: %w[development test].map(&:to_sym)", DependencyGroup.PROD),
+            ("groups: [%w[development test]]", DependencyGroup.PROD),
+            ('group: "test suite"', DependencyGroup.PROD),
+            ("group: BUILD_GROUP", DependencyGroup.PROD),
             # A different option whose name merely ends in "group".
             ("subgroup: :test", DependencyGroup.PROD),
             ("require: false", DependencyGroup.PROD),

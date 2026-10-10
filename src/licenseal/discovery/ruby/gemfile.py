@@ -19,8 +19,11 @@ Group attribution is the load-bearing reason to parse the Gemfile at all —
 ``group :development`` / ``group :test`` blocks or per-line ``group:`` kwargs).
 A gem is DEV only when every group it belongs to is ``development`` or
 ``test``; any other group (``production``, ``staging``, a custom one) puts it
-in a deployed bundle, so it is PROD. The lockfile parser uses the dev-name set
-emitted here as roots for reverse-BFS group propagation.
+in a deployed bundle, so it is PROD. A group name is read from a ``:symbol``,
+a quoted string, or a ``%i[...]`` / ``%w[...]`` word list; a name written any
+other way (a constant, a method call) is unreadable and keeps the gem PROD.
+The lockfile parser uses the dev-name set emitted here as roots for
+reverse-BFS group propagation.
 """
 
 from __future__ import annotations
@@ -50,19 +53,29 @@ _GEM_LINE_RE = re.compile(
 # ``gem "mygem", "~> 7.1.0", ">= 7.1.2"``.
 _VERSION_ARG_RE = re.compile(r"""^\s*,\s*(['"])([^'"]+)\1""")
 
-# Block-form group header: ``group :development, :test do``, optionally
-# parenthesized and with trailing options (``group :test, optional: true do``).
-_GROUP_BLOCK_RE = re.compile(r"^group\b\s*\(?(?P<args>.*?)\)?\s*\bdo\b\s*(?:\|[^|]*\|)?\s*$")
+# Block-form group header: ``group :development, :test do``, with trailing
+# options (``group :test, optional: true do``). ``args`` keeps the call's own
+# parentheses when it has them; the parser strips that pair.
+_GROUP_BLOCK_RE = re.compile(r"^group\b\s*(?P<args>.*?)\s*\bdo\b\s*(?:\|[^|]*\|)?\s*$")
+
+# A ``%i[...]`` / ``%w[...]`` word list, in any of Ruby's bracket delimiters.
+_WORD_LIST = r"%[iIwW](?:\[[^\]]*\]|\([^)]*\)|\{[^}]*\}|<[^>]*>)"
 
 # Per-line group option, keyword or hash-rocket form: ``group: :test``,
 # ``groups: [:development, :test]``, ``:group => :test``, ``:groups => [...]``.
-# The value is a bracketed list or a single comma-free token.
+# The value is a word list, a bracketed list, or a single comma-free token. A
+# word list that an operator or method call continues is not the whole value,
+# so it is left to the single-token branch and stays unreadable.
 _INLINE_GROUP_RE = re.compile(
-    r"(?<![\w:])(?:groups?:|:groups?\s*=>)\s*(?P<value>\[[^\]]*\]|[^,\s]*)"
+    r"(?<![\w:])(?:groups?:|:groups?\s*=>)\s*"
+    rf"(?P<value>{_WORD_LIST}(?!\s*[-+*|&.<\[])|\[[^\]]*\]|[^,\s]*)"
 )
 
-# One argument of a ``group`` call or one element of a ``groups`` list.
-_SYMBOL_RE = re.compile(r":(\w+)")
+# One argument of a ``group`` call or one element of a ``groups`` list: a
+# ``:symbol`` or a quoted string names one group, a word list (splatted in a
+# ``group`` call) names one per word.
+_GROUP_NAME_RE = re.compile(r""":(\w+)|(['"])(\w+)\2""")
+_WORD_LIST_ARG_RE = re.compile(rf"\*?({_WORD_LIST})")
 _KEYWORD_OPTION_RE = re.compile(r"\w+:(?!:)|:\w+\s*=>")
 
 # Off-registry source kwargs — gems carrying one are emitted with the
@@ -113,18 +126,26 @@ def _is_dev_group(groups: tuple[str, ...]) -> bool:
 def _group_names(args: str) -> tuple[str, ...]:
     """Parse comma-separated ``group`` arguments into group names.
 
-    A ``:symbol`` is a group name. A keyword option (``optional: true``,
-    ``:optional => true``) is not a group and is skipped. Any other argument
-    is kept verbatim: it names a group this parser can't read, which keeps
-    the gem out of the dev-only bucket.
+    A ``:symbol`` or a quoted string is a group name, and each word of a
+    ``%i[...]`` / ``%w[...]`` list is one. A keyword option (``optional:
+    true``, ``:optional => true``) is not a group and is skipped. Any other
+    argument is kept verbatim: it names a group this parser can't read, which
+    keeps the gem out of the dev-only bucket.
     """
     names: list[str] = []
     for raw in args.split(","):
         arg = raw.strip()
         if not arg or _KEYWORD_OPTION_RE.match(arg):
             continue
-        symbol = _SYMBOL_RE.fullmatch(arg)
-        names.append(symbol.group(1) if symbol else arg)
+        name = _GROUP_NAME_RE.fullmatch(arg)
+        word_list = _WORD_LIST_ARG_RE.fullmatch(arg)
+        if name:
+            names.append(name.group(1) or name.group(3))
+        elif word_list:
+            # Drop the ``%w`` prefix and the two delimiters.
+            names.extend(word_list.group(1)[3:-1].split())
+        else:
+            names.append(arg)
     return tuple(names)
 
 
@@ -199,7 +220,10 @@ def _parse_gemfile_text(text: str, source: str) -> list[Dependency]:
         # ``group :x do`` — push a group frame at the current nesting depth.
         block = _GROUP_BLOCK_RE.match(stripped)
         if block is not None:
-            group_frames.append((block_depth, _group_names(block.group("args"))))
+            args = block.group("args")
+            if args.startswith("(") and args.endswith(")"):
+                args = args[1:-1]
+            group_frames.append((block_depth, _group_names(args)))
             block_depth += 1
             continue
         # ``end`` — close the innermost block; drop any group frame it closed.

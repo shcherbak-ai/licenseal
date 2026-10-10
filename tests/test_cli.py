@@ -4353,6 +4353,116 @@ class TestRubyEcosystem:
             "test-child": "dev",
         }
 
+    # One runtime gem and two copyleft tools: one in a ``group`` block, one
+    # with a per-line group option.
+    _TOOLS_LOCK = (
+        "GEM\n"
+        "  remote: https://rubygems.org/\n"
+        "  specs:\n"
+        "    block-child (2.0.0)\n"
+        "    block-tool (1.0.0)\n"
+        "      block-child (>= 0)\n"
+        "    inline-tool (3.0.0)\n"
+        "    runtime-gem (4.0.0)\n"
+        "\n"
+        "DEPENDENCIES\n"
+        "  block-tool\n"
+        "  inline-tool\n"
+        "  runtime-gem\n"
+        "\n"
+    )
+
+    def _write_tools_project(self, tmp_path, block_args: str, inline_option: str):
+        (tmp_path / "pyproject.toml").write_text(self._MIT_PYPROJECT)
+        (tmp_path / "Gemfile").write_text(
+            'source "https://rubygems.org"\n'
+            'gem "runtime-gem"\n'
+            f"group {block_args} do\n"
+            '  gem "block-tool"\n'
+            "end\n"
+            f'gem "inline-tool", {inline_option}\n'
+        )
+        (tmp_path / "Gemfile.lock").write_text(self._TOOLS_LOCK)
+        self._mock_gem("runtime-gem", "4.0.0", "MIT")
+        return [
+            *self._mock_gem("block-tool", "1.0.0", "GPL-3.0-only", runtime=("block-child",)),
+            *self._mock_gem("block-child", "2.0.0", "MIT"),
+            *self._mock_gem("inline-tool", "3.0.0", "GPL-3.0-only"),
+        ]
+
+    @respx.mock
+    @pytest.mark.parametrize(
+        ("block_args", "inline_option"),
+        [
+            # Control: the :symbol spelling.
+            (":development, :test", "groups: [:development, :test]"),
+            ('"development", "test"', 'group: "test"'),
+            ("*%w[development test]", "groups: %i[development test]"),
+            ("(*%i(development test))", ":groups => %w(development test)"),
+        ],
+    )
+    def test_dev_group_spelling_does_not_change_the_scan(self, tmp_path, block_args, inline_option):
+        # Default flags (--no-dev): copyleft tools in development / test
+        # groups are left out however the group names are spelled, so the
+        # check passes without looking them up. With --dev they are reported
+        # as dev-only warnings.
+        tool_routes = self._write_tools_project(tmp_path, block_args, inline_option)
+        out = tmp_path / "report.json"
+        runner = CliRunner()
+
+        default = runner.invoke(
+            main, ["check", "--path", str(tmp_path), "-f", "json", "-o", str(out)]
+        )
+        assert default.exit_code == 0
+        data = json.loads(out.read_text(encoding="utf-8"))
+        assert [(d["name"], d["group"]) for d in data["dependencies"]] == [("runtime-gem", "prod")]
+        assert not any(route.called for route in tool_routes)
+
+        with_dev = runner.invoke(
+            main,
+            [
+                "check",
+                "--path",
+                str(tmp_path),
+                "--dev",
+                "--no-strict",
+                "-f",
+                "json",
+                "-o",
+                str(out),
+            ],
+        )
+        assert with_dev.exit_code == 0
+        data = json.loads(out.read_text(encoding="utf-8"))
+        assert {d["name"]: (d["group"], d["verdict"]) for d in data["dependencies"]} == {
+            "runtime-gem": ("prod", "compatible"),
+            "block-tool": ("dev", "warning"),
+            "block-child": ("dev", "compatible"),
+            "inline-tool": ("dev", "warning"),
+        }
+
+    @respx.mock
+    def test_unreadable_group_name_is_checked_as_production(self, tmp_path):
+        # A group named through a constant or a larger expression can't be
+        # read, so its gem is treated as shipping: default flags report the
+        # copyleft tools as violations and the check fails.
+        self._write_tools_project(
+            tmp_path, "*TOOL_GROUPS", "groups: %w[development test] + EXTRA_GROUPS"
+        )
+        out = tmp_path / "report.json"
+
+        result = CliRunner().invoke(
+            main, ["check", "--path", str(tmp_path), "-f", "json", "-o", str(out)]
+        )
+        assert result.exit_code == 1
+        data = json.loads(out.read_text(encoding="utf-8"))
+        assert {d["name"]: (d["group"], d["verdict"]) for d in data["dependencies"]} == {
+            "runtime-gem": ("prod", "compatible"),
+            "block-tool": ("prod", "incompatible"),
+            "block-child": ("prod", "compatible"),
+            "inline-tool": ("prod", "incompatible"),
+        }
+
 
 class TestHexEcosystem:
     @respx.mock
