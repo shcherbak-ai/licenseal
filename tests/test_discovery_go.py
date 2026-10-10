@@ -13,9 +13,57 @@ from licenseal.discovery.go.go_mod import (
     _module_for_tool_path,
     _parse_go_mod,
     discover_go_mod_dependencies,
+    lists_all_requirements,
 )
 from licenseal.models import DependencyGroup, Ecosystem
 from tests._helpers import _NON_RELATIVE_PATH_VALUES, _record_path_io
+
+
+class TestListsAllRequirements:
+    """From ``go 1.17`` on, go.mod lists every module the build needs. Below
+    that, with no ``go`` directive, or with one that is not a version, it
+    lists direct requirements only."""
+
+    @pytest.mark.parametrize(
+        "directive",
+        [
+            "go 1.17",
+            "go 1.22",
+            "go 1.21.0",
+            "go 1.21rc1",
+            "go 1.170",
+            "go 2.0",
+            "\tgo   1.18",
+            "go 1.22 // set by go mod tidy",
+        ],
+    )
+    def test_go_117_or_later(self, directive):
+        assert lists_all_requirements(f"module example.com/app\n\n{directive}\n") is True
+
+    @pytest.mark.parametrize(
+        "directive",
+        [
+            "go 1.16",
+            "go 1.9",
+            "go 1.16.15",
+            "go 0.99",
+            # No directive, and lines that are not one: a comment, a directive
+            # with no minor version, another directive that names a version.
+            "",
+            "// go 1.22",
+            "go 1",
+            "go next",
+            "toolchain go1.22.0",
+            "godebug default=go1.21",
+            # More digits than a version has.
+            "go 1.99999999999999999999",
+        ],
+    )
+    def test_below_117_or_no_usable_directive(self, directive):
+        assert lists_all_requirements(f"module example.com/app\n\n{directive}\n") is False
+
+    def test_first_directive_decides(self):
+        assert lists_all_requirements("go 1.16\ngo 1.22\n") is False
 
 
 class TestParseGoMod:

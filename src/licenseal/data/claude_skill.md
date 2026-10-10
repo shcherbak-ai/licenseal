@@ -68,7 +68,7 @@ Parse `$SCAN_FILE`. The full top-level schema is described in the licenseal repo
 - `summary.warnings + summary.violations + summary.unknown` flagged
 - `summary.gaps` — manifests licenseal couldn't read or parse (the top-level `diagnostics[]` array names each one with a `reason`). A gap is an *incomplete* analysis, not a license finding: under the default `--strict` it fails CI on its own, and the review file **cannot** silence it.
 
-If the flagged total **and** `summary.gaps` are both `0`, the project is clean — say so and stop. If flagged is `0` but `summary.gaps > 0`, the project is **not** clean: list the gap paths from `diagnostics[]` and treat resolving them (unreadable manifest, syntax error, unsupported file) as the action item — the review file can't paper over them, and step 7's strict re-scan will fail until they're fixed.
+If the flagged total **and** `summary.gaps` are both `0`, the project is clean — say so and stop. If flagged is `0` but `summary.gaps > 0`, the project is **not** clean: list the gap paths from `diagnostics[]` and treat resolving them (unreadable manifest, syntax error, unsupported file, a `go.mod` below `go 1.17` with no `go.sum` row for its requirements — commit an up-to-date `go.sum`) as the action item — the review file can't paper over them, and step 7's strict re-scan will fail until they're fixed.
 
 ### 3. Establish project context
 

@@ -52,7 +52,7 @@ from licenseal.review import (
     render_review_template,
     review_key,
 )
-from tests._helpers import _DEEP, _record_path_io
+from tests._helpers import _DEEP, _assert_gap_fails_only_strict, _check_json, _record_path_io
 
 _REVIEW_STANZA = (
     '[[review]]\necosystem = "python"\npackage = "pkg-a"\nversion = "1.0.0"\nlicense = "MIT"\n'
@@ -7083,6 +7083,203 @@ class TestGoDirectRequirementsBesideGoSum:
         exit_code, rows = _check_rows(tmp_path, "--dev")
         assert exit_code == 1
         assert rows == {**production, ("example.org/gen-gpl", "v1.0.0"): ("dev", "warning")}
+
+
+_GO_UNLISTED = (
+    "lists only direct requirements (its go directive is below 1.17 or absent) and a go.sum "
+    "row is missing for {} of them; what they depend on is not in this report (commit an "
+    "up-to-date go.sum to include it)"
+)
+
+
+class TestGoModWithUnlistedRequirements:
+    """A requirement go.sum has no row for is reported alone. From go 1.17 on
+    go.mod lists every module the build needs, so that is the whole set.
+    Below that it lists direct requirements only, what they depend on is
+    missing from the report, and the go.mod is an analysis gap."""
+
+    _LIB = ("example.org/lib", "v1.0.0")
+    _OTHER = ("example.org/other", "v2.0.0")
+
+    @staticmethod
+    def _write_go_mod(path, go_directive: str, *requirements, extra: str = "") -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            "module example.com/app\n\n"
+            + go_directive
+            + "".join(f"require {module} {version}\n" for module, version in requirements)
+            + extra,
+            encoding="utf-8",
+        )
+
+    @respx.mock
+    @pytest.mark.parametrize(
+        "go_directive",
+        ["go 1.16\n\n", "go 1.9\n\n", "go 1.16.15\n\n", "", "// go 1.22\n\n", "go next\n\n"],
+        ids=["1.16", "1.9", "1.16-patch", "absent", "commented-out", "not-a-version"],
+    )
+    def test_go_mod_below_117_without_go_sum_fails_only_strict(self, tmp_path, go_directive):
+        # Every dependency reported is MIT. What fails the strict scan is
+        # that the modules example.org/lib depends on are listed nowhere.
+        _mit_project(tmp_path)
+        go_mod = tmp_path / "go.mod"
+        self._write_go_mod(go_mod, go_directive, self._LIB)
+        _mock_go_modules({self._LIB: ("MIT", "")})
+
+        _assert_gap_fails_only_strict(
+            tmp_path,
+            go_mod,
+            _GO_UNLISTED.format(1),
+            [("example.org/lib", "MIT")],
+            # The fix the reason names: a go.sum with a row for the requirement.
+            repair=lambda: (tmp_path / "go.sum").write_text(_go_sum(self._LIB), encoding="utf-8"),
+        )
+
+    @respx.mock
+    @pytest.mark.parametrize(
+        "go_directive",
+        ["go 1.17\n\n", "go 1.22\n\n", "go 1.21.0\n\n", "go 1.21rc1\n\n"],
+        ids=["1.17", "1.22", "1.21-patch", "1.21-rc"],
+    )
+    def test_go_mod_at_117_or_later_is_complete_without_go_sum(self, tmp_path, go_directive):
+        # Control: the same module with no go.sum. Its go.mod lists every
+        # module the build needs, so nothing is missing and strict passes.
+        _mit_project(tmp_path)
+        self._write_go_mod(tmp_path / "go.mod", go_directive, self._LIB)
+        _mock_go_modules({self._LIB: ("MIT", "")})
+
+        result, data = _check_json(tmp_path)
+        assert result.exit_code == 0
+        assert [d["name"] for d in data["dependencies"]] == ["example.org/lib"]
+        assert data["summary"]["gaps"] == 0
+        assert data["diagnostics"] == []
+
+    @respx.mock
+    @pytest.mark.parametrize(
+        ("go_sum", "missing"),
+        [
+            (_go_sum(("example.org/lib", "v1.0.0")), 1),
+            (
+                _go_sum(("example.org/lib", "v1.0.0")) + "example.org/other v2.0.0/go.mod h1:h\n",
+                1,
+            ),
+            (_go_sum(("example.org/lib", "v1.0.0"), ("example.org/other", "v1.9.0")), 1),
+            (_go_sum(("example.org/unrelated", "v0.1.0")), 2),
+            ("", 2),
+        ],
+        ids=["no-row", "go.mod-row-only", "row-for-another-version", "no-row-for-either", "empty"],
+    )
+    def test_requirement_without_a_go_sum_row_is_counted(self, tmp_path, go_sum, missing):
+        _mit_project(tmp_path)
+        self._write_go_mod(tmp_path / "go.mod", "go 1.16\n\n", self._LIB, self._OTHER)
+        (tmp_path / "go.sum").write_text(go_sum, encoding="utf-8")
+        _mock_go_modules(
+            {
+                self._LIB: ("MIT", ""),
+                self._OTHER: ("MIT", ""),
+                ("example.org/other", "v1.9.0"): ("MIT", ""),
+                ("example.org/unrelated", "v0.1.0"): ("MIT", ""),
+            }
+        )
+
+        result, data = _check_json(tmp_path)
+        assert result.exit_code == 1
+        assert data["diagnostics"] == [
+            {"path": "go.mod", "reason": _GO_UNLISTED.format(missing), "severity": "gap"}
+        ]
+
+        # Control: with a row for each requirement the same go.mod is complete.
+        (tmp_path / "go.sum").write_text(_go_sum(self._LIB, self._OTHER), encoding="utf-8")
+        result, data = _check_json(tmp_path)
+        assert result.exit_code == 0
+        assert data["diagnostics"] == []
+
+    @respx.mock
+    def test_requirements_that_are_not_scanned_need_no_row(self, tmp_path):
+        # One requirement is replaced by a local path and one is a module of
+        # this workspace: neither is scanned. A third is replaced by a fork,
+        # and it is the fork that needs the go.sum row.
+        _mit_project(tmp_path)
+        self._write_go_mod(
+            tmp_path / "go.mod",
+            "go 1.16\n\n",
+            ("example.org/local", "v0.1.0"),
+            ("example.com/app/sibling", "v0.0.0"),
+            ("example.org/original", "v1.2.0"),
+            extra=(
+                "replace example.org/local => ../local\n"
+                "replace example.org/original => example.org/fork v1.2.1\n"
+            ),
+        )
+        (tmp_path / "sibling").mkdir()
+        (tmp_path / "sibling" / "go.mod").write_text(
+            "module example.com/app/sibling\n\ngo 1.22\n", encoding="utf-8"
+        )
+        fork = ("example.org/fork", "v1.2.1")
+        (tmp_path / "go.sum").write_text(_go_sum(fork), encoding="utf-8")
+        _mock_go_modules({fork: ("MIT", "")})
+
+        result, data = _check_json(tmp_path)
+        assert result.exit_code == 0
+        assert [d["name"] for d in data["dependencies"]] == ["example.org/fork"]
+        assert data["diagnostics"] == []
+
+        # Without the fork's row, the fork is the one requirement counted.
+        original = ("example.org/original", "v1.2.0")
+        (tmp_path / "go.sum").write_text(_go_sum(original), encoding="utf-8")
+        _mock_go_modules({fork: ("MIT", ""), original: ("MIT", "")})
+        result, data = _check_json(tmp_path)
+        assert result.exit_code == 1
+        assert data["diagnostics"] == [
+            {"path": "go.mod", "reason": _GO_UNLISTED.format(1), "severity": "gap"}
+        ]
+
+    @respx.mock
+    def test_each_go_mod_is_judged_by_its_own_go_directive(self, tmp_path):
+        # Neither module's requirement has a go.sum row. The root is at go
+        # 1.22 and complete; the nested module is at go 1.15 and is the gap.
+        _mit_project(tmp_path)
+        self._write_go_mod(tmp_path / "go.mod", "go 1.22\n\n", self._LIB)
+        (tmp_path / "tools").mkdir()
+        (tmp_path / "tools" / "go.mod").write_text(
+            "module example.com/app/tools\n\ngo 1.15\n\nrequire example.org/other v2.0.0\n",
+            encoding="utf-8",
+        )
+        _mock_go_modules({self._LIB: ("MIT", ""), self._OTHER: ("MIT", "")})
+
+        result, data = _check_json(tmp_path)
+        assert result.exit_code == 1
+        assert data["diagnostics"] == [
+            {"path": "tools/go.mod", "reason": _GO_UNLISTED.format(1), "severity": "gap"}
+        ]
+        assert "Warning: tools/go.mod: lists only direct requirements" in result.output
+
+    @respx.mock
+    def test_direct_only_scan_records_no_gap(self, tmp_path):
+        # --no-transitive reports the requirements alone by request, so what
+        # they depend on is not missing from that report.
+        _mit_project(tmp_path)
+        self._write_go_mod(tmp_path / "go.mod", "go 1.16\n\n", self._LIB)
+        _mock_go_modules({self._LIB: ("MIT", "")})
+
+        result, data = _check_json(tmp_path, "--no-transitive")
+        assert result.exit_code == 0
+        assert [d["name"] for d in data["dependencies"]] == ["example.org/lib"]
+        assert data["diagnostics"] == []
+
+    @respx.mock
+    def test_go_mod_that_requires_nothing_is_not_a_gap(self, tmp_path):
+        # A go.sum is read even when go.mod requires nothing; with no
+        # requirement there is nothing whose dependencies could be missing.
+        _mit_project(tmp_path)
+        self._write_go_mod(tmp_path / "go.mod", "")
+        (tmp_path / "go.sum").write_text(_go_sum(self._LIB), encoding="utf-8")
+        _mock_go_modules({self._LIB: ("MIT", "")})
+
+        result, data = _check_json(tmp_path)
+        assert result.exit_code == 0
+        assert [d["name"] for d in data["dependencies"]] == ["example.org/lib"]
+        assert data["diagnostics"] == []
 
 
 _CRATES_IO_SOURCE = "registry+https://github.com/rust-lang/crates.io-index"

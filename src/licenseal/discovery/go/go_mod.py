@@ -216,6 +216,50 @@ def _extract_module_declaration(text: str) -> str | None:
     return None
 
 
+# The ``go`` directive names a Go version: ``go 1.22``, ``go 1.21.0``,
+# ``go 1.21rc1``. Its major and minor decide how much a ``go.mod`` lists. Both
+# are bounded, so a run of digits no interpreter will convert is simply not a
+# version.
+_GO_DIRECTIVE_RE = re.compile(r"^go\s+(\d{1,9})\.(\d{1,9})(?!\d)")
+
+# First Go version at which ``go.mod`` lists every module needed to build the
+# main module's packages and tests, indirect requirements included.
+_LISTS_ALL_REQUIREMENTS_SINCE = (1, 17)
+
+
+def lists_all_requirements(text: str) -> bool:
+    """Whether a ``go.mod`` lists every module its packages and tests need.
+
+    From ``go 1.17`` on it does: there is a ``require`` for each module that
+    provides a package the main module's packages or tests import, directly
+    or not. At ``go 1.16`` and below it lists direct requirements only, and a
+    file with no ``go`` directive is read as ``go 1.16``. A directive that is
+    not a version is treated like a missing one.
+    """
+    for raw in text.splitlines():
+        m = _GO_DIRECTIVE_RE.match(_strip_line_comment_with_marker(raw).strip())
+        if m:
+            return (int(m.group(1)), int(m.group(2))) >= _LISTS_ALL_REQUIREMENTS_SINCE
+    return False
+
+
+def apply_replaces(requires: list[tuple[str, str]], replaces: _Replaces) -> list[tuple[str, str]]:
+    """Return the ``(module, version)`` requirements once ``replaces`` is applied.
+
+    A requirement replaced by another module becomes that module and version;
+    one replaced by a local path is dropped, having no registry identity. A
+    directive naming the required version takes precedence over one covering
+    every version of the module, as in Go.
+    """
+    resolved: list[tuple[str, str]] = []
+    for path, version in requires:
+        key = (path, version) if (path, version) in replaces else (path, None)
+        target = replaces.get(key, (path, version))
+        if target is not None:
+            resolved.append(target)
+    return resolved
+
+
 def _parse_go_work_use_directories(text: str) -> list[str]:
     """Return directory paths from go.work's ``use`` directive(s).
 
@@ -385,15 +429,7 @@ def discover_go_mod_dependencies(
 
         # Resolve replace rewrites first so the tool-to-module match runs
         # against the post-replace module paths.
-        resolved: list[tuple[str, str]] = []
-        for path, version in requires:
-            # A directive naming the required version takes precedence over
-            # one covering every version of the module, as in Go.
-            key = (path, version) if (path, version) in replaces else (path, None)
-            target = replaces.get(key, (path, version))
-            if target is None:
-                continue  # local replacement — drop
-            resolved.append(target)
+        resolved = apply_replaces(requires, replaces)
 
         resolved_paths = [r[0] for r in resolved]
         tool_modules = {mp for t in tools if (mp := _module_for_tool_path(t, resolved_paths))}

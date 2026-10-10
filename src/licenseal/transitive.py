@@ -34,7 +34,13 @@ import httpx
 
 from licenseal._concurrency import map_with_context
 from licenseal._graph import compute_direct_ancestors
-from licenseal.discovery._read import read_xml_bytes, record_parse_failure
+from licenseal.discovery._read import (
+    decode_text,
+    read_xml_bytes,
+    record_parse_failure,
+    record_unlisted_dependencies,
+)
+from licenseal.discovery._walk import walk_project_files
 from licenseal.discovery.dotnet import (
     find_nuget_lockfiles,
     find_paket_lockfiles,
@@ -47,6 +53,8 @@ from licenseal.discovery.dotnet.csproj import (
 from licenseal.discovery.go.go_mod import (
     _discover_workspace_local_module_paths,  # noqa: PLC2701
     _parse_go_mod,  # noqa: PLC2701
+    apply_replaces,
+    lists_all_requirements,
 )
 from licenseal.discovery.go.lockfile import find_go_lockfiles, parse_go_sum_entries
 from licenseal.discovery.hex.erlang_mk import workspace_hex_names
@@ -629,7 +637,9 @@ def _resolve_go_transitive(
     version ``go.mod`` requires. A ``go.sum`` row for another version of a
     required module is kept as a row of its own, attributed like any module
     of that name. The modules a direct requires are rows only when ``go.sum``
-    lists them: nothing is added from the proxy.
+    lists them: nothing is added from the proxy. Where that leaves a
+    requirement's own dependencies out of the report, its ``go.mod`` is
+    recorded as a gap (see :func:`_record_unlisted_go_requirements`).
     """
     # Manifest of each requirement, keyed as go.mod states it.
     direct_sources = {(d.name, d.version_constraint): d.source for d in direct_go_deps}
@@ -661,6 +671,10 @@ def _resolve_go_transitive(
                     continue
                 seen_entries.add(mod_ver)
                 entries.append(mod_ver)
+    # Checked against the go.sum rows alone, before the requirements join them.
+    _record_unlisted_go_requirements(
+        project_path, exclude_paths, workspace_local, frozenset(seen_entries)
+    )
     # Every direct requirement is part of the universe, whatever go.sum holds:
     # a nested module can have no go.sum of its own, a go.sum can list a
     # requirement only as a ``/go.mod`` row, or pin another version of it.
@@ -738,6 +752,42 @@ def _resolve_go_transitive(
             )
         )
     return out
+
+
+def _record_unlisted_go_requirements(
+    project_path: Path,
+    exclude_paths: frozenset[Path],
+    workspace_local: set[str],
+    locked: frozenset[tuple[str, str]],
+) -> None:
+    """Record a gap on each ``go.mod`` whose requirements' own dependencies are unknown.
+
+    ``locked`` holds the ``go.sum`` rows. A requirement with a row has the
+    modules it depends on in ``go.sum`` too. One without a row is reported on
+    its own, which is the whole set only when ``go.mod`` lists those modules
+    itself: from ``go 1.17`` on it does (see :func:`lists_all_requirements`).
+    Below that, or with no ``go`` directive, they are missing from the report.
+
+    Requirements that are not scanned — replaced by a local path, or modules
+    of this workspace — need no row and are not counted.
+    """
+    for go_mod in walk_project_files(project_path, "go.mod", exclude_paths=exclude_paths):
+        text = decode_text(go_mod)
+        if text is None or lists_all_requirements(text):
+            continue
+        requires, replaces, _ = _parse_go_mod(text)
+        unlocked = [
+            requirement
+            for requirement in apply_replaces(requires, replaces)
+            if requirement[0] not in workspace_local and requirement not in locked
+        ]
+        if unlocked:
+            record_unlisted_dependencies(
+                go_mod,
+                "lists only direct requirements (its go directive is below 1.17 or absent) "
+                f"and a go.sum row is missing for {len(unlocked)} of them",
+                "commit an up-to-date go.sum to include it",
+            )
 
 
 def _resolve_r_transitive(

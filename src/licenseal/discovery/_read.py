@@ -24,7 +24,8 @@ sink, partitioned into:
   referenced through a path that is not followed), or part of one was (a
   value of a type its format does not allow, read as absent), or a lockfile
   that parsed could not be used (a version known not to be readable, no entry
-  in a form the parser reads, merge-conflict markers). Analysis is
+  in a form the parser reads, merge-conflict markers), or a manifest was read
+  but what its dependencies depend on is listed nowhere. Analysis is
   *incomplete*; ``--strict`` treats this like an UNKNOWN and fails.
 * **recovered** (``is_gap=False``) — read with a caveat. A file decoded through
   the latin-1 fallback: the ASCII dependency lines survived, so analysis is
@@ -70,6 +71,7 @@ __all__ = [
     "record_parse_failure",
     "record_unexpected_type",
     "record_unfollowed_reference",
+    "record_unlisted_dependencies",
     "record_unread_entries",
     "record_walk_error",
     "rejected_path_reference",
@@ -294,6 +296,17 @@ def record_unfollowed_reference(manifest: Path, value: str, why: str) -> None:
     the manifest that points at it.
     """
     _record(manifest, f"references {value!r}, which {why}; not followed", is_gap=True)
+
+
+def record_unlisted_dependencies(manifest: Path, why: str, remedy: str) -> None:
+    """Record that what ``manifest``'s dependencies depend on is unknown (a gap).
+
+    The manifest itself was read and its dependencies are in the report. What
+    is missing is what some of them depend on, named neither by the manifest
+    nor by a lockfile. ``why`` says which ones and why they cannot be listed;
+    ``remedy`` says what makes the scan complete.
+    """
+    _record(manifest, f"{why}; what they depend on is not in this report ({remedy})", is_gap=True)
 
 
 def rejected_path_reference(manifest: Path, value: str) -> bool:
