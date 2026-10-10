@@ -9,7 +9,7 @@ import httpx
 from licenseal.analysis.spdx import normalize_license
 from licenseal.models import Dependency, DependencyGroup, Ecosystem, LicenseInfo
 from licenseal.resolvers.deps_dev import resolve_via_deps_dev_stable_get
-from licenseal.resolvers.http import Fetcher, fetch_registry_json
+from licenseal.resolvers.http import Fetcher, fetch_registry_json, object_field
 
 _CRATES_IO_URL = "https://crates.io/api/v1/crates"
 
@@ -53,7 +53,7 @@ def _resolve_version(
     data = fetcher(f"{_CRATES_IO_URL}/{name}", client)
     if data is None:
         return None
-    crate = data.get("crate", {}) or {}
+    crate = object_field(data, "crate")
     version = crate.get("max_stable_version") or crate.get("newest_version")
     return version if isinstance(version, str) else None
 
@@ -96,8 +96,7 @@ def resolve_rust_license(
             client=client,
             fetcher=fetcher,
         )
-    version_obj = data.get("version", {}) or {}
-    raw_license = version_obj.get("license", "") or ""
+    raw_license = object_field(data, "version").get("license", "") or ""
     if not isinstance(raw_license, str):
         raw_license = ""
 
@@ -108,7 +107,7 @@ def resolve_rust_license(
     homepage_url = ""
     crate_data = fetcher(f"{_CRATES_IO_URL}/{name}", client)
     if crate_data is not None:
-        crate_obj = crate_data.get("crate", {}) or {}
+        crate_obj = object_field(crate_data, "crate")
         repo = crate_obj.get("repository") or ""
         repository_url = repo if isinstance(repo, str) else ""
         home = crate_obj.get("homepage") or ""

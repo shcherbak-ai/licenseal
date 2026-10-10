@@ -9,6 +9,7 @@ import time
 from collections import Counter
 from collections.abc import Callable
 from urllib.parse import urlsplit
+from xml.etree.ElementTree import Element  # nosec B405
 
 import httpx
 from defusedxml import ElementTree as DefusedET
@@ -154,7 +155,13 @@ _HOST_RATE_LIMIT_WINDOWS = {
 
 def _respect_host_rate_limit(url: str) -> None:
     """Apply any host-specific registry rate limit before opening a request."""
-    host = urlsplit(url).hostname
+    try:
+        host = urlsplit(url).hostname
+    except ValueError:
+        # A registry-supplied link whose authority can't be parsed can't be
+        # matched to a rate-limited host, so no limiter applies. Whether it
+        # can be requested at all is for the client and the egress policy.
+        return
     if host is None:
         return
     limiter = _HOST_RATE_LIMITERS.get(host.lower())
@@ -208,7 +215,9 @@ def _retry_delay_seconds(response: httpx.Response, default_delay: float) -> floa
     full-jittered via :func:`_jittered_backoff`.
     """
     retry_after = response.headers.get("Retry-After", "").strip()
-    if retry_after.isdigit():
+    # ``isdecimal``, not ``isdigit``: the latter also accepts characters such
+    # as superscript digits, which ``float()`` rejects.
+    if retry_after.isdecimal():
         capped = min(float(retry_after), _MAX_RETRY_AFTER_SECONDS)
         # S311: jitter, not crypto — see _jittered_backoff.
         return capped + random.uniform(0.0, _INITIAL_BACKOFF_SECONDS)  # noqa: S311  # nosec B311
@@ -234,24 +243,63 @@ def _read_capped_bytes(response: httpx.Response) -> bytes | None:
 
 
 def _read_capped_text(response: httpx.Response) -> str | None:
-    """Stream a response body to text, or ``None`` once it exceeds the ceiling.
+    """Read a response body as text, or ``None`` if it is too large or undecodable.
 
-    ``iter_text`` applies the same content-decoding and charset handling as
-    ``response.text`` (callers see byte-identical output for in-bounds bodies)
-    while bounding memory against a decompression bomb.
+    The capped bytes are decoded with the response's charset (UTF-8 when the
+    ``Content-Type`` names none, or one Python doesn't know), malformed
+    sequences replaced: the same text ``response.text`` gives for an in-bounds
+    body. A ``Content-Type`` whose charset names a codec that can't decode text
+    yields ``None`` rather than an error from the codec.
     """
-    total = 0
-    parts: list[str] = []
-    for chunk in response.iter_text():
-        total += len(chunk)
-        if total > _MAX_RESPONSE_BYTES:
-            return None
-        parts.append(chunk)
-    return "".join(parts)
+    raw = _read_capped_bytes(response)
+    if raw is None:
+        return None
+    try:
+        return raw.decode(response.encoding or "utf-8", errors="replace")
+    except (LookupError, ValueError):
+        # LookupError: a registered codec that is not a text encoding.
+        # ValueError: a codec that does not support replacing malformed input.
+        return None
+
+
+def _decode_json_object(raw: bytes) -> dict | None:
+    """Parse a response body as a JSON object, or ``None`` if it isn't one.
+
+    Every JSON endpoint licenseal reads answers with an object. A body that is
+    not JSON, is JSON of another type (a list, a string, a number, ``null``),
+    or is nested past the parser's recursion limit is a failed lookup, so no
+    cache trim, resolver, or walker has to check the top-level shape itself.
+    """
+    try:
+        data = json.loads(raw)
+    except (ValueError, RecursionError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def object_field(data: dict, key: str) -> dict:
+    """Return ``data[key]`` when it is a JSON object, else an empty ``dict``.
+
+    Registry metadata nests the fields licenseal reads one object down
+    (``info``, ``crate``, ``version``). A response carrying another type there
+    reads as "no such fields", the same as a response without the key.
+    """
+    value = data.get(key)
+    return value if isinstance(value, dict) else {}
 
 
 def fetch_registry_json(url: str, client: httpx.Client) -> dict | None:
-    """Fetch JSON with brief retries for transient registry failures.
+    """Fetch a JSON object with brief retries for transient registry failures.
+
+    Returns ``None`` for every failed lookup: an error status, an exhausted
+    retry budget, an oversized body, or a body that is not a JSON object (see
+    :func:`_decode_json_object`).
+
+    A URL the client refuses to build is a failed lookup too, here and in the
+    other GET fetchers below. ``httpx.InvalidURL`` is raised before anything
+    is sent and is not a ``RequestError``; it is what a dependency name or
+    version carrying a character no URL may hold (an ASCII control character,
+    for example) produces. It is not retried: the same URL fails the same way.
 
     A rate-limited response from a host with a rate-limit window (see
     :class:`_HostRateLimitWindow`) is retried once the window reopens without
@@ -281,10 +329,9 @@ def fetch_registry_json(url: str, client: httpx.Client) -> dict | None:
                 raw = _read_capped_bytes(response)
                 if raw is None:
                     return None
-                try:
-                    return json.loads(raw)
-                except ValueError:
-                    return None
+                return _decode_json_object(raw)
+        except httpx.InvalidURL:
+            return None
         except httpx.RequestError:
             if attempt == _MAX_ATTEMPTS - 1:
                 return None
@@ -324,10 +371,7 @@ def fetch_registry_json_post(url: str, body: dict, client: httpx.Client) -> dict
                 raw = _read_capped_bytes(response)
                 if raw is None:
                     return None
-                try:
-                    return json.loads(raw)
-                except ValueError:
-                    return None
+                return _decode_json_object(raw)
         except httpx.RequestError:
             if attempt == _MAX_ATTEMPTS - 1:
                 return None
@@ -391,6 +435,8 @@ def fetch_pep658_metadata(url: str, client: httpx.Client) -> dict[str, str] | No
                 if text is None:
                     return None
                 return _parse_pep658_headers(text)
+        except httpx.InvalidURL:
+            return None
         except httpx.RequestError:
             if attempt == _MAX_ATTEMPTS - 1:
                 return None
@@ -516,6 +562,8 @@ def fetch_registry_text(url: str, client: httpx.Client) -> dict[str, str] | None
                 if text is None:
                     return None
                 return {"text": text}
+        except httpx.InvalidURL:
+            return None
         except httpx.RequestError:
             if attempt == _MAX_ATTEMPTS - 1:
                 return None
@@ -822,12 +870,27 @@ def _trim_maven_central_pom(data: dict) -> dict:
         if local not in _POM_KEEP_TAGS:
             root.remove(child)
 
-    # ``tostring`` is serialization, not a parse surface, so defusedxml
-    # re-exports the stdlib function unchanged (the parse-side bombs are
-    # handled by ``DefusedET.fromstring`` above). The output carries an
-    # ``ns0:`` prefix when the source declared a default namespace —
-    # functionally equivalent for the resolver, which strips any prefix.
-    return {"text": DefusedET.tostring(root, encoding="unicode")}
+    # The output carries an ``ns0:`` prefix when the source declared a default
+    # namespace — functionally equivalent for the resolver, which strips any
+    # prefix.
+    return _serialize_trimmed_xml(root)
+
+
+def _serialize_trimmed_xml(root: Element) -> dict:
+    """Wrap a pruned XML tree back into the ``{"text": ...}`` cache shape.
+
+    ``tostring`` is serialization, not a parse surface, so defusedxml
+    re-exports the stdlib function unchanged (the parse-side bombs are
+    handled by ``DefusedET.fromstring``). Unlike the parser it recurses once
+    per level of element nesting, so a document nested past the recursion
+    limit inside a kept element parses and then can't be written back. That
+    is cached as the same empty sentinel as an entity bomb: the resolver
+    reads it as a response with no metadata.
+    """
+    try:
+        return {"text": DefusedET.tostring(root, encoding="unicode")}
+    except RecursionError:
+        return {"text": ""}
 
 
 def _trim_nuspec(data: dict) -> dict:
@@ -870,7 +933,7 @@ def _trim_nuspec(data: dict) -> dict:
             if _local(sub.tag) not in _NUSPEC_KEEP_TAGS:
                 child.remove(sub)
 
-    return {"text": DefusedET.tostring(root, encoding="unicode")}
+    return _serialize_trimmed_xml(root)
 
 
 def _trim_rubygems_deps(data: dict) -> dict[str, list[dict]]:

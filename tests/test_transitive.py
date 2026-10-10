@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import textwrap
 from dataclasses import replace
+from pathlib import Path
 
 import httpx
 import pytest
@@ -13,6 +14,7 @@ import respx
 from licenseal.discovery import discover_all_dependencies
 from licenseal.discovery._read import collect_read_diagnostics
 from licenseal.models import Dependency, DependencyGroup, Ecosystem
+from licenseal.resolvers.http import RegistryCache, fetch_registry_json
 from licenseal.resolvers.maven_central import _MAX_PARENT_DEPTH
 from licenseal.transitive import (
     _MAX_BOM_DEPTH,
@@ -7613,3 +7615,127 @@ class TestRIndexClosure:
         # Off-index node still surfaces (resolves UNKNOWN at the license stage)
         # with no version.
         assert by_name["offcran"].version_constraint == ""
+
+
+@pytest.fixture(scope="module")
+def walk_through_cache():
+    """The transitive stage wired the way the CLI wires it: a fresh per-scan
+    cache for every walk, over one client shared by the module.
+    """
+
+    with httpx.Client() as client:
+
+        def walk(seeds: list[Dependency], project: Path) -> list[Dependency]:
+            cache = RegistryCache()
+            return resolve_transitive(
+                seeds,
+                project,
+                include_dev=False,
+                max_depth=50,
+                client=client,
+                fetcher=cache.fetch,
+                pom_fetcher=cache.fetch_text,
+            )
+
+        yield walk
+
+
+class TestRegistryWalkOverUnusableResponses:
+    """A response the walker cannot use is handled exactly like a fetch that
+    failed: the dependency stays in the list, unresolved, for the license
+    stage to report.
+    """
+
+    _VERSION_LOOKUPS = [
+        pytest.param(Ecosystem.PYTHON, "pkg-a", "https://pypi.org/pypi/pkg-a/json", id="python"),
+        pytest.param(Ecosystem.NPM, "pkg-a", "https://registry.npmjs.org/pkg-a/latest", id="npm"),
+        pytest.param(Ecosystem.RUST, "pkg-a", "https://crates.io/api/v1/crates/pkg-a", id="rust"),
+        pytest.param(
+            Ecosystem.PHP,
+            "vendor/pkg-a",
+            "https://repo.packagist.org/p2/vendor/pkg-a.json",
+            id="php",
+        ),
+        pytest.param(
+            Ecosystem.RUBY, "pkg-a", "https://rubygems.org/api/v1/gems/pkg-a.json", id="ruby"
+        ),
+        pytest.param(Ecosystem.HEX, "pkg_a", "https://hex.pm/api/packages/pkg_a", id="hex"),
+    ]
+
+    @respx.mock
+    @pytest.mark.parametrize(("ecosystem", "name", "url"), _VERSION_LOOKUPS)
+    def test_body_that_is_not_an_object_matches_a_failed_fetch(
+        self, tmp_path, walk_through_cache, ecosystem, name, url
+    ):
+        seeds = [_seed(name, ecosystem)]
+        route = respx.get(url).mock(return_value=httpx.Response(404))
+        after_failed_fetch = walk_through_cache(seeds, tmp_path)
+        assert [(d.name, d.version_constraint) for d in after_failed_fetch] == [(name, "")]
+
+        for body in (b"[]", b'["1.0.0"]', b'"1.0.0"', b"5", b"null"):
+            route.mock(return_value=httpx.Response(200, content=body))
+            assert walk_through_cache(seeds, tmp_path) == after_failed_fetch, body
+
+    @respx.mock
+    @pytest.mark.parametrize("crate", [[], ["1.0.0"], "1.0.0", 5, True, None])
+    def test_rust_crate_field_that_is_not_an_object(self, tmp_path, walk_through_cache, crate):
+        respx.get("https://crates.io/api/v1/crates/pkg-a").mock(
+            return_value=httpx.Response(200, json={"crate": crate})
+        )
+        deps = walk_through_cache([_seed("pkg-a", Ecosystem.RUST)], tmp_path)
+        assert [(d.name, d.version_constraint) for d in deps] == [("pkg-a", "")]
+
+    @respx.mock
+    def test_python_info_field_that_is_not_an_object(self):
+        # Without the cache, whose trim replaces a malformed ``info``.
+        route = respx.get("https://pypi.org/pypi/pkg-a/json")
+        seed = _seed("pkg-a", Ecosystem.PYTHON)
+        with httpx.Client() as client:
+            for info in ([], ["1.0.0"], "1.0.0", 5, True, None):
+                route.mock(return_value=httpx.Response(200, json={"info": info}))
+                version = _resolve_version(seed, Ecosystem.PYTHON, client, fetch_registry_json)
+                assert version == "", info
+
+    @respx.mock
+    def test_name_no_url_can_carry_is_kept_unresolved_without_a_request(
+        self, tmp_path, walk_through_cache
+    ):
+        seeds = [
+            Dependency(name="pkg\x01a", version_constraint=spec, ecosystem=ecosystem)
+            for ecosystem in (Ecosystem.PYTHON, Ecosystem.NPM, Ecosystem.RUST, Ecosystem.RUBY)
+            for spec in ("", ">=1.0")
+        ]
+        deps = walk_through_cache(seeds, tmp_path)
+        assert sorted((d.ecosystem.value, d.name, d.version_constraint) for d in deps) == sorted(
+            (s.ecosystem.value, s.name, s.version_constraint) for s in seeds
+        )
+        assert respx.calls.call_count == 0
+
+    @respx.mock
+    def test_registry_declared_child_no_url_can_carry_is_kept_unresolved(
+        self, tmp_path, walk_through_cache
+    ):
+        # The parent's registry metadata names a child with a control character
+        # in it. The child is reported under that exact name; its sibling and
+        # the parent are walked as usual.
+        respx.get("https://registry.npmjs.org/parent-pkg/1.0.0").mock(
+            return_value=httpx.Response(
+                200,
+                json=_npm_version(
+                    "parent-pkg",
+                    "1.0.0",
+                    dependencies={"evil\x01child": "^2.0.0", "good-child": "3.0.0"},
+                ),
+            )
+        )
+        respx.get("https://registry.npmjs.org/good-child/3.0.0").mock(
+            return_value=httpx.Response(200, json=_npm_version("good-child", "3.0.0"))
+        )
+        seed = Dependency(name="parent-pkg", version_constraint="1.0.0", ecosystem=Ecosystem.NPM)
+        deps = walk_through_cache([seed], tmp_path)
+        assert sorted((d.name, d.version_constraint, d.direct_ancestors) for d in deps) == [
+            ("evil\x01child", "^2.0.0", ("parent-pkg",)),
+            ("good-child", "==3.0.0", ("parent-pkg",)),
+            ("parent-pkg", "==1.0.0", ()),
+        ]
+        assert respx.calls.call_count == 2

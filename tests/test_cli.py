@@ -2737,6 +2737,197 @@ class TestCheckCommand:
         assert "could not be resolved" in result.output
 
 
+class TestCheckWithUnusableRegistryAnswers:
+    """A dependency whose registry lookup cannot yield a license is one UNKNOWN
+    row. The scan finishes, the dependencies beside it are resolved, and
+    ``--strict`` alone decides the exit code.
+    """
+
+    @staticmethod
+    def _check(tmp_path, *flags):
+        """Run ``check`` with a JSON report file; return the result and the report."""
+        out = tmp_path / "report.json"
+        result = CliRunner().invoke(
+            main, ["check", "--path", str(tmp_path), "-f", "json", "-o", str(out), *flags]
+        )
+        report = json.loads(out.read_text(encoding="utf-8")) if out.exists() else None
+        return result, report
+
+    def _assert_one_unknown_per_mode(self, tmp_path, expected: dict[str, str]):
+        """``expected`` maps every reported dependency name to its license."""
+        lenient, report = self._check(tmp_path, "--no-strict")
+        assert lenient.exit_code == 0
+        assert {d["name"]: d["license"] for d in report["dependencies"]} == expected
+        unknown = sorted(name for name, license_id in expected.items() if license_id == "UNKNOWN")
+        assert sorted(d["name"] for d in report["dependencies"] if d["verdict"] == "unknown") == (
+            unknown
+        )
+        assert report["summary"]["unknown"] == len(unknown)
+
+        strict, report = self._check(tmp_path)
+        assert strict.exit_code == 1
+        assert {d["name"]: d["license"] for d in report["dependencies"]} == expected
+
+    @respx.mock
+    @pytest.mark.parametrize(
+        "body",
+        [
+            pytest.param(b"[]", id="list"),
+            pytest.param(b'"MIT"', id="string"),
+            pytest.param(b"5", id="number"),
+            pytest.param(b"null", id="null"),
+            pytest.param(b"[" * _DEEP + b"]" * _DEEP, id="nested-too-deeply"),
+        ],
+    )
+    def test_response_body_that_is_not_a_json_object(self, tmp_path, body):
+        (tmp_path / "requirements.txt").write_text("flask\nodd-one\n", encoding="utf-8")
+        _mock_pypi("flask", "BSD-3-Clause")
+        respx.get("https://pypi.org/pypi/odd-one/json").mock(
+            return_value=httpx.Response(200, content=body)
+        )
+        self._assert_one_unknown_per_mode(tmp_path, {"flask": "BSD-3-Clause", "odd-one": "UNKNOWN"})
+
+    @respx.mock
+    def test_registry_fields_of_the_wrong_type(self, tmp_path):
+        (tmp_path / "requirements.txt").write_text("flask\nodd-py\n", encoding="utf-8")
+        (tmp_path / "package.json").write_text(
+            json.dumps({"name": "app", "dependencies": {"left-pad": "1.0.0", "odd-js": "1.0.0"}}),
+            encoding="utf-8",
+        )
+        (tmp_path / "Cargo.toml").write_text(
+            '[package]\nname = "app"\nversion = "0.1.0"\n\n[dependencies]\nodd-rs = "1"\n',
+            encoding="utf-8",
+        )
+        _mock_pypi("flask", "BSD-3-Clause")
+        _mock_npm("left-pad", "MIT")
+        respx.get("https://pypi.org/pypi/odd-py/json").mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "info": {
+                        "version": "1.0.0",
+                        "license": {"text": "MIT"},
+                        "license_expression": 5,
+                        "classifiers": 7,
+                    }
+                },
+            )
+        )
+        respx.get("https://pypi.org/pypi/odd-py/1.0.0/json").mock(
+            return_value=httpx.Response(200, json={"info": {"license": ["MIT"]}})
+        )
+        respx.get("https://registry.npmjs.org/odd-js/1.0.0").mock(
+            return_value=httpx.Response(200, json={"version": "1.0.0", "license": {"type": 5}})
+        )
+        respx.get("https://crates.io/api/v1/crates/odd-rs").mock(
+            return_value=httpx.Response(200, json={"crate": ["1.0.0"]})
+        )
+        self._assert_one_unknown_per_mode(
+            tmp_path,
+            {
+                "flask": "BSD-3-Clause",
+                "left-pad": "MIT",
+                "odd-py": "UNKNOWN",
+                "odd-js": "UNKNOWN",
+                "odd-rs": "UNKNOWN",
+            },
+        )
+
+    @respx.mock
+    def test_names_no_url_can_carry_keep_their_identity(self, tmp_path):
+        # One name with a control character comes from the manifest, another
+        # from a registry answer. Each is reported under exactly that name.
+        (tmp_path / "package.json").write_text(
+            json.dumps(
+                {
+                    "name": "app",
+                    "license": "MIT",
+                    "dependencies": {"parent-pkg": "1.0.0", "bad\x01name": "^1.0.0"},
+                }
+            ),
+            encoding="utf-8",
+        )
+        respx.get("https://registry.npmjs.org/parent-pkg/1.0.0").mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "version": "1.0.0",
+                    "license": "MIT",
+                    "dependencies": {"evil\x01child": "^2.0.0"},
+                },
+            )
+        )
+        self._assert_one_unknown_per_mode(
+            tmp_path, {"parent-pkg": "MIT", "bad\x01name": "UNKNOWN", "evil\x01child": "UNKNOWN"}
+        )
+        _, report = self._check(tmp_path, "--no-strict")
+        child = next(d for d in report["dependencies"] if d["name"] == "evil\x01child")
+        assert child["is_transitive"] is True
+        assert child["direct_ancestors"] == ["parent-pkg"]
+        # Only the well-formed coordinate was ever requested.
+        assert {call.request.url.host for call in respx.calls} <= {
+            "registry.npmjs.org",
+            "api.deps.dev",
+        }
+        assert not any("%01" in str(call.request.url) for call in respx.calls)
+
+    @respx.mock
+    def test_only_dependency_with_such_a_name_trips_the_nothing_resolved_gate(self, tmp_path):
+        # A failed lookup like any other: with no other dependency and no
+        # answered request, the scan reports that nothing could be resolved.
+        (tmp_path / "package.json").write_text(
+            json.dumps({"name": "app", "dependencies": {"bad\x01name": "^1.0.0"}}),
+            encoding="utf-8",
+        )
+        result = CliRunner().invoke(main, ["check", "--path", str(tmp_path), "--no-strict"])
+        assert isinstance(result.exception, SystemExit)
+        assert result.exit_code == 1
+        assert "Could not resolve any of the 1 dependencies" in result.output
+        assert respx.calls.call_count == 0
+
+    @respx.mock
+    @pytest.mark.parametrize(
+        "body",
+        [
+            pytest.param(b"[]", id="list"),
+            pytest.param(b'"ok"', id="string"),
+            pytest.param(b"5", id="number"),
+            pytest.param(b"[" * _DEEP + b"]" * _DEEP, id="nested-too-deeply"),
+        ],
+    )
+    def test_batch_answer_that_is_not_a_json_object_falls_back_per_package(self, tmp_path, body):
+        (tmp_path / "requirements.txt").write_text("flask==3.0.0\n", encoding="utf-8")
+        batch = respx.post("https://api.deps.dev/v3alpha/versionbatch").mock(
+            return_value=httpx.Response(200, content=body)
+        )
+        _mock_pypi("flask", "BSD-3-Clause", version="3.0.0")
+        result, report = self._check(tmp_path)
+        assert result.exit_code == 0
+        assert batch.call_count == 1
+        assert [(d["name"], d["license"]) for d in report["dependencies"]] == [
+            ("flask", "BSD-3-Clause")
+        ]
+
+    @respx.mock
+    def test_retry_after_that_is_a_digit_but_not_a_number(self, tmp_path, fake_registry_clock):
+        (tmp_path / "requirements.txt").write_text("flask\n", encoding="utf-8")
+        _mock_pypi("flask", "BSD-3-Clause")
+        answered = httpx.Response(
+            200, json={"info": {"license": "BSD-3-Clause", "version": "1.0.0"}}
+        )
+        throttled = httpx.Response(429, headers={"Retry-After": b"\xb2"})
+        route = respx.get("https://pypi.org/pypi/flask/json").mock(
+            side_effect=[throttled, answered]
+        )
+        result, report = self._check(tmp_path)
+        assert result.exit_code == 0
+        assert route.call_count == 2
+        assert [(d["name"], d["license"]) for d in report["dependencies"]] == [
+            ("flask", "BSD-3-Clause")
+        ]
+        assert len(fake_registry_clock.sleeps) == 1
+
+
 class TestTetheredIntegration:
     def test_conftest_activate_blocks_unmocked_egress(self):
         """The test suite's no-real-network invariant is enforced by two

@@ -7,12 +7,17 @@ from collections.abc import Callable
 import httpx
 from packaging.markers import Marker
 from packaging.requirements import InvalidRequirement, Requirement
-from packaging.version import InvalidVersion, Version
+from packaging.version import Version
 
 from licenseal.analysis.spdx import normalize_license
 from licenseal.models import Dependency, DependencyGroup, Ecosystem, LicenseInfo
 from licenseal.resolvers.deps_dev import resolve_via_deps_dev_stable_get
-from licenseal.resolvers.http import Fetcher, fetch_pep658_metadata, fetch_registry_json
+from licenseal.resolvers.http import (
+    Fetcher,
+    fetch_pep658_metadata,
+    fetch_registry_json,
+    object_field,
+)
 from licenseal.resolvers.version_selection import select_python_version
 
 _PYPI_URL = "https://pypi.org/pypi"
@@ -68,7 +73,9 @@ def _extract_pinned_version(version_constraint: str) -> str | None:
         return None
     try:
         Version(version)
-    except InvalidVersion:
+    except ValueError:
+        # ``InvalidVersion``, or a release segment with more digits than the
+        # interpreter converts to an integer.
         return None
     return stripped
 
@@ -156,11 +163,17 @@ def _extract_raw_license(info: dict) -> str:
     if not isinstance(info, dict):
         return ""
 
-    raw = info.get("license_expression", "") or ""
+    # A field of another type (an object, a number, a list) carries no license
+    # string: it reads as absent.
+    raw = info.get("license_expression")
+    if not isinstance(raw, str):
+        raw = ""
     if raw and normalize_license(raw) != "UNKNOWN":
         return raw
 
-    legacy = info.get("license", "") or ""
+    legacy = info.get("license")
+    if not isinstance(legacy, str):
+        legacy = ""
     # When ``legacy`` is itself just a file pointer (``"LICENSE"``,
     # ``"LICENSE.txt"``, ``"SEE LICENSE IN ..."``), it carries no SPDX info
     # — only a hint to manual review. Prefer a concrete classifier here so
@@ -171,7 +184,8 @@ def _extract_raw_license(info: dict) -> str:
         if normalized not in ("UNKNOWN", "Proprietary"):
             return legacy
 
-    for classifier in info.get("classifiers", []) or []:
+    classifiers = info.get("classifiers")
+    for classifier in classifiers if isinstance(classifiers, list) else ():
         if isinstance(classifier, str) and classifier.startswith(_LICENSE_CLASSIFIER_PREFIX):
             return classifier
 
@@ -333,8 +347,9 @@ def resolve_python_license(
             license_raw="",
             from_registry=False,
         )
-    info = data.get("info", {})
-    resolved_version = info.get("version", "")
+    info = object_field(data, "info")
+    version = info.get("version")
+    resolved_version = version if isinstance(version, str) else ""
     repository_url = _extract_repository_url(info)
     homepage_url = _extract_homepage_url(info)
 
@@ -347,7 +362,7 @@ def resolve_python_license(
         if project_data is None:
             project_data = fetcher(f"{_PYPI_URL}/{name}/json", client)
         if project_data is not None and project_data is not data:
-            project_info = project_data.get("info", {}) or {}
+            project_info = object_field(project_data, "info")
             raw_license = _extract_raw_license(project_info)
             if not repository_url:
                 repository_url = _extract_repository_url(project_info)
@@ -499,7 +514,7 @@ def fetch_python_dependencies(
     data = fetcher(url, client)
     if data is None:
         return []
-    info = data.get("info", {}) or {}
+    info = object_field(data, "info")
     requires = info.get("requires_dist", []) or []
     if not isinstance(requires, list):
         return []
@@ -509,7 +524,8 @@ def fetch_python_dependencies(
             continue
         try:
             req = Requirement(raw)
-        except InvalidRequirement:
+        except (InvalidRequirement, RecursionError):
+            # ``RecursionError``: a marker nested too deeply for the parser.
             continue
         if not _marker_passes_with_extras(req.marker, requested_extras):
             continue

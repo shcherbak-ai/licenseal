@@ -132,6 +132,7 @@ from licenseal.resolvers.http import (
     fetch_go_mod_text,
     fetch_registry_json,
     fetch_registry_text,
+    object_field,
 )
 from licenseal.resolvers.maven_central import (
     _MAX_PARENT_DEPTH,  # noqa: PLC2701
@@ -1959,8 +1960,7 @@ def _resolve_version(
             data = fetcher(f"https://pypi.org/pypi/{dep.name}/json", client)
             if data is None:
                 return ""
-            info = data.get("info", {}) or {}
-            v = info.get("version", "")
+            v = object_field(data, "info").get("version", "")
             return v if isinstance(v, str) else ""
         # range — query project metadata, pick highest matching. `releases`
         # comes as a list[str] when served through `RegistryCache` (trimmed
@@ -1984,7 +1984,7 @@ def _resolve_version(
         data = fetcher(f"https://crates.io/api/v1/crates/{dep.name}", client)
         if data is None:
             return ""
-        crate = data.get("crate", {}) or {}
+        crate = object_field(data, "crate")
         v = crate.get("max_stable_version") or crate.get("newest_version") or ""
         return v if isinstance(v, str) else ""
 

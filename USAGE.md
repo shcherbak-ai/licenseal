@@ -99,6 +99,7 @@ The report nests transitives directly beneath the depth-0 dependency that pulls 
 - Empty version constraints resolve against the registry's latest published release.
 - Supported non-exact constraints (`>=`, `<=`, `!=`, `~=`, `^`, `~`, ranges, `||`, wildcards) resolve to the highest published version within the declared range.
 - Unsupported or unsafe-to-interpret specs resolve to `UNKNOWN` instead of guessing.
+- A registry lookup that cannot produce a license resolves that one dependency to `UNKNOWN` and the scan continues. This covers an HTTP 200 whose body is not a JSON object, a license, version, or metadata field of an unexpected type (well-formed fields beside it are still read), and a dependency name or version that cannot be put in a request URL, such as one containing an ASCII control character. A lookup never strips or rewrites the name to make the request succeed; the dependency is reported under the name it was discovered with. A response that is not a JSON object and a request that cannot be built count as failed lookups under the every-lookup-fails rule in [Output & the CI gate](#output--the-ci-gate): a scan in which no lookup succeeds and nothing resolves still ends with that error.
 
 licenseal is a license resolver, not a dependency resolver. It does not evaluate Python environment markers, `Requires-Python`, npm `engines`, or transitive-version conflict resolution beyond first-encountered-wins. That keeps resolution fast and predictable but does not model environment-specific installability.
 

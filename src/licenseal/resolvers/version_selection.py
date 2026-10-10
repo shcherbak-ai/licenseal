@@ -4,8 +4,7 @@ from __future__ import annotations
 
 import re
 
-from packaging.specifiers import InvalidSpecifier, SpecifierSet
-from packaging.version import InvalidVersion
+from packaging.specifiers import SpecifierSet
 from packaging.version import Version as PackagingVersion
 from semantic_version import NpmSpec
 from semantic_version import Version as SemVer
@@ -37,22 +36,23 @@ def select_python_version(version_constraint: str, published_versions: list[str]
     if not spec or any(marker in spec for marker in _UNSUPPORTED_PYTHON_MARKERS):
         return None
 
-    try:
-        specifier = SpecifierSet(spec)
-    except InvalidSpecifier:
-        return None
-
+    # ``ValueError`` below covers ``InvalidVersion`` / ``InvalidSpecifier`` and
+    # the plain ``ValueError`` a release segment raises when it has more digits
+    # than the interpreter converts to an integer.
     candidates: dict[PackagingVersion, str] = {}
     for raw_version in published_versions:
         try:
             parsed = PackagingVersion(raw_version)
-        except InvalidVersion:
+        except ValueError:
             continue
         candidates[parsed] = raw_version
 
     if not candidates:
         return None
-    allowed = list(specifier.filter(candidates, prereleases=None))
+    try:
+        allowed = list(SpecifierSet(spec).filter(candidates, prereleases=None))
+    except ValueError:
+        return None
     if not allowed:
         return None
     return candidates[max(allowed)]

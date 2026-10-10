@@ -115,7 +115,7 @@ Each entry is a manifest/lockfile read or parse anomaly surfaced during the scan
 | `effective_license` | string | `reviewed_license` if non-empty, else `detected_license`. |
 | `reviewed` | bool | Whether a review override applied. |
 | `review_note` | string | Reviewer note from `licenseal.review.toml`. |
-| `resolved_version` | string | Concrete version checked (e.g. `"2026.4.22"`). |
+| `resolved_version` | string | Concrete version checked (e.g. `"2026.4.22"`). Empty when the lookup yielded no usable version. |
 | `repository_url` | string | Source-repo URL from the registry's structured field (e.g. PyPI `project_urls`, npm `repository`, crates.io `repository`, and the equivalent field per registry). Empty when the registry didn't expose one. See _URL fields and trust_ below. |
 | `homepage_url` | string | Package-author-supplied homepage (e.g. PyPI `home_page`, npm `homepage`, crates.io `homepage`, and the equivalent field per registry). Empty when the registry didn't expose one. See _URL fields and trust_ below. |
 | `package_url` | string | Registry / docs page for the dependency's ecosystem (e.g. `https://pypi.org/project/{name}/`, `https://www.npmjs.com/package/{name}`, `https://crates.io/crates/{name}`, `https://pkg.go.dev/{module}`, `https://www.nuget.org/packages/{name}`, `https://packagist.org/packages/{name}`, `https://rubygems.org/gems/{name}`, `https://hex.pm/packages/{name}`, `https://cran.r-project.org/package={name}`). The name and version are percent-encoded into the URL (`/`, `@`, and `+` are kept), so the URL of a well-formed name reads as shown and any other character cannot change the host or add a query or fragment. |

@@ -198,15 +198,18 @@ def resolve_npm_license(
 
     # /latest returns version-level metadata directly
     raw_license = ""
-    resolved_version = data.get("version", "")
+    version = data.get("version")
+    resolved_version = version if isinstance(version, str) else ""
     repository_url = _extract_repository_url(data)
     homepage_url = _extract_homepage_url(data)
 
+    # ``license`` is a string, or the legacy ``{"type": ...}`` object. Any
+    # other shape, at either level, carries no license string.
     license_val = data.get("license", "")
+    if isinstance(license_val, dict):
+        license_val = license_val.get("type")
     if isinstance(license_val, str):
         raw_license = license_val
-    elif isinstance(license_val, dict):
-        raw_license = license_val.get("type", "")
 
     # Legacy npm metadata used a `licenses` array (or single dict) instead of
     # the modern `license` string. Many packages published before the
