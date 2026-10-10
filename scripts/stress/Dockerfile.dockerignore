@@ -1,0 +1,10 @@
+# Allowlist: only what the image build copies leaves the host.
+*
+!pyproject.toml
+!uv.lock
+!PYPI.md
+!LICENSE
+!NOTICE
+!src
+!src/**
+**/__pycache__

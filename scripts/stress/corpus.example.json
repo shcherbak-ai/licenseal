@@ -1,0 +1,23 @@
+{
+  "_comment": "Copy to licenseal-scans/corpus.json (gitignored) and list the repos to stress-test. 'name' is the clone directory inside the Docker volume; 'ecosystems' and 'why' are notes for the reader.",
+  "repos": [
+    {
+      "name": "example-app",
+      "url": "https://github.com/<owner>/<repo>",
+      "ecosystems": ["python"],
+      "why": "application with a committed lockfile"
+    },
+    {
+      "name": "example-library",
+      "url": "https://github.com/<owner>/<repo>",
+      "ecosystems": ["npm"],
+      "why": "library without a lockfile, exercising the registry walk"
+    },
+    {
+      "name": "example-polyglot",
+      "url": "https://github.com/<owner>/<repo>",
+      "ecosystems": ["go", "npm"],
+      "why": "two ecosystems in one tree"
+    }
+  ]
+}
