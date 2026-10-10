@@ -1508,7 +1508,10 @@ def _resolve_java_transitive(
     # fetches across sibling poms.
     dm_resolved: list[Dependency] = []
     for d in direct_uncovered:
-        if not d.source:
+        # Both lookups read ``d.source`` as a POM. A dependency declared in
+        # a Gradle build file has no POM to walk, so it keeps its version
+        # as declared (empty when the build leaves it to a BOM).
+        if d.source.rsplit("/", 1)[-1] != "pom.xml":
             dm_resolved.append(d)
             continue
         if not d.version_constraint:

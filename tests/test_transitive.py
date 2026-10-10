@@ -8,6 +8,8 @@ import textwrap
 import httpx
 import respx
 
+from licenseal.discovery import discover_all_dependencies
+from licenseal.discovery._read import collect_read_diagnostics
 from licenseal.models import Dependency, DependencyGroup, Ecosystem
 from licenseal.resolvers.maven_central import _MAX_PARENT_DEPTH
 from licenseal.transitive import (
@@ -3394,7 +3396,7 @@ class TestJavaTransitiveResolution:
             version_constraint="${some.version}",
             ecosystem=Ecosystem.JAVA,
             group=DependencyGroup.PROD,
-            source="does-not-exist.xml",
+            source="missing/pom.xml",
         )
         with httpx.Client() as client:
             deps = _resolve_java_transitive(
@@ -3627,7 +3629,7 @@ class TestJavaTransitiveResolution:
             version_constraint="",
             ecosystem=Ecosystem.JAVA,
             group=DependencyGroup.PROD,
-            source="does-not-exist.xml",
+            source="missing/pom.xml",
         )
         with httpx.Client() as client:
             deps = _resolve_java_transitive(
@@ -4727,6 +4729,59 @@ class TestJavaTransitiveResolution:
             assert names == {"com.example:a", "com.example:b"}
         finally:
             respx.stop()
+
+    @respx.mock
+    def test_versionless_gradle_dependency_is_not_read_as_a_pom(self, tmp_path):
+        # A Gradle coordinate without a concrete version has no POM whose
+        # parent chain could supply one. It stays as declared, and the build
+        # file is never parsed as XML (which would surface as a gap on it).
+        (tmp_path / "build.gradle").write_text(
+            "dependencies {\n"
+            "    implementation 'org.example:managed'\n"
+            "    implementation group: 'org.example', name: 'templated', version: '${libVersion}'\n"
+            "}\n",
+            encoding="utf-8",
+        )
+        with collect_read_diagnostics() as diags, httpx.Client() as client:
+            direct, _ = discover_all_dependencies(tmp_path)
+            deps = resolve_transitive(
+                direct_deps=direct,
+                project_path=tmp_path,
+                include_dev=True,
+                max_depth=10,
+                client=client,
+            )
+        assert [(d.name, d.version_constraint, d.source) for d in deps] == [
+            ("org.example:managed", "", "build.gradle"),
+            ("org.example:templated", "${libVersion}", "build.gradle"),
+        ]
+        assert diags == []
+
+    @respx.mock
+    def test_versionless_gradle_dependency_pinned_by_lockfile(self, tmp_path):
+        # With a gradle.lockfile, the resolved version of a bare
+        # ``group:artifact`` declaration comes from the lockfile.
+        (tmp_path / "build.gradle").write_text(
+            "dependencies {\n    implementation 'org.example:managed'\n}\n",
+            encoding="utf-8",
+        )
+        (tmp_path / "gradle.lockfile").write_text(
+            "org.example:managed:3.1.0=compileClasspath,runtimeClasspath\n",
+            encoding="utf-8",
+        )
+        with collect_read_diagnostics() as diags, httpx.Client() as client:
+            direct, _ = discover_all_dependencies(tmp_path)
+            deps = resolve_transitive(
+                direct_deps=direct,
+                project_path=tmp_path,
+                include_dev=True,
+                max_depth=10,
+                client=client,
+            )
+        assert [(d.name, d.version_constraint, d.source) for d in deps] == [
+            ("org.example:managed", "==3.1.0", "build.gradle")
+        ]
+        assert diags == []
 
 
 # ===========================================================================

@@ -3789,6 +3789,52 @@ class TestJavaEcosystem:
         assert java_dep["license"] == "GPL-3.0-only"
         assert java_dep["group"] == "prod"
 
+    @respx.mock
+    @pytest.mark.parametrize(
+        ("filename", "content"),
+        [
+            (
+                "build.gradle",
+                "dependencies {\n"
+                "    implementation platform('org.example:bom:1.0.0')\n"
+                "    implementation 'org.example:web'\n"
+                "    runtimeOnly 'org.example:driver'\n"
+                "}\n",
+            ),
+            (
+                "build.gradle.kts",
+                "dependencies {\n"
+                '    implementation(platform("org.example:bom:1.0.0"))\n'
+                '    implementation("org.example:web")\n'
+                '    runtimeOnly("org.example:driver")\n'
+                "}\n",
+            ),
+        ],
+    )
+    def test_check_reports_versionless_gradle_coordinates(self, tmp_path, filename, content):
+        # A build that leaves versions to a BOM declares bare
+        # ``group:artifact`` coordinates. They are reported — unresolved,
+        # since the version is not knowable without a lockfile — so strict
+        # fails instead of passing an empty scan. The build file itself is
+        # not a gap.
+        (tmp_path / filename).write_text(content, encoding="utf-8")
+        runner = CliRunner()
+
+        strict = runner.invoke(main, ["check", "--path", str(tmp_path), "--strict", "-f", "json"])
+        assert strict.exit_code == 1
+        data = json.loads(strict.output[strict.output.index("{") :])
+        assert data["summary"]["total"] == 2
+        assert data["summary"]["unknown"] == 2
+        assert data["summary"]["gaps"] == 0
+        assert data["diagnostics"] == []
+        assert {(d["name"], d["license"], d["group"]) for d in data["dependencies"]} == {
+            ("org.example:web", "UNKNOWN", "prod"),
+            ("org.example:driver", "UNKNOWN", "prod"),
+        }
+
+        advisory = runner.invoke(main, ["check", "--path", str(tmp_path), "--no-strict"])
+        assert advisory.exit_code == 0
+
 
 class TestDotnetEcosystem:
     @respx.mock

@@ -14,23 +14,34 @@ Recognized declaration forms:
     implementation("com.example:some-lib:1.2.3")
     implementation group: 'com.example', name: 'some-lib', version: '1.2.3'
     testImplementation 'com.example:test-lib:4.13.2'
+    implementation 'com.example:managed-lib'          // version-less — emitted, empty version
     api libs.someLib                                  // version-catalog ref — NOT resolved
     implementation("com.example:some-lib:$libVersion")  // variable — NOT resolved
+    implementation platform('com.example:some-bom:1.0')  // BOM reference — NOT resolved
 
-The first three forms are extracted faithfully. The last two are skipped:
-version catalogs (``libs.…``) and variable interpolation (``$var``) would
-require evaluating Gradle's full configuration phase, which is out of
-scope. Projects that use these patterns should ship a ``gradle.lockfile``
-— when present, the lockfile parser (:mod:`.gradle_lockfile`) supersedes
-the heuristic and gives full coverage.
+The first four forms are extracted faithfully. A version-less coordinate
+(string or map form) is emitted with an empty version: the version comes
+from a BOM or a dependency-management plugin, so the dependency is
+reported but its license stays UNKNOWN unless a lockfile pins it. The
+last three are skipped: version catalogs (``libs.…``), variable
+interpolation (``$var``), and ``platform(...)`` / ``enforcedPlatform(...)``
+would require evaluating Gradle's full configuration phase, which is out
+of scope. Projects that use these patterns should ship a
+``gradle.lockfile`` — when present, the lockfile parser
+(:mod:`.gradle_lockfile`) supersedes the heuristic and gives full
+coverage.
 
 Configuration → ``DependencyGroup`` mapping (mirrors Maven scopes):
 
-* ``implementation`` / ``api`` / ``compileOnly`` / ``runtimeOnly`` /
-  ``annotationProcessor`` / ``kapt`` / ``ksp`` → PROD
+* ``implementation`` / ``api`` / ``compileOnly`` / ``compileOnlyApi`` /
+  ``runtimeOnly`` / ``annotationProcessor`` / ``kapt`` / ``ksp`` /
+  ``release*`` variants / ``shadow`` → PROD
 * ``testImplementation`` / ``testRuntimeOnly`` / ``testCompileOnly`` /
-  ``androidTestImplementation`` / ``checkstyle`` / ``spotbugs`` / ``pmd``
-  / ``detekt`` → DEV
+  ``testFixtures*`` / ``androidTestImplementation`` / ``debug*`` variants
+  / ``developmentOnly`` / ``checkstyle`` / ``spotbugs`` / ``pmd`` /
+  ``detekt`` → DEV
+
+Any other configuration name is skipped.
 
 Multi-project Gradle builds use ``settings.gradle[.kts]`` ``include
 'submodule'`` directives. Submodule artifact coordinates would normally
@@ -67,6 +78,14 @@ _DEV_CONFIGURATIONS = frozenset(
         "androidTestApi",
         "androidTestCompileOnly",
         "androidTestRuntimeOnly",
+        "testFixturesApi",
+        "testFixturesImplementation",
+        # Debug build variant and development-only classpath: never part of
+        # the released artifact.
+        "debugImplementation",
+        "debugApi",
+        "debugRuntimeOnly",
+        "developmentOnly",
         "checkstyle",
         "spotbugs",
         "pmd",
@@ -83,7 +102,13 @@ _PROD_CONFIGURATIONS = frozenset(
         "compile",  # deprecated but still seen
         "runtime",  # deprecated but still seen
         "compileOnly",
+        "compileOnlyApi",
         "runtimeOnly",
+        # Release build variant.
+        "releaseImplementation",
+        "releaseApi",
+        "releaseRuntimeOnly",
+        "shadow",  # dependencies a shaded jar leaves on its runtime classpath
         "compileClasspath",
         "runtimeClasspath",
         "annotationProcessor",
@@ -142,6 +167,22 @@ _COORD_STRING_RE = re.compile(
     re.VERBOSE,
 )
 
+# Version-less single-string coordinate: ``'group:artifact'``. The version is
+# supplied by a BOM or a dependency-management plugin, which the heuristic
+# does not evaluate, so the coordinate is emitted with an empty version (as
+# the map form without ``version`` is). Applied with ``match`` — only as the
+# declaration's first argument — so a two-segment string further along the
+# line (a closure argument, a map value) is not read as a coordinate.
+_VERSIONLESS_COORD_RE = re.compile(
+    r"""['"]
+    (?P<group>[A-Za-z0-9_.\-]+)
+    :
+    (?P<artifact>[A-Za-z0-9_.\-]+)
+    ['"]
+    """,
+    re.VERBOSE,
+)
+
 # Groovy / Kotlin map form: ``group: 'g', name: 'a', version: 'v'``
 # or ``group = "g", name = "a", version = "v"``. We extract each piece
 # by name to tolerate any argument order.
@@ -158,8 +199,8 @@ def _config_to_group(config: str) -> DependencyGroup | None:
     """Map a Gradle configuration name to a DependencyGroup, or None if unknown.
 
     Unknown configurations (custom user-defined ones, plugin-defined ones
-    like ``shadow``) return None and the line is skipped — we don't want to
-    misclassify deps from configurations we don't recognize.
+    outside the tables above) return None and the line is skipped — we
+    don't want to misclassify deps from configurations we don't recognize.
     """
     if config in _DEV_CONFIGURATIONS:
         return DependencyGroup.DEV
@@ -171,10 +212,11 @@ def _config_to_group(config: str) -> DependencyGroup | None:
 def _extract_coord_from_rest(rest: str) -> tuple[str, str, str] | None:
     """Pull ``(groupId, artifactId, version)`` out of the rhs of a dep line.
 
-    Recognizes either a single-string ``'g:a:v'`` form or a Groovy/Kotlin
-    map form. Returns None when the rhs references a variable or method
-    call instead of a literal coordinate (the heuristic's known blind
-    spot).
+    Recognizes a single-string ``'g:a:v'`` form, a version-less ``'g:a'``
+    first argument, or a Groovy/Kotlin map form. The version is ``""``
+    when the declaration carries none. Returns None when the rhs
+    references a variable or method call instead of a literal coordinate
+    (the heuristic's known blind spot).
     """
     # Reject obvious non-static patterns up front.
     if any(
@@ -194,6 +236,10 @@ def _extract_coord_from_rest(rest: str) -> tuple[str, str, str] | None:
             coord_match.group("artifact"),
             coord_match.group("version"),
         )
+
+    versionless_match = _VERSIONLESS_COORD_RE.match(rest)
+    if versionless_match is not None:
+        return (versionless_match.group("group"), versionless_match.group("artifact"), "")
 
     map_matches = list(_MAP_KEY_RE.finditer(rest))
     if not map_matches:

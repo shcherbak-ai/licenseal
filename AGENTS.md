@@ -47,7 +47,7 @@ src/licenseal/
       lockfile.py             go.sum parser (.zip + /go.mod row dedup; the edge graph and group attribution live in transitive.py via proxy.golang.org go.mod fetches)
     java/
       pom_xml.py              Maven pom.xml parser (multi-module reactor, parent chain, <dependencyManagement>, BOM imports, ${…} property expansion, workspace-local sibling filter; every <profile>'s <dependencies> and <dependencyManagement> unioned without evaluating activation, profile <properties> a fallback for profile-declared dependencies only)
-      build_gradle.py         build.gradle[.kts] heuristic text parser (static-string dependency declarations; variable interpolation and version catalogs deliberately not supported — see ecosystem-doc)
+      build_gradle.py         build.gradle[.kts] heuristic text parser (static-string dependency declarations; a version-less `group:artifact` is emitted with an empty version; unknown configuration names are skipped; variable interpolation, `platform(...)` and version catalogs deliberately not supported — see ecosystem-doc)
       gradle_lockfile.py      gradle.lockfile parser (classpath-attributed PROD/DEV split; supersedes the build.gradle heuristic when present)
     dotnet/
       csproj.py               .csproj / .fsproj / .vbproj (SDK-style + legacy MSBuild-namespace; <PackageReference>; PrivateAssets="all" / Condition → DEV; CPM versionless refs + $(Property) tokens stitched in discovery.__init__)

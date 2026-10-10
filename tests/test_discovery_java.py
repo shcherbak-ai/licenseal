@@ -1448,6 +1448,36 @@ class TestConfigToGroup:
 
         assert cg("customConfig") is None
 
+    @pytest.mark.parametrize(
+        "config",
+        ["compileOnlyApi", "releaseImplementation", "releaseApi", "releaseRuntimeOnly", "shadow"],
+    )
+    def test_shipped_variant_configurations_are_prod(self, config):
+        from licenseal.discovery.java.build_gradle import _config_to_group as cg
+
+        assert cg(config) == DependencyGroup.PROD
+
+    @pytest.mark.parametrize(
+        "config",
+        [
+            "debugImplementation",
+            "debugApi",
+            "debugRuntimeOnly",
+            "developmentOnly",
+            "testFixturesApi",
+            "testFixturesImplementation",
+        ],
+    )
+    def test_debug_development_and_fixture_configurations_are_dev(self, config):
+        from licenseal.discovery.java.build_gradle import _config_to_group as cg
+
+        assert cg(config) == DependencyGroup.DEV
+
+    def test_compile_only_api_matches_compile_only(self):
+        from licenseal.discovery.java.build_gradle import _config_to_group as cg
+
+        assert cg("compileOnlyApi") == cg("compileOnly")
+
 
 class TestExtractCoordFromRest:
     def test_groovy_single_quoted(self):
@@ -1500,6 +1530,76 @@ class TestExtractCoordFromRest:
 
     def test_no_match_returns_none(self):
         assert _extract_coord_from_rest("some random text") is None
+
+    @pytest.mark.parametrize(
+        "rest",
+        [
+            "'g:a'",  # Groovy
+            '"g:a"',  # Kotlin, or a Groovy double-quoted string
+            "'g:a') {",  # opens a configuration closure
+            '"g:a") { exclude(group = "x", module = "y") }',
+        ],
+    )
+    def test_versionless_string_form_has_empty_version(self, rest):
+        # Same result as the map form without a version.
+        assert _extract_coord_from_rest(rest) == ("g", "a", "")
+        assert _extract_coord_from_rest(rest) == _extract_coord_from_rest("group: 'g', name: 'a'")
+
+    @pytest.mark.parametrize(
+        "rest",
+        [
+            "platform('g:a')",
+            'platform("g:a")',
+            "enforcedPlatform('g:a')",
+            "project(':core')",
+            'project(":libs:core")',
+            "project(path: ':core', configuration: 'shadow')",
+            "files('libs:x.jar')",
+        ],
+    )
+    def test_versionless_shape_inside_a_call_is_not_a_coordinate(self, rest):
+        assert _extract_coord_from_rest(rest) is None
+
+    @pytest.mark.parametrize(
+        "rest",
+        [
+            '"g:$artifact"',
+            '"$group:a"',
+            '"g:a$suffix"',
+            '"g:${artifact}"',
+            "'g:a:'",
+            "':a'",
+            "'g:'",
+            "'https://example.invalid/x'",
+        ],
+    )
+    def test_interpolated_or_malformed_two_segment_string_returns_none(self, rest):
+        assert _extract_coord_from_rest(rest) is None
+
+    @pytest.mark.parametrize(
+        "rest",
+        [
+            # A two-segment string that is not the first argument is not a
+            # coordinate: a closure argument, a version-catalog reference
+            # followed by a string, a bare word.
+            "libs.some.lib) { because('see:tracker') }",
+            "someVariable, 'g:a'",
+            "name 'g:a'",
+        ],
+    )
+    def test_two_segment_string_past_the_first_argument_is_ignored(self, rest):
+        assert _extract_coord_from_rest(rest) is None
+
+    def test_map_form_not_shadowed_by_a_two_segment_map_value(self):
+        rest = "group: 'g', name: 'a', version: '1.0', classifier: 'x:y'"
+        assert _extract_coord_from_rest(rest) == ("g", "a", "1.0")
+
+    def test_three_segment_string_still_wins(self):
+        assert _extract_coord_from_rest("'g:a:1.0') { because('see:tracker') }") == (
+            "g",
+            "a",
+            "1.0",
+        )
 
 
 class TestParseBuildGradle:
@@ -1647,3 +1747,134 @@ class TestDiscoverBuildGradleDependencies:
         deps, filtered = discover_build_gradle_dependencies(tmp_path)
         assert deps == []
         assert filtered == 0
+
+    # A build whose versions come from a BOM or a dependency-management
+    # plugin declares bare ``group:artifact`` coordinates. Each is reported
+    # with an empty version in both DSLs; the BOM reference itself, project
+    # references and interpolated strings stay unread.
+    _VERSIONLESS_EXPECTED = {
+        "org.example:web": DependencyGroup.PROD,
+        "org.example:parens": DependencyGroup.PROD,
+        "org.example:driver": DependencyGroup.PROD,
+        "org.example:mapped": DependencyGroup.PROD,
+        "org.example:excluding": DependencyGroup.PROD,
+        "org.example:testing": DependencyGroup.DEV,
+    }
+
+    def test_versionless_coordinates_groovy(self, tmp_path):
+        (tmp_path / "build.gradle").write_text(
+            "plugins { id 'java' }\n"
+            "dependencies {\n"
+            "    implementation platform('org.example:bom:1.0.0')\n"
+            "    implementation enforcedPlatform('org.example:strict-bom')\n"
+            "    implementation 'org.example:web'\n"
+            "    implementation('org.example:parens')\n"
+            "    runtimeOnly 'org.example:driver'\n"
+            "    implementation group: 'org.example', name: 'mapped'\n"
+            "    implementation('org.example:excluding') {\n"
+            "        exclude group: 'org.unwanted', module: 'thing'\n"
+            "    }\n"
+            "    testImplementation 'org.example:testing'\n"
+            "    implementation project(':core')\n"
+            '    implementation "org.example:interpolated:$libVersion"\n'
+            '    implementation "org.example:$artifactName"\n'
+            "}\n",
+            encoding="utf-8",
+        )
+        deps, _ = discover_all_dependencies(tmp_path)
+        assert {d.name: d.group for d in deps} == self._VERSIONLESS_EXPECTED
+        assert {d.version_constraint for d in deps} == {""}
+        assert {d.source for d in deps} == {"build.gradle"}
+
+    def test_versionless_coordinates_kotlin(self, tmp_path):
+        (tmp_path / "build.gradle.kts").write_text(
+            "plugins { java }\n"
+            "dependencies {\n"
+            '    implementation(platform("org.example:bom:1.0.0"))\n'
+            '    implementation(enforcedPlatform("org.example:strict-bom"))\n'
+            '    implementation("org.example:web")\n'
+            '    implementation( "org.example:parens" )\n'
+            '    runtimeOnly("org.example:driver")\n'
+            '    implementation(group = "org.example", name = "mapped")\n'
+            '    implementation("org.example:excluding") {\n'
+            '        exclude(group = "org.unwanted", module = "thing")\n'
+            "    }\n"
+            '    testImplementation("org.example:testing")\n'
+            '    implementation(project(":core"))\n'
+            '    implementation("org.example:interpolated:$libVersion")\n'
+            '    implementation("org.example:${artifactName}")\n'
+            "}\n",
+            encoding="utf-8",
+        )
+        deps, _ = discover_all_dependencies(tmp_path)
+        assert {d.name: d.group for d in deps} == self._VERSIONLESS_EXPECTED
+        assert {d.version_constraint for d in deps} == {""}
+        assert {d.source for d in deps} == {"build.gradle.kts"}
+
+    def test_versioned_and_versionless_declarations_coexist(self, tmp_path):
+        (tmp_path / "build.gradle").write_text(
+            "dependencies {\n"
+            "    implementation 'org.example:pinned:1.2.3'\n"
+            "    implementation 'org.example:managed'\n"
+            "}\n",
+            encoding="utf-8",
+        )
+        deps, _ = discover_all_dependencies(tmp_path)
+        assert {(d.name, d.version_constraint) for d in deps} == {
+            ("org.example:pinned", "1.2.3"),
+            ("org.example:managed", ""),
+        }
+
+    def test_variant_configurations_discovered(self, tmp_path):
+        (tmp_path / "build.gradle").write_text(
+            "dependencies {\n"
+            "    compileOnlyApi 'org.example:compile-only-api:1.0'\n"
+            "    releaseImplementation 'org.example:release-impl:1.0'\n"
+            "    releaseApi 'org.example:release-api:1.0'\n"
+            "    releaseRuntimeOnly 'org.example:release-runtime:1.0'\n"
+            "    shadow 'org.example:shadow:1.0'\n"
+            "    debugImplementation 'org.example:debug-impl:1.0'\n"
+            "    debugApi 'org.example:debug-api:1.0'\n"
+            "    debugRuntimeOnly 'org.example:debug-runtime:1.0'\n"
+            "    developmentOnly 'org.example:development-only:1.0'\n"
+            "    testFixturesApi 'org.example:fixtures-api:1.0'\n"
+            "    testFixturesImplementation 'org.example:fixtures-impl:1.0'\n"
+            "    stagingImplementation 'org.example:unknown-variant:1.0'\n"
+            "    customConfiguration 'org.example:unknown-custom:1.0'\n"
+            "}\n",
+            encoding="utf-8",
+        )
+        deps, _ = discover_all_dependencies(tmp_path)
+        assert {d.name.split(":")[1]: d.group for d in deps} == {
+            "compile-only-api": DependencyGroup.PROD,
+            "release-impl": DependencyGroup.PROD,
+            "release-api": DependencyGroup.PROD,
+            "release-runtime": DependencyGroup.PROD,
+            "shadow": DependencyGroup.PROD,
+            "debug-impl": DependencyGroup.DEV,
+            "debug-api": DependencyGroup.DEV,
+            "debug-runtime": DependencyGroup.DEV,
+            "development-only": DependencyGroup.DEV,
+            "fixtures-api": DependencyGroup.DEV,
+            "fixtures-impl": DependencyGroup.DEV,
+        }
+
+    def test_variant_configurations_kotlin(self, tmp_path):
+        (tmp_path / "build.gradle.kts").write_text(
+            "dependencies {\n"
+            '    compileOnlyApi("org.example:compile-only-api")\n'
+            '    releaseImplementation("org.example:release-impl:1.0")\n'
+            '    debugImplementation("org.example:debug-impl:1.0")\n'
+            '    developmentOnly("org.example:development-only")\n'
+            '    testFixturesImplementation("org.example:fixtures-impl:1.0")\n'
+            "}\n",
+            encoding="utf-8",
+        )
+        deps, _ = discover_all_dependencies(tmp_path)
+        assert {d.name.split(":")[1]: (d.version_constraint, d.group) for d in deps} == {
+            "compile-only-api": ("", DependencyGroup.PROD),
+            "release-impl": ("1.0", DependencyGroup.PROD),
+            "debug-impl": ("1.0", DependencyGroup.DEV),
+            "development-only": ("", DependencyGroup.DEV),
+            "fixtures-impl": ("1.0", DependencyGroup.DEV),
+        }
