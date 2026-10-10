@@ -68,9 +68,9 @@ def _project_compat_risk(project_spdx: str, project_risk: RiskLevel) -> RiskLeve
     strictest-consumption row across arms — the one with the LOWEST severity,
     since a PERMISSIVE row flags the most. Dep-side OR aggregation
     (elect one arm, drop unknowns) is the wrong semantics here: it would drop
-    a ``Proprietary`` / ``LicenseRef-*`` arm and let an ``AGPL-3.0-only OR
-    Proprietary`` open-core project consume copyleft deps that poison its
-    commercial arm.
+    a ``Proprietary`` / ``LicenseRef-*`` / unrecognized arm and let an
+    ``AGPL-3.0-only OR Proprietary`` open-core project consume copyleft deps
+    that poison its commercial arm.
     """
     if project_spdx == "Proprietary":
         return RiskLevel.PERMISSIVE
@@ -90,26 +90,18 @@ def _project_compat_risk(project_spdx: str, project_risk: RiskLevel) -> RiskLeve
 def _project_arm_compat_risk(arm: str) -> RiskLevel:
     """Matrix-row risk for one arm of a dual-licensed project expression.
 
-    Applies the same project-side-permissive mapping as
-    :func:`_project_compat_risk`, per arm: a ``Proprietary`` /
-    ``LicenseRef-*`` / source-available arm maps to PERMISSIVE (the
-    project's own restrictive choice doesn't constrain consumption — but it
-    does pin the strictest row), everything else classifies normally. An arm
-    that stays UNKNOWN (unrecognized string) keeps UNKNOWN's last-place
-    severity, so a recognized arm wins the strictest-row ``min`` — matching
-    the dep-side convention that unresolvable arms don't drive the verdict.
+    An arm that classifies takes its own row. Every other arm maps to
+    PERMISSIVE, the row that flags the most: a ``Proprietary`` /
+    ``LicenseRef-*`` / source-available arm (the project's own restrictive
+    choice doesn't constrain consumption — but it does pin the strictest
+    row), and equally an arm licenseal does not recognize at all
+    (``Commercial``). The project distributes under that arm too, and
+    nothing says it can absorb copyleft, so it is judged exactly as a
+    ``Proprietary`` arm. Dropping it instead would let the recognized arm
+    alone pick the row.
     """
-    arm = _strip_outer_parens(arm.strip())
-    risk = classify_risk(arm)
-    if risk != RiskLevel.UNKNOWN:
-        return risk
-    if (
-        arm == "Proprietary"
-        or arm.startswith("LicenseRef-")
-        or arm.startswith(_SOURCE_AVAILABLE_PROJECT_PREFIXES)
-    ):
-        return RiskLevel.PERMISSIVE
-    return RiskLevel.UNKNOWN
+    risk = classify_risk(_strip_outer_parens(arm.strip()))
+    return RiskLevel.PERMISSIVE if risk == RiskLevel.UNKNOWN else risk
 
 
 # Compatibility matrix: (project_risk, dependency_risk) -> verdict

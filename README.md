@@ -297,7 +297,7 @@ A **`WITH` exception** is matched whole against a fixed list. `Classpath-excepti
 
 A **license list whose source does not say what it means** is judged twice: as a choice, and with every entry applying. That covers a RubyGems or Hex `licenses` array with several entries, several PyPI license classifiers on one release, and a comma- or slash-separated list in one license string (`MIT, GPL-3.0-only`, `MIT/Apache-2.0`). When both readings give the same verdict it is reported; when they differ the dependency is Unknown until you confirm the reading and record it in `licenseal.review.toml`, so a RubyGems `["MIT", "GPL-3.0-only"]` in an MIT project is Unknown rather than OK. Sources that define their lists keep that meaning (a Composer `license` array and `/` in a Cargo license are choices; a deps.dev array and the licenses of a Maven POM all apply); the per-source rules are in [USAGE.md](USAGE.md#license-expressions).
 
-A **dual-licensed project** (e.g. `AGPL-3.0-only OR Proprietary`) is checked against the strictest of its arms: dependencies must be compatible with every license the project distributes under, so the commercial arm of an open-core project still flags copyleft dependencies.
+A **dual-licensed project** (e.g. `AGPL-3.0-only OR Proprietary`) is checked against the strictest of its arms: dependencies must be compatible with every license the project distributes under, so the commercial arm of an open-core project still flags copyleft dependencies. An arm licenseal does not recognize (`AGPL-3.0-only OR Commercial`) is judged as a `Proprietary` arm.
 
 When `--dev` is set, copyleft violations on dev dependencies are downgraded to warnings — licenseal treats dev deps as lower risk because they usually do not ship with the project.
 

@@ -1763,12 +1763,74 @@ class TestDualLicensedProjectRow:
         result = check_compatibility("MIT OR Apache-2.0", li)
         assert result.verdict == CompatibilityVerdict.WARNING
 
-    def test_unrecognized_arm_does_not_drive_row(self):
-        # An arm that stays UNKNOWN ranks last in the strictest-row min; the
-        # recognized copyleft arm picks the row.
+    def test_unrecognized_arm_pins_permissive_row(self):
+        # The project distributes under the arm licenseal does not recognize
+        # too, and nothing says that arm can absorb copyleft: it is the
+        # strictest arm, not a dropped one.
         li = _make_license_info("GPL-3.0-only")
         result = check_compatibility("GPL-3.0-only OR SomeWeirdLicense", li)
-        assert result.verdict == CompatibilityVerdict.COMPATIBLE
+        assert result.verdict == CompatibilityVerdict.INCOMPATIBLE
+
+    _UNRECOGNIZED_ARMS = (
+        "Commercial",
+        "SomeWeirdLicense",
+        "Ruby",
+        "UNKNOWN",
+        "MIT WITH Commons-Clause",
+        "(MIT AND SomeWeirdLicense)",
+    )
+    _DEPENDENCIES = (
+        "MIT",
+        "Apache-2.0",
+        "MPL-2.0",
+        "LGPL-3.0-only",
+        "GPL-2.0-only",
+        "GPL-3.0-only",
+        "AGPL-3.0-only",
+        "Proprietary",
+        "SomeCustomLicense",
+        "MIT OR GPL-3.0-only",
+        "GPL-3.0-only AND SomeCustomLicense",
+    )
+
+    @pytest.mark.parametrize("arm", _UNRECOGNIZED_ARMS)
+    @pytest.mark.parametrize(
+        "recognized", ["AGPL-3.0-only", "GPL-3.0-only", "GPL-2.0-only", "MPL-2.0", "MIT"]
+    )
+    def test_unrecognized_arm_is_judged_exactly_as_a_proprietary_arm(self, arm, recognized):
+        for group in (DependencyGroup.PROD, DependencyGroup.DEV):
+            for dep_license in self._DEPENDENCIES:
+                expected = check_compatibility(
+                    f"{recognized} OR Proprietary", _make_license_info(dep_license, group=group)
+                )
+                for project in (f"{recognized} OR {arm}", f"{arm} OR {recognized}"):
+                    result = check_compatibility(
+                        project, _make_license_info(dep_license, group=group)
+                    )
+                    assert result.verdict == expected.verdict, (project, dep_license, group)
+                    assert result.risk_level == expected.risk_level
+
+    def test_commercial_arm_flags_a_copyleft_dependency(self):
+        for project in ("AGPL-3.0-only OR Commercial", "Commercial OR AGPL-3.0-only"):
+            copyleft = check_compatibility(project, _make_license_info("GPL-3.0-only"))
+            assert copyleft.verdict == CompatibilityVerdict.INCOMPATIBLE, project
+            permissive = check_compatibility(project, _make_license_info("MIT"))
+            assert permissive.verdict == CompatibilityVerdict.COMPATIBLE, project
+        assert analyze("AGPL-3.0-only OR Commercial", []).project_license == (
+            "AGPL-3.0-only OR Commercial"
+        )
+
+    def test_project_arms_that_are_all_recognized_are_the_control(self):
+        li = _make_license_info("GPL-3.0-only")
+        assert check_compatibility("AGPL-3.0-only OR GPL-3.0-only", li).verdict == (
+            CompatibilityVerdict.COMPATIBLE
+        )
+
+    def test_project_license_that_is_unrecognized_as_a_whole_is_unchanged(self):
+        # No arm to fall back on: nothing is judged against an unknown row.
+        for project in ("Commercial", "SomeWeirdLicense"):
+            result = check_compatibility(project, _make_license_info("MIT"))
+            assert result.verdict == CompatibilityVerdict.UNKNOWN, project
 
     def test_redundant_project_parens_do_not_change_the_row(self):
         # The strictest-row selection splits the project license on its

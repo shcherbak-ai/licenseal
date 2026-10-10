@@ -820,3 +820,40 @@ class TestCranFileLicenseTerms:
         data = json.loads(result.output[result.output.index("{") :])
         assert data["project_license"] == "GPL-3.0-only"
         assert data["dependencies"][0]["verdict"] == "compatible"
+
+
+class TestUnrecognizedArmOfTheProjectLicense:
+    """A dual-licensed project is judged against every arm it offers. An arm
+    licenseal does not recognize is the strictest one, like ``Proprietary``."""
+
+    @pytest.mark.parametrize(
+        "project_license, exit_code, verdict",
+        [
+            ("AGPL-3.0-only OR Commercial", 1, "incompatible"),
+            ("Commercial OR AGPL-3.0-only", 1, "incompatible"),
+            # The same project spelled with the arm licenseal knows.
+            ("AGPL-3.0-only OR Proprietary", 1, "incompatible"),
+            # Controls: one license, and two recognized arms.
+            ("AGPL-3.0-only", 0, "compatible"),
+            ("AGPL-3.0-only OR GPL-3.0-only", 0, "compatible"),
+        ],
+    )
+    @respx.mock
+    def test_copyleft_dependency(self, tmp_path, project_license, exit_code, verdict):
+        _npm_project(tmp_path, project_license)
+        _mock_npm("GPL-3.0-only")
+        result = CliRunner().invoke(
+            main,
+            ["check", "--path", str(tmp_path), "--no-transitive", "--no-strict", "-f", "json"],
+        )
+        assert result.exit_code == exit_code
+        data = json.loads(result.output[result.output.index("{") :])
+        assert data["dependencies"][0]["verdict"] == verdict
+
+    @respx.mock
+    def test_permissive_dependency_clears_every_arm(self, tmp_path):
+        _npm_project(tmp_path, "AGPL-3.0-only OR Commercial")
+        _mock_npm("MIT")
+        exit_code, dep = _check(tmp_path)
+        assert exit_code == 0
+        assert dep["verdict"] == "compatible"
