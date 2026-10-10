@@ -17,6 +17,7 @@ from licenseal.analysis.spdx import (
     and_join_licenses,
     canonical_license_id,
     collapse_bundled_license_pairs,
+    is_license_file_pointer,
     license_list_items,
     malformed_expression_conjunction,
     normalize_license,
@@ -1451,6 +1452,50 @@ class TestLicenseLists:
 
     def test_file_pointer_to_a_url_keeps_its_routing(self):
         assert normalize_license("SEE LICENSE IN https://example.com/license.txt") == "Proprietary"
+
+
+class TestLicenseFilePointer:
+    """A value that names a bundled license file is told apart from one that
+    declares a license, proprietary ones included."""
+
+    @pytest.mark.parametrize(
+        "raw",
+        [
+            "LICENSE",
+            "LICENCE",
+            "license",
+            "COPYING",
+            "LICENSE.txt",
+            "LICENSE.md",
+            "(LICENSE)",
+            "  LICENSE.txt  ",
+            "See COPYING",
+            "SEE LICENSE IN LICENSE.md",
+            "SEE LICENSE IN https://example.com/license.txt",
+        ],
+    )
+    def test_file_pointer(self, raw):
+        assert is_license_file_pointer(raw) is True
+        assert normalize_license(raw) == "Proprietary"
+
+    @pytest.mark.parametrize(
+        "raw",
+        [
+            "Proprietary",
+            "proprietary",
+            "Proprietary License",
+            "LicenseRef-custom",
+            "custom",
+            "License :: Other/Proprietary License",
+        ],
+    )
+    def test_proprietary_declaration_is_not_a_pointer(self, raw):
+        assert is_license_file_pointer(raw) is False
+        assert normalize_license(raw) == "Proprietary"
+
+    def test_license_and_empty_value_are_not_pointers(self):
+        for raw in ("MIT", "MIT License", "", "see the license file for details"):
+            assert is_license_file_pointer(raw) is False
 
 
 class TestReadLicenseArray:

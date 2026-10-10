@@ -9,7 +9,12 @@ from packaging.markers import Marker
 from packaging.requirements import Requirement
 from packaging.version import Version
 
-from licenseal.analysis.spdx import all_apply_reading, normalize_license
+from licenseal.analysis.spdx import (
+    all_apply_reading,
+    is_license_file_pointer,
+    normalize_license,
+    read_license_array,
+)
 from licenseal.discovery.python import REQUIREMENT_PARSE_ERRORS
 from licenseal.models import Dependency, DependencyGroup, Ecosystem, LicenseInfo
 from licenseal.resolvers.deps_dev import resolve_via_deps_dev_stable_get
@@ -29,7 +34,11 @@ _PYPI_URL = "https://pypi.org/pypi"
 _LEGACY_LICENSE_MAX_LEN = 60
 
 # Trove classifier prefix for license
-_LICENSE_CLASSIFIER_PREFIX = "License :: OSI Approved :: "
+_LICENSE_CLASSIFIER_PREFIX = "License :: "
+
+# Classifiers under that prefix that name a category of licenses, not a
+# license.
+_LICENSE_CATEGORY_CLASSIFIERS = frozenset({"License :: OSI Approved", "License :: DFSG approved"})
 
 # Patterns that indicate the license field contains junk, not a license ID
 _JUNK_INDICATORS = ("copyright", "\n", "all rights reserved", "permission is hereby")
@@ -147,12 +156,16 @@ def _extract_homepage_url(info: dict) -> str:
     return ""
 
 
-def _extract_raw_license(info: dict) -> str:
+def _extract_raw_license(info: dict) -> tuple[str, list[str]]:
     """Pull a license string out of a PyPI info dict, preferring PEP 639.
 
     Falls back to classifiers whenever the chosen field doesn't normalize to
     a known SPDX identifier — covers vague markers like ``Dual License`` that
     publish meaningful info only in the trove classifiers.
+
+    Returns ``(raw, classifiers)``. ``classifiers`` is empty unless the
+    license comes from the trove classifiers; it then holds every license
+    classifier of the release, and ``raw`` lists them comma-separated.
 
     Does *not* attempt to extract a license name from free-form license-text
     bodies: that's a soft signal that can be spoofed ("Apache 2.0 license
@@ -162,7 +175,7 @@ def _extract_raw_license(info: dict) -> str:
     fall through to UNKNOWN and route to manual review.
     """
     if not isinstance(info, dict):
-        return ""
+        return "", []
 
     # A field of another type (an object, a number, a list) carries no license
     # string: it reads as absent.
@@ -170,7 +183,7 @@ def _extract_raw_license(info: dict) -> str:
     if not isinstance(raw, str):
         raw = ""
     if raw and normalize_license(raw) != "UNKNOWN":
-        return raw
+        return raw, []
 
     legacy = info.get("license")
     if not isinstance(legacy, str):
@@ -179,21 +192,59 @@ def _extract_raw_license(info: dict) -> str:
     # ``"LICENSE.txt"``, ``"SEE LICENSE IN ..."``), it carries no SPDX info
     # — only a hint to manual review. Prefer a concrete classifier here so
     # ``info.license = "License"`` + classifier ``"License :: OSI Approved
-    # :: MIT License"`` returns MIT, not Proprietary-by-file-pointer.
-    if legacy and not _is_junk_license(legacy):
-        normalized = normalize_license(legacy)
-        if normalized not in ("UNKNOWN", "Proprietary"):
-            return legacy
+    # :: MIT License"`` returns MIT, not Proprietary-by-file-pointer. A value
+    # that declares the license proprietary is a declaration, not a pointer,
+    # and no classifier replaces it.
+    if (
+        legacy
+        and not _is_junk_license(legacy)
+        and normalize_license(legacy) != "UNKNOWN"
+        and not is_license_file_pointer(legacy)
+    ):
+        return legacy, []
 
-    classifiers = info.get("classifiers")
-    for classifier in classifiers if isinstance(classifiers, list) else ():
-        if isinstance(classifier, str) and classifier.startswith(_LICENSE_CLASSIFIER_PREFIX):
-            return classifier
+    classifiers = _license_classifiers(info)
+    if classifiers:
+        return ", ".join(classifiers), classifiers
 
     # No classifier rescued us — return legacy even if it's a file pointer
     # (still surfaces as Proprietary on the next normalize_license call,
     # routing to manual review).
-    return raw or (legacy if legacy and not _is_junk_license(legacy) else "")
+    return raw or (legacy if legacy and not _is_junk_license(legacy) else ""), []
+
+
+def _license_classifiers(info: dict) -> list[str]:
+    """Distinct license classifiers of a PyPI info dict, in the order given.
+
+    Every ``License ::`` classifier counts, the ones outside ``OSI
+    Approved`` (``License :: Other/Proprietary License``) included: skipping
+    one would leave the classifiers beside it to speak for the package.
+    The two category classifiers name no license and are left out.
+    """
+    classifiers = info.get("classifiers")
+    return list(
+        dict.fromkeys(
+            classifier
+            for classifier in (classifiers if isinstance(classifiers, list) else ())
+            if isinstance(classifier, str)
+            and classifier.startswith(_LICENSE_CLASSIFIER_PREFIX)
+            and classifier not in _LICENSE_CATEGORY_CLASSIFIERS
+        )
+    )
+
+
+def _license_readings(raw_license: str, classifiers: list[str]) -> tuple[str, str]:
+    """``(license_id, all_apply_license_id)`` for an extracted license.
+
+    PyPI does not define what several license classifiers on one release
+    mean — publishers list them for a choice, for bundled components and
+    across a license change alike — and it does not define ``,`` or ``/``
+    between licenses in a license string either. Both are lists that keep
+    two readings.
+    """
+    if classifiers:
+        return read_license_array(classifiers)
+    return normalize_license(raw_license), all_apply_reading(raw_license)
 
 
 def _extract_wheel_url(data: dict) -> str:
@@ -354,7 +405,7 @@ def resolve_python_license(
     repository_url = _extract_repository_url(info)
     homepage_url = _extract_homepage_url(info)
 
-    raw_license = _extract_raw_license(info)
+    raw_license, classifiers = _extract_raw_license(info)
 
     # PEP 658 fallback. The PyPI JSON API does generally surface PEP 639's
     # ``License-Expression``, the legacy ``license`` field, and classifiers
@@ -367,17 +418,16 @@ def resolve_python_license(
     # choice. PEP 658's ``.metadata`` sidecar is the officially standardized
     # HTTPS mechanism for reading the wheel's canonical ``METADATA`` directly
     # — fetch and parse it only when the JSON-side fields yielded nothing
-    # usable. ``not raw_license`` covers the "no field at all" case;
-    # ``normalize_license(...) == "UNKNOWN"`` catches "field present but
-    # unparseable" so a maintainer publishing PEP 639 metadata isn't overruled
-    # by a stale-classifier holdover.
+    # usable. An ``UNKNOWN`` reading covers the "no field at all" case and
+    # the "field present but unparseable" one, so a maintainer publishing
+    # PEP 639 metadata isn't overruled by a stale-classifier holdover.
     #
     # The sidecar is this release's own metadata, so it is read before the
     # project-level endpoint below, which describes the latest release.
-    if not raw_license or normalize_license(raw_license) == "UNKNOWN":
+    if _license_readings(raw_license, classifiers)[0] == "UNKNOWN":
         pep658_license = _license_from_pep658(data, client, pep658_fetcher)
         if pep658_license:
-            raw_license = pep658_license
+            raw_license, classifiers = pep658_license, []
 
     # Older releases publish sparse per-version metadata (no license_expression,
     # no classifiers); the project-level endpoint reflects current metadata for
@@ -388,13 +438,13 @@ def resolve_python_license(
             project_data = fetcher(f"{_PYPI_URL}/{name}/json", client)
         if project_data is not None and project_data is not data:
             project_info = object_field(project_data, "info")
-            raw_license = _extract_raw_license(project_info)
+            raw_license, classifiers = _extract_raw_license(project_info)
             if not repository_url:
                 repository_url = _extract_repository_url(project_info)
             if not homepage_url:
                 homepage_url = _extract_homepage_url(project_info)
 
-    normalized = normalize_license(raw_license)
+    normalized, all_apply_license_id = _license_readings(raw_license, classifiers)
 
     return LicenseInfo(
         dependency=dep,
@@ -404,8 +454,7 @@ def resolve_python_license(
         homepage_url=homepage_url,
         resolved_version=resolved_version,
         from_registry=True,
-        # PyPI metadata does not define ``,`` or ``/`` between licenses.
-        all_apply_license_id=all_apply_reading(raw_license),
+        all_apply_license_id=all_apply_license_id,
     )
 
 

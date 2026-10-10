@@ -5533,9 +5533,189 @@ class TestPyPIExtractRawLicenseGuard:
     def test_non_dict_input_returns_empty(self):
         # Defensive guard for malformed PyPI responses where `info` is missing
         # or arrives as a non-object JSON value.
-        assert _extract_raw_license(None) == ""  # type: ignore[arg-type]
-        assert _extract_raw_license("not a dict") == ""  # type: ignore[arg-type]
-        assert _extract_raw_license([]) == ""  # type: ignore[arg-type]
+        assert _extract_raw_license(None) == ("", [])  # type: ignore[arg-type]
+        assert _extract_raw_license("not a dict") == ("", [])  # type: ignore[arg-type]
+        assert _extract_raw_license([]) == ("", [])  # type: ignore[arg-type]
+
+
+class TestPyPILicenseClassifiers:
+    """The classifier fallback reads every license classifier of a release.
+    Several distinct ones are a list PyPI does not define, kept under both
+    readings; each test goes through ``RegistryCache.fetch``."""
+
+    _MIT = "License :: OSI Approved :: MIT License"
+    _BSD = "License :: OSI Approved :: BSD License"
+    _APACHE = "License :: OSI Approved :: Apache Software License"
+    _GPL3 = "License :: OSI Approved :: GNU General Public License v3 (GPLv3)"
+    _AGPL3 = "License :: OSI Approved :: GNU Affero General Public License v3"
+    _PROPRIETARY = "License :: Other/Proprietary License"
+
+    @staticmethod
+    def _resolve(info: dict):
+        respx.get("https://pypi.org/pypi/pkg/1.0.0/json").mock(
+            return_value=httpx.Response(
+                200, json={"info": {"name": "pkg", "version": "1.0.0", **info}}
+            )
+        )
+        cache = RegistryCache()
+        dep = Dependency(name="pkg", version_constraint="==1.0.0", ecosystem=Ecosystem.PYTHON)
+        with httpx.Client() as client:
+            return resolve_python_license(
+                dep, client, fetcher=cache.fetch, pep658_fetcher=lambda *_: None
+            )
+
+    @respx.mock
+    def test_permissive_and_copyleft_classifiers_are_unknown(self):
+        info = self._resolve({"classifiers": [self._BSD, self._GPL3]})
+        assert info.license_id == "BSD-3-Clause OR GPL-3.0-only"
+        assert info.all_apply_license_id == "BSD-3-Clause AND GPL-3.0-only"
+        assert info.license_raw == f"{self._BSD}, {self._GPL3}"
+        result = check_compatibility("MIT", info)
+        assert result.verdict == CompatibilityVerdict.UNKNOWN
+        assert "without stating whether they are alternatives" in result.reason
+        assert "the verdict is compatible" in result.reason
+        assert "it is incompatible" in result.reason
+
+    @respx.mock
+    def test_classifier_order_does_not_matter(self):
+        for classifiers in ([self._APACHE, self._AGPL3], [self._AGPL3, self._APACHE]):
+            info = self._resolve({"classifiers": classifiers})
+            assert info.license_id == "AGPL-3.0-only OR Apache-2.0"
+            assert info.all_apply_license_id == "AGPL-3.0-only AND Apache-2.0"
+            assert check_compatibility("MIT", info).verdict == CompatibilityVerdict.UNKNOWN
+
+    @respx.mock
+    def test_classifiers_whose_readings_agree_are_reported_as_a_choice(self):
+        info = self._resolve({"classifiers": [self._APACHE, self._BSD]})
+        assert info.license_id == "Apache-2.0 OR BSD-3-Clause"
+        assert info.all_apply_license_id == "Apache-2.0 AND BSD-3-Clause"
+        assert check_compatibility("MIT", info).verdict == CompatibilityVerdict.COMPATIBLE
+
+    @respx.mock
+    def test_proprietary_classifier_is_an_entry_of_the_list(self):
+        for classifiers in ([self._MIT, self._PROPRIETARY], [self._PROPRIETARY, self._MIT]):
+            info = self._resolve({"classifiers": classifiers})
+            assert info.license_id == "MIT OR Proprietary"
+            assert info.all_apply_license_id == "MIT AND Proprietary"
+            assert check_compatibility("MIT", info).verdict == CompatibilityVerdict.UNKNOWN
+
+    @respx.mock
+    def test_proprietary_classifier_alone_is_proprietary(self):
+        info = self._resolve({"classifiers": [self._PROPRIETARY]})
+        assert info.license_id == "Proprietary"
+        assert info.all_apply_license_id == ""
+        assert info.license_raw == self._PROPRIETARY
+
+    @respx.mock
+    def test_unmapped_license_classifier_is_an_entry_of_the_list(self):
+        info = self._resolve({"classifiers": [self._MIT, "License :: Free for non-commercial use"]})
+        assert info.license_id == "MIT OR UNKNOWN"
+        assert info.all_apply_license_id == "MIT AND UNKNOWN"
+        assert check_compatibility("MIT", info).verdict == CompatibilityVerdict.UNKNOWN
+
+    @respx.mock
+    def test_single_and_repeated_classifiers_are_one_license(self):
+        for classifiers in (
+            [self._MIT],
+            [self._MIT, self._MIT],
+            # Two classifiers for the same license.
+            [
+                "License :: OSI Approved :: GNU General Public License (GPL)",
+                self._GPL3,
+            ],
+        ):
+            info = self._resolve({"classifiers": classifiers})
+            assert info.all_apply_license_id == "", classifiers
+        assert self._resolve({"classifiers": [self._MIT, self._MIT]}).license_raw == self._MIT
+
+    @respx.mock
+    def test_category_and_non_license_classifiers_are_not_entries(self):
+        info = self._resolve(
+            {
+                "classifiers": [
+                    "License :: OSI Approved",
+                    "License :: DFSG approved",
+                    "Programming Language :: Python :: 3",
+                    7,
+                    self._MIT,
+                ]
+            }
+        )
+        assert info.license_id == "MIT"
+        assert info.license_raw == self._MIT
+        assert info.all_apply_license_id == ""
+
+    @respx.mock
+    def test_public_domain_classifier_outside_osi_approved_resolves(self):
+        info = self._resolve({"classifiers": ["License :: Public Domain"]})
+        assert info.license_id == "LicenseRef-Public-Domain"
+
+    @pytest.mark.parametrize(
+        "declared", ["Proprietary", "proprietary", "Proprietary License", "LicenseRef-Acme-EULA"]
+    )
+    @respx.mock
+    def test_explicit_proprietary_license_is_not_overridden_by_a_classifier(self, declared):
+        info = self._resolve({"license": declared, "classifiers": [self._MIT]})
+        assert info.license_id == "Proprietary"
+        assert info.license_raw == declared
+        assert info.all_apply_license_id == ""
+        result = check_compatibility("MIT", info)
+        assert result.verdict == CompatibilityVerdict.UNKNOWN
+        assert "proprietary license" in result.reason
+
+    @pytest.mark.parametrize(
+        "placeholder",
+        ["UNKNOWN", "Dual License", "LICENSE", "LICENSE.txt", "License", "SEE LICENSE IN LICENSE"],
+    )
+    @respx.mock
+    def test_placeholder_and_file_pointer_still_fall_through_to_classifiers(self, placeholder):
+        info = self._resolve({"license": placeholder, "classifiers": [self._MIT]})
+        assert info.license_id == "MIT"
+        assert info.license_raw == self._MIT
+
+    @respx.mock
+    def test_file_pointer_without_a_classifier_stays_a_pointer(self):
+        info = self._resolve({"license": "LICENSE.txt", "classifiers": []})
+        assert info.license_id == "Proprietary"
+        assert info.license_raw == "LICENSE.txt"
+
+    @respx.mock
+    def test_license_expression_is_preferred_over_classifiers(self):
+        info = self._resolve({"license_expression": "MIT", "classifiers": [self._BSD, self._GPL3]})
+        assert info.license_id == "MIT"
+        assert info.all_apply_license_id == ""
+
+    @respx.mock
+    def test_unmapped_classifier_alone_reads_the_wheel_metadata(self):
+        respx.get("https://pypi.org/pypi/pkg/1.0.0/json").mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "info": {
+                        "name": "pkg",
+                        "version": "1.0.0",
+                        "classifiers": ["License :: Free for non-commercial use"],
+                    },
+                    "urls": [
+                        {
+                            "packagetype": "bdist_wheel",
+                            "url": "https://files.pythonhosted.org/pkg-1.0.0-py3-none-any.whl",
+                        }
+                    ],
+                },
+            )
+        )
+        sidecar = "Metadata-Version: 2.4\nLicense-Expression: MIT\n"
+        respx.get("https://files.pythonhosted.org/pkg-1.0.0-py3-none-any.whl.metadata").mock(
+            return_value=httpx.Response(200, text=sidecar)
+        )
+        cache = RegistryCache()
+        dep = Dependency(name="pkg", version_constraint="==1.0.0", ecosystem=Ecosystem.PYTHON)
+        with httpx.Client() as client:
+            info = resolve_python_license(dep, client, fetcher=cache.fetch)
+        assert info.license_id == "MIT"
+        assert info.license_raw == "MIT"
+        assert info.all_apply_license_id == ""
 
 
 class TestBulkResolveCombinedSystems:

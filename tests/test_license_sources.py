@@ -625,3 +625,74 @@ class TestLicenseListWithADefinedMeaning:
         assert dep["license"] == "Apache-2.0 OR MIT"
         assert dep["verdict"] == "unknown"
         assert _UNDEFINED_LIST in dep["reason"]
+
+
+_MIT_CLASSIFIER = "License :: OSI Approved :: MIT License"
+_BSD_CLASSIFIER = "License :: OSI Approved :: BSD License"
+_APACHE_CLASSIFIER = "License :: OSI Approved :: Apache Software License"
+_GPL3_CLASSIFIER = "License :: OSI Approved :: GNU General Public License v3 (GPLv3)"
+_AGPL3_CLASSIFIER = "License :: OSI Approved :: GNU Affero General Public License v3"
+_PROPRIETARY_CLASSIFIER = "License :: Other/Proprietary License"
+
+
+class TestPyPILicenseClassifiers:
+    """A PyPI release with no usable license field is read from its license
+    classifiers — all of them, in an MIT project."""
+
+    @pytest.mark.parametrize(
+        "classifiers, license_id",
+        [
+            ([_BSD_CLASSIFIER, _GPL3_CLASSIFIER], "BSD-3-Clause OR GPL-3.0-only"),
+            ([_GPL3_CLASSIFIER, _BSD_CLASSIFIER], "BSD-3-Clause OR GPL-3.0-only"),
+            ([_APACHE_CLASSIFIER, _AGPL3_CLASSIFIER], "AGPL-3.0-only OR Apache-2.0"),
+            ([_MIT_CLASSIFIER, _PROPRIETARY_CLASSIFIER], "MIT OR Proprietary"),
+        ],
+    )
+    @respx.mock
+    def test_classifiers_whose_readings_differ_are_unknown(self, tmp_path, classifiers, license_id):
+        _pypi_project(tmp_path)
+        _mock_pypi({"classifiers": classifiers})
+        exit_code, dep = _check(tmp_path)
+        assert exit_code == 1
+        assert dep["verdict"] == "unknown"
+        assert dep["license"] == license_id
+        assert dep["license_raw"] == ", ".join(classifiers)
+        assert _UNDEFINED_LIST in dep["reason"]
+
+    @respx.mock
+    def test_classifiers_whose_readings_agree_are_compatible(self, tmp_path):
+        _pypi_project(tmp_path)
+        _mock_pypi({"classifiers": [_MIT_CLASSIFIER, _APACHE_CLASSIFIER]})
+        exit_code, dep = _check(tmp_path)
+        assert exit_code == 0
+        assert dep["verdict"] == "compatible"
+        assert dep["license"] == "Apache-2.0 OR MIT"
+
+    @respx.mock
+    def test_single_classifier_is_that_license(self, tmp_path):
+        _pypi_project(tmp_path)
+        _mock_pypi({"classifiers": [_GPL3_CLASSIFIER]})
+        exit_code, dep = _check(tmp_path, "--no-strict")
+        assert exit_code == 1
+        assert dep["verdict"] == "incompatible"
+        assert dep["license"] == "GPL-3.0-only"
+
+    @respx.mock
+    def test_explicit_proprietary_license_is_not_overridden_by_a_classifier(self, tmp_path):
+        _pypi_project(tmp_path)
+        _mock_pypi({"license": "Proprietary", "classifiers": [_MIT_CLASSIFIER]})
+        exit_code, dep = _check(tmp_path)
+        assert exit_code == 1
+        assert dep["license"] == "Proprietary"
+        assert dep["license_raw"] == "Proprietary"
+        assert dep["verdict"] == "unknown"
+
+    @pytest.mark.parametrize("placeholder", ["UNKNOWN", "LICENSE.txt"])
+    @respx.mock
+    def test_placeholder_license_still_falls_through_to_the_classifier(self, tmp_path, placeholder):
+        _pypi_project(tmp_path)
+        _mock_pypi({"license": placeholder, "classifiers": [_MIT_CLASSIFIER]})
+        exit_code, dep = _check(tmp_path)
+        assert exit_code == 0
+        assert dep["license"] == "MIT"
+        assert dep["verdict"] == "compatible"

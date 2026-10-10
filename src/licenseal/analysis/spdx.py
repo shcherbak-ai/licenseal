@@ -689,6 +689,9 @@ _CLASSIFIER_MAP: dict[str, str] = {
     "License :: OSI Approved :: University of Illinois/NCSA Open Source License": "NCSA",
     "License :: CC0 1.0 Universal (CC0 1.0) Public Domain Dedication": "CC0-1.0",
     "License :: Public Domain": "LicenseRef-Public-Domain",
+    # The publisher's own statement that the terms are not an open-source
+    # license; routed to manual review like any proprietary declaration.
+    "License :: Other/Proprietary License": "Proprietary",
 }
 
 
@@ -1226,6 +1229,18 @@ def read_license_array(entries: Iterable[str]) -> tuple[str, str]:
         _canonicalize_spdx_operands(" OR ".join(items)),
         normalize_license(and_join_licenses(alternatives)) if alternatives else "",
     )
+
+
+def is_license_file_pointer(raw: str) -> bool:
+    """True when ``raw`` names a bundled license file instead of a license.
+
+    ``LICENSE``, ``LICENSE.txt``, ``SEE LICENSE IN <file>``, ``See COPYING``.
+    :func:`normalize_license` routes these to ``Proprietary`` for manual
+    review; this tells them apart from a value that declares a proprietary
+    license.
+    """
+    stripped = _strip_outer_parens(raw.strip())
+    return bool(_SEE_FILE_RE.match(stripped) or _LICENSE_FILENAME_RE.match(stripped))
 
 
 def _normalize_part(raw: str) -> str:

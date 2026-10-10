@@ -82,10 +82,12 @@ def test_python_dateutil_dual_license_falls_through_to_classifier() -> None:
         ecosystem=Ecosystem.PYTHON,
     )
     li = _resolve(dep)
-    # The first License classifier wins under current resolver logic. Either
-    # Apache-2.0 or BSD-3-Clause is acceptable — UNKNOWN is not.
-    assert li.license_id in {"Apache-2.0", "BSD-3-Clause"}, (
-        f"expected fallback to a classifier license, got {li.license_id!r}"
+    # Both license classifiers are read. PyPI does not say whether they are
+    # alternatives, so the list keeps its two readings.
+    assert li.license_id == "Apache-2.0 OR BSD-3-Clause"
+    assert li.all_apply_license_id == "Apache-2.0 AND BSD-3-Clause"
+    assert li.license_raw == (
+        "License :: OSI Approved :: Apache Software License, License :: OSI Approved :: BSD License"
     )
 
 
