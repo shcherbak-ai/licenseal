@@ -6,10 +6,11 @@ from collections.abc import Callable
 
 import httpx
 from packaging.markers import Marker
-from packaging.requirements import InvalidRequirement, Requirement
+from packaging.requirements import Requirement
 from packaging.version import Version
 
 from licenseal.analysis.spdx import normalize_license
+from licenseal.discovery.python import REQUIREMENT_PARSE_ERRORS
 from licenseal.models import Dependency, DependencyGroup, Ecosystem, LicenseInfo
 from licenseal.resolvers.deps_dev import resolve_via_deps_dev_stable_get
 from licenseal.resolvers.http import (
@@ -524,8 +525,7 @@ def fetch_python_dependencies(
             continue
         try:
             req = Requirement(raw)
-        except (InvalidRequirement, RecursionError):
-            # ``RecursionError``: a marker nested too deeply for the parser.
+        except REQUIREMENT_PARSE_ERRORS:
             continue
         if not _marker_passes_with_extras(req.marker, requested_extras):
             continue

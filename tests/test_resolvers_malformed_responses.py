@@ -34,6 +34,7 @@ _MIT_CLASSIFIER = "License :: OSI Approved :: MIT License"
 _OVERSIZED_NUMBER = "1" * 5000
 # A marker nested deeper than the requirement parser can recurse.
 _DEEP_MARKER = "(" * 5000 + 'os_name == "posix"' + ")" * 5000
+_BACKSLASH = chr(92)
 # A JSON value of every type but the one the field is documented to have.
 _NOT_AN_OBJECT = [[], ["MIT"], "MIT", 5, True, None]
 _NOT_A_STRING = [7, 1.5, ["1.0.0"], {"v": "1.0.0"}, True, None]
@@ -181,13 +182,23 @@ class TestPyPIFieldOfTheWrongType:
 
 class TestPyPIRequirementsAndVersionsNoParserAccepts:
     @respx.mock
-    def test_requirement_with_a_marker_nested_too_deeply_is_skipped(self, client):
+    @pytest.mark.parametrize(
+        "marker",
+        [
+            pytest.param(_DEEP_MARKER, id="nested-too-deeply"),
+            # A quoted marker value is read as a Python string literal.
+            pytest.param(f'platform_release == "C:{_BACKSLASH}Users"', id="invalid-escape"),
+            pytest.param(f'os_name == "{_BACKSLASH}"', id="lone-backslash"),
+            pytest.param('os_name == "po\x00six"', id="embedded-nul"),
+        ],
+    )
+    def test_requirement_whose_marker_the_parser_cannot_read_is_skipped(self, client, marker):
         _json(
             "https://pypi.org/pypi/pkg-a/1.0.0/json",
             {
                 "info": {
                     "version": "1.0.0",
-                    "requires_dist": ["first>=1", f"skipped; {_DEEP_MARKER}", "last"],
+                    "requires_dist": ["first>=1", f"skipped; {marker}", "last"],
                 }
             },
         )

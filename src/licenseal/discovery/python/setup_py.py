@@ -56,9 +56,10 @@ def _parse_ast(path: Path, *, record_failure: bool = False) -> ast.Module | None
         return None
     try:
         return ast.parse(source, filename=str(path))
-    except (SyntaxError, ValueError, RecursionError):
-        # ValueError: an embedded NUL. RecursionError: an expression nested
-        # past the parser's depth limit.
+    except (SyntaxError, ValueError, RecursionError, MemoryError):
+        # ValueError: an embedded NUL. RecursionError / MemoryError: an
+        # expression nested past the parser's depth limit; the parser reports
+        # the overflow of its own stack as MemoryError.
         if record_failure:
             record_parse_failure(path, "Python 3")
         return None

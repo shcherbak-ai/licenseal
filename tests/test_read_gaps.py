@@ -39,6 +39,7 @@ def _raise_oserror(self, *args, **kwargs):
     raise OSError("simulated")
 
 
+_BACKSLASH = chr(92)
 _TRUNCATED_UTF16 = b"\xff\xfe\x52"
 _UTF16_LONE_SURROGATE = b"\xff\xfe" + b"\x00\xd8" + '{"dependencies": {}}'.encode("utf-16-le")
 _TRUNCATED_UTF32 = b"\xff\xfe\x00\x00" + b"\x41\x00"
@@ -242,13 +243,30 @@ class TestBadManifestBesideAHealthyOne:
         assert {(d.path, d.is_gap) for d in diags} == {(recovered, False)}
         assert all("decoded as latin-1" in d.reason for d in diags)
 
-    def test_requirement_with_a_marker_nested_too_deeply_keeps_its_name(self, project: Path):
-        # The PEP 508 parser recurses once per parenthesis. A line it cannot
-        # get through is handled like any other malformed requirement.
-        line = "flask; " + "(" * 5000 + 'os_name == "posix"' + ")" * 5000 + "\n"
-        (project / "sub" / "requirements.txt").write_text(line, encoding="utf-8")
-        names, diags = _discover(project)
-        assert names == {"requests", "flask"}
+    @pytest.mark.parametrize(
+        "marker",
+        [
+            # The parser recurses once per parenthesis.
+            pytest.param("(" * 5000 + 'os_name == "posix"' + ")" * 5000, id="nested-too-deeply"),
+            # A quoted marker value is read as a Python string literal.
+            pytest.param(f'platform_release == "C:{_BACKSLASH}Users"', id="invalid-escape"),
+            pytest.param(f'os_name == "{_BACKSLASH}"', id="lone-backslash"),
+            pytest.param('os_name == "po\x00six"', id="embedded-nul"),
+        ],
+    )
+    def test_requirement_whose_marker_the_parser_cannot_read_keeps_its_name(
+        self, project: Path, marker
+    ):
+        # A requirement the PEP 508 parser fails on in any way, not only with
+        # its own error type, is handled like every other malformed line.
+        line = f"flask>=2; {marker}\n"
+        (project / "sub" / "requirements.txt").write_text(line, encoding="utf-8", newline="\n")
+        with collect_read_diagnostics() as diags:
+            deps, _ = discover_all_dependencies(project)
+        assert {(d.name, d.version_constraint) for d in deps} == {
+            ("requests", "==2.31.0"),
+            ("flask", ">=2"),
+        }
         assert diags == []
 
     def test_license_detection_survives_an_undecodable_root_pom(self, tmp_path: Path):
@@ -410,6 +428,24 @@ class TestRebarLockGaps:
             '{"1.2.0",\n'
             '[{<<"cowlib">>,{pkg,<<"cowlib">>,<<"2.12.1">>},0},\n'
             ' {<<"meck">>,{pkg,<<"meck">>,<<"0.9.2">>},' + level + "}]}.\n",
+            encoding="utf-8",
+        )
+        deps = parse_rebar_lock(lock, dev_direct_names=set(), include_dev=True)
+        assert [(d.name, d.version_constraint) for d in deps] == [("cowlib", "==2.12.1")]
+
+    @pytest.mark.parametrize(
+        "entry",
+        [
+            # The name binary is never closed.
+            '{<<"meck">,{pkg,<<"meck">>,<<"0.9.2">>},1}',
+            '{<<"meck"> >,{git,"https://example.invalid/meck",{ref,"abc"}},1}',
+        ],
+        ids=["unterminated-pkg-name", "unterminated-git-name"],
+    )
+    def test_entry_whose_name_binary_is_not_closed_is_skipped(self, tmp_path: Path, entry):
+        lock = tmp_path / "rebar.lock"
+        lock.write_text(
+            '{"1.2.0",\n[{<<"cowlib">>,{pkg,<<"cowlib">>,<<"2.12.1">>},0},\n ' + entry + "]}.\n",
             encoding="utf-8",
         )
         deps = parse_rebar_lock(lock, dev_direct_names=set(), include_dev=True)

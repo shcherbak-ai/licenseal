@@ -684,7 +684,7 @@ class TestSetupPyParseGaps:
             (tmp_path / "setup.py", "is not valid Python 3; skipped")
         ]
 
-    @pytest.mark.parametrize("error", [ValueError, RecursionError])
+    @pytest.mark.parametrize("error", [ValueError, RecursionError, MemoryError])
     def test_parser_value_and_recursion_errors_record_gap(self, tmp_path, error):
         # ``ast.parse`` raises these for an embedded NUL and for an expression
         # nested past the parser's depth limit; which input triggers them
@@ -710,6 +710,21 @@ class TestSetupPyParseGaps:
             deps, _ = discover_all_dependencies(tmp_path)
         assert [d.name for d in deps] == ["other-dep"]
         assert all(d.path == tmp_path / "setup.py" for d in diags)
+
+    def test_expression_that_overflows_the_parser_stack_records_gap(self, tmp_path):
+        # Nested lambdas exhaust the parser's own stack, which it reports as
+        # MemoryError rather than as a syntax or recursion error.
+        nested = "lambda: " * 5000 + "1"
+        (tmp_path / "setup.py").write_text(
+            f"from setuptools import setup\nhook = {nested}\nsetup(name='x')\n", encoding="utf-8"
+        )
+        (tmp_path / "requirements.txt").write_text("other-dep\n", encoding="utf-8")
+        with collect_read_diagnostics() as diags:
+            deps, _ = discover_all_dependencies(tmp_path)
+        assert [d.name for d in deps] == ["other-dep"]
+        assert [(d.path, d.reason) for d in _setup_py_gaps(diags)] == [
+            (tmp_path / "setup.py", "is not valid Python 3; skipped")
+        ]
 
     def test_gap_does_not_stop_other_manifests(self, tmp_path):
         _write(tmp_path / "legacy" / "setup.py", 'print "python 2 only"\n')

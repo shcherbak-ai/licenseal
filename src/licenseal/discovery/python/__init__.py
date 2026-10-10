@@ -4,7 +4,15 @@ from __future__ import annotations
 
 import re
 
-from packaging.requirements import InvalidRequirement, Requirement
+from packaging.requirements import Requirement
+
+# Everything ``Requirement(text)`` raises on text it cannot parse.
+# ``InvalidRequirement`` is a ``ValueError``. The marker parser adds the rest:
+# a quoted value is evaluated as a Python string literal, so one that is not a
+# valid literal (a stray backslash, a line break) is a ``SyntaxError``, an
+# embedded NUL a ``SyntaxError`` or ``ValueError`` depending on the
+# interpreter, and parentheses nested too deeply a ``RecursionError``.
+REQUIREMENT_PARSE_ERRORS = (ValueError, SyntaxError, RecursionError)
 
 # Regex to extract package name from PEP 508 / setup.cfg dependency strings
 DEP_NAME_RE = re.compile(r"^([A-Za-z0-9]([A-Za-z0-9._-]*[A-Za-z0-9])?)")
@@ -38,12 +46,11 @@ def parse_pep508_dep(dep_str: str) -> tuple[str, str, frozenset[str]]:
         return "", "", frozenset()
     try:
         req = Requirement(text)
-    except (InvalidRequirement, RecursionError):
+    except REQUIREMENT_PARSE_ERRORS:
         # Fall back to the regex parser for malformed strings — they were
         # silently dropped before this helper existed, and changing that
         # would alter discovery behavior on quirky manifests. A path is the
         # exception: its first segment is a directory, not a package name.
-        # ``RecursionError``: a marker nested too deeply for the parser.
         name_match = DEP_NAME_RE.match(text)
         if not name_match or _PATH_TOKEN_RE.match(text):
             return "", "", frozenset()

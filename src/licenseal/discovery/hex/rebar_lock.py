@@ -77,8 +77,8 @@ def _balanced_braces(text: str, start: int) -> str | None:
 def _parse_lock_entry(elements: list[str]) -> tuple[str, str, int, bool]:
     """``[<<"name">>, <source>, Level]`` → (name, version, level, off_registry)."""
     level = int(elements[2].strip())
-    # elements[0] is always a ``<<"name">>`` binary (the entry only reaches here
-    # via the ``{<<"`` scan), so the name is always recoverable.
+    # The caller has checked that elements[0] holds a complete ``<<"name">>``
+    # binary, so the name is always recoverable.
     entry_name = _BINARY_RE.findall(elements[0])[0]
     source = elements[1].strip()
     if source.startswith("{pkg"):
@@ -116,9 +116,15 @@ def parse_rebar_lock(
         if body is None:
             continue
         elements = _split_top_level(body)
-        # A lock entry is a 3-tuple ending in the integer level; the 2-tuple
-        # ``{<<"name">>,<<"hash">>}`` hash entries are skipped by arity.
-        if len(elements) != 3 or not _LEVEL_RE.fullmatch(elements[2].strip()):
+        # A lock entry is a 3-tuple that starts with a ``<<"name">>`` binary and
+        # ends in the integer level; the 2-tuple ``{<<"name">>,<<"hash">>}``
+        # hash entries are skipped by arity. The ``{<<"`` scan matches an
+        # unterminated binary too, so the name is checked here.
+        if (
+            len(elements) != 3
+            or not _BINARY_RE.search(elements[0])
+            or not _LEVEL_RE.fullmatch(elements[2].strip())
+        ):
             continue
         name, version, level, off_registry = _parse_lock_entry(elements)
         is_direct = level == 0
