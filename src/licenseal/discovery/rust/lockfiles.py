@@ -5,7 +5,9 @@ blocks with `name`, `version`, optional `source`, and `dependencies = [...]`.
 A registry-sourced crate has `source = "registry+https://github.com/rust-lang/crates.io-index"`.
 The local crate(s) being scanned have no `source` field; path/git deps have
 non-registry source URIs. Both are skipped — there's no crates.io license to
-resolve for them.
+resolve for them. They stay in the edge graph, and a dependency declared with
+`git` or `path` is passed in as a root like any other direct dep, so the
+registry crates only it pulls in are attributed to it.
 """
 
 from __future__ import annotations
@@ -95,7 +97,9 @@ def parse_cargo_lock(
     Reverse-BFS from prod and dev root sets attributes group + direct
     ancestors per crate. A crate no root reaches is dropped, unless the
     lockfile contains none of the roots at all: then every registry crate is
-    kept as PROD with no ancestors.
+    kept as PROD with no ancestors. A root need not be registry-sourced: one
+    that is not (a ``git`` / ``path`` dependency) has no row of its own, and
+    the registry crates it reaches name it in ``direct_ancestors``.
 
     ``all_known_names`` is the lowercased names of every package in the
     lockfile, registry-sourced or not. Callers in ``transitive.py`` use

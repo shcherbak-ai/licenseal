@@ -10,6 +10,16 @@ from licenseal.discovery._walk import walk_project_files
 from licenseal.models import Dependency, DependencyGroup, Ecosystem
 
 
+def _is_off_registry(spec: Any) -> bool:
+    """True for a dependency declared with ``path`` or ``git``.
+
+    There is no crates.io release to look up for it, so it is not emitted as
+    a dependency. With a Cargo.lock it is still a root of the locked graph:
+    see :func:`cargo_off_registry_root_names`.
+    """
+    return isinstance(spec, dict) and ("path" in spec or "git" in spec)
+
+
 def _spec_to_version(spec: Any) -> str | None:
     """Extract a version constraint from a cargo dep spec.
 
@@ -21,11 +31,8 @@ def _spec_to_version(spec: Any) -> str | None:
     """
     if isinstance(spec, str):
         return spec
-    if isinstance(spec, dict):
-        spec_dict = cast("dict[str, Any]", spec)
-        if "path" in spec_dict or "git" in spec_dict:
-            return None
-        version = spec_dict.get("version")
+    if isinstance(spec, dict) and not _is_off_registry(spec):
+        version = cast("dict[str, Any]", spec).get("version")
         if isinstance(version, str):
             return version
     return None
@@ -55,6 +62,7 @@ def _emit_deps(
     source: str,
     out: list[Dependency],
     ws_refs: list[tuple[str, DependencyGroup]],
+    off_registry: list[tuple[str, DependencyGroup]],
 ) -> None:
     """Append Dependency objects from a `[dependencies]`-style table.
 
@@ -63,6 +71,9 @@ def _emit_deps(
     workspace's ``[workspace.dependencies]`` catalog. They are recorded in
     ``ws_refs`` (alias name + table group) for the caller to stitch against
     the catalog.
+
+    A path/git entry is not emitted; its crate name and the table's group
+    are recorded in ``off_registry``.
     """
     if not isinstance(section, dict):
         return
@@ -73,6 +84,8 @@ def _emit_deps(
             continue
         version = _spec_to_version(spec)
         if version is None:
+            if _is_off_registry(spec):
+                off_registry.append((_canonical_crate_name(name, spec), group))
             continue
         out.append(
             Dependency(
@@ -87,35 +100,39 @@ def _emit_deps(
 
 def _parse_cargo_deps(
     data: dict[str, Any], source: str
-) -> tuple[list[Dependency], list[tuple[str, DependencyGroup]]]:
+) -> tuple[list[Dependency], list[tuple[str, DependencyGroup]], list[tuple[str, DependencyGroup]]]:
     """Extract dependencies and workspace-catalog references from one Cargo.toml.
 
-    Returns ``(deps, ws_refs)``: inline-version dependencies, plus the
-    ``{ workspace = true }`` references this file makes into its workspace's
-    ``[workspace.dependencies]`` catalog (stitched by the caller).
+    Returns ``(deps, ws_refs, off_registry)``: inline-version dependencies,
+    the ``{ workspace = true }`` references this file makes into its
+    workspace's ``[workspace.dependencies]`` catalog (stitched by the
+    caller), and the crate name and group of each path/git dependency.
     """
     deps: list[Dependency] = []
     ws_refs: list[tuple[str, DependencyGroup]] = []
+    off_registry: list[tuple[str, DependencyGroup]] = []
 
-    # Top-level dependency tables.
-    _emit_deps(data.get("dependencies"), DependencyGroup.PROD, source, deps, ws_refs)
-    _emit_deps(data.get("build-dependencies"), DependencyGroup.PROD, source, deps, ws_refs)
-    _emit_deps(data.get("dev-dependencies"), DependencyGroup.DEV, source, deps, ws_refs)
-
-    # Target-specific tables: [target.<cfg>.dependencies] etc.
-    # Cfg gates platform/feature, not legal obligations — flatten with the
-    # matching group, mirroring how PEP 508 markers are ignored elsewhere.
+    # Top-level dependency tables, then the target-specific ones:
+    # [target.<cfg>.dependencies] etc. Cfg gates platform/feature, not legal
+    # obligations — flatten with the matching group, mirroring how PEP 508
+    # markers are ignored elsewhere.
+    tables: list[dict[str, Any]] = [data]
     target = data.get("target")
     if isinstance(target, dict):
-        for cfg_section in cast("dict[str, Any]", target).values():
-            if not isinstance(cfg_section, dict):
-                continue
-            cfg = cast("dict[str, Any]", cfg_section)
-            _emit_deps(cfg.get("dependencies"), DependencyGroup.PROD, source, deps, ws_refs)
-            _emit_deps(cfg.get("build-dependencies"), DependencyGroup.PROD, source, deps, ws_refs)
-            _emit_deps(cfg.get("dev-dependencies"), DependencyGroup.DEV, source, deps, ws_refs)
+        tables.extend(
+            cast("dict[str, Any]", cfg_section)
+            for cfg_section in cast("dict[str, Any]", target).values()
+            if isinstance(cfg_section, dict)
+        )
+    for table in tables:
+        for key, group in (
+            ("dependencies", DependencyGroup.PROD),
+            ("build-dependencies", DependencyGroup.PROD),
+            ("dev-dependencies", DependencyGroup.DEV),
+        ):
+            _emit_deps(table.get(key), group, source, deps, ws_refs, off_registry)
 
-    return deps, ws_refs
+    return deps, ws_refs, off_registry
 
 
 def _workspace_catalog(data: dict[str, Any]) -> dict[str, Any] | None:
@@ -148,6 +165,7 @@ def _stitch_workspace_refs(
     refs: list[tuple[Path, str, DependencyGroup]],
     catalogs: dict[Path, tuple[str, dict[str, Any]]],
     project_path: Path,
+    off_registry: list[tuple[str, DependencyGroup]],
 ) -> list[Dependency]:
     """Emit one Dependency per catalog entry that some member actually uses.
 
@@ -161,6 +179,9 @@ def _stitch_workspace_refs(
 
     Group attribution comes from the referencing tables: referenced from any
     prod-side table → PROD, referenced only from dev-dependencies → DEV.
+
+    A referenced path/git catalog entry is not emitted; its crate name and
+    group are appended to ``off_registry``.
     """
     chosen: dict[tuple[Path, str], DependencyGroup] = {}
     catalog_dirs = set(catalogs)
@@ -179,7 +200,10 @@ def _stitch_workspace_refs(
         spec = table[alias]
         version = _spec_to_version(spec)
         if version is None:
-            continue  # path/git catalog entry — workspace-local, no registry lookup
+            # path/git catalog entry — no registry lookup.
+            if _is_off_registry(spec):
+                off_registry.append((_canonical_crate_name(alias, spec), chosen[(cat_dir, alias)]))
+            continue
         out.append(
             Dependency(
                 name=_canonical_crate_name(alias, spec),
@@ -212,36 +236,70 @@ def discover_cargo_toml_dependencies(
     Returns ``(deps, filtered_count)`` where ``filtered_count`` is the number
     of deps removed because their name matched a workspace-local crate.
     """
-    cargo_tomls = walk_project_files(project_path, "Cargo.toml", exclude_paths=exclude_paths)
-    if not cargo_tomls:
-        return [], 0
+    deps, _off_registry, local_names = _scan_cargo_tomls(project_path, exclude_paths)
+    kept = [d for d in deps if d.name not in local_names]
+    return kept, len(deps) - len(kept)
 
+
+def cargo_off_registry_root_names(
+    project_path: Path,
+    *,
+    exclude_paths: frozenset[Path] = frozenset(),
+) -> tuple[set[str], set[str]]:
+    """Lowercased names of the dependencies declared with ``git`` or ``path``.
+
+    Returned as ``(prod, dev)``, by the table that declares them. Such a
+    dependency is not emitted by :func:`discover_cargo_toml_dependencies`,
+    but a Cargo.lock records the registry crates it pulls in. The lockfile
+    pass takes these names as roots beside the discovered direct deps, so
+    that closure is attributed instead of dropped as unreachable.
+
+    A ``path`` dependency on a crate of this tree is left out. That crate's
+    own Cargo.toml is scanned, so its dependencies are roots already, split
+    into prod and dev. Cargo.lock lists a workspace member's
+    dev-dependencies among its dependencies; walking the graph through the
+    member would make every one of them a production dependency.
+    """
+    _deps, off_registry, local_names = _scan_cargo_tomls(project_path, exclude_paths)
+    roots = [(name.lower(), group) for name, group in off_registry if name not in local_names]
+    return (
+        {name for name, group in roots if group == DependencyGroup.PROD},
+        {name for name, group in roots if group == DependencyGroup.DEV},
+    )
+
+
+def _scan_cargo_tomls(
+    project_path: Path, exclude_paths: frozenset[Path]
+) -> tuple[list[Dependency], list[tuple[str, DependencyGroup]], set[str]]:
+    """Parse every Cargo.toml in the tree.
+
+    Returns ``(deps, off_registry, local_names)``: the registry dependencies
+    (workspace-catalog references stitched, workspace-local names not yet
+    filtered), the crate name and group of each path/git dependency, and
+    the ``[package].name`` of every crate in the tree.
+    """
     parsed: list[tuple[Path, dict[str, Any]]] = []
-    for ct in cargo_tomls:
+    for ct in walk_project_files(project_path, "Cargo.toml", exclude_paths=exclude_paths):
         data = load_toml(ct)
         if data is not None:
             parsed.append((ct, data))
 
-    local_names = _collect_local_rust_names(parsed)
-
     deps: list[Dependency] = []
+    off_registry: list[tuple[str, DependencyGroup]] = []
     catalogs: dict[Path, tuple[str, dict[str, Any]]] = {}
     pending_refs: list[tuple[Path, str, DependencyGroup]] = []
     for ct, data in parsed:
         source = ct.relative_to(project_path).as_posix()
-        file_deps, ws_refs = _parse_cargo_deps(data, source)
+        file_deps, ws_refs, file_off_registry = _parse_cargo_deps(data, source)
         deps.extend(file_deps)
+        off_registry.extend(file_off_registry)
         pending_refs.extend((ct.parent, alias, group) for alias, group in ws_refs)
         catalog = _workspace_catalog(data)
         if catalog is not None:
             catalogs[ct.parent] = (source, catalog)
 
-    deps.extend(_stitch_workspace_refs(pending_refs, catalogs, project_path))
-
-    if not local_names:
-        return deps, 0
-    kept = [d for d in deps if d.name not in local_names]
-    return kept, len(deps) - len(kept)
+    deps.extend(_stitch_workspace_refs(pending_refs, catalogs, project_path, off_registry))
+    return deps, off_registry, _collect_local_rust_names(parsed)
 
 
 def _collect_local_rust_names(parsed: list[tuple[Path, dict[str, Any]]]) -> set[str]:

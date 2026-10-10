@@ -6544,12 +6544,10 @@ def _mit_project(tmp_path) -> None:
     )
 
 
-def _mock_go_modules(modules: dict[tuple[str, str], tuple[str, str]]) -> None:
-    """Mock deps.dev and the module proxy for Go modules.
+def _mock_deps_dev_licenses(licenses: dict[tuple[str, str], str]) -> None:
+    """Answer the deps.dev batch lookup from a ``(name, version)`` → license map.
 
-    ``modules`` maps ``(module, version)`` to ``(license, go.mod requirements)``.
-    deps.dev answers a module the map lacks as not found; its go.mod is not
-    mocked, so a scan that asks the proxy for it fails the test.
+    A package the map lacks is answered as not found.
     """
 
     def batch(request: httpx.Request) -> httpx.Response:
@@ -6557,13 +6555,23 @@ def _mock_go_modules(modules: dict[tuple[str, str], tuple[str, str]]) -> None:
         for item in json.loads(request.content)["requests"]:
             key = item["versionKey"]
             entry: dict = {"request": {"versionKey": key}}
-            if (key["name"], key["version"]) in modules:
-                license_id = modules[key["name"], key["version"]][0]
+            license_id = licenses.get((key["name"], key["version"]))
+            if license_id:
                 entry["version"] = {"versionKey": key, "licenses": [license_id], "links": []}
             responses.append(entry)
         return httpx.Response(200, json={"responses": responses, "nextPageToken": ""})
 
     respx.post("https://api.deps.dev/v3alpha/versionbatch").mock(side_effect=batch)
+
+
+def _mock_go_modules(modules: dict[tuple[str, str], tuple[str, str]]) -> None:
+    """Mock deps.dev and the module proxy for Go modules.
+
+    ``modules`` maps ``(module, version)`` to ``(license, go.mod requirements)``.
+    deps.dev answers a module the map lacks as not found; its go.mod is not
+    mocked, so a scan that asks the proxy for it fails the test.
+    """
+    _mock_deps_dev_licenses({key: license_id for key, (license_id, _) in modules.items()})
     for (module, version), (_license, requires) in modules.items():
         respx.get(f"https://proxy.golang.org/{module}/@v/{version}.mod").mock(
             return_value=httpx.Response(200, text=f"module {module}\n{requires}")
@@ -6881,6 +6889,151 @@ class TestGoDirectRequirementsBesideGoSum:
         exit_code, rows = _check_rows(tmp_path, "--dev")
         assert exit_code == 1
         assert rows == {**production, ("example.org/gen-gpl", "v1.0.0"): ("dev", "warning")}
+
+
+_CRATES_IO_SOURCE = "registry+https://github.com/rust-lang/crates.io-index"
+_GIT_SOURCE = "git+https://example.org/forked.git#0123abc"
+
+
+def _cargo_lock(*packages: tuple[str, str, str | None, list[str]]) -> str:
+    """Cargo.lock text from ``(name, version, source, dependencies)`` packages.
+
+    ``source`` is ``None`` for a crate with no ``source`` line: the scanned
+    crate itself, or a ``path`` dependency.
+    """
+    blocks = []
+    for name, version, source, dependencies in packages:
+        lines = ["[[package]]", f'name = "{name}"', f'version = "{version}"']
+        if source is not None:
+            lines.append(f'source = "{source}"')
+        if dependencies:
+            lines.append(f"dependencies = {json.dumps(dependencies)}")
+        blocks.append("\n".join(lines))
+    return "version = 3\n\n" + "\n\n".join(blocks) + "\n"
+
+
+class TestCargoOffRegistryDependencyClosure:
+    """A crate that Cargo.lock reaches only through a ``git`` or ``path``
+    dependency is checked like any other: a copyleft one fails the scan."""
+
+    _MANIFEST = (
+        '[package]\nname = "myapp"\nversion = "0.1.0"\nlicense = "MIT"\n\n'
+        '[dependencies]\nunrelated = "1.0"\n'
+    )
+
+    @staticmethod
+    def _write_project(tmp_path, forked_declaration: str, forked_source: str | None) -> None:
+        (tmp_path / "Cargo.toml").write_text(
+            TestCargoOffRegistryDependencyClosure._MANIFEST + forked_declaration, encoding="utf-8"
+        )
+        (tmp_path / "Cargo.lock").write_text(
+            _cargo_lock(
+                ("myapp", "0.1.0", None, ["forked", "unrelated"]),
+                ("forked", "0.3.0", forked_source, ["fork-dep", "fork-dep-gpl", "shared"]),
+                ("fork-dep", "1.0.0", _CRATES_IO_SOURCE, []),
+                ("fork-dep-gpl", "2.0.0", _CRATES_IO_SOURCE, []),
+                ("shared", "3.0.0", _CRATES_IO_SOURCE, []),
+                ("unrelated", "1.0.5", _CRATES_IO_SOURCE, ["shared"]),
+            ),
+            encoding="utf-8",
+        )
+        _mock_deps_dev_licenses(
+            {
+                ("forked", "0.3.0"): "MIT",
+                ("fork-dep", "1.0.0"): "MIT",
+                ("fork-dep-gpl", "2.0.0"): "GPL-3.0-only",
+                ("shared", "3.0.0"): "MIT",
+                ("unrelated", "1.0.5"): "MIT",
+            }
+        )
+
+    _CLOSURE = (
+        (("fork-dep", "1.0.0"), ("prod", "compatible")),
+        (("fork-dep-gpl", "2.0.0"), ("prod", "incompatible")),
+        (("shared", "3.0.0"), ("prod", "compatible")),
+        (("unrelated", "1.0.5"), ("prod", "compatible")),
+    )
+
+    @respx.mock
+    @pytest.mark.parametrize(
+        ("forked_declaration", "forked_source"),
+        [
+            ('forked = { git = "https://example.org/forked.git" }\n', _GIT_SOURCE),
+            ('forked = { path = "../forked" }\n', None),
+        ],
+        ids=["git", "path"],
+    )
+    def test_copyleft_crate_behind_an_off_registry_dependency_fails_the_check(
+        self, tmp_path, forked_declaration, forked_source
+    ):
+        self._write_project(tmp_path, forked_declaration, forked_source)
+
+        exit_code, rows = _check_rows(tmp_path)
+        assert exit_code == 1
+        # No row for ``forked`` itself.
+        assert rows == dict(self._CLOSURE)
+
+    @respx.mock
+    def test_same_verdict_as_a_registry_dependency(self, tmp_path):
+        # Control: with ``forked`` taken from crates.io the scan already
+        # failed on the same crate.
+        self._write_project(tmp_path, 'forked = "0.3"\n', _CRATES_IO_SOURCE)
+
+        exit_code, rows = _check_rows(tmp_path)
+        assert exit_code == 1
+        assert rows == {**dict(self._CLOSURE), ("forked", "0.3.0"): ("prod", "compatible")}
+
+    @respx.mock
+    def test_closure_of_a_dev_git_dependency_follows_the_dev_flag(self, tmp_path):
+        (tmp_path / "Cargo.toml").write_text(
+            '[package]\nname = "myapp"\nversion = "0.1.0"\nlicense = "MIT"\n\n'
+            '[dependencies]\nruntime = "1.0"\n\n'
+            '[dev-dependencies]\ntest-fork = { git = "https://example.org/forked.git" }\n',
+            encoding="utf-8",
+        )
+        (tmp_path / "Cargo.lock").write_text(
+            _cargo_lock(
+                ("myapp", "0.1.0", None, ["runtime", "test-fork"]),
+                ("test-fork", "0.3.0", _GIT_SOURCE, ["test-dep-gpl"]),
+                ("test-dep-gpl", "1.0.0", _CRATES_IO_SOURCE, []),
+                ("runtime", "1.0.0", _CRATES_IO_SOURCE, []),
+            ),
+            encoding="utf-8",
+        )
+        _mock_deps_dev_licenses(
+            {("runtime", "1.0.0"): "MIT", ("test-dep-gpl", "1.0.0"): "GPL-3.0-only"}
+        )
+
+        exit_code, rows = _check_rows(tmp_path)
+        assert exit_code == 0
+        production = {("runtime", "1.0.0"): ("prod", "compatible")}
+        assert rows == production
+
+        exit_code, rows = _check_rows(tmp_path, "--dev")
+        assert exit_code == 1
+        assert rows == {**production, ("test-dep-gpl", "1.0.0"): ("dev", "warning")}
+
+    @respx.mock
+    @pytest.mark.parametrize("output_format", ["table", "markdown"])
+    def test_report_lists_each_crate_once_when_an_ancestor_has_no_row(
+        self, tmp_path, output_format
+    ):
+        # ``forked`` is the first ancestor of three rows and has no row of
+        # its own. Each crate is still listed exactly once.
+        self._write_project(
+            tmp_path, 'forked = { git = "https://example.org/forked.git" }\n', _GIT_SOURCE
+        )
+        out = tmp_path / "report.out"
+        result = CliRunner().invoke(
+            main, ["check", "--path", str(tmp_path), "-f", output_format, "-o", str(out)]
+        )
+        assert result.exit_code == 1
+        text = out.read_text(encoding="utf-8")
+        lines = text.splitlines()
+        for (name, version), _ in self._CLOSURE:
+            assert len([line for line in lines if f"{name} ({version})" in line]) == 1
+        assert not [line for line in lines if "forked (" in line]
+        assert "1 violation" in text
 
 
 class TestLockfileWithoutDirectDependencies:

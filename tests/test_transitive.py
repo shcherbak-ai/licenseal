@@ -1285,6 +1285,240 @@ class TestLockfileWithoutDirectDependencies:
         assert not any_request.called
 
 
+def _cargo_lock(*packages: tuple[str, str, str | None, list[str]]) -> str:
+    """Cargo.lock text from ``(name, version, source, dependencies)`` packages.
+
+    ``source`` is ``None`` for a crate with no ``source`` line: the scanned
+    crate itself, or a ``path`` dependency.
+    """
+    blocks = []
+    for name, version, source, dependencies in packages:
+        lines = ["[[package]]", f'name = "{name}"', f'version = "{version}"']
+        if source is not None:
+            lines.append(f'source = "{source}"')
+        if dependencies:
+            lines.append(f"dependencies = {json.dumps(dependencies)}")
+        blocks.append("\n".join(lines))
+    return "version = 3\n\n" + "\n\n".join(blocks) + "\n"
+
+
+_GIT_SOURCE = "git+https://example.org/forked.git#0123abc"
+
+
+class TestCargoOffRegistryDependencyClosure:
+    """A dependency declared with ``git`` or ``path`` has no row, but the
+    crates.io crates Cargo.lock shows it pulling in are reported, attributed
+    to it."""
+
+    PROD = DependencyGroup.PROD
+    DEV = DependencyGroup.DEV
+
+    @staticmethod
+    def _rows(deps: list[Dependency]) -> set[tuple[str, str, DependencyGroup, int, tuple, str]]:
+        return {
+            (d.name, d.version_constraint, d.group, d.depth, d.direct_ancestors, d.source)
+            for d in deps
+        }
+
+    # The registry crates reached through ``forked``, which every declaration
+    # form below must report.
+    _CLOSURE = frozenset(
+        {
+            ("fork-dep-a", "==1.0.0", DependencyGroup.PROD, 1, ("forked",), ""),
+            ("fork-dep-b", "==2.0.0", DependencyGroup.PROD, 1, ("forked",), ""),
+            ("shared", "==3.0.0", DependencyGroup.PROD, 1, ("forked", "unrelated"), ""),
+        }
+    )
+    _UNRELATED = ("unrelated", "==1.0.5", DependencyGroup.PROD, 0, (), "Cargo.toml")
+
+    def _write_project(self, tmp_path, manifest: str, forked_source: str | None) -> None:
+        (tmp_path / "Cargo.toml").write_text(textwrap.dedent(manifest), encoding="utf-8")
+        (tmp_path / "Cargo.lock").write_text(
+            _cargo_lock(
+                ("myapp", "0.1.0", None, ["forked", "unrelated"]),
+                ("forked", "0.3.0", forked_source, ["fork-dep-a", "shared"]),
+                ("fork-dep-a", "1.0.0", _CRATES_IO, ["fork-dep-b"]),
+                ("fork-dep-b", "2.0.0", _CRATES_IO, []),
+                ("shared", "3.0.0", _CRATES_IO, []),
+                ("unrelated", "1.0.5", _CRATES_IO, ["shared"]),
+            ),
+            encoding="utf-8",
+        )
+
+    @pytest.mark.parametrize(
+        ("manifest", "forked_source"),
+        [
+            (
+                """\
+                [package]
+                name = "myapp"
+                version = "0.1.0"
+
+                [dependencies]
+                unrelated = "1.0"
+                forked = { git = "https://example.org/forked.git" }
+                """,
+                _GIT_SOURCE,
+            ),
+            (
+                """\
+                [package]
+                name = "myapp"
+                version = "0.1.0"
+
+                [dependencies]
+                unrelated = "1.0"
+                forked = { path = "../forked" }
+                """,
+                None,
+            ),
+            (
+                """\
+                [package]
+                name = "myapp"
+                version = "0.1.0"
+
+                [workspace.dependencies]
+                forked = { git = "https://example.org/forked.git" }
+
+                [dependencies]
+                unrelated = "1.0"
+                forked = { workspace = true }
+                """,
+                _GIT_SOURCE,
+            ),
+        ],
+        ids=["git", "path", "workspace-catalog-git"],
+    )
+    def test_closure_of_an_off_registry_dependency_is_reported(
+        self, tmp_path, manifest, forked_source
+    ):
+        self._write_project(tmp_path, manifest, forked_source)
+        direct, _ = discover_all_dependencies(tmp_path)
+        assert [d.name for d in direct] == ["unrelated"]
+
+        # ``forked`` itself has no row; what it pulls in from crates.io does.
+        assert self._rows(_resolve_tree(tmp_path, include_dev=False)) == {
+            self._UNRELATED,
+            *self._CLOSURE,
+        }
+
+    def test_same_closure_as_a_registry_dependency(self, tmp_path):
+        # Control: with ``forked`` taken from crates.io the same crates are
+        # reported, plus ``forked`` itself.
+        self._write_project(
+            tmp_path,
+            """\
+            [package]
+            name = "myapp"
+            version = "0.1.0"
+
+            [dependencies]
+            unrelated = "1.0"
+            forked = "0.3"
+            """,
+            _CRATES_IO,
+        )
+        assert self._rows(_resolve_tree(tmp_path, include_dev=False)) == {
+            self._UNRELATED,
+            ("forked", "==0.3.0", self.PROD, 0, (), "Cargo.toml"),
+            *self._CLOSURE,
+        }
+
+    def test_closure_of_a_dev_git_dependency_is_dev(self, tmp_path):
+        (tmp_path / "Cargo.toml").write_text(
+            textwrap.dedent("""\
+                [package]
+                name = "myapp"
+                version = "0.1.0"
+
+                [dependencies]
+                runtime = "1.0"
+
+                [dev-dependencies]
+                test-fork = { git = "https://example.org/forked.git" }
+            """),
+            encoding="utf-8",
+        )
+        (tmp_path / "Cargo.lock").write_text(
+            _cargo_lock(
+                ("myapp", "0.1.0", None, ["runtime", "test-fork"]),
+                ("test-fork", "0.3.0", _GIT_SOURCE, ["test-dep", "runtime-child"]),
+                ("test-dep", "1.0.0", _CRATES_IO, []),
+                ("runtime", "1.0.0", _CRATES_IO, ["runtime-child"]),
+                ("runtime-child", "1.0.0", _CRATES_IO, []),
+            ),
+            encoding="utf-8",
+        )
+        production = {
+            ("runtime", "==1.0.0", self.PROD, 0, (), "Cargo.toml"),
+            ("runtime-child", "==1.0.0", self.PROD, 1, ("runtime",), ""),
+        }
+        assert self._rows(_resolve_tree(tmp_path, include_dev=False)) == production
+        assert self._rows(_resolve_tree(tmp_path, include_dev=True)) == {
+            *production,
+            ("test-dep", "==1.0.0", self.DEV, 1, ("test-fork",), ""),
+        }
+
+    def test_only_dependency_is_a_git_dependency(self, tmp_path):
+        # The git dependency is the lockfile's only root. Its closure is
+        # attributed to it rather than kept unattributed.
+        (tmp_path / "Cargo.toml").write_text(
+            '[package]\nname = "myapp"\nversion = "0.1.0"\n\n'
+            '[dependencies]\nforked = { git = "https://example.org/forked.git" }\n',
+            encoding="utf-8",
+        )
+        (tmp_path / "Cargo.lock").write_text(
+            _cargo_lock(
+                ("myapp", "0.1.0", None, ["forked"]),
+                ("forked", "0.3.0", _GIT_SOURCE, ["fork-dep"]),
+                ("fork-dep", "1.0.0", _CRATES_IO, []),
+            ),
+            encoding="utf-8",
+        )
+        assert discover_all_dependencies(tmp_path)[0] == []
+        assert self._rows(_resolve_tree(tmp_path, include_dev=False)) == {
+            ("fork-dep", "==1.0.0", self.PROD, 1, ("forked",), ""),
+        }
+
+    def test_path_dependency_on_a_workspace_member_is_not_a_root(self, tmp_path):
+        # ``app`` depends on its sibling ``core`` by path. Cargo.lock lists
+        # core's dev-dependency among core's dependencies; core's own
+        # Cargo.toml says which of them is dev, and that is what counts.
+        files = {
+            "Cargo.toml": '[workspace]\nmembers = ["app", "core"]\n',
+            "app/Cargo.toml": (
+                '[package]\nname = "app"\nversion = "0.1.0"\n\n'
+                '[dependencies]\ncore = { path = "../core" }\nruntime = "1.0"\n'
+            ),
+            "core/Cargo.toml": (
+                '[package]\nname = "core"\nversion = "0.1.0"\n\n'
+                '[dependencies]\ncore-dep = "1.0"\n\n'
+                '[dev-dependencies]\ncore-test-tool = "1.0"\n'
+            ),
+            "Cargo.lock": _cargo_lock(
+                ("app", "0.1.0", None, ["core", "runtime"]),
+                ("core", "0.1.0", None, ["core-dep", "core-test-tool"]),
+                ("core-dep", "1.0.0", _CRATES_IO, []),
+                ("core-test-tool", "1.0.0", _CRATES_IO, []),
+                ("runtime", "1.0.0", _CRATES_IO, []),
+            ),
+        }
+        for relative, content in files.items():
+            (tmp_path / relative).parent.mkdir(parents=True, exist_ok=True)
+            (tmp_path / relative).write_text(content, encoding="utf-8")
+
+        production = {
+            ("runtime", "==1.0.0", self.PROD, 0, (), "app/Cargo.toml"),
+            ("core-dep", "==1.0.0", self.PROD, 0, (), "core/Cargo.toml"),
+        }
+        assert self._rows(_resolve_tree(tmp_path, include_dev=False)) == production
+        assert self._rows(_resolve_tree(tmp_path, include_dev=True)) == {
+            *production,
+            ("core-test-tool", "==1.0.0", self.DEV, 0, (), "core/Cargo.toml"),
+        }
+
+
 # ------------------------------------------------------------------ recursion path
 
 

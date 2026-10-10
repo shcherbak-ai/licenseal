@@ -532,9 +532,10 @@ def _grouped_results(results: list[CompatibilityResult]) -> list[CompatibilityRe
     shares its ancestors' ecosystem, so a same-named direct dep in another
     ecosystem is not its parent. When several direct rows share an ecosystem
     and name (two locked versions of one package), they are ordered by
-    resolved version and the transitives go under the first. Transitives
-    whose first ancestor isn't represented in the report (which shouldn't
-    happen post-orphan-filter, but defensively) appear at the end.
+    resolved version and the transitives go under the first. A transitive
+    whose first ancestor has no row in the report, or that has no ancestors,
+    appears at the end. An ancestor can lack a row: a Cargo ``git`` / ``path``
+    dependency is a root of the lockfile graph but is not reported itself.
     """
     direct = sorted(
         [r for r in results if not r.license_info.dependency.is_transitive],

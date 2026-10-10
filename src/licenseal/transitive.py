@@ -106,6 +106,7 @@ from licenseal.discovery.ruby.lockfiles import (
 from licenseal.discovery.ruby.lockfiles import (
     is_off_registry_marker as _is_ruby_off_registry,
 )
+from licenseal.discovery.rust.cargo_toml import cargo_off_registry_root_names
 from licenseal.discovery.rust.lockfiles import find_rust_lockfiles, parse_cargo_lock
 from licenseal.models import Dependency, DependencyGroup, Ecosystem
 from licenseal.resolvers.cran import CranIndex, fetch_cran_index, index_edge_names
@@ -320,11 +321,20 @@ def resolve_transitive(
     if rust_locks:
         locked = []
         rust_known_names: set[str] = set()
+        # A dependency declared with ``git`` / ``path`` is not a direct dep
+        # here (it has no row), but the lockfile records the registry crates
+        # it pulls in. It is a root of the lockfile graph all the same;
+        # without it those crates are unreachable and dropped as orphans.
+        off_registry_prod, off_registry_dev = cargo_off_registry_root_names(
+            project_path, exclude_paths=exclude_paths
+        )
         for rust_lock in rust_locks:
             lock_deps, lock_known = parse_cargo_lock(
                 rust_lock,
-                prod_root_names=names_by_group(Ecosystem.RUST, DependencyGroup.PROD),
-                dev_root_names=names_by_group(Ecosystem.RUST, DependencyGroup.DEV),
+                prod_root_names=names_by_group(Ecosystem.RUST, DependencyGroup.PROD)
+                | off_registry_prod,
+                dev_root_names=names_by_group(Ecosystem.RUST, DependencyGroup.DEV)
+                | off_registry_dev,
                 include_dev=include_dev,
             )
             locked.extend(_stamp_sources(lock_deps))

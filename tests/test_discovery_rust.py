@@ -7,6 +7,7 @@ from unittest.mock import patch
 
 from licenseal.discovery._walk import walk_project_files
 from licenseal.discovery.rust.cargo_toml import (
+    cargo_off_registry_root_names,
     detect_project_license_cargo_toml,
     discover_cargo_toml_dependencies,
 )
@@ -376,6 +377,136 @@ class TestDiscoverCargoToml:
         # Versions of both renamed entries surface.
         renamed_versions = {d.version_constraint for d in deps if d.name == "getrandom"}
         assert renamed_versions == {"0.4", "0.3.3"}
+
+
+class TestCargoOffRegistryRootNames:
+    """Dependencies declared with ``git`` or ``path`` are not emitted as
+    dependencies; their crate names are reported separately, by group, for
+    the Cargo.lock reachability pass."""
+
+    def test_no_cargo_toml(self, tmp_path):
+        assert cargo_off_registry_root_names(tmp_path) == (set(), set())
+
+    def test_git_and_path_dependencies_by_group(self, tmp_path):
+        _write(
+            tmp_path,
+            """\
+            [package]
+            name = "myapp"
+
+            [dependencies]
+            Forked = { git = "https://example.org/forked.git", rev = "abc123" }
+            sibling = { path = "../sibling" }
+            pinned-fork = { git = "https://example.org/pinned.git", version = "1.2" }
+            registry-crate = { version = "1.0" }
+            no-version = { features = ["x"] }
+
+            [build-dependencies]
+            build-fork = { git = "https://example.org/build.git" }
+
+            [dev-dependencies]
+            test-fork = { git = "https://example.org/test.git" }
+            registry-dev = "2.0"
+
+            [target.'cfg(unix)'.dependencies]
+            unix-fork = { git = "https://example.org/unix.git" }
+
+            [target.'cfg(windows)'.dev-dependencies]
+            windows-test-fork = { path = "../windows-test" }
+            """,
+        )
+        prod, dev = cargo_off_registry_root_names(tmp_path)
+        # Names are lowercased, as the lockfile pass compares them.
+        assert prod == {"forked", "sibling", "pinned-fork", "build-fork", "unix-fork"}
+        assert dev == {"test-fork", "windows-test-fork"}
+        # None of them is emitted as a dependency. Control: the registry
+        # dependencies beside them are, and are not roots of this kind.
+        deps, _ = discover_cargo_toml_dependencies(tmp_path)
+        assert {(d.name, d.group) for d in deps} == {
+            ("registry-crate", DependencyGroup.PROD),
+            ("registry-dev", DependencyGroup.DEV),
+        }
+
+    def test_renamed_dependency_uses_the_package_name(self, tmp_path):
+        # Cargo.lock records the package name, not the local alias.
+        _write(
+            tmp_path,
+            """\
+            [dependencies]
+            alias = { git = "https://example.org/real.git", package = "real-crate" }
+            """,
+        )
+        assert cargo_off_registry_root_names(tmp_path) == ({"real-crate"}, set())
+
+    def test_path_dependency_on_a_crate_of_this_tree_is_not_a_root(self, tmp_path):
+        # ``core`` is scanned through its own Cargo.toml; ``elsewhere`` has no
+        # Cargo.toml in the tree.
+        _write(
+            tmp_path,
+            """\
+            [package]
+            name = "app"
+
+            [dependencies]
+            core = { path = "core" }
+            elsewhere = { path = "../elsewhere" }
+            """,
+        )
+        (tmp_path / "core").mkdir()
+        (tmp_path / "core" / "Cargo.toml").write_text(
+            '[package]\nname = "core"\n\n[dependencies]\ncore-dep = "1.0"\n'
+        )
+        assert cargo_off_registry_root_names(tmp_path) == ({"elsewhere"}, set())
+
+    def test_workspace_catalog_git_entry_referenced_by_a_member(self, tmp_path):
+        _write(
+            tmp_path,
+            """\
+            [workspace]
+            members = ["member"]
+
+            [workspace.dependencies]
+            forked = { git = "https://example.org/forked.git" }
+            test-fork = { git = "https://example.org/test.git" }
+            renamed = { git = "https://example.org/real.git", package = "real-crate" }
+            unused-fork = { git = "https://example.org/unused.git" }
+            no-source = { features = ["x"] }
+            serde = "1.0"
+            """,
+        )
+        (tmp_path / "member").mkdir()
+        (tmp_path / "member" / "Cargo.toml").write_text(
+            textwrap.dedent("""\
+                [package]
+                name = "member"
+
+                [dependencies]
+                forked = { workspace = true }
+                renamed = { workspace = true }
+                no-source = { workspace = true }
+                serde = { workspace = true }
+
+                [dev-dependencies]
+                test-fork = { workspace = true }
+            """)
+        )
+        prod, dev = cargo_off_registry_root_names(tmp_path)
+        # A catalog entry no member references is inert, as for registry
+        # entries; one that is neither git nor path is not a root.
+        assert prod == {"forked", "real-crate"}
+        assert dev == {"test-fork"}
+        deps, _ = discover_cargo_toml_dependencies(tmp_path)
+        assert [d.name for d in deps] == ["serde"]
+
+    def test_exclude_paths_respected(self, tmp_path):
+        (tmp_path / "skipped").mkdir()
+        (tmp_path / "skipped" / "Cargo.toml").write_text(
+            '[dependencies]\nforked = { git = "https://example.org/forked.git" }\n'
+        )
+        assert cargo_off_registry_root_names(tmp_path) == ({"forked"}, set())
+        assert cargo_off_registry_root_names(
+            tmp_path, exclude_paths=frozenset({tmp_path / "skipped"})
+        ) == (set(), set())
 
 
 class TestDetectProjectLicenseCargoToml:
