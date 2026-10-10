@@ -5412,6 +5412,74 @@ class TestHexEcosystem:
         # internal_app is a workspace sibling → filtered, not resolved.
         assert "internal_app" not in names
 
+    @respx.mock
+    def test_rebar_production_profile_dependency_fails_the_default_check(self, tmp_path):
+        # A copyleft package declared under a prod profile ships, so the
+        # default scan (no --dev) reports it and fails. The overrides term in
+        # front of the top-level deps term declares nothing for the project.
+        (tmp_path / "rebar.config").write_text(
+            '{overrides, [{override, base_lib, [{deps, [{forced_lib, "9.0.0"}]}]}]}.\n'
+            '{deps, [{base_lib, "1.0.0"}]}.\n'
+            "{profiles, [\n"
+            '    {prod, [{deps, [{gpl_lib, "2.0.0"}]}]},\n'
+            '    {test, [{deps, [{test_gpl, "3.0.0"}]}]}\n'
+            "]}.\n",
+            encoding="utf-8",
+        )
+        routes = {}
+        for name, version, license_id in (
+            ("base_lib", "1.0.0", "MIT"),
+            ("gpl_lib", "2.0.0", "GPL-3.0-only"),
+            ("test_gpl", "3.0.0", "GPL-3.0-only"),
+            ("forced_lib", "9.0.0", "GPL-3.0-only"),
+        ):
+            routes[name] = respx.get(f"https://hex.pm/api/packages/{name}").mock(
+                return_value=httpx.Response(
+                    200,
+                    json={"meta": {"licenses": [license_id]}, "latest_stable_version": version},
+                )
+            )
+            respx.get(f"https://hex.pm/api/packages/{name}/releases/{version}").mock(
+                return_value=httpx.Response(200, json={"requirements": {}})
+            )
+
+        def check(*flags: str):
+            out = tmp_path / "report.json"
+            result = CliRunner().invoke(
+                main, ["check", "--path", str(tmp_path), *flags, "-f", "json", "-o", str(out)]
+            )
+            data = json.loads(out.read_text(encoding="utf-8"))
+            rows = {d["name"]: (d["group"], d["verdict"]) for d in data["dependencies"]}
+            return result.exit_code, rows
+
+        exit_code, rows = check()
+        assert exit_code == 1
+        assert rows == {
+            "base_lib": ("prod", "compatible"),
+            "gpl_lib": ("prod", "incompatible"),
+        }
+        assert not routes["test_gpl"].called
+
+        exit_code, rows = check("--dev", "--no-strict")
+        assert exit_code == 1
+        assert rows == {
+            "base_lib": ("prod", "compatible"),
+            "gpl_lib": ("prod", "incompatible"),
+            # Control: the same license under the test profile is a warning.
+            "test_gpl": ("dev", "warning"),
+        }
+        assert not routes["forced_lib"].called
+
+        # Control: without the prod profile the default check passes.
+        (tmp_path / "rebar.config").write_text(
+            '{deps, [{base_lib, "1.0.0"}]}.\n'
+            '{profiles, [{test, [{deps, [{test_gpl, "3.0.0"}]}]}]}.\n',
+            encoding="utf-8",
+        )
+        exit_code, rows = check()
+        assert exit_code == 0
+        assert rows == {"base_lib": ("prod", "compatible")}
+
 
 class TestTransitiveFlag:
     @respx.mock

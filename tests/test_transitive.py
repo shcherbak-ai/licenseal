@@ -7347,6 +7347,67 @@ class TestHexLockfileFirstPath:
             )
         assert "meck" not in {d.name for d in prod_only}
 
+    @respx.mock
+    def test_rebar_production_profile_dep_is_walked_beside_the_lock(self, tmp_path):
+        # rebar.lock holds the default profile only. A dependency of another
+        # production profile is a direct dep the lock does not cover, so it is
+        # walked on hex.pm, without --dev too. The overrides term comes first
+        # and contributes nothing.
+        (tmp_path / "rebar.config").write_text(
+            '{overrides, [{override, base_lib, [{deps, [{forced_lib, "9.0.0"}]}]}]}.\n'
+            '{deps, [{base_lib, "2.12.1"}]}.\n'
+            "{profiles, [\n"
+            '    {prod, [{deps, [{release_lib, "1.0.0"}]}]},\n'
+            '    {test, [{deps, [{test_lib, "0.9.2"}]}]}\n'
+            "]}.\n"
+        )
+        (tmp_path / "rebar.lock").write_text(
+            '{"1.2.0",\n[{<<"base_lib">>,{pkg,<<"base_lib">>,<<"2.12.1">>},0}]}.\n'
+        )
+        routes = {}
+        for name, version, requirements in (
+            ("release_lib", "1.0.0", {"release_child": {"requirement": "~> 2.0"}}),
+            ("release_child", "2.1.0", {}),
+            ("test_lib", "0.9.2", {}),
+            ("forced_lib", "9.0.0", {}),
+        ):
+            routes[name] = respx.get(f"https://hex.pm/api/packages/{name}").mock(
+                return_value=httpx.Response(
+                    200, json={"meta": {"licenses": ["MIT"]}, "latest_stable_version": version}
+                )
+            )
+            respx.get(f"https://hex.pm/api/packages/{name}/releases/{version}").mock(
+                return_value=httpx.Response(200, json={"requirements": requirements})
+            )
+        from licenseal.discovery import discover_all_dependencies
+
+        direct_deps, _ = discover_all_dependencies(tmp_path)
+        with httpx.Client() as client:
+            prod_only = resolve_transitive(
+                direct_deps, tmp_path, include_dev=False, max_depth=50, client=client
+            )
+        assert {(d.name, d.group, d.depth) for d in prod_only} == {
+            ("base_lib", DependencyGroup.PROD, 0),
+            ("release_lib", DependencyGroup.PROD, 0),
+            ("release_child", DependencyGroup.PROD, 1),
+        }
+        child = next(d for d in prod_only if d.name == "release_child")
+        assert child.direct_ancestors == ("release_lib",)
+        assert not routes["test_lib"].called
+        assert not routes["forced_lib"].called
+
+        with httpx.Client() as client:
+            with_dev = resolve_transitive(
+                direct_deps, tmp_path, include_dev=True, max_depth=50, client=client
+            )
+        assert {d.name: d.group for d in with_dev} == {
+            "base_lib": DependencyGroup.PROD,
+            "release_lib": DependencyGroup.PROD,
+            "release_child": DependencyGroup.PROD,
+            "test_lib": DependencyGroup.DEV,
+        }
+        assert not routes["forced_lib"].called
+
 
 class TestResolveVersionHex:
     """Direct unit tests for the _resolve_version Hex branch."""

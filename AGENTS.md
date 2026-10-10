@@ -66,7 +66,7 @@ src/licenseal/
     hex/
       mix_exs.py              Static mix.exs parser (Elixir; flat `deps` tuple list, never executed; `only: :dev|:test` → dev; git/github/path/in_umbrella off-registry; `package` `licenses` → project license; umbrella `app:` workspace filter)
       mix_lock.py             mix.lock parser (Elixir map literal; edge-aware via the 6th tuple element → reverse-BFS group attribution; `:git`/`:path` off-registry; shared `_split_top_level`/`_strip_line_comments`/off-registry-marker term helpers)
-      rebar_config.py         Static rebar.config parser (Erlang terms; top-level `{deps,…}` → prod, `{profiles,[{test|dev,…}]}` → dev; `{pkg,…}` hex-rename; `{git,…}` off-registry)
+      rebar_config.py         Static rebar.config parser (Erlang terms; top-level `{deps,…}` → prod; `{profiles,[{Name,[{deps,…}]}]}` → dev for the `test` / `dev` profiles, prod for every other profile; only top-level terms are read, so a `{deps,…}` nested in `overrides` is not a project dependency list; `{pkg,…}` hex-rename; `{git,…}` off-registry)
       rebar_lock.py           rebar.lock parser (Erlang terms; level/section-based — depth levels, NO edges, like Pipfile.lock; level-0 grouped by rebar.config profile, level-≥1 conservative PROD with no ancestors)
       erlang_mk.py            Static erlang.mk Makefile parser (DEPS/REL_DEPS prod, TEST/BUILD/DOC/SHELL_DEPS dev, LOCAL_DEPS=OTP skipped; `dep_<name> = hex VER | git URL`; gated on `include erlang.mk`, never parses erlang.mk itself; manifest-only → registry walk; PROJECT-name monorepo workspace filter unioned with Mix umbrella apps)
     r/

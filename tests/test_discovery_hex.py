@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path  # noqa: F401 - used by monkeypatch in tests
 
+from licenseal.discovery import discover_all_dependencies
 from licenseal.discovery.hex.erlang_mk import (
     _logical_lines,
     _parse_dep_def,
@@ -358,6 +359,93 @@ class TestDiscoverRebarConfigDependencies:
         deps, filtered = discover_rebar_config_dependencies(tmp_path)
         assert deps == []
         assert filtered == 0
+
+    def test_deps_outside_the_test_and_dev_profiles_are_production(self, tmp_path):
+        # Only the test and dev profiles are development profiles. A prod
+        # profile, and a profile under any other name, ships.
+        (tmp_path / "rebar.config").write_text(
+            "{erl_opts, [debug_info]}.\n"
+            '{deps, [{base_lib, "1.0.0"}]}.\n'
+            "{profiles, [\n"
+            '    {prod, [{deps, [{release_lib, "2.0.0"}]}, {relx, [{dev_mode, false}]}]},\n'
+            '    {bench, [{deps, [{bench_lib, "3.0.0"}]}]},\n'
+            '    {test, [{deps, [{test_lib, "4.0.0"}]}]},\n'
+            '    {dev, [{deps, [{dev_lib, "5.0.0"}]}]}\n'
+            "]}.\n",
+            encoding="utf-8",
+        )
+        deps, _ = discover_all_dependencies(tmp_path)
+        assert {(d.name, d.version_constraint, d.group) for d in deps} == {
+            ("base_lib", "1.0.0", DependencyGroup.PROD),
+            ("release_lib", "2.0.0", DependencyGroup.PROD),
+            ("bench_lib", "3.0.0", DependencyGroup.PROD),
+            ("test_lib", "4.0.0", DependencyGroup.DEV),
+            ("dev_lib", "5.0.0", DependencyGroup.DEV),
+        }
+        assert {d.source for d in deps} == {"rebar.config"}
+
+    def test_dep_in_a_production_profile_and_the_test_profile_is_production(self, tmp_path):
+        (tmp_path / "rebar.config").write_text(
+            "{profiles, [\n"
+            '    {test, [{deps, [{shared, "1.0.0"}, {test_only, "1.0.0"}]}]},\n'
+            '    {prod, [{deps, [{shared, "1.0.0"}]}]}\n'
+            "]}.\n",
+            encoding="utf-8",
+        )
+        deps, _ = discover_all_dependencies(tmp_path)
+        assert {d.name: d.group for d in deps} == {
+            "shared": DependencyGroup.PROD,
+            "test_only": DependencyGroup.DEV,
+        }
+        assert collect_dev_direct_names(deps) == {"test_only"}
+
+    def test_deps_nested_in_another_term_are_not_the_project_deps(self, tmp_path):
+        # An overrides entry rewrites one dependency's own configuration. Its
+        # deps list is not the project's, wherever the term sits in the file.
+        overrides = '{overrides, [{override, patched_app, [{deps, [{forced_lib, "9.0.0"}]}]}]}.\n'
+        deps_term = '{deps, [{real_lib, "1.0.0"}, {patched_app, "2.0.0"}]}.\n'
+        expected = {("real_lib", "1.0.0"), ("patched_app", "2.0.0")}
+        for content in (overrides + deps_term, deps_term + overrides, deps_term):
+            (tmp_path / "rebar.config").write_text(content, encoding="utf-8")
+            deps, _ = discover_all_dependencies(tmp_path)
+            assert {(d.name, d.version_constraint) for d in deps} == expected
+            assert all(d.group == DependencyGroup.PROD for d in deps)
+
+    def test_overrides_term_alone_declares_no_dependencies(self, tmp_path):
+        (tmp_path / "rebar.config").write_text(
+            '{overrides, [{override, patched_app, [{deps, [{forced_lib, "9.0.0"}]}]}]}.\n',
+            encoding="utf-8",
+        )
+        assert discover_all_dependencies(tmp_path)[0] == []
+
+    def test_every_top_level_deps_term_is_read(self, tmp_path):
+        (tmp_path / "rebar.config").write_text(
+            '{deps, [{first, "1.0.0"}]}.\n{plugins, [a_plugin]}.\n{deps, [{second, "2.0.0"}]}.\n',
+            encoding="utf-8",
+        )
+        deps, _ = discover_all_dependencies(tmp_path)
+        assert {d.name for d in deps} == {"first", "second"}
+
+    def test_terms_of_another_shape_are_skipped(self, tmp_path):
+        # A deps or profiles value that is not a list, a profile entry that is
+        # not a {Name, Options} pair, and a term that is not a pair at all.
+        (tmp_path / "rebar.config").write_text(
+            "{deps, undefined}.\n"
+            "{minimum_otp_vsn}.\n"
+            "{profiles, undefined}.\n"
+            '{profiles, [docs, {lint}, {test, undefined}, {prod, [{deps, [{kept, "1.0.0"}]}]}]}.\n',
+            encoding="utf-8",
+        )
+        deps, _ = discover_all_dependencies(tmp_path)
+        assert [(d.name, d.group) for d in deps] == [("kept", DependencyGroup.PROD)]
+
+    def test_truncated_final_term_keeps_the_complete_terms(self, tmp_path):
+        (tmp_path / "rebar.config").write_text(
+            '{deps, [{complete, "1.0.0"}]}.\n{profiles, [{prod, [{deps, [{cut_off, "2.0.0"}',
+            encoding="utf-8",
+        )
+        deps, _ = discover_all_dependencies(tmp_path)
+        assert [d.name for d in deps] == ["complete"]
 
 
 class TestParseRebarDep:

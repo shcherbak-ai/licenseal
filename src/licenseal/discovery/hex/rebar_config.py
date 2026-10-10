@@ -4,10 +4,15 @@
 load-bearing terms are::
 
     {deps, [cowlib, {ranch, "1.8.0"}, {jsx, {git, "...", {tag, "v3.1.0"}}}]}.
-    {profiles, [{test, [{deps, [{meck, "0.9.2"}]}]}, {dev, [{deps, [...]}]}]}.
+    {profiles, [{test, [{deps, [{meck, "0.9.2"}]}]}, {prod, [{deps, [...]}]}]}.
 
-The top-level ``{deps, [...]}`` lists production dependencies; deps inside a
-``test`` / ``dev`` profile are development dependencies (the rebar3 convention).
+The top-level ``{deps, [...]}`` lists production dependencies. Deps inside a
+``test`` / ``dev`` profile are development dependencies (the rebar3
+convention); deps inside any other profile are production. Only top-level
+terms are read: a ``{deps, [...]}`` nested in another term (an ``overrides``
+entry that rewrites one dependency's own configuration) is not the project's
+dependency list.
+
 Dep entries come as a bare atom, ``{name, "version"}``, ``{name, "version",
 [opts]}``, ``{name, {pkg, hexname, "version"}}`` (hex package rename), or
 ``{name, {git, ...}}`` (off-registry). All resolve from hex.pm.
@@ -25,6 +30,7 @@ from licenseal.discovery.hex.mix_lock import (  # noqa: PLC2701
     _split_top_level,
     _strip_line_comments,
 )
+from licenseal.discovery.hex.rebar_lock import _balanced_braces  # noqa: PLC2701
 from licenseal.models import Dependency, DependencyGroup, Ecosystem
 
 # Leading lowercase atom (a dep name or the ``pkg`` hex-rename target).
@@ -36,30 +42,42 @@ _STRING_RE = re.compile(r'"([^"]*)"')
 _DEV_PROFILES = ("test", "dev")
 
 
-def _extract_braced_list_value(text: str, key: str) -> str | None:
-    """Return the body of the ``[...]`` following ``{key,`` in ``text``."""
-    m = re.search(r"\{\s*" + re.escape(key) + r"\s*,", text)
-    if m is None:
-        return None
-    start = text.find("[", m.end())
-    if start == -1:
-        return None  # pragma: no cover - {key,...} is always followed by a list
-    depth = 0
-    in_str = False
-    for j in range(start, len(text)):
-        ch = text[j]
-        if in_str:
-            if ch == '"':
-                in_str = False
-        elif ch == '"':
-            in_str = True
-        elif ch == "[":
-            depth += 1
-        elif ch == "]":
-            depth -= 1
-            if depth == 0:
-                return text[start + 1 : j]
-    return None  # pragma: no cover - unbalanced brackets don't occur in valid configs
+def _top_level_terms(text: str) -> list[str]:
+    """Return every top-level ``{...}`` term of an Erlang-terms file, braces included.
+
+    Stops at a term whose braces never close (a truncated file).
+    """
+    terms: list[str] = []
+    pos = 0
+    while (start := text.find("{", pos)) != -1:
+        body = _balanced_braces(text, start)
+        if body is None:
+            break
+        pos = start + len(body) + 2
+        terms.append(text[start:pos])
+    return terms
+
+
+def _elements(term: str, brackets: str) -> list[str]:
+    """Return the top-level elements of the ``[...]`` or ``{...}`` literal ``term``.
+
+    ``brackets`` is the pair expected around it. A term of any other shape has
+    no elements.
+    """
+    term = term.strip()
+    if not (term.startswith(brackets[0]) and term.endswith(brackets[1])):
+        return []
+    return _split_top_level(term[1:-1])
+
+
+def _values_for(terms: list[str], key: str) -> list[str]:
+    """Return ``Value`` from every ``{key, Value}`` 2-tuple among ``terms``."""
+    out: list[str] = []
+    for term in terms:
+        elements = _elements(term, "{}")
+        if len(elements) == 2 and elements[0] == key:
+            out.append(elements[1])
+    return out
 
 
 def _parse_dep(entry: str) -> tuple[str, str, bool]:
@@ -87,9 +105,10 @@ def _parse_dep(entry: str) -> tuple[str, str, bool]:
     return name, version, off_registry
 
 
-def _parse_dep_list(body: str, group: DependencyGroup, source: str) -> list[Dependency]:
+def _parse_dep_list(dep_list: str, group: DependencyGroup, source: str) -> list[Dependency]:
+    """Parse the ``[...]`` value of a ``{deps, [...]}`` term into Dependencies."""
     out: list[Dependency] = []
-    for entry in _split_top_level(body):
+    for entry in _elements(dep_list, "[]"):
         name, version, off_registry = _parse_dep(entry)
         if not name:
             continue
@@ -107,12 +126,7 @@ def _parse_dep_list(body: str, group: DependencyGroup, source: str) -> list[Depe
 
 def _parse_rebar_config_text(text: str, source: str) -> list[Dependency]:
     """Parse a ``rebar.config`` body into direct Dependencies."""
-    text = _strip_line_comments(text, "%")
-    profiles_body = _extract_braced_list_value(text, "profiles")
-
-    # Isolate the top-level deps from any profile deps before the lookup.
-    prod_text = text.replace(profiles_body, "") if profiles_body is not None else text
-    prod_body = _extract_braced_list_value(prod_text, "deps")
+    terms = _top_level_terms(_strip_line_comments(text, "%"))
 
     out: list[Dependency] = []
     seen: set[tuple[str, str]] = set()
@@ -125,16 +139,18 @@ def _parse_rebar_config_text(text: str, source: str) -> list[Dependency]:
             seen.add(key)
             out.append(dep)
 
-    if prod_body is not None:
-        _emit(_parse_dep_list(prod_body, DependencyGroup.PROD, source))
-    if profiles_body is not None:
-        for profile in _DEV_PROFILES:
-            profile_body = _extract_braced_list_value(profiles_body, profile)
-            if profile_body is None:
+    for dep_list in _values_for(terms, "deps"):
+        _emit(_parse_dep_list(dep_list, DependencyGroup.PROD, source))
+    for profiles in _values_for(terms, "profiles"):
+        for profile in _elements(profiles, "[]"):
+            # ``{Name, [Options]}``. Only ``test`` / ``dev`` are development
+            # profiles; every other name is a production profile.
+            elements = _elements(profile, "{}")
+            if len(elements) != 2:
                 continue
-            deps_body = _extract_braced_list_value(profile_body, "deps")
-            if deps_body is not None:
-                _emit(_parse_dep_list(deps_body, DependencyGroup.DEV, source))
+            group = DependencyGroup.DEV if elements[0] in _DEV_PROFILES else DependencyGroup.PROD
+            for dep_list in _values_for(_elements(elements[1], "[]"), "deps"):
+                _emit(_parse_dep_list(dep_list, group, source))
     return out
 
 
