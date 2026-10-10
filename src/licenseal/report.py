@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import json
 import re
+import sys
+from dataclasses import replace
 from pathlib import Path, PurePath
 from typing import Any
 from urllib.parse import quote, urlsplit
@@ -462,6 +464,52 @@ def _detected_license_label(result: CompatibilityResult) -> str:
 
 _TRANSITIVE_PREFIX = "  └─ "
 
+# ASCII stand-ins for the glyphs the report draws: the verdict icons and the
+# tree branch of ``_TRANSITIVE_PREFIX``.
+_ASCII_GLYPHS = {"✓": "OK", "⚠": "!", "✗": "X", "└": "+", "─": "-"}
+
+# Below this width a terminal has no room left for the text columns once the
+# fixed-vocabulary columns are laid out whole.
+_COMPACT_TERMINAL_WIDTH = 80
+
+
+def _glyphs(text: str, encoding: str) -> str:
+    """Return ``text``, with ASCII glyphs if ``encoding`` lacks the report's own.
+
+    A redirected stdout takes the locale's code page, and a legacy one (cp1252
+    on a Western-locale Windows) has no check mark and no box-drawing
+    characters: writing them would raise after the whole scan has run. The
+    glyphs are swapped together, so a report never mixes the two sets.
+    """
+    try:
+        "".join(_ASCII_GLYPHS).encode(encoding)
+    except UnicodeEncodeError:
+        return text.translate(str.maketrans(_ASCII_GLYPHS))
+    return text
+
+
+def _fit_table(console: Console, table: Table) -> None:
+    """Keep every column of ``table`` in view, whatever the console's width.
+
+    Off a terminal (a pipe, a CI log, an ``-o`` file) nothing bounds the line
+    length, so the console is widened to the table's natural width: no cell
+    wraps or is cut short.
+
+    On a terminal too narrow for the columns' minimum widths, the table would
+    be cropped at the right edge, which loses whole columns. The minimums are
+    dropped instead, so the text columns fold further; below
+    ``_COMPACT_TERMINAL_WIDTH`` the fixed-vocabulary columns fold as well.
+    """
+    measured = console.measure(table, options=console.options.update_width(sys.maxsize))
+    if not console.is_terminal:
+        console.width = max(console.width, measured.maximum)
+    elif measured.minimum > console.width:
+        keep_whole = console.width >= _COMPACT_TERMINAL_WIDTH
+        table.columns[:] = [
+            replace(column, min_width=None, no_wrap=column.no_wrap and keep_whole)
+            for column in table.columns
+        ]
+
 
 def _grouped_results(results: list[CompatibilityResult]) -> list[CompatibilityResult]:
     """Order direct deps alphabetically; nest transitives under their first ancestor.
@@ -584,14 +632,16 @@ def render_table(
     )
     console.print()
 
+    # Every column folds rather than truncates. The fixed-vocabulary columns
+    # are kept whole (``no_wrap``) for as long as ``_fit_table`` leaves them so.
     table = Table(show_header=True, header_style="bold", pad_edge=True)
-    table.add_column("Package", style="cyan", min_width=20)
-    table.add_column("Ecosystem", min_width=8)
-    table.add_column("Group", min_width=5)
-    table.add_column("Source", min_width=12)
-    table.add_column("License", min_width=12)
-    table.add_column("Risk", min_width=14)
-    table.add_column("Status", justify="center", min_width=6)
+    table.add_column("Package", style="cyan", min_width=20, overflow="fold")
+    table.add_column("Ecosystem", min_width=8, overflow="fold", no_wrap=True)
+    table.add_column("Group", min_width=5, overflow="fold", no_wrap=True)
+    table.add_column("Source", min_width=12, overflow="fold")
+    table.add_column("License", min_width=12, overflow="fold")
+    table.add_column("Risk", min_width=14, overflow="fold", no_wrap=True)
+    table.add_column("Status", justify="center", min_width=6, overflow="fold", no_wrap=True)
 
     grouped = _grouped_results(report.results)
 
@@ -599,7 +649,7 @@ def render_table(
         dep = result.license_info.dependency
         table.add_row(
             Text.assemble(
-                _TRANSITIVE_PREFIX if dep.is_transitive else "",
+                _glyphs(_TRANSITIVE_PREFIX, console.encoding) if dep.is_transitive else "",
                 _rich_link(_package_label(result), _package_url(result)),
                 _printable(_other_ancestors_suffix(result)),
             ),
@@ -610,9 +660,10 @@ def render_table(
             else "",
             _rich_license_label(result.license_info.effective_license_id),
             _risk_style(result),
-            _VERDICT_ICONS[result.verdict],
+            _glyphs(_VERDICT_ICONS[result.verdict], console.encoding),
         )
 
+    _fit_table(console, table)
     console.print(table)
     console.print()
 
@@ -656,7 +707,7 @@ def render_table(
     if detail_results:
         console.print("  [bold]Details:[/bold]")
         for result in detail_results:
-            icon = _VERDICT_ICONS[result.verdict]
+            icon = _glyphs(_VERDICT_ICONS[result.verdict], console.encoding)
             console.print(f"    {icon} {_rich_escape(result.reason)}")
         console.print()
 
@@ -664,10 +715,10 @@ def render_table(
     if reviewed_results:
         console.print("  [bold]Reviewed:[/bold]")
         review_table = Table(show_header=True, header_style="bold", pad_edge=True)
-        review_table.add_column("Package", style="cyan", min_width=20)
-        review_table.add_column("Detected", min_width=18)
-        review_table.add_column("Reviewed", min_width=12)
-        review_table.add_column("Note", min_width=18)
+        review_table.add_column("Package", style="cyan", min_width=20, overflow="fold")
+        review_table.add_column("Detected", min_width=18, overflow="fold")
+        review_table.add_column("Reviewed", min_width=12, overflow="fold")
+        review_table.add_column("Note", min_width=18, overflow="fold")
         for result in reviewed_results:
             review_table.add_row(
                 _rich_link(_package_label(result), _package_url(result)),
@@ -675,6 +726,7 @@ def render_table(
                 _rich_license_label(result.license_info.reviewed_license_id),
                 Text(_printable(result.license_info.review_note)),
             )
+        _fit_table(console, review_table)
         console.print(review_table)
         console.print()
 
@@ -726,12 +778,17 @@ def render_json(report: AnalysisReport) -> str:
     return json.dumps(data, indent=2)
 
 
-def render_markdown(report: AnalysisReport) -> str:
+def render_markdown(report: AnalysisReport, *, encoding: str = "utf-8") -> str:
     """Render the analysis report as markdown.
 
     Direct deps alphabetical; transitives nested beneath their first ancestor
     via a `└─ ` prefix in the Package cell. Shared transitives carry an
     `(also: X)` suffix.
+
+    ``encoding`` is that of the stream the text is headed for. A saved report
+    is UTF-8; for a stdout that cannot represent the report as written, the
+    verdict icons and the tree branch are replaced by ASCII (see
+    :func:`_glyphs`).
     """
     lines: list[str] = []
     lines.append("# License Analysis Report")
@@ -826,7 +883,7 @@ def render_markdown(report: AnalysisReport) -> str:
 
     lines.append("")
     lines.append(f"_{_REPORT_NOTE.replace('licenseal check', '`licenseal check`')}_")
-    return "\n".join(lines).rstrip("\n")
+    return _glyphs("\n".join(lines).rstrip("\n"), encoding)
 
 
 def _report_to_dict(report: AnalysisReport) -> dict[str, Any]:

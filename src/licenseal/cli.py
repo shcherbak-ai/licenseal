@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import contextvars
 import hashlib
+import io
 import sys
 import time
 from collections.abc import Iterator
@@ -992,11 +993,13 @@ def check(
             raise click.ClickException(f"Failed to write report to {output_file}: {exc}") from exc
         click.echo(f"Wrote {output_format} report to {output_file}", err=True)
     elif output_format == "table":
+        _replace_unencodable_on_stdout()
         render_table(report, Console(), project_path=project_path)
     elif output_format == "json":
         click.echo(render_json(report))
     elif output_format == "markdown":
-        click.echo(render_markdown(report))
+        _replace_unencodable_on_stdout()
+        click.echo(render_markdown(report, encoding=sys.stdout.encoding or "utf-8"))
 
     skill_hint = _project_skill_staleness_hint(project_path)
     if skill_hint is not None:
@@ -1014,20 +1017,39 @@ def check(
         sys.exit(1)
 
 
+def _replace_unencodable_on_stdout() -> None:
+    """Make stdout replace, not raise on, characters its encoding lacks.
+
+    A redirected stdout takes the locale's code page (cp1252 on a
+    Western-locale Windows), which cannot represent every character a package
+    name, a license string, or a review note may hold. The report's own glyphs
+    fall back to ASCII in ``report.py``; anything else the stream cannot encode
+    becomes ``?`` instead of an exception after the whole scan has run.
+    """
+    if isinstance(sys.stdout, io.TextIOWrapper):
+        sys.stdout.reconfigure(errors="replace")
+
+
 def _render_report_to_string(report: AnalysisReport, output_format: str, project_path: Path) -> str:
     """Render the report to a string for file output.
 
     Table format goes through a non-terminal Rich Console so ANSI escapes
-    aren't written to disk. JSON / markdown are already string renderers.
+    aren't written to disk, and into its own buffer rather than a capture of
+    stdout: the file is UTF-8 whatever the terminal's code page is, so the
+    table keeps its box-drawing characters and glyphs. JSON / markdown are
+    already string renderers.
     """
     if output_format == "json":
         return render_json(report) + "\n"
     if output_format == "markdown":
         return render_markdown(report) + "\n"
-    console = Console(force_terminal=False, color_system=None, width=120)
-    with console.capture() as capture:
-        render_table(report, console, project_path=project_path)
-    return capture.get()
+    buffer = io.StringIO()
+    render_table(
+        report,
+        Console(file=buffer, force_terminal=False, color_system=None, width=120),
+        project_path=project_path,
+    )
+    return buffer.getvalue()
 
 
 @main.command("init-review-file")

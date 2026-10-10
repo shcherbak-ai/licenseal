@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import re
-from io import StringIO
+from io import BytesIO, StringIO, TextIOWrapper
 from pathlib import Path
 
 import pytest
@@ -150,18 +150,20 @@ def _make_console(width: int = 120) -> tuple[Console, StringIO]:
     return console, buf
 
 
-def _make_terminal_console(width: int = 200) -> tuple[Console, StringIO]:
-    """A console that emits styles and hyperlinks, whatever the host terminal is.
+def _make_terminal_console(width: int = 200, *, styled: bool = True) -> tuple[Console, StringIO]:
+    """A terminal console whose capabilities don't come from the host environment.
 
     The colour system and an empty environment are passed explicitly: left to
     detection, ``TERM=dumb`` or ``NO_COLOR`` in the host environment would turn
-    the escape sequences off and ``COLUMNS`` would override the width.
+    the escape sequences off and ``TERM=dumb`` or ``COLUMNS`` would override
+    the width. ``styled=False`` keeps the terminal's layout rules but emits no
+    escape sequences, for tests that read the layout as text.
     """
     buf = StringIO()
     console = Console(
         file=buf,
         force_terminal=True,
-        color_system="standard",
+        color_system="standard" if styled else None,
         width=width,
         legacy_windows=False,
         _environ={},
@@ -1667,15 +1669,9 @@ class TestHierarchicalLayout:
                 ),
             ],
         )
-        # force_terminal + legacy_windows=False so rich emits OSC-8 hyperlinks.
-        buf = StringIO()
-        console = Console(
-            file=buf,
-            force_terminal=True,
-            no_color=True,
-            width=200,
-            legacy_windows=False,
-        )
+        # A terminal with its capabilities pinned, so rich emits OSC-8
+        # hyperlinks whatever TERM the tests run under.
+        console, buf = _make_terminal_console()
         render_table(report, console, project_path=tmp_path)
         output = buf.getvalue()
         # OSC-8 hyperlink escape should reference a file:// URI.
@@ -2208,3 +2204,261 @@ class TestAnalysisGaps:
             "'[x](https://evil.example)\\x1b[2J', which is not `relative` | <i>\n"
         ) in table
         assert not _RAW_CONTROL.search(table)
+
+
+_LONG_NAME = "@example-scope/client-identity-provider-bindings"
+_HEADERS = ["Package", "Ecosystem", "Group", "Source", "License", "Risk", "Status"]
+
+
+def _wide_report() -> AnalysisReport:
+    """A report whose table needs more columns than a default console has."""
+    return AnalysisReport(
+        project_license="MIT",
+        elapsed_seconds=0.42,
+        results=[
+            _make_result(
+                _LONG_NAME,
+                "Apache-2.0",
+                RiskLevel.PERMISSIVE,
+                CompatibilityVerdict.COMPATIBLE,
+                ecosystem=Ecosystem.NPM,
+                resolved_version="3.540.0",
+                source="packages/web-frontend/package.json",
+            ),
+            _make_result(
+                "network-thing",
+                "AGPL-3.0-only",
+                RiskLevel.NETWORK_COPYLEFT,
+                CompatibilityVerdict.INCOMPATIBLE,
+                ecosystem=Ecosystem.NPM,
+                reason="network-thing uses AGPL-3.0-only",
+                resolved_version="1.0.0",
+                depth=1,
+                direct_ancestors=(_LONG_NAME, "other"),
+            ),
+            _make_result(
+                "dual",
+                "LGPL-3.0-only OR (MIT AND BSD-3-Clause)",
+                RiskLevel.WEAK_COPYLEFT,
+                CompatibilityVerdict.WARNING,
+                ecosystem=Ecosystem.NPM,
+                reason="dual needs review",
+                resolved_version="2.0.0",
+                reviewed_license_id="LGPL-3.0-only",
+                review_note="Unmodified dependency; only modified files carry the obligation.",
+            ),
+            _make_result(
+                "mystery",
+                "UNKNOWN",
+                RiskLevel.UNKNOWN,
+                CompatibilityVerdict.UNKNOWN,
+                ecosystem=Ecosystem.NPM,
+                reason="mystery has no license information",
+            ),
+        ],
+    )
+
+
+# The Package column of ``_wide_report``, top to bottom, without whitespace.
+_WIDE_PACKAGES = f"{_LONG_NAME}(3.540.0)└─network-thing(1.0.0)(also:other)dual(2.0.0)mystery"
+
+
+def _first_table(output: str) -> tuple[list[str], list[str]]:
+    """Header lines and body lines of the first table in a rendered report.
+
+    Reads the three box styles rich picks between: heavy-headed, square (a
+    legacy Windows console) and ASCII (a stream that is not UTF-encoded).
+    """
+    lines = output.splitlines()
+    top = next(i for i, line in enumerate(lines) if line.startswith(("┏", "┌", "+")))
+    rule = next(i for i in range(top + 1, len(lines)) if lines[i].startswith(("┡", "├", "|-")))
+    bottom = next(i for i in range(rule + 1, len(lines)) if lines[i].startswith(("└", "+")))
+    return lines[top + 1 : rule], lines[rule + 1 : bottom]
+
+
+def _cells(line: str) -> list[str]:
+    """The cells of one table line, padding stripped."""
+    return [cell.strip() for cell in re.split("[┃│|]", line)[1:-1]]
+
+
+def _column(lines: list[str], index: int) -> str:
+    """One column's text down ``lines``, with folds and all whitespace removed."""
+    return "".join("".join(_cells(line)[index].split()) for line in lines)
+
+
+class TestTableWidth:
+    """No column is dropped or cut short, on a terminal or off it."""
+
+    @pytest.mark.parametrize("width", [80, 120])
+    def test_off_a_terminal_every_cell_is_whole(self, width):
+        # 80 is what a stream that is not a terminal gets by default (a pipe,
+        # a CI log); 120 is the width an ``-o`` table file starts from.
+        console, buf = _make_console(width)
+        render_table(_wide_report(), console)
+        output = buf.getvalue()
+
+        header, body = _first_table(output)
+        assert [_cells(line) for line in header] == [_HEADERS]
+        assert [_cells(line) for line in body] == [
+            [
+                f"{_LONG_NAME} (3.540.0)",
+                "npm",
+                "prod",
+                "packages/web-frontend/package.json",
+                "Apache-2.0",
+                "permissive",
+                "✓",
+            ],
+            [
+                "└─ network-thing (1.0.0) (also: other)",
+                "npm",
+                "prod",
+                "",
+                "AGPL-3.0-only",
+                "network-copyleft",
+                "✗",
+            ],
+            ["dual (2.0.0)", "npm", "prod", "", "LGPL-3.0-only", "weak-copyleft", "⚠"],
+            ["mystery", "npm", "prod", "", "UNKNOWN", "unknown", "?"],
+        ]
+        # The Reviewed table is laid out the same way: one line per row.
+        reviewed = next(line for line in output.splitlines() if "Unmodified dependency" in line)
+        assert _cells(reviewed) == [
+            "dual (2.0.0)",
+            "LGPL-3.0-only OR (MIT AND BSD-3-Clause)",
+            "LGPL-3.0-only",
+            "Unmodified dependency; only modified files carry the obligation.",
+        ]
+        assert "…" not in output
+
+    def test_off_a_terminal_a_table_that_fits_leaves_the_width_alone(self):
+        console, _ = _make_console()
+        render_table(_sample_report(), console)
+        assert console.width == 120
+
+    def test_roomy_terminal_keeps_the_minimum_column_widths(self):
+        report = AnalysisReport(
+            project_license="MIT",
+            results=[
+                _make_result("pkg", "MIT", RiskLevel.PERMISSIVE, CompatibilityVerdict.COMPATIBLE)
+            ],
+        )
+        console, buf = _make_terminal_console(120, styled=False)
+        render_table(report, console)
+        header, body = _first_table(buf.getvalue())
+        assert header == [
+            "┃ Package              ┃ Ecosystem ┃ Group ┃ Source       ┃ License      "
+            "┃ Risk           ┃ Status ┃"
+        ]
+        assert body == [
+            "│ pkg                  │ python    │ prod  │              │ MIT          "
+            "│ permissive     │   ✓    │"
+        ]
+
+    @pytest.mark.parametrize("width", [100, 80])
+    def test_narrow_terminal_folds_the_text_columns(self, width):
+        console, buf = _make_terminal_console(width, styled=False)
+        render_table(_wide_report(), console)
+        output = buf.getvalue()
+
+        assert max(len(line) for line in output.splitlines()) <= width
+        header, body = _first_table(output)
+        # All seven columns, with their headings on one line.
+        assert [_cells(line) for line in header] == [_HEADERS]
+        assert all(len(_cells(line)) == 7 for line in body)
+        # The text columns fold: every character is still there.
+        assert _column(body, 0) == _WIDE_PACKAGES
+        assert _column(body, 3) == "packages/web-frontend/package.json"
+        assert _column(body, 4) == "Apache-2.0AGPL-3.0-onlyLGPL-3.0-onlyUNKNOWN"
+        assert "…" not in output
+        # The fixed-vocabulary columns are not folded: one value per row.
+        assert [cells[5] for line in body if (cells := _cells(line))[5]] == [
+            "permissive",
+            "network-copyleft",
+            "weak-copyleft",
+            "unknown",
+        ]
+        assert [cells[6] for line in body if (cells := _cells(line))[6]] == ["✓", "✗", "⚠", "?"]
+
+    @pytest.mark.parametrize("width", [79, 60, 40])
+    def test_terminal_under_80_columns_folds_every_column(self, width):
+        console, buf = _make_terminal_console(width, styled=False)
+        render_table(_wide_report(), console)
+        output = buf.getvalue()
+
+        assert max(len(line) for line in output.splitlines()) <= width
+        header, body = _first_table(output)
+        assert all(len(_cells(line)) == 7 for line in header + body)
+        assert [_column(header, index) for index in range(7)] == _HEADERS
+        assert _column(body, 0) == _WIDE_PACKAGES
+        assert _column(body, 3) == "packages/web-frontend/package.json"
+        assert _column(body, 5) == "permissivenetwork-copyleftweak-copyleftunknown"
+        assert _column(body, 6) == "✓✗⚠?"
+        assert "…" not in output
+
+
+class TestGlyphFallback:
+    """A stream that cannot encode the report's glyphs gets ASCII ones."""
+
+    @staticmethod
+    def _report() -> AnalysisReport:
+        report = _sample_report()
+        report.results.append(
+            _make_result(
+                "child",
+                "MIT",
+                RiskLevel.PERMISSIVE,
+                CompatibilityVerdict.COMPATIBLE,
+                depth=1,
+                direct_ancestors=("flask",),
+                resolved_version="1.0.0",
+            )
+        )
+        return report
+
+    def test_markdown_for_a_legacy_code_page(self):
+        md = render_markdown(self._report(), encoding="cp1252")
+        md.encode("cp1252")
+        lines = md.splitlines()
+        assert "|  +- [child (1.0.0)](https://pypi.org/project/child/)|python|prod||" in md
+        assert sum(line.endswith("|permissive|OK|") for line in lines) == 4
+        assert sum(line.endswith("|strong-copyleft|X|") for line in lines) == 1
+        assert sum(line.endswith("|weak-copyleft|!|") for line in lines) == 1
+        assert sum(line.endswith("|unknown|?|") for line in lines) == 1
+        assert "- X GPL is incompatible with MIT" in lines
+        assert "- ! Weak copyleft, review needed" in lines
+        assert "- ? No license info" in lines
+
+    def test_markdown_keeps_its_glyphs_where_they_can_be_encoded(self):
+        report = self._report()
+        md = render_markdown(report)
+        assert md == render_markdown(report, encoding="utf-8")
+        assert md == render_markdown(report, encoding="utf-16")
+        assert "|  └─ [child (1.0.0)]" in md
+        assert "|permissive|✓|" in md and "- ✗ GPL" in md and "- ⚠ Weak" in md
+
+    def test_table_on_a_legacy_code_page_stream(self):
+        raw = BytesIO()
+        stream = TextIOWrapper(raw, encoding="cp1252", newline="")
+        console = Console(
+            file=stream, force_terminal=False, width=200, legacy_windows=False, _environ={}
+        )
+        render_table(self._report(), console)
+        stream.flush()
+        output = raw.getvalue().decode("cp1252")
+
+        header, body = _first_table(output)
+        assert [_cells(line) for line in header] == [_HEADERS]
+        assert [(_cells(line)[0], _cells(line)[6]) for line in body] == [
+            ("react (18.2.0)", "OK"),
+            ("flask (3.0.3)", "OK"),
+            ("+- child (1.0.0)", "OK"),
+            ("gpl-lib (1.0.0)", "X"),
+            ("lgpl-lib (2.0.0)", "!"),
+            ("mystery", "?"),
+            ("requests (2.31.0)", "OK"),
+        ]
+        assert "    X GPL is incompatible with MIT" in output
+        assert "    ! Weak copyleft, review needed" in output
+        # Nothing had to be replaced: the borders are ASCII too.
+        assert output.isascii()

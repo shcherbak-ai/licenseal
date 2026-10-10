@@ -60,6 +60,13 @@ The `-o / --output FILE` flag writes the rendered report to a file (UTF-8, no AN
 
 The table and Markdown formats escape the strings that come from registries and scanned files (package names, versions, license strings, manifest paths, review notes) for display. Control characters are shown as `\xNN`; line breaks and tabs become a space. Markdown reports backslash-escape `\`, `` ` ``, `[`, `]`, `<`, `>`, and `|`, so a string cannot add a link, an image, HTML, or a table column. Link URLs carry the name percent-encoded. JSON reports the original strings.
 
+The table is laid out for where it goes, and never drops a column:
+
+- **Not a terminal** (a pipe, a CI log) **or an `-o` file**: the table is written at its full width, one line per dependency, with no cell wrapped or cut short. Lines can be longer than 80 columns.
+- **A terminal narrower than the table**: package names, manifest paths, and license expressions fold over several lines; the Ecosystem, Group, Risk, and Status columns stay whole. Below 80 columns those fold too.
+
+When stdout's encoding cannot represent the report's glyphs (a redirected stdout under a legacy Windows code page such as cp1252), the table and Markdown formats print `OK`, `!`, and `X` for ✓, ⚠, and ✗, and `+-` for the tree branch; any other character the encoding lacks is printed as `?`. An `-o` file is always UTF-8 and keeps the original glyphs, and JSON is plain ASCII.
+
 ## Transitive scanning
 
 Transitive is the default. `--no-transitive` audits only the manifests you declared directly. The walk uses a **lockfile-first** strategy:

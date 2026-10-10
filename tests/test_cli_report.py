@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import contextlib
+import io
 import json
 import textwrap
 from pathlib import Path
 
 import httpx
+import pytest
 import respx
 from click.testing import CliRunner
 
@@ -26,19 +29,54 @@ def _mock_crate(name: str, version: str, license_str: str) -> None:
     )
 
 
-def _check(project: Path, *args: str) -> tuple[int, str]:
-    """Run ``check`` and return ``(exit_code, stdout)``."""
-    result = CliRunner().invoke(main, ["check", "--path", str(project), *args])
+@pytest.fixture(autouse=True)
+def _stdout_is_an_80_column_pipe(monkeypatch):
+    """Give ``check`` the console a CI log gets, whatever the host terminal is.
+
+    ``check`` builds its stdout console from the environment. Left alone, a
+    host that forces terminal mode would put escape sequences into the
+    captured output, and the console width would follow the terminal the
+    tests happen to run in.
+    """
+    for name in ("FORCE_COLOR", "TTY_COMPATIBLE", "TTY_INTERACTIVE", "NO_COLOR", "LINES"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("COLUMNS", "80")
+
+
+def _check(project: Path, *args: str, charset: str = "utf-8") -> tuple[int, str]:
+    """Run ``check`` and return ``(exit_code, stdout)``.
+
+    ``charset`` is the encoding of the emulated stdout; its error handler is
+    strict, as a redirected stdout's is.
+    """
+    result = CliRunner(charset=charset).invoke(main, ["check", "--path", str(project), *args])
     return result.exit_code, result.stdout
 
 
-def _check_to_file(project: Path, output_format: str, *args: str) -> tuple[int, str]:
+def _check_to_file(
+    project: Path, output_format: str, *args: str, charset: str = "utf-8"
+) -> tuple[int, str]:
     """Run ``check -o`` and return ``(exit_code, file contents)``."""
     out_file = project / f"report.{output_format}"
-    result = CliRunner().invoke(
+    result = CliRunner(charset=charset).invoke(
         main, ["check", "--path", str(project), "-f", output_format, "-o", str(out_file), *args]
     )
     return result.exit_code, out_file.read_text(encoding="utf-8")
+
+
+def _mock_pypi_package(name: str, license_str: str, requires: tuple[str, ...] = ()) -> None:
+    """Mock PyPI for version 1.0.0 of ``name``, declaring ``requires`` as its dependencies."""
+    payload = {
+        "info": {
+            "license": license_str,
+            "version": "1.0.0",
+            "classifiers": [],
+            "requires_dist": list(requires),
+        },
+        "releases": {"1.0.0": []},
+    }
+    for url in (f"https://pypi.org/pypi/{name}/json", f"https://pypi.org/pypi/{name}/1.0.0/json"):
+        respx.get(url).mock(return_value=httpx.Response(200, json=payload))
 
 
 def _markdown_rows(markdown: str) -> list[str]:
@@ -139,9 +177,7 @@ class TestRowCardinality:
         assert markdown.count("- ✗ copyleft-child uses GPL-3.0-only") == 1
 
     @respx.mock
-    def test_two_locked_versions_of_a_crate_table(self, tmp_path, monkeypatch):
-        # Wide enough for one line per row on stdout, whatever the host's width.
-        monkeypatch.setenv("COLUMNS", "200")
+    def test_two_locked_versions_of_a_crate_table(self, tmp_path):
         self._two_locked_versions_of_one_crate(tmp_path)
         _, raw_json = _check_to_file(tmp_path, "json")
         summary = json.loads(raw_json)["summary"]
@@ -224,22 +260,8 @@ class TestRowCardinality:
         (tmp_path / "package.json").write_text(
             json.dumps({"name": "app", "license": "MIT", "dependencies": {"shared": "1.0.0"}})
         )
-        for url in ("https://pypi.org/pypi/shared/json", "https://pypi.org/pypi/shared/1.0.0/json"):
-            respx.get(url).mock(
-                return_value=httpx.Response(
-                    200,
-                    json={
-                        "info": {
-                            "license": "MIT",
-                            "version": "1.0.0",
-                            "classifiers": [],
-                            "requires_dist": ["python-child"],
-                        },
-                        "releases": {"1.0.0": []},
-                    },
-                )
-            )
-        _mock_pypi("python-child", "MIT")
+        _mock_pypi_package("shared", "MIT", requires=("python-child",))
+        _mock_pypi_package("python-child", "MIT")
         _mock_npm("shared", "MIT")
 
         _, raw_json = _check_to_file(tmp_path, "json")
@@ -301,9 +323,7 @@ class TestUntrustedStrings:
         )
 
     @respx.mock
-    def test_table_renders_and_writes_file(self, tmp_path, monkeypatch):
-        # Wide enough for one line per row on stdout, whatever the host's width.
-        monkeypatch.setenv("COLUMNS", "300")
+    def test_table_renders_and_writes_file(self, tmp_path):
         self._project(tmp_path)
 
         exit_code, stdout = _check(tmp_path, "--no-strict")
@@ -315,9 +335,9 @@ class TestUntrustedStrings:
             assert "\x1b" not in table
             assert "\x9b" not in table
             assert "brack[et (1.0.0)" in table
+            assert f"└─ {self.LINK_NAME} (1.0.0)" in table
+            assert "\\x1b[2JEvil\\x9b31m<b>|`x`" in table
             assert "Summary: 1 unknown, 2 ok" in table
-        assert f"└─ {self.LINK_NAME} (1.0.0)" in stdout
-        assert "\\x1b[2JEvil\\x9b31m<b>|`x`" in stdout
 
     @respx.mock
     def test_strict_fails_on_the_finding_not_on_rendering(self, tmp_path):
@@ -400,8 +420,7 @@ class TestAnalysisGaps:
         assert self.GAP_ROW in lines
 
     @respx.mock
-    def test_table_names_the_gap(self, tmp_path, monkeypatch):
-        monkeypatch.setenv("COLUMNS", "200")
+    def test_table_names_the_gap(self, tmp_path):
         self._healthy_manifest_beside_a_broken_one(tmp_path)
 
         exit_code, stdout = _check(tmp_path, "--no-strict")
@@ -441,8 +460,7 @@ class TestAnalysisGaps:
         assert "    package.json: is not valid JSON; skipped" in table.splitlines()
 
     @respx.mock
-    def test_scan_without_gaps_has_no_gap_section(self, tmp_path, monkeypatch):
-        monkeypatch.setenv("COLUMNS", "200")
+    def test_scan_without_gaps_has_no_gap_section(self, tmp_path):
         # A stray non-UTF-8 byte in a comment is recovered, not a gap.
         (tmp_path / "requirements.txt").write_bytes(b"# maintainer: Jos\xe9\nflask\n")
         _mock_pypi("flask", "BSD-3-Clause")
@@ -488,3 +506,130 @@ class TestAnalysisGaps:
             assert str(tmp_path) not in report
             assert tmp_path.as_posix() not in report
             assert tmp_path.name not in report
+
+
+class TestTableWidth:
+    """Off a terminal, the table keeps every column and no cell is cut short."""
+
+    LONG_NAME = "extremely-long-distribution-name-for-a-python-package"
+    CHILD = "child-with-a-long-name-of-its-own"
+
+    @respx.mock
+    def test_piped_stdout_and_saved_file_have_every_column(self, tmp_path):
+        # The table is wider than both the 80 columns a pipe is assumed to
+        # have and the 120 a saved table file starts from.
+        (tmp_path / "requirements.txt").write_text(f"{self.LONG_NAME}==1.0.0\n")
+        _mock_pypi_package(self.LONG_NAME, "MIT", requires=(self.CHILD,))
+        _mock_pypi_package(self.CHILD, "LGPL-3.0-only")
+        _, raw_json = _check_to_file(tmp_path, "json", "--no-strict")
+        total = json.loads(raw_json)["summary"]["total"]
+
+        for exit_code, table in (
+            _check(tmp_path, "--no-strict"),
+            _check_to_file(tmp_path, "table", "--no-strict"),
+        ):
+            assert exit_code == 0
+            lines = table.splitlines()
+            header = next(line for line in lines if "Package" in line)
+            for heading in ("Ecosystem", "Group", "Source", "License", "Risk", "Status"):
+                assert heading in header
+            assert max(len(line) for line in lines) > 120
+            # One line per dependency, each cell whole.
+            rows = _table_rows(table)
+            assert len(rows) == total == 2
+            cells = [[cell.strip() for cell in row[1:-1].split(row[0])] for row in rows]
+            assert cells == [
+                [
+                    f"{self.LONG_NAME} (1.0.0)",
+                    "python",
+                    "prod",
+                    "requirements.txt",
+                    "MIT",
+                    "permissive",
+                    "✓",
+                ],
+                [
+                    f"└─ {self.CHILD} (1.0.0)",
+                    "python",
+                    "prod",
+                    "",
+                    "LGPL-3.0-only",
+                    "weak-copyleft",
+                    "⚠",
+                ],
+            ]
+            assert "…" not in table
+
+
+class TestLegacyCodePageStdout:
+    """A stdout that cannot encode the report's glyphs still gets the report."""
+
+    UNENCODABLE = "Свободная"
+
+    def _project(self, project: Path) -> None:
+        # A tree branch, three different verdicts, and a license string with
+        # characters outside the code page.
+        (project / "requirements.txt").write_text("parent==1.0.0\nodd==1.0.0\n")
+        _mock_pypi_package("parent", "MIT", requires=("child",))
+        _mock_pypi_package("child", "LGPL-3.0-only")
+        _mock_pypi_package("odd", self.UNENCODABLE)
+
+    @respx.mock
+    def test_table_falls_back_to_ascii(self, tmp_path):
+        self._project(tmp_path)
+        exit_code, table = _check(tmp_path, "--no-strict", charset="cp1252")
+
+        assert exit_code == 0
+        rows = [[cell.strip() for cell in row[1:-1].split("|")] for row in _table_rows(table)]
+        assert [(row[0], row[4], row[6]) for row in rows] == [
+            ("odd (1.0.0)", "?" * len(self.UNENCODABLE), "?"),
+            ("parent (1.0.0)", "MIT", "OK"),
+            ("+- child (1.0.0)", "LGPL-3.0-only", "!"),
+        ]
+        assert "    ! child uses LGPL-3.0-only" in table
+        assert "✓" not in table and "└" not in table
+
+    @respx.mock
+    def test_markdown_falls_back_to_ascii(self, tmp_path):
+        self._project(tmp_path)
+        exit_code, markdown = _check(tmp_path, "-f", "markdown", "--no-strict", charset="cp1252")
+
+        assert exit_code == 0
+        rows = _markdown_rows(markdown)
+        assert [row.split("|")[-2] for row in rows] == ["?", "OK", "!"]
+        assert rows[0].split("|")[5] == "?" * len(self.UNENCODABLE)
+        assert rows[2].startswith("|  +- [child (1.0.0)](https://pypi.org/project/child/)|")
+        assert "- ! child uses LGPL-3.0-only" in markdown
+
+    @respx.mock
+    def test_saved_reports_and_json_are_not_affected(self, tmp_path):
+        self._project(tmp_path)
+        _, markdown = _check_to_file(tmp_path, "markdown", "--no-strict", charset="cp1252")
+        _, table = _check_to_file(tmp_path, "table", "--no-strict", charset="cp1252")
+        _, raw_json = _check(tmp_path, "-f", "json", "--no-strict", charset="cp1252")
+
+        # A saved file is UTF-8 whatever the terminal's code page is.
+        for report in (markdown, table):
+            assert "✓" in report and "⚠" in report
+            assert "└─ " in report
+            assert self.UNENCODABLE in report
+        assert "+--" not in table
+        licenses = {d["name"]: d["license"] for d in json.loads(raw_json)["dependencies"]}
+        assert licenses["odd"] == self.UNENCODABLE
+
+    @respx.mock
+    @pytest.mark.parametrize("output_format", ["table", "markdown"])
+    def test_stdout_swapped_for_an_in_memory_buffer(self, tmp_path, output_format):
+        # An in-process caller that replaces sys.stdout with a text buffer:
+        # there is no encoding to consult and no error handler to relax.
+        self._project(tmp_path)
+        buffer = io.StringIO()
+        with contextlib.redirect_stdout(buffer):
+            main.main(
+                ["check", "--path", str(tmp_path), "-f", output_format, "--no-strict"],
+                standalone_mode=False,
+            )
+        report = buffer.getvalue()
+        assert "✓" in report and "⚠" in report
+        assert "└─ " in report
+        assert self.UNENCODABLE in report
