@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from collections.abc import Iterable
 from urllib.parse import urlsplit
 
 from licenseal.analysis.risk import KNOWN_SPDX_IDS
@@ -976,6 +977,22 @@ def _canon(expr: str) -> str:
     return expr
 
 
+def and_join_licenses(expressions: Iterable[str]) -> str:
+    """Compose independent license expressions into one ``AND`` expression.
+
+    ``AND`` binds tighter than ``OR``, so an operand that carries a
+    top-level ``OR`` is parenthesised: joined bare, ``A OR B`` and ``C``
+    would read as ``A OR (B AND C)`` and let ``A`` escape ``C``. Other
+    operands need no wrap. Whitespace is collapsed first so an ``OR`` set
+    off by tabs or runs of spaces is still seen.
+    """
+    operands = (" ".join(expression.split()) for expression in expressions)
+    return " AND ".join(
+        f"({operand})" if len(_split_top_level(operand, " OR ")) > 1 else operand
+        for operand in operands
+    )
+
+
 _LGPL_VARIANT_RE = re.compile(
     r"^LGPL-(?P<ver>\d+(?:\.\d+)*)(?:-only|-or-later)?$",
     re.IGNORECASE,
@@ -1179,7 +1196,10 @@ def _normalize_license_inner(raw: str) -> str:
     # Lowercase ``and`` / ``or`` connectors: publisher prose often uses
     # ``"MIT and ISC"`` or ``"BSD or MIT"`` instead of the SPDX-standard
     # uppercase keywords. Split case-insensitively so each side normalizes.
-    for connector, joiner in ((" and ", " AND "), (" or ", " OR ")):
+    # ``or`` splits first and an ``and`` join keeps each operand's grouping,
+    # so a string mixing the two reads with SPDX precedence, like the same
+    # string spelled with uppercase operators.
+    for connector, join in ((" or ", " OR ".join), (" and ", and_join_licenses)):
         if connector in stripped.lower() and " AND " not in stripped and " OR " not in stripped:
             lower = stripped.lower()
             parts: list[str] = []
@@ -1195,7 +1215,7 @@ def _normalize_license_inner(raw: str) -> str:
             parts.append(stripped[prev:].strip())
             normalized_parts = [normalize_license(p) for p in parts if p]
             if len(normalized_parts) >= 2 and all(p != "UNKNOWN" for p in normalized_parts):
-                return joiner.join(normalized_parts)
+                return join(normalized_parts)
 
     # If it looks like a valid SPDX ID already (contains uppercase, hyphens),
     # return as-is

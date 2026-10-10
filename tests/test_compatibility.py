@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from licenseal.analysis.compatibility import analyze, check_compatibility
+from licenseal.analysis.spdx import and_join_licenses, normalize_license
 from licenseal.models import (
     CompatibilityVerdict,
     Dependency,
@@ -330,6 +331,68 @@ class TestAndExpressionWithUnresolvedArm:
         # And a network-copyleft project can elect the AGPL arm cleanly.
         li2 = _make_license_info("AGPL-3.0-only OR Proprietary", name="dual")
         assert check_compatibility("AGPL-3.0-only", li2).verdict == CompatibilityVerdict.COMPATIBLE
+
+
+class TestComposedExpressionGrouping:
+    """An ``AND`` of independent license entries keeps every entry binding,
+    whichever order the entries arrive in."""
+
+    _OR_ENTRY = "Apache-2.0 OR GPL-2.0-only"
+    _COPYLEFT_ENTRY = "AGPL-3.0-only"
+
+    def test_or_entry_cannot_escape_the_other_entry(self):
+        for entries in (
+            [self._OR_ENTRY, self._COPYLEFT_ENTRY],
+            [self._COPYLEFT_ENTRY, self._OR_ENTRY],
+        ):
+            li = _make_license_info(normalize_license(and_join_licenses(entries)))
+            result = check_compatibility("MIT", li)
+            assert result.verdict == CompatibilityVerdict.INCOMPATIBLE, entries
+            assert result.risk_level == RiskLevel.NETWORK_COPYLEFT, entries
+
+    def test_each_entry_alone_is_the_control(self):
+        # The OR entry on its own is electable down to Apache-2.0; only the
+        # composition with the copyleft entry makes it a violation.
+        alone = check_compatibility("MIT", _make_license_info(self._OR_ENTRY))
+        assert alone.verdict == CompatibilityVerdict.COMPATIBLE
+        copyleft = check_compatibility("MIT", _make_license_info(self._COPYLEFT_ENTRY))
+        assert copyleft.verdict == CompatibilityVerdict.INCOMPATIBLE
+
+    def test_bare_join_is_the_escape_the_grouping_closes(self):
+        # Without the group, SPDX precedence reads the bare join as
+        # ``Apache-2.0 OR (GPL-2.0-only AND AGPL-3.0-only)``.
+        bare = _make_license_info(f"{self._OR_ENTRY} AND {self._COPYLEFT_ENTRY}")
+        assert check_compatibility("MIT", bare).verdict == CompatibilityVerdict.COMPATIBLE
+
+    def test_mixed_lowercase_connectors_get_the_uppercase_verdict(self):
+        pairs = (
+            (
+                "GPL-3.0-only or Apache-2.0 and AGPL-3.0-only",
+                "GPL-3.0-only OR Apache-2.0 AND AGPL-3.0-only",
+            ),
+            (
+                "Apache-2.0 and AGPL-3.0-only or GPL-3.0-only",
+                "Apache-2.0 AND AGPL-3.0-only OR GPL-3.0-only",
+            ),
+            ("MIT or Apache-2.0 and GPL-3.0-only", "MIT OR Apache-2.0 AND GPL-3.0-only"),
+            ("(MIT or Apache-2.0) and GPL-3.0-only", "(MIT OR Apache-2.0) AND GPL-3.0-only"),
+        )
+        for project in ("MIT", "MPL-2.0", "GPL-2.0-only", "GPL-3.0-only", "AGPL-3.0-only"):
+            for lowercase, uppercase in pairs:
+                lower = check_compatibility(
+                    project, _make_license_info(normalize_license(lowercase))
+                )
+                upper = check_compatibility(
+                    project, _make_license_info(normalize_license(uppercase))
+                )
+                assert lower.verdict == upper.verdict, (project, lowercase)
+                assert lower.risk_level == upper.risk_level, (project, lowercase)
+
+    def test_mixed_lowercase_connectors_no_longer_clear_a_permissive_project(self):
+        li = _make_license_info(normalize_license("GPL-3.0-only or Apache-2.0 and AGPL-3.0-only"))
+        result = check_compatibility("MIT", li)
+        assert result.verdict == CompatibilityVerdict.INCOMPATIBLE
+        assert result.risk_level == RiskLevel.STRONG_COPYLEFT
 
 
 class TestSourceAvailableProjectLicense:

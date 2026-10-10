@@ -44,7 +44,11 @@ from typing import cast
 
 import httpx
 
-from licenseal.analysis.spdx import normalize_license, spdx_from_license_url
+from licenseal.analysis.spdx import (
+    and_join_licenses,
+    normalize_license,
+    spdx_from_license_url,
+)
 from licenseal.discovery.java.pom_xml import (
     _expand_properties,
     _parse_pom,
@@ -461,8 +465,12 @@ def resolve_maven_central_license(
             )
             if fallback.from_registry and fallback.license_id not in ("UNKNOWN", "Proprietary", ""):
                 return fallback
+        # The composed ``license_id`` is not normalized again, so an entry
+        # that expanded to an ``OR`` expression has to be grouped here.
         license_id = (
-            normalized_parts[0] if len(normalized_parts) == 1 else " AND ".join(normalized_parts)
+            normalized_parts[0]
+            if len(normalized_parts) == 1
+            else and_join_licenses(normalized_parts)
         )
         return LicenseInfo(
             dependency=dep,

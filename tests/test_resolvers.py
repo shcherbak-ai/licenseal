@@ -10,7 +10,14 @@ import httpx
 import pytest
 import respx
 
-from licenseal.models import Dependency, DependencyGroup, Ecosystem
+from licenseal.analysis.compatibility import check_compatibility
+from licenseal.models import (
+    CompatibilityVerdict,
+    Dependency,
+    DependencyGroup,
+    Ecosystem,
+    RiskLevel,
+)
 from licenseal.resolvers.crates_io import (
     _extract_pinned_version as extract_rust_pinned_version,
 )
@@ -3424,6 +3431,79 @@ class TestDepsDevLicensesToSpdx:
         # Default AND semantics for every non-RubyGems system.
         assert _licenses_to_spdx(["MIT", "Apache-2.0"], system="PYPI") == "MIT AND Apache-2.0"
         assert _licenses_to_spdx(["non-standard", "Apache-2.0"]) == "Apache-2.0"
+
+    def test_and_join_groups_an_entry_that_is_itself_an_or(self):
+        # Every entry is an independent, binding license. An ``OR`` entry is
+        # grouped so its arms cannot escape the other entries.
+        assert (
+            _licenses_to_spdx(["Apache-2.0 OR GPL-2.0-only", "AGPL-3.0-only"])
+            == "(Apache-2.0 OR GPL-2.0-only) AND AGPL-3.0-only"
+        )
+        assert (
+            _licenses_to_spdx(["AGPL-3.0-only", "Apache-2.0 OR GPL-2.0-only"])
+            == "AGPL-3.0-only AND (Apache-2.0 OR GPL-2.0-only)"
+        )
+
+    def test_disjunctive_join_needs_no_group(self):
+        # ``AND`` binds tighter than ``OR``, so an ``AND`` entry keeps its
+        # meaning when the entries are OR-joined bare.
+        assert (
+            _licenses_to_spdx(["MIT AND ISC", "Ruby"], system="RUBYGEMS") == "MIT AND ISC OR Ruby"
+        )
+
+
+class TestDepsDevMultiEntryGrouping:
+    """Multi-entry ``licenses`` arrays through the single-version resolver
+    path, fetched with ``RegistryCache.fetch``."""
+
+    _OR_ENTRY = "Apache-2.0 OR GPL-2.0-only"
+    _COPYLEFT_ENTRY = "AGPL-3.0-only"
+
+    @staticmethod
+    def _resolve(licenses: list[str]):
+        respx.get(
+            "https://api.deps.dev/v3/systems/GO/packages/github.com%2Ffoo%2Fbar/versions/v1.0.0"
+        ).mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "versionKey": {
+                        "system": "GO",
+                        "name": "github.com/foo/bar",
+                        "version": "v1.0.0",
+                    },
+                    "licenses": licenses,
+                    "links": [],
+                },
+            )
+        )
+        cache = RegistryCache()
+        with httpx.Client() as client:
+            return resolve_go_license(_go_dep(), client, fetcher=cache.fetch)
+
+    @pytest.mark.parametrize(
+        "licenses",
+        [[_OR_ENTRY, _COPYLEFT_ENTRY], [_COPYLEFT_ENTRY, _OR_ENTRY]],
+    )
+    @respx.mock
+    def test_or_entry_stays_bound_to_the_other_entry(self, licenses):
+        info = self._resolve(licenses)
+        assert info.license_id == "(Apache-2.0 OR GPL-2.0-only) AND AGPL-3.0-only"
+        result = check_compatibility("MIT", info)
+        assert result.verdict == CompatibilityVerdict.INCOMPATIBLE
+        assert result.risk_level == RiskLevel.NETWORK_COPYLEFT
+
+    @respx.mock
+    def test_or_entry_alone_is_the_control(self):
+        info = self._resolve([self._OR_ENTRY])
+        assert info.license_id == "Apache-2.0 OR GPL-2.0-only"
+        assert check_compatibility("MIT", info).verdict == CompatibilityVerdict.COMPATIBLE
+
+    @respx.mock
+    def test_plain_entries_join_without_a_group(self):
+        info = self._resolve(["MIT", "Apache-2.0"])
+        assert info.license_id == "Apache-2.0 AND MIT"
+        assert check_compatibility("MIT", info).verdict == CompatibilityVerdict.COMPATIBLE
 
 
 class TestDepsDevRepoUrlFromLinks:

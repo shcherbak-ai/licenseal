@@ -4,7 +4,12 @@ from __future__ import annotations
 
 import pytest
 
-from licenseal.analysis.spdx import _looks_like_spdx, normalize_license, normalize_r_license
+from licenseal.analysis.spdx import (
+    _looks_like_spdx,
+    and_join_licenses,
+    normalize_license,
+    normalize_r_license,
+)
 
 
 class TestNormalizeLicense:
@@ -467,6 +472,106 @@ class TestSpdxOperandCanonicalization:
         assert normalize_license("MIT") == "MIT"
         expr = "Apache-2.0 WITH LLVM-exception"
         assert normalize_license(expr) == expr
+
+
+class TestAndJoinLicenses:
+    """Composing independent license entries into one ``AND`` expression."""
+
+    def test_simple_operands_join_bare(self):
+        assert and_join_licenses(["MIT", "Apache-2.0"]) == "MIT AND Apache-2.0"
+        assert and_join_licenses(["MIT", "Apache-2.0", "ISC"]) == "MIT AND Apache-2.0 AND ISC"
+
+    @pytest.mark.parametrize(
+        "operands, expected",
+        [
+            (
+                ["Apache-2.0 OR GPL-2.0-only", "AGPL-3.0-only"],
+                "(Apache-2.0 OR GPL-2.0-only) AND AGPL-3.0-only",
+            ),
+            (
+                ["AGPL-3.0-only", "Apache-2.0 OR GPL-2.0-only"],
+                "AGPL-3.0-only AND (Apache-2.0 OR GPL-2.0-only)",
+            ),
+            (["MIT OR ISC", "Apache-2.0 OR Zlib"], "(MIT OR ISC) AND (Apache-2.0 OR Zlib)"),
+        ],
+    )
+    def test_operand_with_a_top_level_or_is_parenthesised(self, operands, expected):
+        # Joined bare, ``A OR B`` and ``C`` would parse as ``A OR (B AND C)``.
+        assert and_join_licenses(operands) == expected
+
+    def test_operand_without_a_top_level_or_is_not_wrapped(self):
+        # An ``AND`` chain, a ``WITH`` leaf and an ``OR`` already inside its
+        # own group all keep their meaning when joined bare.
+        assert and_join_licenses(["MIT AND ISC", "Zlib"]) == "MIT AND ISC AND Zlib"
+        assert (
+            and_join_licenses(["GPL-2.0-only WITH Classpath-exception-2.0", "MIT"])
+            == "GPL-2.0-only WITH Classpath-exception-2.0 AND MIT"
+        )
+        assert (
+            and_join_licenses(["(MIT OR ISC) AND Zlib", "0BSD"]) == "(MIT OR ISC) AND Zlib AND 0BSD"
+        )
+
+    @pytest.mark.parametrize("operand", ["MIT\tOR\tISC", "MIT  OR  ISC", " MIT OR\nISC "])
+    def test_or_set_off_by_other_whitespace_is_still_grouped(self, operand):
+        assert and_join_licenses([operand, "Zlib"]) == "(MIT OR ISC) AND Zlib"
+
+    def test_grouped_join_normalizes_the_same_in_either_order(self):
+        entries = ["Apache-2.0 OR GPL-2.0-only", "AGPL-3.0-only"]
+        expected = "(Apache-2.0 OR GPL-2.0-only) AND AGPL-3.0-only"
+        assert normalize_license(and_join_licenses(entries)) == expected
+        assert normalize_license(and_join_licenses(entries[::-1])) == expected
+
+
+class TestLowercaseConnectorPrecedence:
+    """A string mixing lowercase ``and`` / ``or`` reads with SPDX precedence."""
+
+    def test_or_binds_looser_than_and(self):
+        expected = "AGPL-3.0-only AND Apache-2.0 OR GPL-3.0-only"
+        assert normalize_license("GPL-3.0-only or Apache-2.0 and AGPL-3.0-only") == expected
+        assert normalize_license("Apache-2.0 and AGPL-3.0-only or GPL-3.0-only") == expected
+        assert normalize_license("AGPL-3.0-only and Apache-2.0 or GPL-3.0-only") == expected
+
+    @pytest.mark.parametrize(
+        "lowercase, uppercase",
+        [
+            (
+                "GPL-3.0-only or Apache-2.0 and AGPL-3.0-only",
+                "GPL-3.0-only OR Apache-2.0 AND AGPL-3.0-only",
+            ),
+            (
+                "Apache-2.0 and AGPL-3.0-only or GPL-3.0-only",
+                "Apache-2.0 AND AGPL-3.0-only OR GPL-3.0-only",
+            ),
+            ("MIT or Apache-2.0 and GPL-3.0-only", "MIT OR Apache-2.0 AND GPL-3.0-only"),
+            ("MIT and ISC or Apache-2.0 and Zlib", "MIT AND ISC OR Apache-2.0 AND Zlib"),
+            ("MIT or ISC or Apache-2.0 and Zlib", "MIT OR ISC OR Apache-2.0 AND Zlib"),
+            ("MIT And ISC Or Apache-2.0", "MIT AND ISC OR Apache-2.0"),
+            # Explicit grouping survives the connector split.
+            ("(MIT or Apache-2.0) and GPL-3.0-only", "(MIT OR Apache-2.0) AND GPL-3.0-only"),
+            ("GPL-3.0-only and (MIT or Apache-2.0)", "GPL-3.0-only AND (MIT OR Apache-2.0)"),
+            ("MIT and (Apache-2.0 or GPL-3.0-only)", "MIT AND (Apache-2.0 OR GPL-3.0-only)"),
+            (
+                "(MIT or Apache-2.0) and (GPL-3.0-only or ISC)",
+                "(MIT OR Apache-2.0) AND (GPL-3.0-only OR ISC)",
+            ),
+            # Single-connector controls.
+            ("MIT and ISC", "MIT AND ISC"),
+            ("MIT or ISC", "MIT OR ISC"),
+        ],
+    )
+    def test_lowercase_connectors_normalize_like_uppercase_operators(self, lowercase, uppercase):
+        assert normalize_license(lowercase) == normalize_license(uppercase)
+
+    def test_and_operand_that_expands_to_an_or_keeps_its_group(self):
+        # The left side resolves through the alias map to a two-arm ``OR``;
+        # the right side must stay binding on both arms.
+        assert (
+            normalize_license("CDDL+GPL and MIT")
+            == "(CDDL-1.0 OR GPL-2.0-with-classpath-exception) AND MIT"
+        )
+
+    def test_mixing_lowercase_connectors_with_uppercase_operators_is_unknown(self):
+        assert normalize_license("MIT or Apache-2.0 AND GPL-3.0-only") == "UNKNOWN"
 
 
 class TestRedundantLicensePairCollapse:

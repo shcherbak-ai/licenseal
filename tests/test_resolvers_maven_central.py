@@ -6,7 +6,9 @@ import httpx
 import pytest
 import respx
 
+from licenseal.analysis.compatibility import check_compatibility
 from licenseal.analysis.spdx import spdx_from_license_url
+from licenseal.models import CompatibilityVerdict, RiskLevel
 from licenseal.resolvers.http import (
     RegistryCache,
     _trim_for_cache,
@@ -1568,6 +1570,64 @@ class TestMavenResolverThroughRegistryCache:
         assert info2.license_id == "Apache-2.0"
         # Two resolves, one HTTP fetch.
         assert route.call_count == 1
+
+
+class TestMultiLicensePomGrouping:
+    """A POM's ``<license>`` entries are AND-joined; an entry whose name
+    expands to an ``OR`` expression stays bound to the other entries."""
+
+    @staticmethod
+    def _resolve(*names: str):
+        entries = "".join(f"<license><name>{name}</name></license>" for name in names)
+        respx.get(
+            "https://repo.maven.apache.org/maven2/com/example/multi/1.0.0/multi-1.0.0.pom"
+        ).mock(
+            return_value=httpx.Response(
+                200,
+                text=(
+                    '<project xmlns="http://maven.apache.org/POM/4.0.0">'
+                    "<groupId>com.example</groupId><artifactId>multi</artifactId>"
+                    f"<version>1.0.0</version><licenses>{entries}</licenses></project>"
+                ),
+            )
+        )
+        cache = RegistryCache()
+        with httpx.Client() as client:
+            return resolve_maven_central_license(
+                _java_dep(name="com.example:multi"),
+                client,
+                fetcher=cache.fetch_text,
+                json_fetcher=cache.fetch,
+            )
+
+    @pytest.mark.parametrize(
+        "names, expected",
+        [
+            (("MIT/Apache-2.0", "GPLv3"), "(Apache-2.0 OR MIT) AND GPL-3.0-only"),
+            (("GPLv3", "MIT/Apache-2.0"), "GPL-3.0-only AND (Apache-2.0 OR MIT)"),
+        ],
+    )
+    @respx.mock
+    def test_or_entry_stays_bound_to_the_other_entry(self, names, expected):
+        info = self._resolve(*names)
+        assert info.license_id == expected
+        result = check_compatibility("MIT", info)
+        assert result.verdict == CompatibilityVerdict.INCOMPATIBLE
+        assert result.risk_level == RiskLevel.STRONG_COPYLEFT
+
+    @respx.mock
+    def test_or_entry_alone_is_the_control(self):
+        # A single entry is not a join: no group, and the permissive arms
+        # stay electable.
+        info = self._resolve("MIT/Apache-2.0")
+        assert info.license_id == "Apache-2.0 OR MIT"
+        assert check_compatibility("MIT", info).verdict == CompatibilityVerdict.COMPATIBLE
+
+    @respx.mock
+    def test_plain_entries_join_without_a_group(self):
+        info = self._resolve("MIT License", "Apache License, Version 2.0")
+        assert info.license_id == "MIT AND Apache-2.0"
+        assert check_compatibility("MIT", info).verdict == CompatibilityVerdict.COMPATIBLE
 
 
 class TestFetchRegistryText:

@@ -6523,6 +6523,59 @@ class TestDepsDevBatchHitShortcut:
         assert dotnet_dep["license"] == "MIT"  # batch source
 
 
+class TestComposedLicenseExitCode:
+    """A multi-entry deps.dev ``licenses`` array is AND-joined; an entry that
+    is itself an ``OR`` expression must not escape the other entries."""
+
+    @staticmethod
+    def _check(tmp_path, licenses: list[str]):
+        (tmp_path / "pyproject.toml").write_text(
+            textwrap.dedent("""\
+            [project]
+            name = "myapp"
+            version = "0.1.0"
+            license = "MIT"
+            dependencies = ["dual==1.0.0"]
+            """)
+        )
+        respx.post("https://api.deps.dev/v3alpha/versionbatch").mock(
+            return_value=httpx.Response(
+                200,
+                json=TestDepsDevBatchHitShortcut._batch_response("PYPI", "dual", "1.0.0", licenses),
+            )
+        )
+        result = CliRunner().invoke(
+            main,
+            ["check", "--path", str(tmp_path), "--no-transitive", "--no-strict", "-f", "json"],
+        )
+        data = json.loads(result.output[result.output.index("{") :])
+        return result.exit_code, data["dependencies"][0]
+
+    @pytest.mark.parametrize(
+        "licenses",
+        [
+            ["Apache-2.0 OR GPL-2.0-only", "AGPL-3.0-only"],
+            ["AGPL-3.0-only", "Apache-2.0 OR GPL-2.0-only"],
+        ],
+    )
+    @pytest.mark.no_default_deps_dev_mock
+    @respx.mock
+    def test_or_entry_and_copyleft_entry_fail_in_either_order(self, tmp_path, licenses):
+        # A violation fails even under --no-strict.
+        exit_code, dep = self._check(tmp_path, licenses)
+        assert exit_code == 1
+        assert dep["license"] == "(Apache-2.0 OR GPL-2.0-only) AND AGPL-3.0-only"
+        assert dep["verdict"] == "incompatible"
+
+    @pytest.mark.no_default_deps_dev_mock
+    @respx.mock
+    def test_or_entry_alone_passes(self, tmp_path):
+        exit_code, dep = self._check(tmp_path, ["Apache-2.0 OR GPL-2.0-only"])
+        assert exit_code == 0
+        assert dep["license"] == "Apache-2.0 OR GPL-2.0-only"
+        assert dep["verdict"] == "compatible"
+
+
 class TestCliMarkdownViolation:
     @respx.mock
     def test_markdown_with_violation_exits_nonzero(self, tmp_path):

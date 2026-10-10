@@ -40,7 +40,7 @@ from typing import Any, cast
 import httpx
 
 from licenseal._concurrency import map_with_context
-from licenseal.analysis.spdx import normalize_license
+from licenseal.analysis.spdx import and_join_licenses, normalize_license
 from licenseal.models import Dependency, LicenseInfo
 from licenseal.resolvers.http import (
     Fetcher,
@@ -156,7 +156,8 @@ def _licenses_to_spdx(licenses_field: object, *, system: str = "") -> str:
       shape as Composer's ``license`` array) — join with ``OR``.
     * For every other system, join with ``AND`` (the conservative /
       more-restrictive choice; the user can override via
-      ``licenseal.review.toml``).
+      ``licenseal.review.toml``). An entry that is itself an ``OR``
+      expression is parenthesised, so every entry stays binding.
 
     deps.dev surfaces ``"non-standard"`` for packages whose ``<licenseUrl>``
     (NuGet) or ``<license>`` (Maven) tag couldn't be matched to an SPDX
@@ -193,8 +194,9 @@ def _licenses_to_spdx(licenses_field: object, *, system: str = "") -> str:
         return ""
     if len(collected) == 1:
         return collected[0]
-    operator = " OR " if system in _DISJUNCTIVE_MULTI_LICENSE_SYSTEMS else " AND "
-    return operator.join(collected)
+    if system in _DISJUNCTIVE_MULTI_LICENSE_SYSTEMS:
+        return " OR ".join(collected)
+    return and_join_licenses(collected)
 
 
 def _repo_url_from_links(links_field: object) -> str:
