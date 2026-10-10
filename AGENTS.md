@@ -33,7 +33,7 @@ src/licenseal/
       pyproject.py            PEP 621 / Poetry / PEP 735
       requirements.py         requirements*.txt (pip-style comment stripping; URL / VCS / local-path lines and option lines skipped)
       setup_cfg.py            setup.cfg (dependencies from every file in the tree; project license from the root file only)
-      setup_py.py             setup.py (static `ast.parse`, never executed; literal `setup(...)` license / install_requires / extras_require args)
+      setup_py.py             setup.py (static `ast.parse`, never executed; literal `setup(...)` license / install_requires / extras_require args; a file the parser rejects is an analysis gap)
       pipfile.py              Pipfile (Pipenv manifest)
       lockfiles.py            uv.lock, poetry.lock, Pipfile.lock parsers (transitive; edge-aware for uv/poetry, section-based for Pipfile)
     npm/

@@ -8,8 +8,13 @@ generated ``dependency_versions_table.py``-style file alongside setup.py.
 from __future__ import annotations
 
 import textwrap
+from pathlib import Path
 from unittest.mock import patch
 
+import pytest
+
+from licenseal.discovery import detect_project_license, discover_all_dependencies
+from licenseal.discovery._read import collect_read_diagnostics
 from licenseal.discovery._walk import walk_project_files
 from licenseal.discovery.python.setup_py import (
     detect_project_license_setup_py,
@@ -430,8 +435,8 @@ class TestSetupPyEdgeCases:
             setup(name="x", license="MIT")
             """,
         )
-        with patch("licenseal.discovery.python.setup_py.read_bytes", return_value=None):
-            # `read_bytes` records the OS read failure and returns None;
+        with patch("licenseal.discovery.python.setup_py.decode_text", return_value=None):
+            # `decode_text` records the OS read failure and returns None;
             # `_parse_ast` returns None, so discover / detect both gracefully
             # return their empty result.
             assert discover_setup_py_dependencies(tmp_path) == []
@@ -646,12 +651,149 @@ class TestSetupPyEdgeCases:
         assert names == {"requests"}
 
 
+_VALID_SETUP_PY = (
+    'from setuptools import setup\nsetup(name="x", install_requires=["real-dep>=1"])\n'
+)
+
+# Sources the running interpreter's parser rejects on every supported version.
+_UNPARSEABLE_SOURCES = {
+    "truncated_call": 'from setuptools import setup\nsetup(name="x", install_requires=["a"\n',
+    "print_statement": 'print "building"\nfrom setuptools import setup\nsetup()\n',
+    "leading_zero_octal": 'import os\nos.chmod("build.sh", 0755)\n',
+    "diamond_operator": "import sys\nif sys.version_info[0] <> 3:\n    raise SystemExit\n",
+    "tab_space_mix": "if True:\n\tname = 'x'\n        version = '1'\n",
+    "embedded_nul": 'from setuptools import setup\nsetup(name="x")\x00\n',
+}
+
+
+def _setup_py_gaps(diags):
+    return [d for d in diags if d.is_gap and "not valid Python 3" in d.reason]
+
+
+class TestSetupPyParseGaps:
+    """A ``setup.py`` that can't be parsed is an analysis gap, never a silent
+    "no dependencies"."""
+
+    @pytest.mark.parametrize("source", _UNPARSEABLE_SOURCES.values(), ids=_UNPARSEABLE_SOURCES)
+    def test_unparseable_setup_py_records_gap(self, tmp_path, source):
+        (tmp_path / "setup.py").write_bytes(source.encode("utf-8"))
+        with collect_read_diagnostics() as diags:
+            deps, _ = discover_all_dependencies(tmp_path)
+        assert deps == []
+        assert [(d.path, d.reason) for d in _setup_py_gaps(diags)] == [
+            (tmp_path / "setup.py", "is not valid Python 3; skipped")
+        ]
+
+    @pytest.mark.parametrize("error", [ValueError, RecursionError])
+    def test_parser_value_and_recursion_errors_record_gap(self, tmp_path, error):
+        # ``ast.parse`` raises these for an embedded NUL and for an expression
+        # nested past the parser's depth limit; which input triggers them
+        # varies by interpreter version, so the error is injected.
+        (tmp_path / "setup.py").write_text(_VALID_SETUP_PY, encoding="utf-8")
+        with (
+            patch("licenseal.discovery.python.setup_py.ast.parse", side_effect=error("boom")),
+            collect_read_diagnostics() as diags,
+        ):
+            deps, _ = discover_all_dependencies(tmp_path)
+        assert deps == []
+        assert len(_setup_py_gaps(diags)) == 1
+
+    def test_long_expression_does_not_abort_the_scan(self, tmp_path):
+        # Depending on the interpreter this either parses or exceeds the
+        # parser's depth limit; neither outcome may escape as an exception.
+        chain = " + ".join(['"a"'] * 3000)
+        (tmp_path / "setup.py").write_text(
+            f"from setuptools import setup\nsetup(install_requires=[{chain}])\n", encoding="utf-8"
+        )
+        (tmp_path / "requirements.txt").write_text("other-dep\n", encoding="utf-8")
+        with collect_read_diagnostics() as diags:
+            deps, _ = discover_all_dependencies(tmp_path)
+        assert [d.name for d in deps] == ["other-dep"]
+        assert all(d.path == tmp_path / "setup.py" for d in diags)
+
+    def test_gap_does_not_stop_other_manifests(self, tmp_path):
+        _write(tmp_path / "legacy" / "setup.py", 'print "python 2 only"\n')
+        (tmp_path / "legacy" / "requirements.txt").write_text("from-requirements\n")
+        (tmp_path / "modern").mkdir()
+        (tmp_path / "modern" / "setup.py").write_text(_VALID_SETUP_PY, encoding="utf-8")
+        with collect_read_diagnostics() as diags:
+            deps, _ = discover_all_dependencies(tmp_path)
+        assert {d.name for d in deps} == {"from-requirements", "real-dep"}
+        assert [d.path for d in _setup_py_gaps(diags)] == [tmp_path / "legacy" / "setup.py"]
+
+    def test_project_license_probe_records_the_same_gap(self, tmp_path):
+        (tmp_path / "setup.py").write_text('print "python 2 only"\n', encoding="utf-8")
+        with collect_read_diagnostics() as diags:
+            assert detect_project_license(tmp_path) == ""
+        assert [d.path for d in _setup_py_gaps(diags)] == [tmp_path / "setup.py"]
+
+    def test_unparseable_sibling_deps_table_is_not_a_gap(self, tmp_path):
+        # The deps-table lookup is a best-effort probe of sibling files; only
+        # the setup.py itself is a manifest whose loss is a gap.
+        _write(
+            tmp_path / "setup.py",
+            """\
+            from setuptools import setup
+            setup(name="x", install_requires=["real-dep", deps["pinned"]])
+            """,
+        )
+        _write(tmp_path / "src" / "x" / "dependency_versions_table.py", "deps = {\n")
+        with collect_read_diagnostics() as diags:
+            deps, _ = discover_all_dependencies(tmp_path)
+        assert [d.name for d in deps] == ["real-dep"]
+        assert diags == []
+
+    def test_dynamic_install_requires_is_not_a_gap(self, tmp_path):
+        _write(
+            tmp_path / "setup.py",
+            """\
+            from setuptools import setup
+            setup(name="x", install_requires=open("requirements/base.txt").read().split())
+            """,
+        )
+        with collect_read_diagnostics() as diags:
+            deps, _ = discover_all_dependencies(tmp_path)
+        assert deps == []
+        assert diags == []
+
+    def test_unreadable_setup_py_is_one_read_gap(self, tmp_path, monkeypatch):
+        (tmp_path / "setup.py").write_text(_VALID_SETUP_PY, encoding="utf-8")
+
+        def boom(self, *args, **kwargs):
+            raise OSError("denied")
+
+        monkeypatch.setattr(Path, "read_bytes", boom)
+        with collect_read_diagnostics() as diags:
+            deps, _ = discover_all_dependencies(tmp_path)
+        assert deps == []
+        assert [d.reason for d in diags] == ["could not be read (OSError); skipped"]
+
+
+class TestSetupPyEncodings:
+    """setup.py is decoded like every other manifest before it is parsed."""
+
+    @pytest.mark.parametrize("encoding", ["utf-16", "utf-8-sig", "utf-32"])
+    def test_bom_marked_setup_py_is_parsed(self, tmp_path, encoding):
+        (tmp_path / "setup.py").write_bytes(_VALID_SETUP_PY.encode(encoding))
+        with collect_read_diagnostics() as diags:
+            deps, _ = discover_all_dependencies(tmp_path)
+        assert [(d.name, d.version_constraint) for d in deps] == [("real-dep", ">=1")]
+        assert diags == []
+
+    def test_non_utf8_byte_is_recovered_with_a_warning(self, tmp_path):
+        (tmp_path / "setup.py").write_bytes(
+            b"# maintainer: Jos\xe9\n" + _VALID_SETUP_PY.encode("ascii")
+        )
+        with collect_read_diagnostics() as diags:
+            deps, _ = discover_all_dependencies(tmp_path)
+        assert [d.name for d in deps] == ["real-dep"]
+        assert [(d.is_gap, "latin-1" in d.reason) for d in diags] == [(False, True)]
+
+
 class TestSetupPyTopLevelIntegration:
     """Confirm setup.py discovery is wired into the top-level walker."""
 
     def test_discover_all_picks_up_setup_py(self, tmp_path):
-        from licenseal.discovery import discover_all_dependencies
-
         _write(
             tmp_path / "setup.py",
             """\
@@ -664,8 +806,6 @@ class TestSetupPyTopLevelIntegration:
         assert "requests" in names
 
     def test_detect_project_license_picks_up_setup_py(self, tmp_path):
-        from licenseal.discovery import detect_project_license
-
         _write(
             tmp_path / "setup.py",
             """\

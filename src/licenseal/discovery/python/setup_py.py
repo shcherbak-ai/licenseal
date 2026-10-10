@@ -19,7 +19,8 @@ no ``eval``) and extract:
 
 Non-literal constructs (DictComp, function calls, conditional logic) are
 treated as unresolvable: the parser returns whatever it could resolve and
-silently skips the rest rather than guess.
+silently skips the rest rather than guess. A setup.py that can't be parsed at
+all (Python-2-only syntax, a truncated file) is recorded as an analysis gap.
 """
 
 from __future__ import annotations
@@ -27,7 +28,7 @@ from __future__ import annotations
 import ast
 from pathlib import Path
 
-from licenseal.discovery._read import read_bytes
+from licenseal.discovery._read import decode_text, record_parse_failure
 from licenseal.discovery._walk import walk_project_files
 from licenseal.discovery.python import DEV_GROUP_NAMES, parse_pep508_dep
 from licenseal.models import Dependency, DependencyGroup, Ecosystem
@@ -43,14 +44,23 @@ _SIBLING_DEPS_FILE_PATTERNS = (
 )
 
 
-def _parse_ast(path: Path) -> ast.Module | None:
-    """Parse a Python file to an AST. Returns None on any failure."""
-    source = read_bytes(path)
+def _parse_ast(path: Path, *, record_failure: bool = False) -> ast.Module | None:
+    """Parse a Python file to an AST. Returns None on any failure.
+
+    With ``record_failure`` a file that was read but can't be parsed is
+    recorded as an analysis gap. Set for a ``setup.py``; left off for the
+    sibling deps-table probes, which are only a best-effort lookup.
+    """
+    source = decode_text(path)
     if source is None:
         return None
     try:
         return ast.parse(source, filename=str(path))
-    except SyntaxError:
+    except (SyntaxError, ValueError, RecursionError):
+        # ValueError: an embedded NUL. RecursionError: an expression nested
+        # past the parser's depth limit.
+        if record_failure:
+            record_parse_failure(path, "Python 3")
         return None
 
 
@@ -256,7 +266,7 @@ def _emit_deps(
 
 def _extract_setup_py(path: Path, source: str) -> tuple[list[Dependency], str]:
     """Return ``(deps, license_str)`` extracted from a single setup.py file."""
-    tree = _parse_ast(path)
+    tree = _parse_ast(path, record_failure=True)
     if tree is None:
         return [], ""
     setup_call = _find_setup_call(tree)

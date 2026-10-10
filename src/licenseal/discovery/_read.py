@@ -162,10 +162,9 @@ def _over_size_cap(path: Path) -> bool:
 def read_bytes(path: Path) -> bytes | None:
     """Read raw bytes, recording an OS read failure (permission, I/O) as a gap.
 
-    The byte-level primitive behind every loader here; also used directly for
-    inputs that aren't text (e.g. a ``setup.py`` parsed straight to an AST).
-    A file past the manifest size cap is recorded as a gap and skipped without
-    being read into memory (see :func:`_over_size_cap`).
+    The byte-level primitive behind every loader here. A file past the
+    manifest size cap is recorded as a gap and skipped without being read
+    into memory (see :func:`_over_size_cap`).
     """
     try:
         if _over_size_cap(path):

@@ -971,6 +971,34 @@ class TestCheckCommand:
         assert "fails --strict" in strict.output
 
     @respx.mock
+    def test_unparseable_setup_py_surfaces_gap_and_fails_strict(self, tmp_path):
+        # A setup.py the parser rejects may declare dependencies the scan
+        # never saw: it is reported once as a gap and fails --strict, while
+        # the other manifests in the tree are still analyzed.
+        (tmp_path / "setup.py").write_text(
+            'print "legacy build script"\nfrom setuptools import setup\nsetup()\n',
+            encoding="utf-8",
+        )
+        (tmp_path / "requirements.txt").write_text("requests==1.0.0\n", encoding="utf-8")
+        _mock_pypi("requests", "MIT")
+        out = tmp_path / "report.json"
+        runner = CliRunner()
+
+        warn = runner.invoke(
+            main,
+            ["check", "--path", str(tmp_path), "--no-strict", "-f", "json", "-o", str(out)],
+        )
+        assert warn.exit_code == 0
+        assert warn.output.count("Warning: setup.py: is not valid Python 3; skipped") == 1
+        data = json.loads(out.read_text(encoding="utf-8"))
+        assert data["summary"]["gaps"] == 1
+        assert [dep["name"] for dep in data["dependencies"]] == ["requests"]
+
+        strict = runner.invoke(main, ["check", "--path", str(tmp_path)])
+        assert strict.exit_code == 1
+        assert "fails --strict" in strict.output
+
+    @respx.mock
     def test_warning_exits_nonzero_in_strict_mode(self, tmp_path):
         (tmp_path / "pyproject.toml").write_text(
             textwrap.dedent("""\

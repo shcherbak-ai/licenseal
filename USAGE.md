@@ -52,7 +52,7 @@ licenseal check --exclude-dirs third_party,scratch  # skip subtrees not already 
 
 `licenseal check` exits non-zero when there are violations, warnings, unresolved licenses, or analysis gaps — that's the CI gate.
 
-- An **analysis gap** is a dependency manifest or lockfile that couldn't be read (permission / I/O error) or parsed (malformed XML / JSON / TOML / YAML / INI), or a directory that couldn't be traversed — each is surfaced as a `Warning:` on stderr so a dropped dependency is never silent. Gaps fail strict mode like an unknown; a non-UTF-8 file recovered via latin-1 fallback warns but does not fail.
+- An **analysis gap** is a dependency manifest or lockfile that couldn't be read (permission / I/O error) or parsed (malformed XML / JSON / TOML / YAML / INI, or a `setup.py` that is not valid Python 3), or a directory that couldn't be traversed — each is surfaced as a `Warning:` on stderr so a dropped dependency is never silent. Gaps fail strict mode like an unknown; a non-UTF-8 file recovered via latin-1 fallback warns but does not fail.
 - `--no-strict` demotes warnings / unknowns / gaps to advisory. **Violations always fail** — they're definite legal incompatibilities and the flag won't silence them.
 - If **every** registry lookup fails and not one dependency resolves (no network, blocked egress, registry-wide outage), `check` aborts with an error and a non-zero exit rather than reporting an all-UNKNOWN scan; this is not demotable by `--no-strict`.
 
