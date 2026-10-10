@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import threading
+
 import click
 import httpx
 import pytest
@@ -48,7 +50,52 @@ def _disable_registry_host_rate_limits(monkeypatch):
     for limiter in registry_http._HOST_RATE_LIMITERS.values():  # noqa: SLF001
         monkeypatch.setattr(limiter, "_interval_seconds", 0.0)  # noqa: SLF001
         monkeypatch.setattr(limiter, "_next_allowed_at", 0.0)  # noqa: SLF001
+    # Rate-limit windows are process-wide state. Pin each one's state for the
+    # test so a pause or a spent budget left by one test is undone at teardown
+    # instead of leaking into the next.
+    for window in registry_http._HOST_RATE_LIMIT_WINDOWS.values():  # noqa: SLF001
+        monkeypatch.setattr(window, "_resume_at", 0.0)  # noqa: SLF001
+        monkeypatch.setattr(window, "_stalled_pauses", 0)  # noqa: SLF001
+        monkeypatch.setattr(window, "_remaining_seconds", window._remaining_seconds)  # noqa: SLF001
     yield
+
+
+class FakeRegistryClock:
+    """Stand-in for the ``time`` module inside ``licenseal.resolvers.http``.
+
+    ``sleep`` advances the clock instead of blocking, so rate-limit waits and
+    retry backoffs cost no wall-clock time and every wait is recorded. The
+    epoch and monotonic readings are far apart, so code that mixes the two
+    clocks up computes a visibly wrong wait.
+    """
+
+    def __init__(self) -> None:
+        self._elapsed = 0.0
+        self._lock = threading.Lock()
+        self.sleeps: list[float] = []
+
+    def time(self) -> float:
+        with self._lock:
+            return 1_700_000_000.0 + self._elapsed
+
+    def monotonic(self) -> float:
+        with self._lock:
+            return 500.0 + self._elapsed
+
+    def sleep(self, seconds: float) -> None:
+        with self._lock:
+            self.sleeps.append(seconds)
+            self._elapsed += seconds
+
+
+@pytest.fixture
+def fake_registry_clock(monkeypatch):
+    """Replace the registry HTTP layer's clock and sleep with a fake."""
+    from licenseal.resolvers import http as registry_http
+
+    clock = FakeRegistryClock()
+    monkeypatch.setattr(registry_http, "time", clock)
+    return clock
 
 
 @pytest.fixture(autouse=True)

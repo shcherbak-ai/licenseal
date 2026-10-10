@@ -17,6 +17,11 @@ deps.dev does not index Hex, so there is no batch pre-pass: every dep is
 resolved here against hex.pm (lockfile-first keeps this to one GET per unique
 package, deduped by the per-scan cache). Off-registry deps (``:git`` / ``:path``
 in ``mix.lock``, ``git:`` / ``path:`` in ``mix.exs``) short-circuit to UNKNOWN.
+
+One request per package means a large project exceeds hex.pm's per-window
+request quota. That is handled in the shared HTTP layer, not here: a 429 pauses
+all hex.pm requests until the window resets (``_HostRateLimitWindow`` in
+:mod:`licenseal.resolvers.http`).
 """
 
 from __future__ import annotations

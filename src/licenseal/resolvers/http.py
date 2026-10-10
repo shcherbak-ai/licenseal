@@ -60,6 +60,98 @@ _HOST_RATE_LIMITERS = {
 }
 
 
+# hex.pm caps unauthenticated API clients at 100 requests per 60-second window
+# per IP and reports the window in ``x-ratelimit-*`` response headers. It has
+# no batch endpoint and deps.dev does not index Hex, so each package costs one
+# request and a project with more packages than a window allows is certain to
+# draw 429s. Pacing every request under the limit would slow the common small
+# scan for nothing, so the limit is handled when it is hit: a 429 pauses all
+# hex.pm requests until the window resets, then they resume.
+_HEX_PM_WINDOW_SECONDS = 60.0
+# One pause never outlasts a window by more than this allowance, whatever
+# reset time the response reports.
+_HEX_PM_MAX_PAUSE_SECONDS = _HEX_PM_WINDOW_SECONDS + 5.0
+# Ceiling on all hex.pm pausing in one process: ten full-length pauses.
+_HEX_PM_MAX_TOTAL_PAUSE_SECONDS = 10 * _HEX_PM_MAX_PAUSE_SECONDS
+# Pauses in a row, with no non-429 response between them, after which the host
+# is treated as not lifting its limit.
+_HEX_PM_MAX_STALLED_PAUSES = 3
+# Added to a reported reset time: it is in whole seconds, and the local clock
+# may run slightly ahead of the server's.
+_RATE_LIMIT_RESET_MARGIN_SECONDS = 1.0
+
+
+class _HostRateLimitWindow:
+    """Pause every request to a host until its rate-limit window reopens.
+
+    ``defer`` is shown each response from the host. On a 429 it opens a pause
+    lasting until the window reset the response reports, and ``acquire`` —
+    called before every request to the host — sleeps out the rest of an open
+    pause. Worker threads rate limited together share one pause rather than
+    each opening their own.
+
+    The waiting is bounded twice, so a host that never lifts its limit cannot
+    hang a scan: at most ``max_stalled_pauses`` pauses in a row with no non-429
+    response between them, and at most ``max_total_seconds`` of pausing over
+    the life of the process. Past either bound ``defer`` declines and the
+    caller's ordinary retry budget applies.
+    """
+
+    def __init__(
+        self, max_pause_seconds: float, max_total_seconds: float, max_stalled_pauses: int
+    ) -> None:
+        self._max_pause_seconds = max_pause_seconds
+        self._max_stalled_pauses = max_stalled_pauses
+        self._remaining_seconds = max_total_seconds
+        self._stalled_pauses = 0
+        self._resume_at = 0.0
+        self._lock = threading.Lock()
+
+    def acquire(self) -> None:
+        with self._lock:
+            wait = self._resume_at - time.monotonic()
+        # Sleep outside the lock: ``defer`` needs it while workers wait, and
+        # the requests that resume together must not be serialized.
+        if wait > 0:
+            time.sleep(wait)
+
+    def defer(self, response: httpx.Response) -> bool:
+        """Return True when the request should be retried after the pause."""
+        if response.status_code != 429:
+            with self._lock:
+                self._stalled_pauses = 0
+            return False
+        wait = self._seconds_until_reset(response)
+        with self._lock:
+            now = time.monotonic()
+            if now < self._resume_at:
+                # Another worker already opened the pause for this window.
+                return True
+            if self._stalled_pauses >= self._max_stalled_pauses or wait > self._remaining_seconds:
+                return False
+            self._stalled_pauses += 1
+            self._remaining_seconds -= wait
+            self._resume_at = now + wait
+            return True
+
+    def _seconds_until_reset(self, response: httpx.Response) -> float:
+        reset = response.headers.get("x-ratelimit-reset", "").strip()
+        if reset.isdecimal():
+            wait = float(reset) - time.time() + _RATE_LIMIT_RESET_MARGIN_SECONDS
+            if 0 < wait <= self._max_pause_seconds:
+                return wait
+        # No usable reset time (absent, malformed, already past by the local
+        # clock, or further off than a window lasts): wait out a whole window.
+        return self._max_pause_seconds
+
+
+_HOST_RATE_LIMIT_WINDOWS = {
+    "hex.pm": _HostRateLimitWindow(
+        _HEX_PM_MAX_PAUSE_SECONDS, _HEX_PM_MAX_TOTAL_PAUSE_SECONDS, _HEX_PM_MAX_STALLED_PAUSES
+    ),
+}
+
+
 def _respect_host_rate_limit(url: str) -> None:
     """Apply any host-specific registry rate limit before opening a request."""
     host = urlsplit(url).hostname
@@ -68,12 +160,25 @@ def _respect_host_rate_limit(url: str) -> None:
     limiter = _HOST_RATE_LIMITERS.get(host.lower())
     if limiter is not None:
         limiter.acquire()
+    window = _HOST_RATE_LIMIT_WINDOWS.get(host.lower())
+    if window is not None:
+        window.acquire()
+
+
+def _defer_to_rate_limit_window(url: str, response: httpx.Response) -> bool:
+    """Whether to retry a rate-limited request once its host's window reopens.
+
+    Always False for a host without a rate-limit window. Only the JSON GET
+    fetcher asks: it is the only one that reaches such a host.
+    """
+    window = _HOST_RATE_LIMIT_WINDOWS.get((urlsplit(url).hostname or "").lower())
+    return window is not None and window.defer(response)
 
 
 # Retries are jittered so the worker pool doesn't re-fire in lockstep. Without
 # it, a burst of threads that all trip a per-window limiter at the same instant
-# (e.g. hex.pm's 100 req/min per IP) back off the identical amount and retry as
-# the same synchronized burst — reconstructing the spike that got them
+# (a per-IP request quota, for example) back off the identical amount and retry
+# as the same synchronized burst — reconstructing the spike that got them
 # throttled. ``random`` is module-global and thread-safe in CPython (the
 # C-level state update holds the GIL); it's the same jitter source urllib3
 # uses. No seeding: real per-thread entropy is the whole point.
@@ -146,17 +251,26 @@ def _read_capped_text(response: httpx.Response) -> str | None:
 
 
 def fetch_registry_json(url: str, client: httpx.Client) -> dict | None:
-    """Fetch JSON with brief retries for transient registry failures."""
+    """Fetch JSON with brief retries for transient registry failures.
+
+    A rate-limited response from a host with a rate-limit window (see
+    :class:`_HostRateLimitWindow`) is retried once the window reopens without
+    spending one of the ``_MAX_ATTEMPTS``; the window bounds its own waiting.
+    """
     delay = _INITIAL_BACKOFF_SECONDS
-    for attempt in range(_MAX_ATTEMPTS):
+    attempt = 0
+    while attempt < _MAX_ATTEMPTS:
         try:
             _respect_host_rate_limit(url)
             with client.stream("GET", url) as response:
+                if _defer_to_rate_limit_window(url, response):
+                    continue
                 if response.status_code in _RETRYABLE_STATUS_CODES:
                     if attempt == _MAX_ATTEMPTS - 1:
                         return None
                     time.sleep(_retry_delay_seconds(response, delay))
                     delay *= 2
+                    attempt += 1
                     continue
 
                 try:
@@ -176,6 +290,7 @@ def fetch_registry_json(url: str, client: httpx.Client) -> dict | None:
                 return None
             time.sleep(_jittered_backoff(delay))
             delay *= 2
+            attempt += 1
             continue
 
     return None

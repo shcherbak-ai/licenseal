@@ -3558,6 +3558,71 @@ class TestHexEcosystem:
         assert dep["package_url"] == "https://hex.pm/packages/acme/1.2.3"
 
     @respx.mock
+    def test_check_resolves_every_hex_package_past_the_rate_limit(
+        self, tmp_path, fake_registry_clock
+    ):
+        # A lockfile with more packages than one hex.pm rate-limit window
+        # allows. The mocked registry enforces the window the way the real one
+        # does: past the quota it answers 429 until the window's reset time,
+        # which it reports in ``x-ratelimit-reset``. Every package must still
+        # resolve — none may fall out as UNKNOWN because it came after the
+        # quota was spent. One worker keeps the request order deterministic.
+        names = [f"pkg_{i:03d}" for i in range(250)]
+        (tmp_path / "mix.exs").write_text(
+            "defmodule M.MixProject do\n"
+            "  def project, do: [app: :m, deps: deps()]\n"
+            "  defp deps do\n"
+            "    [" + ", ".join(f'{{:{name}, "~> 1.0"}}' for name in names) + "]\n"
+            "  end\n"
+            "end\n"
+        )
+        (tmp_path / "mix.lock").write_text(
+            "%{\n"
+            + "".join(
+                f'  "{name}": {{:hex, :{name}, "1.0.0", "h", [:mix], [], "hexpm", "h2"}},\n'
+                for name in names
+            )
+            + "}\n"
+        )
+        window_seconds, quota = 60, 100
+        requests_in_window: dict[int, int] = {}
+        rejected = 0
+
+        def hex_pm(request: httpx.Request) -> httpx.Response:
+            nonlocal rejected
+            window = int(fake_registry_clock.time() // window_seconds)
+            count = requests_in_window[window] = requests_in_window.get(window, 0) + 1
+            headers = {
+                "x-ratelimit-limit": str(quota),
+                "x-ratelimit-remaining": str(max(0, quota - count)),
+                "x-ratelimit-reset": str((window + 1) * window_seconds),
+            }
+            if count > quota:
+                rejected += 1
+                return httpx.Response(429, headers=headers)
+            return httpx.Response(
+                200,
+                headers=headers,
+                json={"meta": {"licenses": ["MIT"], "links": {}}, "latest_stable_version": "1.0.0"},
+            )
+
+        respx.get(url__regex=r"^https://hex\.pm/api/packages/pkg_\d+$").mock(side_effect=hex_pm)
+
+        runner = CliRunner()
+        result = runner.invoke(
+            main, ["check", "--path", str(tmp_path), "--max-workers", "1", "-f", "json"]
+        )
+        assert result.exit_code == 0
+        data = json.loads(result.output[result.output.index("{") :])
+        licenses = {d["name"]: d["license"] for d in data["dependencies"]}
+        assert licenses == dict.fromkeys(names, "MIT")
+        assert data["summary"]["unknown"] == 0
+        # Two windows ran out; each was waited out once, to its reported reset
+        # (plus the one-second margin), and never for longer than a window.
+        assert rejected == 2
+        assert fake_registry_clock.sleeps == [41.0, 60.0]
+
+    @respx.mock
     def test_check_resolves_r_dep_via_cran_index(self, tmp_path):
         # End-to-end: DESCRIPTION + renv.lock → lockfile-driven resolution →
         # official CRAN PACKAGES index (fetched once) → JSON with the CRAN URL.

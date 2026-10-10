@@ -86,7 +86,7 @@ src/licenseal/
     rubygems.py               RubyGems.org v2 per-version endpoint primary (`/api/v2/rubygems/{name}/versions/{version}.json`); v1 latest-version fallback for unpinned (`/api/v1/gems/{name}.json`); deps.dev RUBYGEMS batch pre-pass
     hex.py                    hex.pm package endpoint (`/api/packages/{name}` — package-level `meta.licenses`/`meta.links`/`latest_stable_version`) + release endpoint (`/api/packages/{name}/releases/{version}` — transitive `requirements` edges); hex.pm-only (deps.dev does not index Hex), no batch pre-pass
     cran.py                   Official CRAN PACKAGES index (`cran.r-project.org/src/contrib/PACKAGES` — fetched + parsed once per scan into a name→record map; License + edges for every current package); resolve license + transitive closure from the local map, no per-package requests; R license-grammar → SPDX via `analysis.spdx.normalize_r_license`
-    http.py                   Shared registry HTTP behavior + per-scan RegistryCache (URL dedup, response trimming, in-flight collapse) + PEP 658 sidecar fetch
+    http.py                   Shared registry HTTP behavior (retries; per-host rate limits — crates.io request pacing, hex.pm rate-limit-window wait) + per-scan RegistryCache (URL dedup, response trimming, in-flight collapse) + PEP 658 sidecar fetch
     version_selection.py      Range-aware version selection helpers
 ```
 
@@ -201,6 +201,7 @@ Same untrusted-code rules apply: manifests and lockfiles only — never install,
   - `LICENSES.md` — the sample `reason` string in the Details section.
 - 100% test coverage required. Run with parallel workers: `uv run pytest -n 8 --cov=licenseal --cov-report=term-missing` (`pytest-xdist` is in the dev deps; `-n 8` cuts wall-clock by ~4-5×).
 - Tests use `respx` to mock HTTP calls. Never make real network requests in tests.
+- A `hex.pm` 429 is not retried on the ordinary three-attempt budget: `_HostRateLimitWindow` in `resolvers/http.py` pauses every `hex.pm` request until the window reset reported in `x-ratelimit-reset`, bounded by `_HEX_PM_MAX_STALLED_PAUSES` consecutive pauses and `_HEX_PM_MAX_TOTAL_PAUSE_SECONDS` per process. A test that makes `hex.pm` answer 429 must take the `fake_registry_clock` fixture (`tests/conftest.py`) so the pause advances a fake clock instead of sleeping.
 - Keep it simple. No unnecessary abstractions, helpers, or error handling for impossible cases.
 - When two ecosystems share an identical type or helper, give the shared definition a domain-neutral name both reference (e.g. `_TransitiveDepsFetcher`), rather than aliasing one ecosystem's name to another's (`_DotnetDepsFetcher = _MavenDepsFetcher`). The cross-domain alias couples the two and makes the borrowed name lie about its scope.
 - No specific stress-test repository or package names in source or test comments. Describe the pattern (`large Python projects`, `Cargo workspaces`, `packages with extras-heavy transitives`) instead of the project where you happened to observe it.
