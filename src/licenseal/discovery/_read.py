@@ -25,8 +25,10 @@ sink, partitioned into:
   value of a type its format does not allow, read as absent), or a lockfile
   that parsed could not be used (a version known not to be readable, no entry
   in a form the parser reads, merge-conflict markers), or a manifest was read
-  but what its dependencies depend on is listed nowhere. Analysis is
-  *incomplete*; ``--strict`` treats this like an UNKNOWN and fails.
+  but what its dependencies depend on is listed nowhere, or a registry walk
+  that started from a manifest could not read the dependency list of a
+  package it reached. Analysis is *incomplete*; ``--strict`` treats this
+  like an UNKNOWN and fails.
 * **recovered** (``is_gap=False``) — read with a caveat. A file decoded through
   the latin-1 fallback: the ASCII dependency lines survived, so analysis is
   complete but lossy for any non-ASCII content. A lockfile that declares a
@@ -79,6 +81,7 @@ __all__ = [
     "record_unfollowed_reference",
     "record_unlisted_dependencies",
     "record_unmapped_repositories",
+    "record_unread_dependencies",
     "record_unread_entries",
     "record_walk_error",
     "rejected_path_reference",
@@ -301,6 +304,24 @@ def record_missing_lockfile(manifest: Path) -> None:
         "transitive dependencies are estimated from the registry",
         is_gap=True,
         missing_lockfile=True,
+    )
+
+
+def record_unread_dependencies(manifest: Path, name: str, version: str) -> None:
+    """Record that the dependency list of a package could not be read (a gap).
+
+    ``name`` at ``version`` is a package a registry walk reached from a
+    direct dependency that ``manifest`` declares. The registry did not give
+    its dependencies (a failed request, a response of another shape, a
+    package with no version to ask about), so whatever it requires is
+    missing from the scan. ``version`` is empty for a package without one.
+    """
+    package = f"{name} {version}" if version else name
+    _record(
+        manifest,
+        f"the dependencies of {package} could not be read from the registry; "
+        "its transitive dependencies may be missing",
+        is_gap=True,
     )
 
 

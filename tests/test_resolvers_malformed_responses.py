@@ -161,7 +161,12 @@ class TestPyPIFieldOfTheWrongType:
         for result in (unpinned, pinned):
             assert (result.license_id, result.resolved_version) == ("UNKNOWN", "")
             assert result.from_registry is True
-        assert children == []
+        # No dependency list was read, with or without the cache in between.
+        assert children == ([], False)
+        cached = fetch_python_dependencies(
+            "pkg-a", "1.0.0", client, parent_depth=0, fetcher=RegistryCache().fetch
+        )
+        assert cached == ([], False)
 
     @respx.mock
     @pytest.mark.parametrize(
@@ -198,7 +203,9 @@ class TestPyPIRequirementsAndVersionsNoParserAccepts:
             pytest.param('os_name == "po\x00six"', id="embedded-nul"),
         ],
     )
-    def test_requirement_whose_marker_the_parser_cannot_read_is_skipped(self, client, marker):
+    def test_requirement_whose_marker_the_parser_cannot_read_is_an_unread_entry(
+        self, client, marker
+    ):
         _json(
             "https://pypi.org/pypi/pkg-a/1.0.0/json",
             {
@@ -208,9 +215,11 @@ class TestPyPIRequirementsAndVersionsNoParserAccepts:
                 }
             },
         )
-        children = fetch_python_dependencies(
+        children, complete = fetch_python_dependencies(
             "pkg-a", "1.0.0", client, parent_depth=0, fetcher=RegistryCache().fetch
         )
+        # The entries beside it are still read; the list is not complete.
+        assert complete is False
         assert [child.name for child in children] == ["first", "last"]
 
     def test_oversized_version_is_not_a_pin(self):
@@ -447,9 +456,12 @@ class TestCoordinateNoUrlCanCarry:
         self, client, fetch, name, version_is_in_the_url
     ):
         cache = RegistryCache()
-        assert fetch(name, "1.0.0", client, parent_depth=0, fetcher=cache.fetch) == []
+        assert fetch(name, "1.0.0", client, parent_depth=0, fetcher=cache.fetch) == ([], False)
         if version_is_in_the_url:
-            assert fetch("pkg-a", "1.0\x01", client, parent_depth=0, fetcher=cache.fetch) == []
+            assert fetch("pkg-a", "1.0\x01", client, parent_depth=0, fetcher=cache.fetch) == (
+                [],
+                False,
+            )
         assert respx.calls.call_count == 0
 
 
@@ -555,19 +567,26 @@ class TestCoordinateWithNoEncoding:
         self, client, fetch, name, version_is_in_the_url
     ):
         cache = RegistryCache()
-        assert fetch(name, "1.0.0", client, parent_depth=0, fetcher=cache.fetch) == []
+        assert fetch(name, "1.0.0", client, parent_depth=0, fetcher=cache.fetch) == ([], False)
         if version_is_in_the_url:
-            assert fetch("pkg-a", "1.0\ud800", client, parent_depth=0, fetcher=cache.fetch) == []
+            assert fetch("pkg-a", "1.0\ud800", client, parent_depth=0, fetcher=cache.fetch) == (
+                [],
+                False,
+            )
         assert respx.calls.call_count == 0
 
     @respx.mock
     def test_graph_walk_finds_nothing_without_a_request(self, client):
         cache = RegistryCache()
         for name, version in (("com.example:pkg\ud800a", "1.0.0"), ("com.example:a", "1\ud800")):
-            assert fetch_maven_dependencies(name, version, client, fetcher=cache.fetch) == ([], [])
+            assert fetch_maven_dependencies(name, version, client, fetcher=cache.fetch) == (
+                [],
+                [],
+                [(name, version)],
+            )
         for name, version in ((_NO_ENCODING, "1.0.0"), ("pkg-a", "1.0\ud800")):
             walked = fetch_nuget_dependencies(name, version, client, fetcher=cache.fetch_text)
-            assert walked == ([], [])
+            assert walked == ([], [], [(name, version)])
         assert respx.calls.call_count == 0
 
     @respx.mock

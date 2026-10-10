@@ -169,7 +169,7 @@ def _find_metadata(root: Element) -> Element | None:
     return None
 
 
-def _dependencies_from_nuspec(text: str) -> list[tuple[str, str]]:
+def _dependencies_from_nuspec(text: str) -> tuple[list[tuple[str, str]], bool]:
     """Parse the ``<dependencies>`` block of a ``.nuspec``.
 
     Modern nuspec wraps deps per target framework::
@@ -194,43 +194,44 @@ def _dependencies_from_nuspec(text: str) -> list[tuple[str, str]]:
     might be reachable in any build configuration.
 
     Bracket-range versions (``[1.0,)``, ``[1.0,2.0)``) are reduced to
-    their lower-bound pin via :func:`_extract_pinned_version_nuget`. Open
-    ranges, floating-version (``*``), and MSBuild-property versions are
-    dropped — they can't be safely resolved without re-running
-    ``dotnet restore``.
+    their lower-bound pin via :func:`_extract_pinned_version_nuget`. A
+    dependency with no version, or with one that cannot be pinned (an open
+    range, a floating ``*``, an MSBuild property), is emitted with an empty
+    version: the package is known, its version is not.
 
-    Returns ``[]`` for malformed XML / empty body / missing ``<dependencies>``.
+    Returns ``(dependencies, complete)``. ``complete`` is False when the
+    list could not be read in full: malformed XML, no ``<metadata>``, or a
+    ``<dependency>`` without an ``id``. A nuspec with no ``<dependencies>``
+    block declares none.
     """
     try:
         from defusedxml import ElementTree as DefusedET
 
         root = DefusedET.fromstring(text)
     except Exception:  # noqa: BLE001 - defusedxml raises many entity classes
-        return []
+        return [], False
     metadata = _find_metadata(root)
     if metadata is None:
-        return []
+        return [], False
 
+    complete = True
     seen: set[tuple[str, str]] = set()
     out: list[tuple[str, str]] = []
 
-    def _emit_dependency(elem: Element) -> None:
+    def _emit_dependency(elem: Element) -> bool:
         package_id = (elem.get("id") or "").strip()
-        version_raw = (elem.get("version") or "").strip()
-        if not package_id or not version_raw:
-            return
+        if not package_id:
+            return False
         # NuGet IDs are case-insensitive — normalize for dedup but keep
         # the publisher's casing in the emitted name (consistent with
         # the rest of the .NET path; the flatcontainer URL lowercases
         # at fetch time).
-        pinned = _extract_pinned_version_nuget(version_raw)
-        if pinned is None:
-            return
+        pinned = _extract_pinned_version_nuget(elem.get("version") or "") or ""
         key = (package_id.lower(), pinned)
-        if key in seen:
-            return
-        seen.add(key)
-        out.append((package_id, pinned))
+        if key not in seen:
+            seen.add(key)
+            out.append((package_id, pinned))
+        return True
 
     for child in metadata:
         if _local(child.tag) != "dependencies":
@@ -238,12 +239,12 @@ def _dependencies_from_nuspec(text: str) -> list[tuple[str, str]]:
         for entry in child:
             tag = _local(entry.tag)
             if tag == "dependency":
-                _emit_dependency(entry)
+                complete = _emit_dependency(entry) and complete
             elif tag == "group":
                 for inner in entry:
                     if _local(inner.tag) == "dependency":
-                        _emit_dependency(inner)
-    return out
+                        complete = _emit_dependency(inner) and complete
+    return out, complete
 
 
 def _license_from_nuspec(text: str) -> tuple[str, str]:
@@ -416,6 +417,7 @@ def resolve_nuget_license(
 # Cap on recursion depth for the nuspec walker. .NET dep graphs rarely
 # go this deep in practice; the cap is defensive against cycles that
 # slipped past the visited-set (shouldn't happen, but cheap to enforce).
+# A package at the cap is reported, and its own dependencies as unread.
 _NUSPEC_WALK_MAX_DEPTH = 32
 
 
@@ -425,7 +427,7 @@ def fetch_nuget_dependencies(
     client: httpx.Client,
     *,
     fetcher: Fetcher = fetch_registry_text,
-) -> tuple[list[tuple[str, str]], list[tuple[str, str, str, str]]]:
+) -> tuple[list[tuple[str, str]], list[tuple[str, str, str, str]], list[tuple[str, str]]]:
     """Walk a NuGet dep subgraph by recursively reading ``.nuspec`` files.
 
     Replaces the previous deps.dev ``GetDependencies`` call: deps.dev's
@@ -435,33 +437,39 @@ def fetch_nuget_dependencies(
     across TFM ``<group>``s (same conservative posture as the .NET
     lockfile parsers).
 
-    Returns the same ``(nodes, edges)`` shape as the Maven walker, where
-    each node is ``(package_id, pinned_version)`` and each edge is
+    Returns the same ``(nodes, edges, unread)`` shape as the Maven walker,
+    where each node is ``(package_id, pinned_version)`` and each edge is
     ``(from_id, from_version, to_id, to_version)``. The SELF root is NOT
     emitted as a node (the caller already has the direct dep object) but
-    is implicit as the source of the first-level edges.
+    is implicit as the source of the first-level edges. A dependency whose
+    version cannot be pinned is a node with an empty version.
+
+    ``unread`` lists the packages of the subgraph, the root included, whose
+    own dependencies could not be read: the ``.nuspec`` could not be
+    fetched or parsed in full, the package has no version to fetch one for,
+    or it sits at :data:`_NUSPEC_WALK_MAX_DEPTH`. The rest of the subgraph
+    is still returned: an unread package trims its own branch only.
 
     No conflict resolution: when a transitive appears under multiple
     requested versions through different paths, ALL are emitted. The
     Mode-C license pipeline runs per ``(name, version)`` so this matches
     the licenseal posture (lockfile-equivalent enumeration, not
     runtime resolution).
-
-    Returns ``([], [])`` for any unparseable / network-failing root.
-    Partial subgraphs are surfaced: a child fetch failure trims that
-    branch but doesn't blank the whole result.
     """
     visited: set[tuple[str, str]] = set()
     nodes: list[tuple[str, str]] = []
     edges: list[tuple[str, str, str, str]] = []
+    unread: list[tuple[str, str]] = []
 
     def _walk(parent_name: str, parent_version: str, depth: int) -> None:
-        if depth >= _NUSPEC_WALK_MAX_DEPTH:
+        if not parent_version or depth >= _NUSPEC_WALK_MAX_DEPTH:
+            unread.append((parent_name, parent_version))
             return
         text = _fetch_nuspec(parent_name, parent_version, client, fetcher)
-        if not text:
-            return
-        for child_name, child_version in _dependencies_from_nuspec(text):
+        children, complete = _dependencies_from_nuspec(text) if text else ([], False)
+        if not complete:
+            unread.append((parent_name, parent_version))
+        for child_name, child_version in children:
             edges.append((parent_name, parent_version, child_name, child_version))
             key = (child_name.lower(), child_version)
             if key in visited:
@@ -475,4 +483,4 @@ def fetch_nuget_dependencies(
     # (rare but legal) doesn't recurse forever.
     visited.add((name.lower(), version))
     _walk(name, version, 0)
-    return (nodes, edges)
+    return (nodes, edges, unread)

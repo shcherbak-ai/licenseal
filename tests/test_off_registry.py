@@ -4232,6 +4232,28 @@ class TestMavenSystemScope:
                 ),
             )
         )
+        # The registry dependency's own graph is served, so nothing under it
+        # is recorded as unread.
+        respx.get(
+            "https://api.deps.dev/v3/systems/MAVEN/packages/org.example%3Aregular/versions/1.0"
+            ":dependencies"
+        ).mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "nodes": [
+                        {
+                            "versionKey": {
+                                "system": "MAVEN",
+                                "name": "org.example:regular",
+                                "version": "1.0",
+                            },
+                            "relation": "SELF",
+                        }
+                    ]
+                },
+            )
+        )
         _refuse_everything_else()
         return project
 

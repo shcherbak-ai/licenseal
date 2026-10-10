@@ -24,6 +24,7 @@ from licenseal.resolvers.http import (
     _trim_for_cache,
     _trim_rubygems_gem,
     _trim_rubygems_version,
+    fetch_registry_json,
 )
 from licenseal.resolvers.rubygems import (
     _extract_homepage_url,
@@ -380,7 +381,10 @@ class TestFetchRubygemsDependencies:
             )
         )
         with httpx.Client() as client:
-            children = fetch_rubygems_dependencies("rails", "7.1.3", client, parent_depth=0)
+            children, complete = fetch_rubygems_dependencies(
+                "rails", "7.1.3", client, parent_depth=0
+            )
+            assert complete is True
         names = {c.name for c in children}
         assert names == {"actionpack", "activesupport"}
         for c in children:
@@ -389,10 +393,13 @@ class TestFetchRubygemsDependencies:
             assert c.group == DependencyGroup.PROD
 
     @respx.mock
-    def test_404_returns_empty(self):
+    def test_404_is_an_unread_list(self):
         respx.get(_rubygems_version_url("missing", "1.0")).mock(return_value=httpx.Response(404))
         with httpx.Client() as client:
-            children = fetch_rubygems_dependencies("missing", "1.0", client, parent_depth=0)
+            children, complete = fetch_rubygems_dependencies(
+                "missing", "1.0", client, parent_depth=0
+            )
+            assert complete is False
         assert children == []
 
     @respx.mock
@@ -401,8 +408,22 @@ class TestFetchRubygemsDependencies:
             return_value=httpx.Response(200, json={"name": "x", "number": "1.0"})
         )
         with httpx.Client() as client:
-            children = fetch_rubygems_dependencies("x", "1.0", client, parent_depth=0)
+            children, complete = fetch_rubygems_dependencies("x", "1.0", client, parent_depth=0)
+            assert complete is True
         assert children == []
+
+    @respx.mock
+    @pytest.mark.parametrize("dependencies", [{}, {"runtime": None}, {"development": []}])
+    def test_no_runtime_list_declares_nothing(self, dependencies):
+        # With and without the cache: the trim keeps the same shape.
+        respx.get(_rubygems_version_url("x", "1.0")).mock(
+            return_value=httpx.Response(200, json={"number": "1.0", "dependencies": dependencies})
+        )
+        with httpx.Client() as client:
+            for fetcher in (fetch_registry_json, RegistryCache().fetch):
+                assert fetch_rubygems_dependencies(
+                    "x", "1.0", client, parent_depth=0, fetcher=fetcher
+                ) == ([], True)
 
     @respx.mock
     def test_non_dict_dependencies(self):
@@ -413,7 +434,8 @@ class TestFetchRubygemsDependencies:
             )
         )
         with httpx.Client() as client:
-            children = fetch_rubygems_dependencies("x", "1.0", client, parent_depth=0)
+            children, complete = fetch_rubygems_dependencies("x", "1.0", client, parent_depth=0)
+            assert complete is False
         assert children == []
 
     @respx.mock
@@ -429,7 +451,8 @@ class TestFetchRubygemsDependencies:
             )
         )
         with httpx.Client() as client:
-            children = fetch_rubygems_dependencies("x", "1.0", client, parent_depth=0)
+            children, complete = fetch_rubygems_dependencies("x", "1.0", client, parent_depth=0)
+            assert complete is False
         assert children == []
 
     @respx.mock
@@ -454,12 +477,13 @@ class TestFetchRubygemsDependencies:
             )
         )
         with httpx.Client() as client:
-            children = fetch_rubygems_dependencies(
+            children, complete = fetch_rubygems_dependencies(
                 "x",
                 "1.0",
                 client,
                 parent_depth=0,
             )
+            assert complete is False
         names = sorted(c.name for c in children)
         assert names == ["no-req", "rack"]
         rack = next(c for c in children if c.name == "rack")
@@ -508,24 +532,30 @@ class TestRegistryCacheTrim:
         # Only runtime is read transitively; development is dropped at trim time.
         assert "development" not in trimmed["dependencies"]
 
-    def test_trim_version_non_list_runtime_dropped(self):
-        raw = {"licenses": ["MIT"], "dependencies": {"runtime": "wrong"}}
+    # A value of the wrong type is cached as it is. Reduced to "no
+    # dependencies", it would read as a gem that declares none, and the
+    # walker could not tell that its list was never read.
+
+    def test_trim_version_non_list_runtime_kept(self):
+        raw = {"licenses": ["MIT"], "dependencies": {"runtime": "wrong", "development": []}}
         trimmed = _trim_rubygems_version(raw)
-        assert trimmed["dependencies"] == {}
+        assert trimmed["dependencies"] == {"runtime": "wrong"}
 
-    def test_trim_non_dict_dependencies_dropped(self):
-        # A non-dict ``dependencies`` value is reduced to an empty map rather
-        # than cached as-is.
+    def test_trim_non_dict_dependencies_kept(self):
         trimmed = _trim_rubygems_version({"licenses": ["MIT"], "dependencies": "wrong-shape"})
+        assert trimmed["dependencies"] == "wrong-shape"
+
+    def test_trim_version_without_runtime_declares_nothing(self):
+        trimmed = _trim_rubygems_version({"dependencies": {"development": [{"name": "rspec"}]}})
         assert trimmed["dependencies"] == {}
 
-    def test_trim_version_non_dict_entry_skipped(self):
+    def test_trim_version_non_dict_entry_kept(self):
         raw = {
             "licenses": ["MIT"],
-            "dependencies": {"runtime": ["wrong", {"name": "rack"}]},
+            "dependencies": {"runtime": ["wrong", {"name": "rack", "extra": 1}]},
         }
         trimmed = _trim_rubygems_version(raw)
-        assert trimmed["dependencies"]["runtime"] == [{"name": "rack"}]
+        assert trimmed["dependencies"]["runtime"] == ["wrong", {"name": "rack"}]
 
     def test_trim_gem_drops_extra_fields(self):
         raw = {
@@ -543,18 +573,22 @@ class TestRegistryCacheTrim:
         assert "info" not in trimmed
         assert "extra" not in trimmed["dependencies"]["runtime"][0]
 
-    def test_trim_gem_non_list_dropped(self):
+    def test_trim_gem_non_list_runtime_kept(self):
         raw = {"licenses": ["MIT"], "dependencies": {"runtime": "wrong"}}
         trimmed = _trim_rubygems_gem(raw)
-        assert trimmed["dependencies"] == {}
+        assert trimmed["dependencies"] == {"runtime": "wrong"}
 
-    def test_trim_gem_non_dict_entry_skipped(self):
+    def test_trim_gem_non_dict_dependencies_kept(self):
+        trimmed = _trim_rubygems_gem({"licenses": ["MIT"], "dependencies": ["wrong"]})
+        assert trimmed["dependencies"] == ["wrong"]
+
+    def test_trim_gem_non_dict_entry_kept(self):
         raw = {
             "licenses": ["MIT"],
             "dependencies": {"runtime": ["wrong", {"name": "rack"}], "development": []},
         }
         trimmed = _trim_rubygems_gem(raw)
-        assert trimmed["dependencies"]["runtime"] == [{"name": "rack"}]
+        assert trimmed["dependencies"]["runtime"] == ["wrong", {"name": "rack"}]
 
     def test_dispatch_routes_v2(self):
         url = _rubygems_version_url("rails", "7.1.3")

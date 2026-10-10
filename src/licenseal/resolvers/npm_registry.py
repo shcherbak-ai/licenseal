@@ -245,13 +245,18 @@ def fetch_npm_dependencies(
     include_optional: bool = True,
     include_peer: bool = True,
     fetcher: Fetcher = fetch_registry_json,
-) -> list[Dependency]:
+) -> tuple[list[Dependency], bool]:
     """Fetch the package's declared dependencies from the npm registry.
 
-    Reads ``dependencies``, ``peerDependencies``, and
-    ``optionalDependencies`` from the version-specific metadata.
-    ``devDependencies`` are skipped (callers handle dev filtering at the
-    orchestrator level via ``--dev``).
+    Returns ``(children, complete)``. Reads ``dependencies``,
+    ``peerDependencies``, and ``optionalDependencies`` from the
+    version-specific metadata. ``devDependencies`` are skipped (callers
+    handle dev filtering at the orchestrator level via ``--dev``).
+
+    ``complete`` is False when the dependency list could not be determined:
+    the fetch failed, or one of those fields is present and is not an
+    object. The fields that could be read are returned all the same. A field
+    that is absent or ``null`` declares nothing.
 
     Children inherit ``parent_group``: a transitive only reachable through
     a devDep stays in the dev group so the dev → warning downgrade applies
@@ -264,7 +269,8 @@ def fetch_npm_dependencies(
     url = f"{_NPM_REGISTRY_URL}/{name}/{version}"
     data = fetcher(url, client)
     if data is None:
-        return []
+        return [], False
+    complete = True
     out: list[Dependency] = []
     seen: set[str] = set()
     fields: list[str] = ["dependencies"]
@@ -273,8 +279,11 @@ def fetch_npm_dependencies(
     if include_optional:
         fields.append("optionalDependencies")
     for field_name in fields:
-        deps_dict = data.get(field_name, {})
+        deps_dict = data.get(field_name)
+        if deps_dict is None:
+            continue
         if not isinstance(deps_dict, dict):
+            complete = False
             continue
         for dep_name, raw_spec in deps_dict.items():
             if not isinstance(dep_name, str) or dep_name in seen:
@@ -291,4 +300,4 @@ def fetch_npm_dependencies(
                     depth=parent_depth + 1,
                 )
             )
-    return out
+    return out, complete

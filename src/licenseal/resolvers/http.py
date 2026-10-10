@@ -716,9 +716,12 @@ _NPM_VERSION_KEEP = frozenset(
 
 
 def _trim_pypi(data: dict) -> dict:
-    info = data.get("info", {})
+    # An ``info`` that is not an object is cached as ``None``, not as an empty
+    # object: the dependency fetcher tells "declares nothing" from "not the
+    # documented shape" by it.
+    info = data.get("info")
     trimmed_info = (
-        {k: v for k, v in info.items() if k in _PYPI_INFO_KEEP} if isinstance(info, dict) else {}
+        {k: v for k, v in info.items() if k in _PYPI_INFO_KEEP} if isinstance(info, dict) else None
     )
     # `_resolve_version` and `resolve_python_license` only read the release
     # *version strings* to pick a matching version. Store them as a list,
@@ -798,27 +801,36 @@ _DEPS_DEV_LINK_KEEP = frozenset({"label", "url"})
 # * ``nodes[i].versionKey`` — (system, name, version) for each node
 # * ``nodes[i].relation`` — SELF / DIRECT / INDIRECT
 # * ``edges[i].fromNode`` / ``toNode`` — node indices for the parent/child link
+# * ``error`` — set when deps.dev could not resolve the whole graph; the
+#   walker records the graph as incomplete
 #
 # Everything else (``requirement`` strings, ``bundled``, optional flag
-# metadata that some node entries carry, the ``error`` envelope) is
-# dropped. Maven dependency graphs can be large — popular framework
-# starters' transitive closures run into hundreds of nodes per direct
-# dep — so the trim materially shrinks the per-scan cache footprint
-# when many direct deps share popular transitives.
+# metadata that some node entries carry) is dropped. Maven dependency
+# graphs can be large — popular framework starters' transitive closures
+# run into hundreds of nodes per direct dep — so the trim materially
+# shrinks the per-scan cache footprint when many direct deps share
+# popular transitives.
 _DEPS_DEV_DEPS_NODE_KEEP = frozenset({"versionKey", "relation"})
 _DEPS_DEV_DEPS_EDGE_KEEP = frozenset({"fromNode", "toNode"})
 
 
 def _trim_deps_dev_dependencies(data: dict) -> dict:
-    """Strip a deps.dev ``:dependencies`` response to walker-read fields."""
-    raw_nodes = data.get("nodes", [])
-    trimmed_nodes: list[dict] = []
+    """Strip a deps.dev ``:dependencies`` response to walker-read fields.
+
+    A node that is not an object is kept as an empty one: the edges refer to
+    nodes by position, and the walker reads an empty node as a graph it could
+    not read in full. A ``nodes`` that is not a list is cached as it is, for
+    the same reason.
+    """
+    raw_nodes = data.get("nodes")
+    trimmed_nodes = raw_nodes
     if isinstance(raw_nodes, list):
-        for entry in raw_nodes:
-            if isinstance(entry, dict):
-                trimmed_nodes.append(
-                    {k: v for k, v in entry.items() if k in _DEPS_DEV_DEPS_NODE_KEEP}
-                )
+        trimmed_nodes = [
+            {k: v for k, v in entry.items() if k in _DEPS_DEV_DEPS_NODE_KEEP}
+            if isinstance(entry, dict)
+            else {}
+            for entry in raw_nodes
+        ]
     raw_edges = data.get("edges", [])
     trimmed_edges: list[dict] = []
     if isinstance(raw_edges, list):
@@ -827,7 +839,7 @@ def _trim_deps_dev_dependencies(data: dict) -> dict:
                 trimmed_edges.append(
                     {k: v for k, v in entry.items() if k in _DEPS_DEV_DEPS_EDGE_KEEP}
                 )
-    return {"nodes": trimmed_nodes, "edges": trimmed_edges}
+    return {"nodes": trimmed_nodes, "edges": trimmed_edges, "error": data.get("error")}
 
 
 # Maven Central serves raw POM XML at ``repo.maven.apache.org/maven2/...``
@@ -1041,20 +1053,24 @@ def _trim_rubygems_deps(data: dict) -> dict[str, list[dict]]:
     ``name`` / ``requirements`` fields the registry-walk transitive fetcher
     reads. Development dependencies aren't followed transitively (same posture
     as the other ecosystems), so that sub-array is dropped rather than cached.
-    Returns an empty map when ``dependencies`` or its ``runtime`` value is
-    missing / malformed.
+
+    Only well-formed values are reduced. A ``runtime`` that is not a list, and
+    an entry of it that is not an object, are cached as they are: the fetcher
+    tells a gem that declares nothing from a response it could not read by
+    them. ``data['dependencies']`` is an object here; the callers check.
     """
-    deps = data.get("dependencies")
-    if not isinstance(deps, dict):
+    deps = data["dependencies"]
+    if "runtime" not in deps:
         return {}
-    runtime = deps.get("runtime")
+    runtime = deps["runtime"]
     if not isinstance(runtime, list):
-        return {}
+        return {"runtime": runtime}
     return {
         "runtime": [
             {k: v for k, v in entry.items() if k in {"name", "requirements"}}
-            for entry in runtime
             if isinstance(entry, dict)
+            else entry
+            for entry in runtime
         ]
     }
 
@@ -1067,7 +1083,7 @@ def _trim_rubygems_version(data: dict) -> dict:
     trimmed ``runtime`` array via :func:`_trim_rubygems_deps`.
     """
     out = {k: v for k, v in data.items() if k in _RUBYGEMS_VERSION_KEEP}
-    if "dependencies" in out:
+    if isinstance(out.get("dependencies"), dict):
         out["dependencies"] = _trim_rubygems_deps(data)
     return out
 
@@ -1075,7 +1091,7 @@ def _trim_rubygems_version(data: dict) -> dict:
 def _trim_rubygems_gem(data: dict) -> dict:
     """Strip a RubyGems v1 ``/gems/{name}.json`` response to the kept fields."""
     out = {k: v for k, v in data.items() if k in _RUBYGEMS_GEM_KEEP}
-    if "dependencies" in out:
+    if isinstance(out.get("dependencies"), dict):
         out["dependencies"] = _trim_rubygems_deps(data)
     return out
 
@@ -1097,15 +1113,20 @@ def _trim_hex_release(data: dict) -> dict:
     """Strip a hex.pm release response to the ``requirements`` edge map.
 
     Each requirement entry is reduced to the ``requirement`` / ``optional`` /
-    ``app`` fields the transitive walker reads.
+    ``app`` fields the transitive walker reads. An entry that is not an
+    object is cached as it is, so the walker sees the same requirement names
+    with and without the cache.
     """
     out = {k: v for k, v in data.items() if k in _HEX_RELEASE_KEEP}
     requirements = out.get("requirements")
     if isinstance(requirements, dict):
         out["requirements"] = {
-            name: {k: v for k, v in entry.items() if k in _HEX_REQUIREMENT_KEEP}
+            name: (
+                {k: v for k, v in entry.items() if k in _HEX_REQUIREMENT_KEEP}
+                if isinstance(entry, dict)
+                else entry
+            )
             for name, entry in requirements.items()
-            if isinstance(entry, dict)
         }
     return out
 

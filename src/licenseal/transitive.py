@@ -30,7 +30,7 @@ from __future__ import annotations
 
 import contextvars
 import re
-from collections.abc import Callable, Container, Iterator, Mapping
+from collections.abc import Callable, Container, Iterable, Iterator, Mapping
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from pathlib import Path
@@ -46,6 +46,7 @@ from licenseal.discovery._read import (
     record_missing_lockfile,
     record_parse_failure,
     record_unlisted_dependencies,
+    record_unread_dependencies,
 )
 from licenseal.discovery._walk import walk_project_files, with_scan_exclusions
 from licenseal.discovery.dotnet import (
@@ -246,11 +247,30 @@ def _record_missing_lockfiles(project_path: Path, deps: list[Dependency]) -> Non
     erlang.mk ``Makefile``.
     """
     for source in sorted({d.source for d in deps if not d.origin}):
-        if not source:
-            continue
-        if source.rsplit("/", 1)[-1] in _MANIFESTS_WITHOUT_LOCKFILE_FORMAT:
-            continue
-        record_missing_lockfile(project_path / source)
+        manifest = _manifest_path(project_path, source)
+        if manifest is not None and manifest.name not in _MANIFESTS_WITHOUT_LOCKFILE_FORMAT:
+            record_missing_lockfile(manifest)
+
+
+def _manifest_path(project_path: Path, source: str) -> Path | None:
+    """The manifest a direct dep's ``source`` names, or None for a dep built without one."""
+    return project_path / source if source else None
+
+
+def _record_unread_dependencies(
+    project_path: Path, source: str, packages: Iterable[tuple[str, str]]
+) -> None:
+    """Record, on the manifest at ``source``, each package whose dependencies were not read.
+
+    ``packages`` are the ``(name, version)`` pairs a registry walk reached
+    from a direct dep that manifest declares and could not expand. Each is a
+    gap on the manifest, once however many of its direct deps reach it.
+    """
+    manifest = _manifest_path(project_path, source)
+    if manifest is None:
+        return
+    for name, version in sorted(set(packages)):
+        record_unread_dependencies(manifest, name, version)
 
 
 @with_scan_exclusions
@@ -347,6 +367,7 @@ def resolve_transitive(
         return _walk_registry(
             uncovered,
             ecosystem,
+            project_path=project_path,
             max_depth=max_depth,
             client=client,
             max_workers=max_workers,
@@ -672,6 +693,7 @@ def resolve_transitive(
         walked = _walk_registry(
             seeds,
             ecosystem,
+            project_path=project_path,
             max_depth=max_depth,
             client=client,
             max_workers=max_workers,
@@ -1058,13 +1080,15 @@ def _r_index_closure(
     return [dep if dep.origin else replace(dep, version_estimated=True) for dep in closure]
 
 
-# A transitive deps fetcher returns ``(nodes, edges)``: ``nodes`` is a list of
-# ``(name, version)`` and ``edges`` is a list of ``(parent_name, parent_version,
-# child_name, child_version)``. Maven and NuGet fetchers share this shape, so
-# they share this ecosystem-neutral alias rather than borrowing each other's name.
+# A transitive deps fetcher returns ``(nodes, edges, unread)``: ``nodes`` is a
+# list of ``(name, version)``, ``edges`` a list of ``(parent_name,
+# parent_version, child_name, child_version)``, and ``unread`` the ``(name,
+# version)`` of each package whose own dependencies could not be read. Maven
+# and NuGet fetchers share this shape, so they share this ecosystem-neutral
+# alias rather than borrowing each other's name.
 _TransitiveDepsFetcher = Callable[
     ...,
-    tuple[list[tuple[str, str]], list[tuple[str, str, str, str]]],
+    tuple[list[tuple[str, str]], list[tuple[str, str, str, str]], list[tuple[str, str]]],
 ]
 
 
@@ -1235,13 +1259,21 @@ def _resolve_dotnet_transitive(
 
     def _one(
         entry: tuple[Dependency, str],
-    ) -> tuple[list[tuple[str, str]], list[tuple[str, str, str, str]]]:
+    ) -> tuple[list[tuple[str, str]], list[tuple[str, str, str, str]], list[tuple[str, str]]]:
         direct, pinned = entry
         return deps_fetcher(direct.name, pinned, client, fetcher=fetcher)
 
     # Propagate the active tethered scope into the edge-fetch workers — a bare
     # pool fetches in an empty context and bypasses the egress policy.
-    for nodes, edge_tuples in map_with_context(_one, walkable, max_workers):
+    subgraphs = map_with_context(_one, walkable, max_workers)
+    for (direct, _pinned), (nodes, edge_tuples, unread) in zip(walkable, subgraphs, strict=True):
+        # A package whose nuspec could not be read leaves a hole under the
+        # direct dep it was reached from: a gap on that dep's manifest.
+        _record_unread_dependencies(
+            project_path,
+            direct.source,
+            (pkg for pkg in unread if pkg[0].lower() not in workspace_local_lower),
+        )
         for node_name, node_version in nodes:
             if node_name.lower() in workspace_local_lower:
                 continue
@@ -1285,7 +1317,9 @@ def _resolve_dotnet_transitive(
         out.append(
             Dependency(
                 name=node_name,
-                version_constraint=f"=={node_version}",
+                # A node without a version is a package the nuspec names with
+                # no version that can be pinned: reported, resolved UNKNOWN.
+                version_constraint=f"=={node_version}" if node_version else "",
                 ecosystem=Ecosystem.DOTNET,
                 group=group,
                 depth=1,
@@ -1705,12 +1739,14 @@ def _resolve_java_transitive(
     declared version for a DEV direct. Another version of a DEV direct's
     artifact that a PROD direct pulls in is a PROD transitive.
 
-    ``deps_fetcher`` returns a structured ``(nodes, edges)`` tuple rather
-    than a raw response dict, so the ``fetcher`` JSON-fetcher is passed
+    ``deps_fetcher`` returns a structured ``(nodes, edges, unread)`` tuple
+    rather than a raw response dict, so the ``fetcher`` JSON-fetcher is passed
     *into* it as a keyword arg — the cache trim ``_trim_deps_dev_dependencies``
-    runs against the URL-keyed cache that wraps it. Only the nodes are used
-    here. Tests inject a custom ``deps_fetcher`` to drive the merge and
-    attribution paths without going through respx.
+    runs against the URL-keyed cache that wraps it. The edges are not used
+    here. A direct whose graph deps.dev did not return in full is in
+    ``unread`` and is recorded as a gap on its manifest. Tests inject a
+    custom ``deps_fetcher`` to drive the merge and attribution paths without
+    going through respx.
     """
     workspace_local_poms = _discover_workspace_local_pom_paths(
         project_path, exclude_paths=exclude_paths
@@ -1823,10 +1859,10 @@ def _resolve_java_transitive(
     if not walkable:
         return out
 
-    def _one(entry: tuple[Dependency, str]) -> list[tuple[str, str]]:
+    def _one(entry: tuple[Dependency, str]) -> tuple[list[tuple[str, str]], list[tuple[str, str]]]:
         direct, pinned = entry
-        nodes, _edges = deps_fetcher(direct.name, pinned, client, fetcher=fetcher)
-        return nodes
+        nodes, _edges, unread = deps_fetcher(direct.name, pinned, client, fetcher=fetcher)
+        return nodes, unread
 
     # ---- Attribution by subgraph ----
     # deps.dev resolves each direct's subgraph on its own, so a node belongs
@@ -1842,7 +1878,10 @@ def _resolve_java_transitive(
     # Propagate the active tethered scope into the fetch workers — a bare
     # pool fetches in an empty context and bypasses the egress policy.
     subgraphs = map_with_context(_one, walkable, max_workers)
-    for (direct, _pinned), nodes in zip(walkable, subgraphs, strict=True):
+    for (direct, _pinned), (nodes, unread) in zip(walkable, subgraphs, strict=True):
+        # deps.dev did not return this direct's whole graph: a gap on the
+        # manifest that declares it, Maven ``pom.xml`` included.
+        _record_unread_dependencies(project_path, direct.source, unread)
         owners = prod_owners if direct.group == DependencyGroup.PROD else dev_owners
         for node_name, node_version in nodes:
             if node_name in workspace_local:
@@ -1942,6 +1981,7 @@ def _walk_registry(
     seeds: list[Dependency],
     ecosystem: Ecosystem,
     *,
+    project_path: Path,
     max_depth: int,
     client: httpx.Client,
     max_workers: int = 16,
@@ -1983,6 +2023,11 @@ def _walk_registry(
     Every row is marked ``version_estimated``, except a seed whose manifest
     pins it exactly: the walk picks the versions, no lockfile does.
 
+    A node whose dependency list the registry did not give is a hole in the
+    graph under every seed that reaches it. It is recorded as a gap on the
+    manifests of those seeds (under ``project_path``), the node itself
+    included when it is a seed.
+
     Records the graph it follows so that, after BFS terminates, every row can
     be stamped with its group and with the seeds that reach it. A node of
     that graph is a package at one resolved version (with its extras), not a
@@ -2018,6 +2063,9 @@ def _walk_registry(
     # each expanded node to the specs it requires.
     node_of_spec: dict[DedupKey, DedupKey] = {}
     child_specs: dict[DedupKey, list[DedupKey]] = {}
+    # Nodes whose dependency list could not be read, with the name and
+    # version to report them under.
+    unread: dict[DedupKey, tuple[str, str]] = {}
     depth_capped = False
     progress_total = 0
 
@@ -2025,8 +2073,8 @@ def _walk_registry(
         result = snapshot.run(_walk_one_inner, dep, ecosystem, max_depth, client, fetcher)
         if not origins:
             return result
-        walked, resolved_version, children = result
-        return (walked, resolved_version, _redirect_children(children, origins))
+        walked, resolved_version, children, complete = result
+        return (walked, resolved_version, _redirect_children(children, origins), complete)
 
     current_level: list[Dependency] = list(seeds)
     while current_level:
@@ -2045,7 +2093,7 @@ def _walk_registry(
         with ThreadPoolExecutor(max_workers=worker_count) as pool:
             results = list(pool.map(_walk_one, snapshots, wave))
         next_level: list[Dependency] = []
-        for dep, resolved_version, children in results:
+        for dep, resolved_version, children, complete in results:
             # Decided on the declared constraint, before it is rewritten to
             # the version picked for it. A transitive is always the walk's
             # pick; a seed is unless its manifest pins it exactly. A dep with
@@ -2067,6 +2115,8 @@ def _walk_registry(
             if dep.depth >= max_depth:
                 depth_capped = True
                 continue
+            if not complete:
+                unread[node] = (dep.name, resolved_version)
             child_specs[node] = [_key(child) for child in children]
             next_level.extend(children)
         if on_wave is not None:
@@ -2089,6 +2139,16 @@ def _walk_registry(
     }
     ancestors = compute_direct_ancestors(edges, seed_roots)
     prod_reached = compute_direct_ancestors(edges, prod_roots)
+
+    # Each unread node is a gap on every manifest one of whose seeds reaches
+    # it. A manifest's reach is its seeds' own nodes plus what they lead to.
+    if unread:
+        for source in sorted({seed.source for seed in seeds}):
+            roots = {node_of_spec[_key(seed)]: seed.name for seed in seeds if seed.source == source}
+            reached = roots.keys() | compute_direct_ancestors(edges, roots).keys()
+            _record_unread_dependencies(
+                project_path, source, (unread[node] for node in unread.keys() & reached)
+            )
 
     def _attributed_group(dep: Dependency) -> DependencyGroup:
         """A dep is PROD iff it is a prod seed or one reaches it; else a transitive is DEV.
@@ -2121,8 +2181,8 @@ def _walk_registry(
     ]
 
 
-# (dep, resolved_version_or_empty, children)
-_WalkResult = tuple[Dependency, str, list[Dependency]]
+# (dep, resolved_version_or_empty, children, whether the children are the whole list)
+_WalkResult = tuple[Dependency, str, list[Dependency], bool]
 
 
 def _redirect_children(
@@ -2152,17 +2212,22 @@ def _walk_one_inner(
 
     A dependency with an origin is not a registry package: nothing is fetched
     for it, and it is a row as it stands.
+
+    The last element of the result is False when the registry did not give
+    the node's whole dependency list. A node that is not expanded (it has an
+    origin, no version resolved for it, or it is at the depth cap) has
+    nothing to be incomplete.
     """
     if dep.origin:
-        return (dep, "", [])
+        return (dep, "", [], True)
     resolved_version = _resolve_version(dep, ecosystem, client, fetcher)
     if not resolved_version or dep.depth >= max_depth:
-        return (dep, resolved_version, [])
+        return (dep, resolved_version, [], True)
     if ecosystem == Ecosystem.PYTHON:
         # Pass the dep's own extras so its requires_dist's `extra ==`
         # markers evaluate against the correct context: e.g. when this dep
         # was reached as `pkg[extra]`, we want the extra-gated deps to come out.
-        children = fetch_python_dependencies(
+        children, complete = fetch_python_dependencies(
             dep.name,
             resolved_version,
             client,
@@ -2172,7 +2237,7 @@ def _walk_one_inner(
             requested_extras=dep.extras,
         )
     elif ecosystem == Ecosystem.RUST:
-        children = fetch_rust_dependencies(
+        children, complete = fetch_rust_dependencies(
             dep.name,
             resolved_version,
             client,
@@ -2181,7 +2246,7 @@ def _walk_one_inner(
             fetcher=fetcher,
         )
     elif ecosystem == Ecosystem.PHP:
-        children = fetch_packagist_dependencies(
+        children, complete = fetch_packagist_dependencies(
             dep.name,
             resolved_version,
             client,
@@ -2190,7 +2255,7 @@ def _walk_one_inner(
             fetcher=fetcher,
         )
     elif ecosystem == Ecosystem.RUBY:
-        children = fetch_rubygems_dependencies(
+        children, complete = fetch_rubygems_dependencies(
             dep.name,
             resolved_version,
             client,
@@ -2201,7 +2266,7 @@ def _walk_one_inner(
     elif ecosystem == Ecosystem.HEX:
         # `effective_registry_name` is the real hex.pm package for a `hex:`-
         # renamed dep, else just the name.
-        children = fetch_hex_dependencies(
+        children, complete = fetch_hex_dependencies(
             dep.effective_registry_name,
             resolved_version,
             client,
@@ -2210,7 +2275,7 @@ def _walk_one_inner(
             fetcher=fetcher,
         )
     else:
-        children = fetch_npm_dependencies(
+        children, complete = fetch_npm_dependencies(
             dep.name,
             resolved_version,
             client,
@@ -2218,7 +2283,7 @@ def _walk_one_inner(
             parent_group=dep.group,
             fetcher=fetcher,
         )
-    return (dep, resolved_version, children)
+    return (dep, resolved_version, children, complete)
 
 
 def _resolve_version(

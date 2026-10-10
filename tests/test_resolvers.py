@@ -1220,7 +1220,10 @@ class TestFetchPythonDependencies:
 
         respx.get("https://pypi.org/pypi/missing/1.0.0/json").mock(return_value=httpx.Response(404))
         with httpx.Client() as client:
-            assert fetch_python_dependencies("missing", "1.0.0", client, parent_depth=0) == []
+            assert fetch_python_dependencies("missing", "1.0.0", client, parent_depth=0) == (
+                [],
+                False,
+            )
 
     @respx.mock
     def test_returns_empty_when_no_requires_dist(self):
@@ -1229,7 +1232,7 @@ class TestFetchPythonDependencies:
             return_value=httpx.Response(200, json={"info": {}})
         )
         with httpx.Client() as client:
-            assert fetch_python_dependencies("foo", "1.0.0", client, parent_depth=0) == []
+            assert fetch_python_dependencies("foo", "1.0.0", client, parent_depth=0) == ([], True)
 
     @respx.mock
     def test_returns_empty_when_requires_dist_not_list(self):
@@ -1238,7 +1241,7 @@ class TestFetchPythonDependencies:
             return_value=httpx.Response(200, json={"info": {"requires_dist": "oops, not a list"}})
         )
         with httpx.Client() as client:
-            assert fetch_python_dependencies("foo", "1.0.0", client, parent_depth=0) == []
+            assert fetch_python_dependencies("foo", "1.0.0", client, parent_depth=0) == ([], False)
 
     @respx.mock
     def test_skips_invalid_requirement_strings(self):
@@ -1258,7 +1261,8 @@ class TestFetchPythonDependencies:
             )
         )
         with httpx.Client() as client:
-            deps = fetch_python_dependencies("foo", "1.0.0", client, parent_depth=2)
+            deps, complete = fetch_python_dependencies("foo", "1.0.0", client, parent_depth=2)
+            assert complete is False
         assert [d.name for d in deps] == ["valid-pkg"]
         assert deps[0].depth == 3
         assert deps[0].direct_ancestors == ()
@@ -1272,13 +1276,14 @@ class TestFetchPythonDependencies:
             )
         )
         with httpx.Client() as client:
-            deps = fetch_python_dependencies(
+            deps, complete = fetch_python_dependencies(
                 "foo",
                 "1.0.0",
                 client,
                 parent_depth=0,
                 parent_group=DependencyGroup.DEV,
             )
+            assert complete is True
         assert deps[0].group == DependencyGroup.DEV
 
 
@@ -1288,7 +1293,7 @@ class TestFetchNpmDependencies:
 
         respx.get("https://registry.npmjs.org/missing/1.0.0").mock(return_value=httpx.Response(404))
         with httpx.Client() as client:
-            assert fetch_npm_dependencies("missing", "1.0.0", client, parent_depth=0) == []
+            assert fetch_npm_dependencies("missing", "1.0.0", client, parent_depth=0) == ([], False)
 
     @respx.mock
     def test_collects_all_three_dep_groups(self):
@@ -1306,7 +1311,8 @@ class TestFetchNpmDependencies:
             )
         )
         with httpx.Client() as client:
-            deps = fetch_npm_dependencies("foo", "1.0.0", client, parent_depth=0)
+            deps, complete = fetch_npm_dependencies("foo", "1.0.0", client, parent_depth=0)
+            assert complete is True
         assert {d.name for d in deps} == {"a", "b", "c"}
 
     @respx.mock
@@ -1323,7 +1329,7 @@ class TestFetchNpmDependencies:
             )
         )
         with httpx.Client() as client:
-            deps = fetch_npm_dependencies(
+            deps, complete = fetch_npm_dependencies(
                 "foo",
                 "1.0.0",
                 client,
@@ -1331,6 +1337,7 @@ class TestFetchNpmDependencies:
                 include_peer=False,
                 include_optional=False,
             )
+            assert complete is True
         assert {d.name for d in deps} == {"a"}
 
     @respx.mock
@@ -1347,7 +1354,8 @@ class TestFetchNpmDependencies:
             )
         )
         with httpx.Client() as client:
-            deps = fetch_npm_dependencies("foo", "1.0.0", client, parent_depth=0)
+            deps, complete = fetch_npm_dependencies("foo", "1.0.0", client, parent_depth=0)
+            assert complete is False
         assert [d.name for d in deps] == ["c"]
 
     @respx.mock
@@ -1363,7 +1371,8 @@ class TestFetchNpmDependencies:
             )
         )
         with httpx.Client() as client:
-            deps = fetch_npm_dependencies("foo", "1.0.0", client, parent_depth=0)
+            deps, complete = fetch_npm_dependencies("foo", "1.0.0", client, parent_depth=0)
+            assert complete is True
         # First-encountered wins (deps before peerDeps).
         assert len(deps) == 1
         assert deps[0].version_constraint == "^1.0"
@@ -1388,7 +1397,8 @@ class TestFetchNpmDependencies:
             )
         )
         with httpx.Client() as client:
-            deps = fetch_npm_dependencies("foo", "1.0.0", client, parent_depth=0)
+            deps, complete = fetch_npm_dependencies("foo", "1.0.0", client, parent_depth=0)
+            assert complete is True
         by_orig = {d.name: d.version_constraint for d in deps}
         assert by_orig == {
             "string-width": "^4.2.0",
@@ -1409,13 +1419,14 @@ class TestFetchNpmDependencies:
             )
         )
         with httpx.Client() as client:
-            deps = fetch_npm_dependencies(
+            deps, complete = fetch_npm_dependencies(
                 "foo",
                 "1.0.0",
                 client,
                 parent_depth=0,
                 parent_group=DependencyGroup.DEV,
             )
+            assert complete is True
         assert {d.group for d in deps} == {DependencyGroup.DEV}
 
     @respx.mock
@@ -1429,7 +1440,8 @@ class TestFetchNpmDependencies:
             )
         )
         with httpx.Client() as client:
-            deps = fetch_npm_dependencies("foo", "1.0.0", client, parent_depth=0)
+            deps, complete = fetch_npm_dependencies("foo", "1.0.0", client, parent_depth=0)
+            assert complete is True
         assert deps[0].group == DependencyGroup.PROD
 
 
@@ -1645,7 +1657,10 @@ class TestFetchRustDependencies:
             return_value=httpx.Response(404)
         )
         with httpx.Client() as client:
-            assert fetch_rust_dependencies("missing", "1.0.0", client, parent_depth=0) == []
+            assert fetch_rust_dependencies("missing", "1.0.0", client, parent_depth=0) == (
+                [],
+                False,
+            )
 
     @respx.mock
     def test_returns_normal_and_build_drops_dev(self):
@@ -1663,7 +1678,8 @@ class TestFetchRustDependencies:
             )
         )
         with httpx.Client() as client:
-            deps = fetch_rust_dependencies("serde", "1.0.193", client, parent_depth=2)
+            deps, complete = fetch_rust_dependencies("serde", "1.0.193", client, parent_depth=2)
+            assert complete is True
         names = {d.name for d in deps}
         assert names == {"serde_derive", "syn"}
         assert deps[0].depth == 3
@@ -1675,7 +1691,16 @@ class TestFetchRustDependencies:
             return_value=httpx.Response(200, json={"dependencies": "oops"})
         )
         with httpx.Client() as client:
-            assert fetch_rust_dependencies("foo", "1.0.0", client, parent_depth=0) == []
+            assert fetch_rust_dependencies("foo", "1.0.0", client, parent_depth=0) == ([], False)
+
+    @respx.mock
+    @pytest.mark.parametrize("body", [{}, {"dependencies": None}, {"dependencies": []}])
+    def test_absent_or_empty_dependencies_field_declares_nothing(self, body):
+        respx.get("https://crates.io/api/v1/crates/foo/1.0.0/dependencies").mock(
+            return_value=httpx.Response(200, json=body)
+        )
+        with httpx.Client() as client:
+            assert fetch_rust_dependencies("foo", "1.0.0", client, parent_depth=0) == ([], True)
 
     @respx.mock
     def test_children_inherit_parent_group(self):
@@ -1690,13 +1715,14 @@ class TestFetchRustDependencies:
             )
         )
         with httpx.Client() as client:
-            deps = fetch_rust_dependencies(
+            deps, complete = fetch_rust_dependencies(
                 "foo",
                 "1.0.0",
                 client,
                 parent_depth=0,
                 parent_group=DependencyGroup.DEV,
             )
+            assert complete is True
         assert deps[0].group == DependencyGroup.DEV
 
     @respx.mock
@@ -1716,7 +1742,8 @@ class TestFetchRustDependencies:
             )
         )
         with httpx.Client() as client:
-            deps = fetch_rust_dependencies("foo", "1.0.0", client, parent_depth=0)
+            deps, complete = fetch_rust_dependencies("foo", "1.0.0", client, parent_depth=0)
+            assert complete is False
         assert [d.name for d in deps] == ["good"]
 
     @respx.mock
@@ -1729,7 +1756,8 @@ class TestFetchRustDependencies:
             )
         )
         with httpx.Client() as client:
-            deps = fetch_rust_dependencies("foo", "1.0.0", client, parent_depth=0)
+            deps, complete = fetch_rust_dependencies("foo", "1.0.0", client, parent_depth=0)
+            assert complete is True
         assert deps[0].name == "bar"
         assert deps[0].version_constraint == ""
 
@@ -1754,9 +1782,10 @@ class TestFetchRustDependencies:
         )
         cache = RegistryCache()
         with httpx.Client() as client:
-            deps = fetch_rust_dependencies(
+            deps, complete = fetch_rust_dependencies(
                 "foo", "1.0.0", client, parent_depth=0, fetcher=cache.fetch
             )
+            assert complete is True
         assert [d.name for d in deps] == ["always", "unflagged"]
 
     @respx.mock
@@ -1775,7 +1804,8 @@ class TestFetchRustDependencies:
             )
         )
         with httpx.Client() as client:
-            deps = fetch_rust_dependencies("foo", "1.0.0", client, parent_depth=0)
+            deps, complete = fetch_rust_dependencies("foo", "1.0.0", client, parent_depth=0)
+            assert complete is True
         assert [d.name for d in deps] == ["bar"]
 
 
@@ -2183,7 +2213,8 @@ class TestPythonExtrasMarkerEvaluation:
     def test_no_marker_always_included(self):
         self._mock_version_metadata("foo", "1.0.0", ["plain-child>=1"])
         with httpx.Client() as client:
-            deps = fetch_python_dependencies("foo", "1.0.0", client, parent_depth=0)
+            deps, complete = fetch_python_dependencies("foo", "1.0.0", client, parent_depth=0)
+            assert complete is True
         assert [d.name for d in deps] == ["plain-child"]
 
     @respx.mock
@@ -2196,7 +2227,8 @@ class TestPythonExtrasMarkerEvaluation:
             ["win-only-child; sys_platform == 'win32'"],
         )
         with httpx.Client() as client:
-            deps = fetch_python_dependencies("foo", "1.0.0", client, parent_depth=0)
+            deps, complete = fetch_python_dependencies("foo", "1.0.0", client, parent_depth=0)
+            assert complete is True
         assert [d.name for d in deps] == ["win-only-child"]
 
     @respx.mock
@@ -2212,7 +2244,8 @@ class TestPythonExtrasMarkerEvaluation:
             ],
         )
         with httpx.Client() as client:
-            deps = fetch_python_dependencies("foo", "1.0.0", client, parent_depth=0)
+            deps, complete = fetch_python_dependencies("foo", "1.0.0", client, parent_depth=0)
+            assert complete is True
         assert [d.name for d in deps] == ["runtime-child"]
 
     @respx.mock
@@ -2223,13 +2256,14 @@ class TestPythonExtrasMarkerEvaluation:
             ["dev-only-child; extra == 'dev'"],
         )
         with httpx.Client() as client:
-            deps = fetch_python_dependencies(
+            deps, complete = fetch_python_dependencies(
                 "foo",
                 "1.0.0",
                 client,
                 parent_depth=0,
                 requested_extras=frozenset({"dev"}),
             )
+            assert complete is True
         assert [d.name for d in deps] == ["dev-only-child"]
 
     @respx.mock
@@ -2241,13 +2275,14 @@ class TestPythonExtrasMarkerEvaluation:
             ["dev-only-child; extra == 'dev'"],
         )
         with httpx.Client() as client:
-            deps = fetch_python_dependencies(
+            deps, complete = fetch_python_dependencies(
                 "foo",
                 "1.0.0",
                 client,
                 parent_depth=0,
                 requested_extras=frozenset({"test"}),
             )
+            assert complete is True
         assert deps == []
 
     @respx.mock
@@ -2261,20 +2296,22 @@ class TestPythonExtrasMarkerEvaluation:
             ["dev-py310-child; python_version >= '3.10' and extra == 'dev'"],
         )
         with httpx.Client() as client:
-            without = fetch_python_dependencies(
+            without, complete = fetch_python_dependencies(
                 "foo",
                 "1.0.0",
                 client,
                 parent_depth=0,
                 requested_extras=frozenset(),
             )
-            with_dev = fetch_python_dependencies(
+            assert complete is True
+            with_dev, complete = fetch_python_dependencies(
                 "foo",
                 "1.0.0",
                 client,
                 parent_depth=0,
                 requested_extras=frozenset({"dev"}),
             )
+            assert complete is True
         assert without == []
         assert [d.name for d in with_dev] == ["dev-py310-child"]
 
@@ -2289,13 +2326,14 @@ class TestPythonExtrasMarkerEvaluation:
             ["maybe-child; extra == 'dev' or sys_platform == 'win32'"],
         )
         with httpx.Client() as client:
-            deps = fetch_python_dependencies(
+            deps, complete = fetch_python_dependencies(
                 "foo",
                 "1.0.0",
                 client,
                 parent_depth=0,
                 requested_extras=frozenset(),
             )
+            assert complete is True
         assert [d.name for d in deps] == ["maybe-child"]
 
     @respx.mock
@@ -2306,20 +2344,22 @@ class TestPythonExtrasMarkerEvaluation:
             ["dev-or-test-child; extra == 'dev' or extra == 'test'"],
         )
         with httpx.Client() as client:
-            none = fetch_python_dependencies(
+            none, complete = fetch_python_dependencies(
                 "foo",
                 "1.0.0",
                 client,
                 parent_depth=0,
                 requested_extras=frozenset(),
             )
-            with_test = fetch_python_dependencies(
+            assert complete is True
+            with_test, complete = fetch_python_dependencies(
                 "foo",
                 "1.0.0",
                 client,
                 parent_depth=0,
                 requested_extras=frozenset({"test"}),
             )
+            assert complete is True
         assert none == []
         assert [d.name for d in with_test] == ["dev-or-test-child"]
 
@@ -2334,7 +2374,8 @@ class TestPythonExtrasMarkerEvaluation:
             ["pkg-x[feature]>=1"],
         )
         with httpx.Client() as client:
-            deps = fetch_python_dependencies("foo", "1.0.0", client, parent_depth=0)
+            deps, complete = fetch_python_dependencies("foo", "1.0.0", client, parent_depth=0)
+            assert complete is True
         assert len(deps) == 1
         assert deps[0].name == "pkg-x"
         assert deps[0].extras == frozenset({"feature"})
@@ -2350,7 +2391,8 @@ class TestPythonExtrasMarkerEvaluation:
             ["valid>=1", "###bad!!!"],
         )
         with httpx.Client() as client:
-            deps = fetch_python_dependencies("foo", "1.0.0", client, parent_depth=0)
+            deps, complete = fetch_python_dependencies("foo", "1.0.0", client, parent_depth=0)
+            assert complete is False
         assert [d.name for d in deps] == ["valid"]
 
 
@@ -4688,7 +4730,8 @@ class TestFetchMavenDependencies:
             )
         )
         with httpx.Client() as client:
-            nodes, edges = fetch_maven_dependencies("com.example:a", "1.0", client)
+            nodes, edges, unread = fetch_maven_dependencies("com.example:a", "1.0", client)
+            assert unread == []
         assert nodes == [("com.example:b", "2.0"), ("com.example:c", "3.0")]
         # Edges reference the actual (name, version) pairs, not indices.
         assert edges == [
@@ -4697,13 +4740,14 @@ class TestFetchMavenDependencies:
         ]
 
     @respx.mock
-    def test_returns_empty_on_fetch_failure(self):
+    def test_fetch_failure_leaves_the_root_unread(self):
         respx.get(
             "https://api.deps.dev/v3/systems/MAVEN/packages/"
             "com.example%3Aa/versions/1.0:dependencies"
         ).mock(return_value=httpx.Response(503))
         with httpx.Client() as client:
-            nodes, edges = fetch_maven_dependencies("com.example:a", "1.0", client)
+            nodes, edges, unread = fetch_maven_dependencies("com.example:a", "1.0", client)
+            assert unread == [("com.example:a", "1.0")]
         assert nodes == []
         assert edges == []
 
@@ -4714,18 +4758,20 @@ class TestFetchMavenDependencies:
             "com.example%3Aa/versions/1.0:dependencies"
         ).mock(return_value=httpx.Response(200, json={}))
         with httpx.Client() as client:
-            nodes, edges = fetch_maven_dependencies("com.example:a", "1.0", client)
+            nodes, edges, unread = fetch_maven_dependencies("com.example:a", "1.0", client)
+            assert unread == []
         assert nodes == []
         assert edges == []
 
     @respx.mock
-    def test_returns_empty_when_nodes_field_wrong_type(self):
+    def test_nodes_field_of_the_wrong_type_leaves_the_root_unread(self):
         respx.get(
             "https://api.deps.dev/v3/systems/MAVEN/packages/"
             "com.example%3Aa/versions/1.0:dependencies"
         ).mock(return_value=httpx.Response(200, json={"nodes": "junk"}))
         with httpx.Client() as client:
-            nodes, edges = fetch_maven_dependencies("com.example:a", "1.0", client)
+            nodes, edges, unread = fetch_maven_dependencies("com.example:a", "1.0", client)
+            assert unread == [("com.example:a", "1.0")]
         assert nodes == []
         assert edges == []
 
@@ -4759,7 +4805,8 @@ class TestFetchMavenDependencies:
             )
         )
         with httpx.Client() as client:
-            nodes, _ = fetch_maven_dependencies("com.example:a", "1.0", client)
+            nodes, _, unread = fetch_maven_dependencies("com.example:a", "1.0", client)
+            assert unread == [("com.example:a", "1.0")]
         assert nodes == [("com.example:good", "1.0")]
 
     @respx.mock
@@ -4799,7 +4846,8 @@ class TestFetchMavenDependencies:
             )
         )
         with httpx.Client() as client:
-            _, edges = fetch_maven_dependencies("com.example:a", "1.0", client)
+            _, edges, unread = fetch_maven_dependencies("com.example:a", "1.0", client)
+            assert unread == []
         assert edges == [
             ("com.example:a", "1.0", "com.example:b", "2.0"),
         ]
@@ -4827,7 +4875,8 @@ class TestFetchMavenDependencies:
             )
         )
         with httpx.Client() as client:
-            _, edges = fetch_maven_dependencies("com.example:a", "1.0", client)
+            _, edges, unread = fetch_maven_dependencies("com.example:a", "1.0", client)
+            assert unread == []
         assert edges == []
 
     @respx.mock
@@ -4867,7 +4916,8 @@ class TestFetchMavenDependencies:
             )
         )
         with httpx.Client() as client:
-            _, edges = fetch_maven_dependencies("com.example:a", "1.0", client)
+            _, edges, unread = fetch_maven_dependencies("com.example:a", "1.0", client)
+            assert unread == [("com.example:a", "1.0")]
         assert edges == [
             ("com.example:a", "1.0", "com.example:b", "2.0"),
         ]
@@ -4906,20 +4956,76 @@ class TestFetchMavenDependencies:
                     "edges": [
                         {"fromNode": 0, "toNode": 1, "requirement": "2.0"},
                     ],
-                    "error": "",  # dropped by trim
+                    "error": "",
                 },
             )
         )
         cache = RegistryCache()
         with httpx.Client() as client:
-            nodes, edges = fetch_maven_dependencies(
+            nodes, edges, unread = fetch_maven_dependencies(
                 "com.example:a", "1.0", client, fetcher=cache.fetch
             )
+            assert unread == []
         # Walker-read fields survived.
         assert nodes == [("com.example:b", "2.0")]
         assert edges == [
             ("com.example:a", "1.0", "com.example:b", "2.0"),
         ]
+
+    _DEPS_URL = (
+        "https://api.deps.dev/v3/systems/MAVEN/packages/com.example%3Aa/versions/1.0:dependencies"
+    )
+    _SELF = {"versionKey": {"name": "com.example:a", "version": "1.0"}, "relation": "SELF"}
+    _CHILD = {"versionKey": {"name": "com.example:b", "version": "2.0"}, "relation": "DIRECT"}
+
+    @respx.mock
+    @pytest.mark.parametrize(
+        "response",
+        [
+            pytest.param(httpx.Response(404), id="version-not-indexed"),
+            pytest.param(
+                httpx.Response(200, json={"nodes": [_SELF, _CHILD], "error": "unresolved"}),
+                id="error-envelope",
+            ),
+            pytest.param(httpx.Response(200, json={"error": "no graph"}), id="error-alone"),
+            pytest.param(httpx.Response(200, json={"nodes": {"0": _SELF}}), id="nodes-not-a-list"),
+            pytest.param(
+                httpx.Response(200, json={"nodes": [_SELF, "junk", _CHILD]}),
+                id="node-not-an-object",
+            ),
+        ],
+    )
+    def test_graph_not_read_in_full_is_reported_through_the_cache(self, response):
+        # The cache trims this response. What tells a whole graph from a
+        # partial one has to survive the trim, or the root reads as having
+        # the dependencies listed and no others.
+        respx.get(self._DEPS_URL).mock(return_value=response)
+        cache = RegistryCache()
+        with httpx.Client() as client:
+            cached = fetch_maven_dependencies("com.example:a", "1.0", client, fetcher=cache.fetch)
+            direct = fetch_maven_dependencies("com.example:a", "1.0", client)
+        assert cached == direct
+        assert cached[2] == [("com.example:a", "1.0")]
+
+    @respx.mock
+    @pytest.mark.parametrize(
+        "body",
+        [
+            pytest.param({"nodes": [_SELF, _CHILD], "error": ""}, id="empty-error"),
+            pytest.param({"nodes": [_SELF, _CHILD]}, id="no-error-field"),
+            pytest.param({"nodes": [_SELF]}, id="no-dependencies"),
+            pytest.param({"nodes": []}, id="no-nodes"),
+            pytest.param({"nodes": None}, id="null-nodes"),
+        ],
+    )
+    def test_graph_read_in_full_leaves_nothing_unread(self, body):
+        respx.get(self._DEPS_URL).mock(return_value=httpx.Response(200, json=body))
+        cache = RegistryCache()
+        with httpx.Client() as client:
+            cached = fetch_maven_dependencies("com.example:a", "1.0", client, fetcher=cache.fetch)
+            direct = fetch_maven_dependencies("com.example:a", "1.0", client)
+        assert cached == direct
+        assert cached[2] == []
 
 
 class TestTrimDepsDevDependencies:
@@ -4945,6 +5051,7 @@ class TestTrimDepsDevDependencies:
                 }
             ],
             "edges": [],
+            "error": None,
         }
 
     def test_keeps_edge_from_to_node(self):
@@ -4963,27 +5070,37 @@ class TestTrimDepsDevDependencies:
         assert trimmed == {
             "nodes": [],
             "edges": [{"fromNode": 0, "toNode": 1}],
+            "error": None,
         }
 
-    def test_missing_nodes_field(self):
-        # Missing or non-list nodes → empty list (defensive).
-        assert _trim_deps_dev_dependencies({}) == {"nodes": [], "edges": []}
+    def test_keeps_the_error_envelope(self):
+        # The walker reads it: a graph deps.dev could not resolve in full.
+        trimmed = _trim_deps_dev_dependencies({"nodes": [], "edges": [], "error": "unresolved"})
+        assert trimmed["error"] == "unresolved"
 
-    def test_non_list_nodes_field(self):
+    def test_missing_nodes_field(self):
+        assert _trim_deps_dev_dependencies({}) == {"nodes": None, "edges": [], "error": None}
+
+    def test_non_list_nodes_field_is_kept_as_it_is(self):
+        # Reduced to an empty list, it would read as a package with no
+        # dependencies.
         assert _trim_deps_dev_dependencies({"nodes": "junk"}) == {
-            "nodes": [],
+            "nodes": "junk",
             "edges": [],
+            "error": None,
         }
 
     def test_non_list_edges_field(self):
         assert _trim_deps_dev_dependencies({"nodes": [], "edges": "junk"}) == {
             "nodes": [],
             "edges": [],
+            "error": None,
         }
 
-    def test_skips_non_dict_node_entries(self):
+    def test_non_dict_node_entry_keeps_its_position(self):
+        # Edges name nodes by index, so the entry is not removed.
         trimmed = _trim_deps_dev_dependencies({"nodes": ["junk", {"versionKey": {}}], "edges": []})
-        assert trimmed["nodes"] == [{"versionKey": {}}]
+        assert trimmed["nodes"] == [{}, {"versionKey": {}}]
 
     def test_skips_non_dict_edge_entries(self):
         trimmed = _trim_deps_dev_dependencies(
@@ -5073,50 +5190,74 @@ class TestExtractMavenPinnedVersion:
 class TestDependenciesFromNuspec:
     """Edge cases in ``resolvers.nuget._dependencies_from_nuspec``."""
 
-    def test_malformed_xml_returns_empty(self):
+    def test_malformed_xml_is_an_unread_list(self):
         from licenseal.resolvers.nuget import _dependencies_from_nuspec
 
-        assert _dependencies_from_nuspec("<not really xml") == []
+        assert _dependencies_from_nuspec("<not really xml") == ([], False)
 
-    def test_no_metadata_block_returns_empty(self):
+    def test_no_metadata_block_is_an_unread_list(self):
         from licenseal.resolvers.nuget import _dependencies_from_nuspec
 
         # Well-formed XML but missing the ``<metadata>`` envelope —
         # nothing to parse.
-        assert _dependencies_from_nuspec("<package><other/></package>") == []
+        assert _dependencies_from_nuspec("<package><other/></package>") == ([], False)
 
-    def test_missing_id_or_version_attribute_skipped(self):
+    def test_no_dependencies_block_declares_none(self):
         from licenseal.resolvers.nuget import _dependencies_from_nuspec
 
-        # ``<dependency>`` without both ``id`` and ``version`` is dropped
-        # — there's no useful (name, version) to emit.
+        assert _dependencies_from_nuspec("<package><metadata><id>A</id></metadata></package>") == (
+            [],
+            True,
+        )
+
+    def test_dependency_without_a_version_is_kept_with_none(self):
+        from licenseal.resolvers.nuget import _dependencies_from_nuspec
+
+        # The package is named, so it is reported; its version is not.
         body = (
             "<package><metadata><dependencies>"
             '<dependency id="OnlyId" />'
-            '<dependency version="1.0.0" />'
-            '<dependency id="" version="1.0.0" />'
             '<dependency id="Good" version="1.0.0" />'
             "</dependencies></metadata></package>"
         )
-        assert _dependencies_from_nuspec(body) == [("Good", "1.0.0")]
+        assert _dependencies_from_nuspec(body) == ([("OnlyId", ""), ("Good", "1.0.0")], True)
 
-    def test_unparseable_version_skipped(self):
+    def test_dependency_without_an_id_leaves_the_list_incomplete(self):
+        from licenseal.resolvers.nuget import _dependencies_from_nuspec
+
+        # Nothing names the package, in a flat list or inside a group.
+        body = (
+            "<package><metadata><dependencies>"
+            '<dependency version="1.0.0" />'
+            '<group targetFramework="net8.0">'
+            '<dependency id="" version="1.0.0" />'
+            '<dependency id="Good" version="1.0.0" />'
+            "</group>"
+            "</dependencies></metadata></package>"
+        )
+        assert _dependencies_from_nuspec(body) == ([("Good", "1.0.0")], False)
+
+    def test_version_that_cannot_be_pinned_is_kept_with_none(self):
         from licenseal.resolvers.nuget import _dependencies_from_nuspec
 
         # Floating versions and MSBuild property tokens have no concrete
-        # pin so ``_extract_pinned_version_nuget`` returns ``None`` and
-        # the nuspec parser drops them. Bracket ranges ``[1.0,2.0)`` DO
+        # pin: the package is emitted with an empty version, once however
+        # many unpinnable forms name it. Bracket ranges ``[1.0,2.0)`` DO
         # resolve to the lower bound (conservative lockfile-equivalent
-        # behavior — see :func:`_extract_pinned_version_nuget`'s
-        # docstring) and are NOT dropped.
+        # behavior — see :func:`_extract_pinned_version_nuget`'s docstring).
         body = (
             "<package><metadata><dependencies>"
             '<dependency id="Floating" version="1.*" />'
+            '<dependency id="floating" version="*" />'
             '<dependency id="Token" version="$(Var)" />'
+            '<dependency id="Ranged" version="[2.0.0,3.0.0)" />'
             '<dependency id="Good" version="2.0.0" />'
             "</dependencies></metadata></package>"
         )
-        assert _dependencies_from_nuspec(body) == [("Good", "2.0.0")]
+        assert _dependencies_from_nuspec(body) == (
+            [("Floating", ""), ("Token", ""), ("Ranged", "2.0.0"), ("Good", "2.0.0")],
+            True,
+        )
 
     def test_unknown_tags_inside_dependencies_skipped(self):
         from licenseal.resolvers.nuget import _dependencies_from_nuspec
@@ -5135,7 +5276,7 @@ class TestDependenciesFromNuspec:
             "</group>"
             "</dependencies></metadata></package>"
         )
-        assert _dependencies_from_nuspec(body) == [("Real", "3.0.0")]
+        assert _dependencies_from_nuspec(body) == ([("Real", "3.0.0")], True)
 
 
 class TestNuspecWalkerDepthCap:
@@ -5167,13 +5308,15 @@ class TestNuspecWalkerDepthCap:
         # respx would raise AllMockedAssertionError.
 
         with httpx.Client() as client:
-            nodes, _ = nuget_mod.fetch_nuget_dependencies("A", "1.0.0", client)
+            nodes, _, unread = nuget_mod.fetch_nuget_dependencies("A", "1.0.0", client)
 
         # Both B and C surface as nodes; D never gets requested because
         # the cap fires before C's nuspec is fetched.
         assert ("B", "1.0.0") in nodes
         assert ("C", "1.0.0") in nodes
         assert ("D", "1.0.0") not in nodes
+        # C is reported, and its own dependencies as never read.
+        assert unread == [("C", "1.0.0")]
 
 
 class TestBulkResolveNugetLicenses:
@@ -5274,21 +5417,62 @@ class TestFetchNugetDependencies:
         respx.get(self._nuspec_url("B", "2.0.0")).respond(text=self._nuspec("B"))
 
         with httpx.Client() as client:
-            nodes, edges = fetch_nuget_dependencies("Root", "1.0.0", client)
+            nodes, edges, unread = fetch_nuget_dependencies("Root", "1.0.0", client)
+            assert unread == []
 
         assert set(nodes) == {("A", "1.0.0"), ("B", "2.0.0")}
         assert ("Root", "1.0.0", "A", "1.0.0") in edges
         assert ("A", "1.0.0", "B", "2.0.0") in edges
 
     @respx.mock
-    def test_returns_empty_on_root_fetch_failure(self):
+    def test_root_fetch_failure_leaves_the_root_unread(self):
         from licenseal.resolvers.nuget import fetch_nuget_dependencies
 
         respx.get(self._nuspec_url("Missing", "0.0.0")).respond(404)
         with httpx.Client() as client:
-            nodes, edges = fetch_nuget_dependencies("Missing", "0.0.0", client)
+            nodes, edges, unread = fetch_nuget_dependencies("Missing", "0.0.0", client)
         assert nodes == []
         assert edges == []
+        assert unread == [("Missing", "0.0.0")]
+
+    @respx.mock
+    def test_unread_child_trims_its_own_branch_only(self):
+        from licenseal.resolvers.nuget import fetch_nuget_dependencies
+
+        # Root → Broken (nuspec not served), Unparsed (malformed nuspec),
+        # Floating (no version to fetch one for), Fine → Leaf. The readable
+        # branch is walked in full; each of the others is named once.
+        respx.get(self._nuspec_url("Root", "1.0.0")).respond(
+            text=self._nuspec(
+                "Root",
+                ("Broken", "1.0.0"),
+                ("Unparsed", "1.0.0"),
+                ("Floating", "1.*"),
+                ("Fine", "1.0.0"),
+            )
+        )
+        respx.get(self._nuspec_url("Broken", "1.0.0")).respond(404)
+        respx.get(self._nuspec_url("Unparsed", "1.0.0")).respond(text="<package><metadata>")
+        respx.get(self._nuspec_url("Fine", "1.0.0")).respond(
+            text=self._nuspec("Fine", ("Leaf", "2.0.0"))
+        )
+        respx.get(self._nuspec_url("Leaf", "2.0.0")).respond(text=self._nuspec("Leaf"))
+
+        cache = RegistryCache()
+        with httpx.Client() as client:
+            nodes, edges, unread = fetch_nuget_dependencies(
+                "Root", "1.0.0", client, fetcher=cache.fetch_text
+            )
+        assert set(nodes) == {
+            ("Broken", "1.0.0"),
+            ("Unparsed", "1.0.0"),
+            ("Floating", ""),
+            ("Fine", "1.0.0"),
+            ("Leaf", "2.0.0"),
+        }
+        assert ("Fine", "1.0.0", "Leaf", "2.0.0") in edges
+        assert ("Root", "1.0.0", "Floating", "") in edges
+        assert unread == [("Broken", "1.0.0"), ("Unparsed", "1.0.0"), ("Floating", "")]
 
     @respx.mock
     def test_cycle_does_not_recurse_forever(self):
@@ -5299,7 +5483,8 @@ class TestFetchNugetDependencies:
         respx.get(self._nuspec_url("B", "1.0.0")).respond(text=self._nuspec("B", ("A", "1.0.0")))
 
         with httpx.Client() as client:
-            nodes, edges = fetch_nuget_dependencies("A", "1.0.0", client)
+            nodes, edges, unread = fetch_nuget_dependencies("A", "1.0.0", client)
+            assert unread == []
 
         # Only B emerges as a node (A is the SELF root). The edge back to
         # A is recorded but A is not re-walked.
@@ -5329,7 +5514,8 @@ class TestFetchNugetDependencies:
         )
 
         with httpx.Client() as client:
-            nodes, edges = fetch_nuget_dependencies("LegacyRoot", "1.0.0", client)
+            nodes, edges, unread = fetch_nuget_dependencies("LegacyRoot", "1.0.0", client)
+            assert unread == []
 
         assert nodes == [("LegacyChild", "2.0.0")]
         assert edges == [("LegacyRoot", "1.0.0", "LegacyChild", "2.0.0")]
@@ -5365,7 +5551,8 @@ class TestFetchNugetDependencies:
             )
 
         with httpx.Client() as client:
-            nodes, _ = fetch_nuget_dependencies("Multi", "1.0.0", client)
+            nodes, _, unread = fetch_nuget_dependencies("Multi", "1.0.0", client)
+            assert unread == []
 
         assert set(nodes) == {
             ("Shared", "1.0.0"),

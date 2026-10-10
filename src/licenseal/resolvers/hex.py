@@ -173,26 +173,36 @@ def fetch_hex_dependencies(
     parent_depth: int,
     parent_group: DependencyGroup = DependencyGroup.PROD,
     fetcher: Fetcher = fetch_registry_json,
-) -> list[Dependency]:
+) -> tuple[list[Dependency], bool]:
     """Fetch runtime dependency edges of ``name@version`` from hex.pm.
 
-    Used by the manifest-only transitive walker (no ``mix.lock`` present).
-    Reads the release endpoint's ``requirements`` map; optional requirements
-    are skipped (not guaranteed to ship, matching the npm / Python posture of
-    not following optional deps transitively).
+    Returns ``(children, complete)``. Used by the manifest-only transitive
+    walker (no ``mix.lock`` present). Reads the release endpoint's
+    ``requirements`` map; optional requirements are skipped (not guaranteed
+    to ship, matching the npm / Python posture of not following optional
+    deps transitively).
+
+    ``complete`` is False when the dependency list could not be determined:
+    the fetch failed, ``requirements`` is not a map, or one of its keys is
+    blank. The requirements that could be read are returned all the same. A
+    ``requirements`` that is absent or ``null`` declares nothing.
     """
     data = fetcher(_hex_release_url(name, version), client)
     if not isinstance(data, dict):
-        return []
+        return [], False
     requirements = data.get("requirements")
+    if requirements is None:
+        return [], True
     if not isinstance(requirements, dict):
-        return []
+        return [], False
+    complete = True
     out: list[Dependency] = []
     # ``requirements`` is a JSON object keyed by dependency name, so the keys
     # are already unique — no dedup pass needed (unlike the array-shaped
     # RubyGems runtime list).
     for child_name, spec in requirements.items():
         if not isinstance(child_name, str) or not child_name.strip():
+            complete = False
             continue
         if isinstance(spec, dict) and spec.get("optional") is True:
             continue
@@ -207,4 +217,4 @@ def fetch_hex_dependencies(
                 depth=parent_depth + 1,
             )
         )
-    return out
+    return out, complete

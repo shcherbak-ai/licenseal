@@ -4371,16 +4371,18 @@ class TestJavaTransitiveResolution:
     def _stub_deps_fetcher(
         graph: dict[tuple[str, str], tuple[list[tuple[str, str]], list[tuple[str, str, str, str]]]],
     ):
-        """Build a stub ``(name, version) -> (nodes, edges)`` fetcher.
+        """Build a stub ``(name, version) -> (nodes, edges, unread)`` fetcher.
 
         ``graph`` maps each ``(direct_name, direct_version)`` to the
         deps.dev :dependencies response shape — the list of (name,
         version) child nodes plus the list of edge tuples
-        ``(from_name, from_version, to_name, to_version)``.
+        ``(from_name, from_version, to_name, to_version)``. Every graph is
+        read in full: nothing is ever unread.
         """
 
         def fetcher(name: str, version: str, _client: httpx.Client, **_kwargs):
-            return graph.get((name, version), ([], []))
+            nodes, edges = graph.get((name, version), ([], []))
+            return nodes, edges, []
 
         return fetcher
 
@@ -4697,7 +4699,7 @@ class TestJavaTransitiveResolution:
 
         def tracking_fetcher(name: str, version: str, _client: httpx.Client, **_kwargs):
             called.append((name, version))
-            return ([], [])
+            return ([], [], [])
 
         with httpx.Client() as client:
             deps = _resolve_java_transitive(
@@ -6884,7 +6886,7 @@ class TestResolveDotnetTransitive:
                 client=client,
                 max_workers=4,
                 fetcher=lambda url, c: None,
-                deps_fetcher=lambda *a, **kw: ([], []),
+                deps_fetcher=lambda *a, **kw: ([], [], []),
             )
         assert {d.name for d in out} == set()
 
@@ -6906,7 +6908,7 @@ class TestResolveDotnetTransitive:
                 client=client,
                 max_workers=4,
                 fetcher=lambda url, c: None,
-                deps_fetcher=lambda *a, **kw: ([], []),
+                deps_fetcher=lambda *a, **kw: ([], [], []),
             )
         names = {d.name for d in out}
         assert names == {"Newtonsoft.Json", "Serilog"}
@@ -6931,7 +6933,7 @@ class TestResolveDotnetTransitive:
                 client=client,
                 max_workers=4,
                 fetcher=lambda url, c: None,
-                deps_fetcher=lambda *a, **kw: ([], []),
+                deps_fetcher=lambda *a, **kw: ([], [], []),
             )
         names = {d.name for d in out}
         assert "KeepMe" in names
@@ -6948,6 +6950,7 @@ class TestResolveDotnetTransitive:
             return (
                 [("System.Text.Json", "8.0.0")],
                 [("Newtonsoft.Json", "13.0.1", "System.Text.Json", "8.0.0")],
+                [],
             )
 
         with httpx.Client() as client:
@@ -7008,7 +7011,7 @@ class TestResolveDotnetTransitive:
                 client=client,
                 max_workers=4,
                 fetcher=lambda url, c: None,
-                deps_fetcher=lambda *a, **kw: ([], []),
+                deps_fetcher=lambda *a, **kw: ([], [], []),
             )
         assert out == []
 
@@ -7019,6 +7022,7 @@ class TestResolveDotnetTransitive:
             # Return a node with NO incoming edge — orphaned from any root.
             return (
                 [("OrphanDep", "9.0.0")],
+                [],
                 [],
             )
 
@@ -7074,6 +7078,7 @@ class TestResolveDotnetTransitive:
                     ("Newtonsoft.Json", "13.0.1", "Local.Module", "1.0"),
                     ("Newtonsoft.Json", "13.0.1", "RealDep", "2.0"),
                 ],
+                [],
             )
 
         with httpx.Client() as client:
@@ -7114,7 +7119,7 @@ class TestResolveDotnetTransitive:
                 client=client,
                 max_workers=4,
                 fetcher=lambda url, c: None,
-                deps_fetcher=lambda *a, **kw: ([], []),
+                deps_fetcher=lambda *a, **kw: ([], [], []),
             )
         names = {d.name for d in out}
         assert "Local.Lib" not in names
@@ -7149,7 +7154,7 @@ class TestResolveDotnetTransitive:
                 client=client,
                 max_workers=4,
                 fetcher=lambda url, c: None,
-                deps_fetcher=lambda *a, **kw: ([], []),
+                deps_fetcher=lambda *a, **kw: ([], [], []),
             )
         trans = next(d for d in out if d.name == "TransitiveOnly")
         assert trans.depth == 1
@@ -7194,7 +7199,7 @@ class TestResolveDotnetTransitiveEdgeBranches:
                 client=client,
                 max_workers=4,
                 fetcher=lambda url, c: None,
-                deps_fetcher=lambda *a, **kw: ([], []),
+                deps_fetcher=lambda *a, **kw: ([], [], []),
             )
         names = {d.name for d in out}
         assert "Shared.Lib" not in names
@@ -7230,7 +7235,7 @@ class TestResolveDotnetTransitiveEdgeBranches:
                 client=client,
                 max_workers=4,
                 fetcher=lambda url, c: None,
-                deps_fetcher=lambda *a, **kw: ([], []),
+                deps_fetcher=lambda *a, **kw: ([], [], []),
             )
         names = {d.name for d in out}
         assert "Shared" in names
@@ -7249,6 +7254,7 @@ class TestResolveDotnetTransitiveEdgeBranches:
             return (
                 [("Newtonsoft.Json", "13.0.1"), ("OtherDep", "5.0")],
                 [("Newtonsoft.Json", "13.0.1", "OtherDep", "5.0")],
+                [],
             )
 
         with httpx.Client() as client:
@@ -7276,6 +7282,7 @@ class TestResolveDotnetTransitiveEdgeBranches:
             return (
                 [("DevTransitive", "1.0")],
                 [("xunit", "2.6.1", "DevTransitive", "1.0")],
+                [],
             )
 
         with httpx.Client() as client:
@@ -8368,7 +8375,7 @@ class TestWalkOneInnerRuby:
             group=DependencyGroup.PROD,
         )
         with httpx.Client() as client:
-            _, ver, children = _walk_one_inner(
+            _, ver, children, complete = _walk_one_inner(
                 dep,
                 Ecosystem.RUBY,
                 50,
@@ -8638,7 +8645,9 @@ class TestWalkOneInnerHex:
             group=DependencyGroup.PROD,
         )
         with httpx.Client() as client:
-            _, ver, children = _walk_one_inner(dep, Ecosystem.HEX, 50, client, fetch_registry_json)
+            _, ver, children, complete = _walk_one_inner(
+                dep, Ecosystem.HEX, 50, client, fetch_registry_json
+            )
         assert ver == "1.7.10"
         assert [c.name for c in children] == ["plug"]
 

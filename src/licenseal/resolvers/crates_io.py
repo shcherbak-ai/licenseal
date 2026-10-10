@@ -135,12 +135,18 @@ def fetch_rust_dependencies(
     parent_depth: int,
     parent_group: DependencyGroup = DependencyGroup.PROD,
     fetcher: Fetcher = fetch_registry_json,
-) -> list[Dependency]:
+) -> tuple[list[Dependency], bool]:
     """Fetch the crate's declared dependencies from crates.io.
 
-    Returns only `kind == "normal"` and `kind == "build"` entries — `dev`
-    dependencies aren't shipped with downstream consumers and are dropped
-    from the registry-walk transitive expansion.
+    Returns ``(children, complete)``. The children are only the
+    `kind == "normal"` and `kind == "build"` entries — `dev` dependencies
+    aren't shipped with downstream consumers and are dropped from the
+    registry-walk transitive expansion.
+
+    ``complete`` is False when the dependency list could not be determined:
+    the fetch failed, ``dependencies`` is not a list, or an entry is not an
+    object naming a crate. The entries that could be read are returned all
+    the same. A ``dependencies`` that is absent or ``null`` declares nothing.
 
     Entries flagged `optional` are skipped: they are built only when a
     feature enables them, and the registry walk has no feature resolution,
@@ -154,13 +160,17 @@ def fetch_rust_dependencies(
     url = f"{_CRATES_IO_URL}/{name}/{version}/dependencies"
     data = fetcher(url, client)
     if data is None:
-        return []
-    deps = data.get("dependencies", [])
+        return [], False
+    deps = data.get("dependencies")
+    if deps is None:
+        return [], True
     if not isinstance(deps, list):
-        return []
+        return [], False
+    complete = True
     out: list[Dependency] = []
     for raw in deps:
         if not isinstance(raw, dict):
+            complete = False
             continue
         kind = raw.get("kind", "normal")
         if kind not in ("normal", "build"):
@@ -169,6 +179,7 @@ def fetch_rust_dependencies(
             continue
         crate_id = raw.get("crate_id")
         if not isinstance(crate_id, str):
+            complete = False
             continue
         req = raw.get("req", "")
         spec = req if isinstance(req, str) else ""
@@ -181,4 +192,4 @@ def fetch_rust_dependencies(
                 depth=parent_depth + 1,
             )
         )
-    return out
+    return out, complete

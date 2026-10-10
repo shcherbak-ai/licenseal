@@ -274,7 +274,8 @@ class TestFetchHexDependencies:
             )
         )
         with httpx.Client() as client:
-            children = fetch_hex_dependencies("phoenix", "1.7.10", client, parent_depth=0)
+            children, complete = fetch_hex_dependencies("phoenix", "1.7.10", client, parent_depth=0)
+            assert complete is True
         names = {c.name for c in children}
         # jason is optional → skipped.
         assert names == {"plug", "telemetry"}
@@ -286,10 +287,10 @@ class TestFetchHexDependencies:
         assert plug.version_constraint == "~> 1.14"
 
     @respx.mock
-    def test_404_returns_empty(self):
+    def test_404_is_an_unread_list(self):
         respx.get(_hex_release_url("x", "1.0")).mock(return_value=httpx.Response(404))
         with httpx.Client() as client:
-            assert fetch_hex_dependencies("x", "1.0", client, parent_depth=0) == []
+            assert fetch_hex_dependencies("x", "1.0", client, parent_depth=0) == ([], False)
 
     @respx.mock
     def test_no_requirements_field(self):
@@ -297,7 +298,7 @@ class TestFetchHexDependencies:
             return_value=httpx.Response(200, json={"version": "1.0"})
         )
         with httpx.Client() as client:
-            assert fetch_hex_dependencies("x", "1.0", client, parent_depth=0) == []
+            assert fetch_hex_dependencies("x", "1.0", client, parent_depth=0) == ([], True)
 
     @respx.mock
     def test_non_dict_requirements(self):
@@ -305,7 +306,7 @@ class TestFetchHexDependencies:
             return_value=httpx.Response(200, json={"requirements": "wrong"})
         )
         with httpx.Client() as client:
-            assert fetch_hex_dependencies("x", "1.0", client, parent_depth=0) == []
+            assert fetch_hex_dependencies("x", "1.0", client, parent_depth=0) == ([], False)
 
     @respx.mock
     def test_skips_blank_names_and_non_dict_spec(self):
@@ -322,7 +323,9 @@ class TestFetchHexDependencies:
             )
         )
         with httpx.Client() as client:
-            children = fetch_hex_dependencies("x", "1.0", client, parent_depth=2)
+            children, complete = fetch_hex_dependencies("x", "1.0", client, parent_depth=2)
+        # A requirement without a name is one the list could not give.
+        assert complete is False
         by_name = {c.name: c for c in children}
         assert set(by_name) == {"plug", "bare"}
         assert by_name["bare"].version_constraint == ""
@@ -360,9 +363,11 @@ class TestRegistryCacheTrim:
         assert "downloads" not in trimmed
         assert set(trimmed["requirements"]["plug"]) == {"requirement", "optional", "app"}
 
-    def test_trim_release_non_dict_entry_skipped(self):
-        trimmed = _trim_hex_release({"requirements": {"a": {"app": "a"}, "b": "non-dict"}})
-        assert set(trimmed["requirements"]) == {"a"}
+    def test_trim_release_non_dict_entry_kept_as_it_is(self):
+        # The walker emits such a requirement with no constraint; dropping it
+        # here would lose the package on the cached path only.
+        trimmed = _trim_hex_release({"requirements": {"a": {"app": "a", "x": 1}, "b": "non-dict"}})
+        assert trimmed["requirements"] == {"a": {"app": "a"}, "b": "non-dict"}
 
     def test_trim_release_no_requirements(self):
         assert _trim_hex_release({"version": "1.0"}) == {"version": "1.0"}
@@ -408,7 +413,8 @@ class TestRegistryCacheTrim:
         )
         cache = RegistryCache()
         with httpx.Client() as client:
-            children = fetch_hex_dependencies(
+            children, complete = fetch_hex_dependencies(
                 "phoenix", "1.7.10", client, parent_depth=0, fetcher=cache.fetch
             )
+            assert complete is True
         assert {c.name for c in children} == {"plug", "telemetry"}

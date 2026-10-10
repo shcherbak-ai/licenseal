@@ -558,34 +558,45 @@ def fetch_python_dependencies(
     parent_group: DependencyGroup = DependencyGroup.PROD,
     fetcher: Fetcher = fetch_registry_json,
     requested_extras: frozenset[str] = frozenset(),
-) -> list[Dependency]:
+) -> tuple[list[Dependency], bool]:
     """Fetch the package's declared dependencies from PyPI.
 
-    Returns the package's own ``requires_dist`` filtered by extras
-    semantics (see :func:`_marker_passes_with_extras`). Each returned
-    ``Dependency`` carries the extras the *parent's* requirement specified
-    for it (e.g. ``"requests[socks]"`` → child has ``extras={"socks"}``)
-    so the walker can evaluate the child's own ``extra ==`` markers
-    correctly when it recurses.
+    Returns ``(children, complete)``. The children are the package's own
+    ``requires_dist`` filtered by extras semantics (see
+    :func:`_marker_passes_with_extras`). Each returned ``Dependency`` carries
+    the extras the *parent's* requirement specified for it (e.g.
+    ``"requests[socks]"`` → child has ``extras={"socks"}``) so the walker can
+    evaluate the child's own ``extra ==`` markers correctly when it recurses.
+
+    ``complete`` is False when the dependency list could not be determined:
+    the fetch failed, ``info`` or ``requires_dist`` is not of the type PyPI
+    documents, or an entry is one ``packaging`` does not parse. The entries
+    that could be read are returned all the same. A ``requires_dist`` that
+    is absent or ``null`` declares nothing.
 
     ``fetcher`` defaults to a direct HTTP fetch; the walker passes a
     cache-backed fetcher so the response is reused for license resolution.
     """
     url = f"{_PYPI_URL}/{name}/{version}/json"
     data = fetcher(url, client)
-    if data is None:
-        return []
-    info = object_field(data, "info")
-    requires = info.get("requires_dist", []) or []
+    info = data.get("info") if data is not None else None
+    if not isinstance(info, dict):
+        return [], False
+    requires = info.get("requires_dist")
+    if requires is None:
+        return [], True
     if not isinstance(requires, list):
-        return []
+        return [], False
+    complete = True
     out: list[Dependency] = []
     for raw in requires:
         if not isinstance(raw, str):
+            complete = False
             continue
         try:
             req = Requirement(raw)
         except REQUIREMENT_PARSE_ERRORS:
+            complete = False
             continue
         if not _marker_passes_with_extras(req.marker, requested_extras):
             continue
@@ -600,4 +611,4 @@ def fetch_python_dependencies(
                 extras=frozenset(req.extras),
             )
         )
-    return out
+    return out, complete

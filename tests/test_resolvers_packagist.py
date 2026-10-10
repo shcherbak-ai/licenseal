@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 
 import httpx
+import pytest
 import respx
 
 from licenseal.models import Dependency, DependencyGroup, Ecosystem
@@ -488,13 +489,14 @@ class TestFetchPackagistDependencies:
             )
         )
         with httpx.Client() as client:
-            children = fetch_packagist_dependencies(
+            children, complete = fetch_packagist_dependencies(
                 "monolog/monolog",
                 "3.5.0",
                 client,
                 parent_depth=0,
                 parent_group=DependencyGroup.PROD,
             )
+            assert complete is True
         names = {c.name for c in children}
         # ``psr/log`` is in require; platform pseudo-packages filtered out.
         assert names == {"psr/log"}
@@ -503,16 +505,17 @@ class TestFetchPackagistDependencies:
         assert children[0].ecosystem == Ecosystem.PHP
 
     @respx.mock
-    def test_404_returns_empty(self):
+    def test_404_is_an_unread_list(self):
         respx.get(_packagist_url("vendor/missing")).mock(return_value=httpx.Response(404))
         with httpx.Client() as client:
-            children = fetch_packagist_dependencies(
+            children, complete = fetch_packagist_dependencies(
                 "vendor/missing", "1.0.0", client, parent_depth=0
             )
+            assert complete is False
         assert children == []
 
     @respx.mock
-    def test_unmatched_version_returns_empty(self):
+    def test_unmatched_version_is_an_unread_list(self):
         respx.get(_packagist_url("monolog/monolog")).mock(
             return_value=httpx.Response(
                 200,
@@ -520,9 +523,10 @@ class TestFetchPackagistDependencies:
             )
         )
         with httpx.Client() as client:
-            children = fetch_packagist_dependencies(
+            children, complete = fetch_packagist_dependencies(
                 "monolog/monolog", "99.0.0", client, parent_depth=0
             )
+            assert complete is False
         assert children == []
 
     @respx.mock
@@ -545,11 +549,29 @@ class TestFetchPackagistDependencies:
             )
         )
         with httpx.Client() as client:
-            children = fetch_packagist_dependencies("vendor/pkg", "1.0.0.0", client, parent_depth=0)
+            children, complete = fetch_packagist_dependencies(
+                "vendor/pkg", "1.0.0.0", client, parent_depth=0
+            )
+            assert complete is True
         assert [c.name for c in children] == ["vendor/child"]
 
     @respx.mock
-    def test_non_dict_require_returns_empty(self):
+    @pytest.mark.parametrize("entry", [{}, {"require": None}, {"require": []}])
+    def test_absent_or_empty_require_declares_nothing(self, entry):
+        # PHP writes an empty map as ``[]``; none of these is an unread list.
+        respx.get(_packagist_url("vendor/pkg")).mock(
+            return_value=httpx.Response(
+                200, json={"packages": {"vendor/pkg": [{"version": "1.0.0", **entry}]}}
+            )
+        )
+        with httpx.Client() as client:
+            assert fetch_packagist_dependencies("vendor/pkg", "1.0.0", client, parent_depth=0) == (
+                [],
+                True,
+            )
+
+    @respx.mock
+    def test_non_dict_require_is_an_unread_list(self):
         respx.get(_packagist_url("vendor/pkg")).mock(
             return_value=httpx.Response(
                 200,
@@ -557,7 +579,10 @@ class TestFetchPackagistDependencies:
             )
         )
         with httpx.Client() as client:
-            children = fetch_packagist_dependencies("vendor/pkg", "1.0.0", client, parent_depth=0)
+            children, complete = fetch_packagist_dependencies(
+                "vendor/pkg", "1.0.0", client, parent_depth=0
+            )
+            assert complete is False
         assert children == []
 
     @respx.mock
@@ -585,7 +610,10 @@ class TestFetchPackagistDependencies:
             )
         )
         with httpx.Client() as client:
-            children = fetch_packagist_dependencies("vendor/pkg", "1.0.0", client, parent_depth=0)
+            children, complete = fetch_packagist_dependencies(
+                "vendor/pkg", "1.0.0", client, parent_depth=0
+            )
+            assert complete is True
         names = sorted(c.name for c in children)
         # Casing dedupe → only one ``vendor/child``. The non-slashed name
         # is skipped. ``vendor/bad-spec`` survives but with empty spec
@@ -624,7 +652,10 @@ class TestFetchPackagistDependencies:
             )
         )
         with httpx.Client() as client:
-            children = fetch_packagist_dependencies("vendor/pkg", "1.0.0", client, parent_depth=0)
+            children, complete = fetch_packagist_dependencies(
+                "vendor/pkg", "1.0.0", client, parent_depth=0
+            )
+            assert complete is True
         assert {c.name: c.version_constraint for c in children} == {
             "php-vendor/client": "^1.0",
             "ext-vendor/bridge": "^2.0",
@@ -826,9 +857,10 @@ class TestMinifiedMetadataThroughCache:
 
     @staticmethod
     def _children(cache: RegistryCache, client: httpx.Client, name: str, version: str):
-        children = fetch_packagist_dependencies(
+        children, complete = fetch_packagist_dependencies(
             name, version, client, parent_depth=0, fetcher=cache.fetch
         )
+        assert complete is True
         return {c.name: c.version_constraint for c in children}
 
     @respx.mock

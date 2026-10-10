@@ -173,29 +173,40 @@ def fetch_rubygems_dependencies(
     parent_depth: int,
     parent_group: DependencyGroup = DependencyGroup.PROD,
     fetcher: Fetcher = fetch_registry_json,
-) -> list[Dependency]:
+) -> tuple[list[Dependency], bool]:
     """Fetch runtime dependencies of ``name@version`` from rubygems.org.
 
-    Used by the manifest-only transitive walker (no Gemfile.lock present).
-    Reads only the ``dependencies.runtime`` list — development dependencies
-    aren't followed transitively (same posture as PHP / npm / Python).
+    Returns ``(children, complete)``. Used by the manifest-only transitive
+    walker (no Gemfile.lock present). Reads only the ``dependencies.runtime``
+    list — development dependencies aren't followed transitively (same
+    posture as PHP / npm / Python).
+
+    ``complete`` is False when the dependency list could not be determined:
+    the fetch failed, ``dependencies`` is not an object, its ``runtime`` is
+    not a list, or an entry is not an object naming a gem. The entries that
+    could be read are returned all the same. A ``dependencies`` or a
+    ``runtime`` that is absent or ``null`` declares nothing.
     """
     data = fetcher(_rubygems_version_url(name, version), client)
     if not isinstance(data, dict):
-        return []
+        return [], False
     deps_field = data.get("dependencies")
+    if deps_field is None:
+        return [], True
     if not isinstance(deps_field, dict):
-        return []
+        return [], False
     runtime = deps_field.get("runtime")
+    if runtime is None:
+        return [], True
     if not isinstance(runtime, list):
-        return []
+        return [], False
+    complete = True
     out: list[Dependency] = []
     seen: set[str] = set()
     for entry in runtime:
-        if not isinstance(entry, dict):
-            continue
-        child_name = entry.get("name")
+        child_name = entry.get("name") if isinstance(entry, dict) else None
         if not isinstance(child_name, str) or not child_name.strip():
+            complete = False
             continue
         lowered = child_name.lower()
         if lowered in seen:
@@ -212,4 +223,4 @@ def fetch_rubygems_dependencies(
                 depth=parent_depth + 1,
             )
         )
-    return out
+    return out, complete

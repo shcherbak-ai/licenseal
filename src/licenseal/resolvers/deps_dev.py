@@ -636,7 +636,7 @@ def _fetch_deps_dev_dependencies(
     url: str,
     client: httpx.Client,
     fetcher: Fetcher,
-) -> tuple[list[tuple[str, str]], list[tuple[str, str, str, str]]]:
+) -> tuple[list[tuple[str, str]], list[tuple[str, str, str, str]], bool]:
     """Generic ``GetDependencies`` response parser.
 
     Used by :func:`fetch_maven_dependencies`. NuGet GetDependencies is
@@ -644,13 +644,23 @@ def _fetch_deps_dev_dependencies(
     Maven / PyPI; the NUGET URL returns 404). NuGet transitive
     resolution uses the nuspec-based walker in ``resolvers.nuget``
     instead.
+
+    The third element tells whether the graph was read in full. It was not
+    when the fetch failed (a version deps.dev does not know answers 404),
+    the response carries an ``error``, ``nodes`` is not a list, or a node is
+    not a named, versioned package. The nodes that could be read are
+    returned all the same. A ``nodes`` that is absent or ``null`` lists
+    nothing.
     """
     data = fetcher(url, client)
     if data is None:
-        return ([], [])
+        return ([], [], False)
     raw_nodes = data.get("nodes")
+    if raw_nodes is None:
+        raw_nodes = []
     if not isinstance(raw_nodes, list):
-        return ([], [])
+        return ([], [], False)
+    complete = not data.get("error")
 
     # First pass: build the node table. Index 0 is always the SELF root
     # by deps.dev convention; we keep it in the indexed lookup so edge
@@ -659,19 +669,14 @@ def _fetch_deps_dev_dependencies(
     node_table: list[tuple[str, str] | None] = []
     nodes_out: list[tuple[str, str]] = []
     for raw_node in raw_nodes:
-        if not isinstance(raw_node, dict):
-            node_table.append(None)
-            continue
-        relation = raw_node.get("relation")
-        version_key = raw_node.get("versionKey")
-        if not isinstance(version_key, dict):
-            node_table.append(None)
-            continue
-        node_name = version_key.get("name")
-        node_version = version_key.get("version")
+        version_key = raw_node.get("versionKey") if isinstance(raw_node, dict) else None
+        node_name = version_key.get("name") if isinstance(version_key, dict) else None
+        node_version = version_key.get("version") if isinstance(version_key, dict) else None
         if not isinstance(node_name, str) or not isinstance(node_version, str):
             node_table.append(None)
+            complete = False
             continue
+        relation = raw_node.get("relation")
         node_table.append((node_name, node_version))
         if relation == "SELF":
             continue
@@ -696,7 +701,7 @@ def _fetch_deps_dev_dependencies(
             if from_entry is None or to_entry is None:
                 continue
             edges_out.append((from_entry[0], from_entry[1], to_entry[0], to_entry[1]))
-    return (nodes_out, edges_out)
+    return (nodes_out, edges_out, complete)
 
 
 def fetch_maven_dependencies(
@@ -705,7 +710,7 @@ def fetch_maven_dependencies(
     client: httpx.Client,
     *,
     fetcher: Fetcher = fetch_registry_json,
-) -> tuple[list[tuple[str, str]], list[tuple[str, str, str, str]]]:
+) -> tuple[list[tuple[str, str]], list[tuple[str, str, str, str]], list[tuple[str, str]]]:
     """Fetch the resolved Maven dependency subgraph for ``(name, version)``.
 
     Hits ``api.deps.dev``'s ``GetDependencies`` endpoint with the MAVEN
@@ -733,12 +738,15 @@ def fetch_maven_dependencies(
     to_version)`` so the caller can build a name-keyed edge graph for
     reachability attribution.
 
-    Returns ``([], [])`` on any fetch / parse failure — same conservative
-    posture as the Go path. The transitive walker treats the empty
-    subgraph as "no resolved children", and the direct dep still flows
-    through with whatever license info we already have.
+    Returns ``(nodes, edges, unread)``. ``unread`` lists the packages whose
+    dependencies could not be read: ``(name, version)`` itself when deps.dev
+    did not return its whole graph (the fetch failed, the version is not
+    indexed, or the response reports an ``error``), and nothing otherwise.
+    The nodes that were read are returned either way, and the direct dep
+    still flows through with whatever license info we already have.
     """
     encoded_name = quote_coordinate(name, safe="")
     encoded_version = quote_coordinate(version, safe="")
     url = _DEPS_DEV_MAVEN_DEPS_URL.format(name=encoded_name, version=encoded_version)
-    return _fetch_deps_dev_dependencies(url, client, fetcher)
+    nodes, edges, complete = _fetch_deps_dev_dependencies(url, client, fetcher)
+    return (nodes, edges, [] if complete else [(name, version)])

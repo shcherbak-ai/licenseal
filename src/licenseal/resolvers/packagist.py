@@ -298,20 +298,26 @@ def fetch_packagist_dependencies(
     parent_depth: int,
     parent_group: DependencyGroup = DependencyGroup.PROD,
     fetcher: Fetcher = fetch_registry_json,
-) -> list[Dependency]:
+) -> tuple[list[Dependency], bool]:
     """Fetch the package's declared runtime dependencies from Packagist.
 
-    Used by the manifest-only transitive walker (no composer.lock present).
-    Reads only ``require`` from the matched version entry — dev requirements
-    aren't followed transitively (matches the npm / Python / Rust posture
-    of dev being a top-level concern, not a transitive one).
+    Returns ``(children, complete)``. Used by the manifest-only transitive
+    walker (no composer.lock present). Reads only ``require`` from the
+    matched version entry — dev requirements aren't followed transitively
+    (matches the npm / Python / Rust posture of dev being a top-level
+    concern, not a transitive one).
+
+    ``complete`` is False when the dependency list could not be determined:
+    the fetch failed, the response has no entry for ``version``, or the
+    entry's ``require`` is not a map. A ``require`` that is absent, ``null``,
+    or an empty list (how PHP writes an empty map) declares nothing.
 
     Platform pseudo-packages (``php``, ``ext-*``, ``lib-*``, ``hhvm`` — names
     without a ``/``) are filtered out.
     """
     data = fetcher(_packagist_url(name), client)
     if data is None:
-        return []
+        return [], False
     entries = _versions_from_response(data, name)
     target = version.lstrip("v")
     entry: dict[str, Any] | None = None
@@ -327,10 +333,12 @@ def fetch_packagist_dependencies(
             entry = candidate
             break
     if entry is None:
-        return []
+        return [], False
     require = entry.get("require")
+    if require is None or require == []:
+        return [], True
     if not isinstance(require, dict):
-        return []
+        return [], False
     out: list[Dependency] = []
     seen: set[str] = set()
     for child_name, child_spec in require.items():
@@ -353,4 +361,4 @@ def fetch_packagist_dependencies(
                 depth=parent_depth + 1,
             )
         )
-    return out
+    return out, True
