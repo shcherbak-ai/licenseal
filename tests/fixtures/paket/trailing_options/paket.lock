@@ -1,0 +1,543 @@
+RESTRICTION: || (== net6.0) (== netstandard2.0)
+NUGET
+  remote: https://api.nuget.org/v3/index.json
+    Aldermoor.Abstractions (9.6) - restriction: >= netstandard2.0
+    Aldermoor.Core (9.6.0-rc.2) - restriction: >= netstandard2.0
+      Eastmere.Logging (>= 8.4) - restriction: || (>= net461) (>= netstandard2.0)
+      Jadewick.Text (>= 3.0) - restriction: >= netstandard2.0
+      Quillmere.Text (>= 2.6) - framework: net6.0
+    Aldermoor.Hosting (1.8.8) - restriction: || (== net6.0) (&& (== netstandard2.0) (>= net472))
+      Calderwick.Core (>= 5.0)
+      Greyfen.Json (>= 9.0) - framework: net6.0
+      Netherby.Diagnostics (8.5.4) - restriction: >= netstandard2.0
+    Aldermoor.Logging (7.11)
+      Jadewick.Json (>= 5.0) - restriction: >= netstandard2.0
+    Aldermoor.Text (6.9.8) - redirects: force
+      Brackenfell.Net (>= 1.9) - restriction: || (>= net461) (>= netstandard2.0)
+      Dunholme.Hosting (>= 9.0) - framework: net6.0
+    Brackenfell.Core (8.1.9) - restriction: || (>= net461) (>= netstandard2.0)
+      Harrowby.Abstractions (>= 4.6)
+    Brackenfell.Diagnostics (1.3.5-rc.2) - copy_local: true
+      Rookhurst.Diagnostics (>= 2.2) - restriction: >= netstandard2.0
+    Brackenfell.Hosting (2.12)
+    Brackenfell.Logging (5.1.4) - copy_local: true, restriction: >= net6.0
+      Fallowgate.Abstractions (>= 4.0) - framework: net6.0
+      Saltwick.Abstractions (>= 1.0) - restriction: >= netstandard2.0
+    Brackenfell.Net (2.8.5) - copy_local: true, restriction: >= net6.0
+      Oakhollow.Core (9.2.7)
+      Pennrith.Diagnostics (2.8.4)
+    Calderwick.Abstractions (6.8) - restriction: || (&& (>= net45) (< netstandard1.3)) (>= netcoreapp2.0)
+      Quillmere.Logging (>= 2.6)
+    Calderwick.Core (6.6.5-rc.2)
+      Eastmere.Core (>= 4.0)
+      Greyfen.Json (>= 9.0) - restriction: >= netstandard2.0
+      Quillmere.Text (>= 3.0) - restriction: || (>= net461) (>= netstandard2.0)
+    Calderwick.Hosting (3.4.2)
+    Calderwick.Json (2.13.0) - restriction: >= netstandard2.0
+    Calderwick.Logging (6.5.0-rc.2) - framework: net6.0
+      Saltwick.Text (>= 2.2)
+      Thornmere.Logging (>= 4.0) - framework: net6.0
+    Calderwick.Text (2.14.0)
+    Dunholme.Abstractions (5.8.4) - restriction: || (== net6.0) (&& (== netstandard2.0) (>= net472))
+      Ivelstone.Diagnostics (>= 2.0)
+      Merrowdale.Hosting (>= 0.7)
+      Thornmere.Logging (>= 3.8) - restriction: || (>= net461) (>= netstandard2.0)
+    Dunholme.Core (3.12.7)
+      Calderwick.Abstractions (6.8) - restriction: >= netstandard2.0
+      Jadewick.Logging (>= 5.0)
+      Rookhurst.Net (>= 4.0)
+    Dunholme.Diagnostics (7.7.4) - restriction: >= netstandard2.0
+    Dunholme.Hosting (9.11.4)
+    Dunholme.Json (3.14.3)
+      Greyfen.Abstractions (2.8.1)
+      Kestrelby.Abstractions (>= 1.8)
+      Thornmere.Net (>= 9.0)
+    Dunholme.Logging (1.12.4)
+      Quillmere.Hosting (>= 3.0) - restriction: || (>= net461) (>= netstandard2.0)
+    Eastmere.Core (4.13.5)
+      Lowmarsh.Diagnostics (>= 8.0)
+      Saltwick.Text (>= 3.0) - restriction: >= netstandard2.0
+    Eastmere.Diagnostics (5.14.4) - copy_local: true
+      Netherby.Logging (>= 1.6) - framework: net6.0
+      Thornmere.Logging (>= 3.7) - restriction: || (>= net461) (>= netstandard2.0)
+    Eastmere.Hosting (2.1.4) - framework: net6.0
+    Eastmere.Json (5.2.6) - copy_local: true, restriction: >= net6.0
+    Eastmere.Logging (9.12.0) - redirects: force
+    Fallowgate.Abstractions (4.5.6) - framework: net6.0
+    Fallowgate.Core (8.6)
+    Fallowgate.Hosting (4.0.4) - restriction: >= netstandard2.0
+    Fallowgate.Json (1.2.7)
+    Fallowgate.Logging (2.8.9) - restriction: || (== net6.0) (&& (== netstandard2.0) (>= net472))
+      Quillmere.Text (>= 3.0)
+    Fallowgate.Net (8.13) - framework: net6.0
+      Calderwick.Text (>= 1.6)
+      Netherby.Logging (>= 1.8)
+      Quillmere.Logging (>= 3.0)
+    Fallowgate.Text (2.10.6) - copy_local: true
+      Aldermoor.Logging (>= 6.6)
+      Greyfen.Diagnostics (>= 7.0)
+      Quillmere.Diagnostics (>= 7.5) - restriction: || (>= net461) (>= netstandard2.0)
+    Greyfen.Abstractions (2.8.1) - restriction: || (>= net461) (>= netstandard2.0)
+    Greyfen.Core (1.1.9) - copy_local: true, restriction: >= net6.0
+      Ivelstone.Diagnostics (>= 1.0) - restriction: >= netstandard2.0
+      Saltwick.Json (>= 5.2)
+    Greyfen.Diagnostics (7.6.4)
+      Brackenfell.Core (8.1.9) - restriction: >= netstandard2.0
+      Harrowby.Json (>= 1.1) - restriction: || (>= net461) (>= netstandard2.0)
+    Greyfen.Hosting (3.9.9) - framework: net6.0
+      Calderwick.Json (2.13.0)
+    Greyfen.Json (9.6.6)
+      Lowmarsh.Diagnostics (>= 7.8)
+      Lowmarsh.Text (>= 2.9)
+    Greyfen.Logging (4.5.9)
+      Brackenfell.Hosting (>= 2.0) - restriction: || (>= net461) (>= netstandard2.0)
+      Greyfen.Json (9.6.6)
+    Greyfen.Net (9.11.8-rc.3)
+      Dunholme.Logging (>= 1.0) - framework: net6.0
+      Quillmere.Abstractions (>= 4.9)
+    Harrowby.Abstractions (5.3.2)
+      Jadewick.Hosting (>= 7.0) - restriction: >= netstandard2.0
+      Oakhollow.Core (>= 9.0)
+      Quillmere.Text (>= 3.0) - restriction: || (>= net461) (>= netstandard2.0)
+    Harrowby.Core (5.12.4) - restriction: >= netstandard2.0
+      Jadewick.Diagnostics (>= 4.0)
+    Harrowby.Diagnostics (2.3.8-rc.1)
+      Calderwick.Abstractions (>= 6.0) - restriction: >= netstandard2.0
+      Lowmarsh.Hosting (>= 6.6) - restriction: >= netstandard2.0
+    Harrowby.Json (2.1.4) - restriction: || (>= net461) (>= netstandard2.0)
+      Calderwick.Core (>= 5.5)
+      Netherby.Text (>= 8.9) - restriction: || (>= net461) (>= netstandard2.0)
+      Saltwick.Abstractions (>= 1.0) - framework: net6.0
+    Harrowby.Logging (6.12.3) - restriction: >= netstandard2.0
+      Calderwick.Logging (>= 5.3)
+      Harrowby.Core (>= 5.0)
+      Oakhollow.Core (>= 9.0)
+    Harrowby.Net (3.2)
+      Calderwick.Abstractions (>= 6.0) - restriction: >= netstandard2.0
+      Greyfen.Diagnostics (>= 6.2)
+      Greyfen.Json (>= 9.0) - restriction: >= netstandard2.0
+    Ivelstone.Abstractions (6.9.0) - restriction: || (&& (>= net45) (< netstandard1.3)) (>= netcoreapp2.0)
+      Fallowgate.Net (>= 8.0)
+    Ivelstone.Diagnostics (2.1.1) - restriction: || (>= net461) (>= netstandard2.0)
+    Ivelstone.Hosting (2.12.5)
+      Rookhurst.Net (>= 3.1)
+    Ivelstone.Json (2.3.4)
+      Ivelstone.Logging (>= 2.0) - restriction: >= netstandard2.0
+      Quillmere.Abstractions (>= 5.0) - restriction: || (>= net461) (>= netstandard2.0)
+    Ivelstone.Logging (2.2) - copy_local: true
+    Ivelstone.Text (3.11.1-rc.2)
+      Dunholme.Logging (>= 0.0)
+      Rookhurst.Core (>= 9.0)
+    Jadewick.Core (4.8.3) - framework: net6.0
+    Jadewick.Diagnostics (4.4.1) - restriction: >= netstandard2.0
+    Jadewick.Hosting (7.7.5) - restriction: || (== net6.0) (&& (== netstandard2.0) (>= net472))
+      Brackenfell.Logging (5.1.4) - framework: net6.0
+    Jadewick.Json (6.12.6) - copy_local: true, restriction: >= net6.0
+    Jadewick.Logging (5.2) - restriction: || (>= net461) (>= netstandard2.0)
+      Fallowgate.Hosting (>= 3.2) - restriction: || (>= net461) (>= netstandard2.0)
+      Jadewick.Text (3.7.5-rc.2)
+      Kestrelby.Text (2.9.6-rc.3)
+    Jadewick.Net (3.4.6)
+      Dunholme.Logging (>= 1.0) - restriction: || (>= net461) (>= netstandard2.0)
+    Jadewick.Text (3.7.5-rc.2) - restriction: || (>= net461) (>= netstandard2.0)
+      Calderwick.Hosting (>= 2.9) - framework: net6.0
+    Kestrelby.Abstractions (2.1.8) - restriction: || (&& (>= net45) (< netstandard1.3)) (>= netcoreapp2.0)
+    Kestrelby.Diagnostics (5.13.3)
+      Dunholme.Abstractions (>= 4.7) - restriction: >= netstandard2.0
+      Greyfen.Logging (4.5.9)
+      Kestrelby.Abstractions (>= 1.7) - restriction: || (>= net461) (>= netstandard2.0)
+    Kestrelby.Hosting (4.0.8) - restriction: || (>= net461) (>= netstandard2.0)
+      Ivelstone.Hosting (>= 1.4) - restriction: >= netstandard2.0
+      Jadewick.Json (>= 6.0) - restriction: || (>= net461) (>= netstandard2.0)
+      Quillmere.Diagnostics (>= 7.2)
+    Kestrelby.Json (9.7.9) - restriction: || (&& (>= net45) (< netstandard1.3)) (>= netcoreapp2.0)
+      Kestrelby.Hosting (>= 3.4)
+      Rookhurst.Net (4.10.8)
+    Kestrelby.Net (2.9.8)
+      Jadewick.Text (>= 2.0)
+      Netherby.Diagnostics (>= 8.0)
+      Thornmere.Logging (>= 4.0)
+    Kestrelby.Text (2.9.6-rc.3) - copy_local: true
+      Pennrith.Text (>= 8.6) - restriction: >= netstandard2.0
+      Quillmere.Core (>= 9.0) - restriction: || (>= net461) (>= netstandard2.0)
+    Lowmarsh.Core (3.8) - restriction: || (== net6.0) (&& (== netstandard2.0) (>= net472))
+      Kestrelby.Hosting (>= 4.0)
+      Rookhurst.Text (5.12.0) - restriction: || (>= net461) (>= netstandard2.0)
+    Lowmarsh.Diagnostics (8.9.3-rc.2) - copy_local: true
+    Lowmarsh.Hosting (7.3.6)
+    Lowmarsh.Logging (5.4)
+      Jadewick.Core (>= 4.0)
+    Lowmarsh.Net (5.3.5-rc.3) - restriction: || (&& (>= net45) (< netstandard1.3)) (>= netcoreapp2.0)
+      Greyfen.Diagnostics (>= 7.0)
+      Lowmarsh.Core (>= 2.0)
+      Pennrith.Logging (>= 7.2) - framework: net6.0
+    Lowmarsh.Text (3.0.5) - framework: net6.0
+      Harrowby.Net (>= 2.6) - restriction: >= netstandard2.0
+    Merrowdale.Abstractions (7.11.0)
+      Fallowgate.Json (>= 1.0)
+    Merrowdale.Hosting (1.8.9)
+      Greyfen.Hosting (3.9.9) - restriction: || (>= net461) (>= netstandard2.0)
+    Merrowdale.Json (7.4.2) - framework: net6.0
+    Merrowdale.Logging (8.2.7) - copy_local: true
+    Merrowdale.Net (2.3.7) - redirects: force
+      Ivelstone.Hosting (>= 2.0)
+      Quillmere.Abstractions (>= 5.0) - restriction: || (>= net461) (>= netstandard2.0)
+    Merrowdale.Text (1.1) - redirects: force
+      Eastmere.Json (>= 4.2)
+      Kestrelby.Json (>= 8.1)
+      Lowmarsh.Hosting (>= 7.0)
+    Netherby.Abstractions (1.0.5)
+    Netherby.Core (9.0.9)
+      Kestrelby.Json (>= 9.0) - restriction: || (>= net461) (>= netstandard2.0)
+    Netherby.Diagnostics (8.5.4) - restriction: >= netstandard2.0
+    Netherby.Hosting (4.1.9-rc.1) - restriction: || (&& (>= net45) (< netstandard1.3)) (>= netcoreapp2.0)
+      Dunholme.Diagnostics (>= 6.6)
+      Ivelstone.Logging (>= 2.0) - framework: net6.0
+    Netherby.Json (7.8) - restriction: >= netstandard2.0
+      Harrowby.Net (>= 2.4)
+      Rookhurst.Json (>= 7.0) - restriction: || (>= net461) (>= netstandard2.0)
+    Netherby.Logging (2.11) - restriction: >= netstandard2.0
+      Lowmarsh.Text (>= 3.0)
+      Pennrith.Json (>= 8.0) - framework: net6.0
+    Netherby.Text (9.11.9) - restriction: >= netstandard2.0
+    Oakhollow.Core (9.2.7) - restriction: || (== net6.0) (&& (== netstandard2.0) (>= net472))
+      Lowmarsh.Diagnostics (>= 8.0) - restriction: || (>= net461) (>= netstandard2.0)
+      Merrowdale.Json (>= 6.9)
+      Saltwick.Net (>= 5.4) - restriction: >= netstandard2.0
+    Oakhollow.Diagnostics (1.8)
+      Rookhurst.Abstractions (>= 2.0) - framework: net6.0
+    Oakhollow.Logging (3.7.3) - framework: net6.0
+      Ivelstone.Text (>= 2.1) - restriction: || (>= net461) (>= netstandard2.0)
+      Netherby.Core (>= 9.0) - restriction: >= netstandard2.0
+    Oakhollow.Net (3.1.6) - redirects: force
+      Aldermoor.Text (>= 5.3)
+      Oakhollow.Core (>= 9.0) - framework: net6.0
+      Rookhurst.Json (>= 6.4)
+    Oakhollow.Text (3.0.1-rc.1)
+    Pennrith.Abstractions (9.0.1) - restriction: || (&& (>= net45) (< netstandard1.3)) (>= netcoreapp2.0)
+    Pennrith.Diagnostics (2.8.4) - restriction: || (== net6.0) (&& (== netstandard2.0) (>= net472))
+      Fallowgate.Hosting (4.0.4)
+    Pennrith.Hosting (5.0.2)
+    Pennrith.Json (8.1.7) - framework: net6.0
+    Pennrith.Logging (8.5.3)
+      Merrowdale.Json (>= 7.0) - restriction: >= netstandard2.0
+    Pennrith.Net (1.1.0) - restriction: || (>= net461) (>= netstandard2.0)
+      Aldermoor.Hosting (>= 0.3)
+      Fallowgate.Json (>= 1.0)
+    Pennrith.Text (9.8.6)
+      Oakhollow.Core (>= 8.9) - restriction: >= netstandard2.0
+    Quillmere.Abstractions (5.14.0) - restriction: >= netstandard2.0
+      Harrowby.Diagnostics (2.3.8-rc.1) - restriction: || (>= net461) (>= netstandard2.0)
+      Jadewick.Logging (>= 4.6) - framework: net6.0
+    Quillmere.Core (9.4.0)
+      Ivelstone.Logging (>= 1.5) - restriction: >= netstandard2.0
+      Merrowdale.Net (2.3.7)
+      Rookhurst.Text (>= 4.6) - restriction: >= netstandard2.0
+    Quillmere.Diagnostics (8.9.2)
+      Aldermoor.Abstractions (>= 8.8) - restriction: >= netstandard2.0
+      Netherby.Logging (>= 2.0) - restriction: || (>= net461) (>= netstandard2.0)
+    Quillmere.Hosting (3.3.7) - restriction: || (>= net461) (>= netstandard2.0)
+      Harrowby.Json (2.1.4)
+      Merrowdale.Abstractions (>= 6.2) - restriction: || (>= net461) (>= netstandard2.0)
+    Quillmere.Logging (3.8.2) - framework: net6.0
+      Greyfen.Hosting (>= 2.1)
+    Quillmere.Net (2.10) - restriction: || (== net6.0) (&& (== netstandard2.0) (>= net472))
+      Pennrith.Hosting (5.0.2)
+    Quillmere.Text (3.10.3) - copy_local: true, restriction: >= net6.0
+      Calderwick.Abstractions (>= 6.0) - restriction: || (>= net461) (>= netstandard2.0)
+      Eastmere.Hosting (>= 2.0) - restriction: || (>= net461) (>= netstandard2.0)
+    Rookhurst.Abstractions (2.10.4) - restriction: || (== net6.0) (&& (== netstandard2.0) (>= net472))
+      Calderwick.Abstractions (>= 5.8)
+      Fallowgate.Json (>= 0.4)
+      Oakhollow.Logging (>= 2.2)
+    Rookhurst.Core (9.3.0) - restriction: || (>= net461) (>= netstandard2.0)
+    Rookhurst.Diagnostics (3.12.5) - restriction: || (&& (>= net45) (< netstandard1.3)) (>= netcoreapp2.0)
+    Rookhurst.Hosting (8.12.4) - framework: net6.0
+      Dunholme.Json (>= 3.0) - framework: net6.0
+    Rookhurst.Json (7.0.1) - restriction: >= netstandard2.0
+    Rookhurst.Net (4.10.8) - restriction: || (&& (>= net45) (< netstandard1.3)) (>= netcoreapp2.0)
+      Fallowgate.Json (>= 1.0)
+      Jadewick.Core (>= 4.0)
+      Netherby.Diagnostics (>= 7.0)
+    Rookhurst.Text (5.12.0) - framework: net6.0
+      Fallowgate.Hosting (>= 3.7)
+      Rookhurst.Abstractions (>= 2.0)
+    Saltwick.Abstractions (1.8)
+      Fallowgate.Core (>= 7.6) - restriction: || (>= net461) (>= netstandard2.0)
+      Lowmarsh.Hosting (>= 6.7) - framework: net6.0
+    Saltwick.Diagnostics (5.7.5) - copy_local: true, restriction: >= net6.0
+      Aldermoor.Core (>= 8.1)
+      Ivelstone.Text (>= 3.0) - restriction: >= netstandard2.0
+    Saltwick.Json (6.3.9)
+      Harrowby.Json (>= 2.0)
+      Lowmarsh.Text (>= 2.8) - restriction: >= netstandard2.0
+      Rookhurst.Abstractions (2.10.4) - framework: net6.0
+    Saltwick.Logging (4.11) - restriction: || (>= net461) (>= netstandard2.0)
+      Fallowgate.Abstractions (>= 3.9)
+      Netherby.Text (>= 8.3) - framework: net6.0
+    Saltwick.Net (6.10.3-rc.1) - restriction: >= netstandard2.0
+    Saltwick.Text (3.13.9) - restriction: || (&& (>= net45) (< netstandard1.3)) (>= netcoreapp2.0)
+      Jadewick.Text (>= 2.4)
+    Thornmere.Json (7.13.4) - copy_local: true
+    Thornmere.Logging (4.5.9-rc.2) - restriction: || (&& (>= net45) (< netstandard1.3)) (>= netcoreapp2.0)
+    Thornmere.Net (9.13) - restriction: || (&& (>= net45) (< netstandard1.3)) (>= netcoreapp2.0)
+
+GROUP Build
+STORAGE: NONE
+RESTRICTION: == net6.0
+NUGET
+  remote: https://api.nuget.org/v3/index.json
+    Aldermoor.Diagnostics (5.12.9)
+      Aldermoor.Json (>= 4.7) - framework: net6.0
+      Saltwick.Core (>= 2.0)
+    Aldermoor.Hosting (8.9)
+      Greyfen.Net (>= 1.0) - restriction: || (>= net461) (>= netstandard2.0)
+      Kestrelby.Core (>= 0.8)
+    Aldermoor.Json (5.2.9) - restriction: || (&& (>= net45) (< netstandard1.3)) (>= netcoreapp2.0)
+      Harrowby.Text (>= 4.0)
+      Quillmere.Core (>= 4.6)
+      Thornmere.Hosting (>= 7.0) - restriction: || (>= net461) (>= netstandard2.0)
+    Aldermoor.Net (4.14.2) - restriction: || (&& (>= net45) (< netstandard1.3)) (>= netcoreapp2.0)
+    Brackenfell.Abstractions (1.9.6)
+      Calderwick.Diagnostics (>= 8.0) - restriction: >= netstandard2.0
+      Lowmarsh.Json (9.4.1) - framework: net6.0
+    Brackenfell.Json (3.12.7) - restriction: || (== net6.0) (&& (== netstandard2.0) (>= net472))
+      Thornmere.Abstractions (4.0.3)
+    Brackenfell.Net (2.6.5) - restriction: || (== net6.0) (&& (== netstandard2.0) (>= net472))
+      Greyfen.Hosting (>= 3.0)
+    Brackenfell.Text (6.13.0-rc.3) - redirects: force
+      Dunholme.Text (>= 3.0)
+      Netherby.Logging (>= 6.0) - restriction: >= netstandard2.0
+      Saltwick.Logging (>= 0.2) - framework: net6.0
+    Calderwick.Abstractions (2.12.2)
+      Brackenfell.Abstractions (>= 0.7) - framework: net6.0
+    Calderwick.Diagnostics (8.8.2)
+      Harrowby.Diagnostics (>= 0.3)
+    Calderwick.Json (2.10) - restriction: || (== net6.0) (&& (== netstandard2.0) (>= net472))
+      Brackenfell.Net (>= 1.2)
+      Eastmere.Abstractions (>= 8.8)
+      Oakhollow.Json (>= 2.3) - restriction: >= netstandard2.0
+    Calderwick.Net (5.3.1) - restriction: || (== net6.0) (&& (== netstandard2.0) (>= net472))
+    Dunholme.Abstractions (4.10.9) - framework: net6.0
+    Dunholme.Json (9.13.8) - restriction: || (>= net461) (>= netstandard2.0)
+      Aldermoor.Hosting (>= 7.9) - framework: net6.0
+      Dunholme.Net (>= 5.0) - restriction: >= netstandard2.0
+      Lowmarsh.Hosting (8.6.4-rc.2) - framework: net6.0
+    Dunholme.Net (6.4.1)
+    Dunholme.Text (3.13.9) - restriction: || (== net6.0) (&& (== netstandard2.0) (>= net472))
+    Eastmere.Abstractions (9.4) - copy_local: true, restriction: >= net6.0
+      Calderwick.Abstractions (>= 2.0) - framework: net6.0
+    Eastmere.Net (7.8)
+      Greyfen.Hosting (>= 2.9) - restriction: || (>= net461) (>= netstandard2.0)
+      Netherby.Net (>= 8.7) - restriction: || (>= net461) (>= netstandard2.0)
+    Eastmere.Text (7.0.7) - copy_local: true
+    Greyfen.Hosting (3.3)
+      Brackenfell.Net (2.6.5) - framework: net6.0
+      Dunholme.Text (>= 3.0)
+      Lowmarsh.Json (9.4.1)
+    Greyfen.Net (1.8.4)
+    Greyfen.Text (2.11.5)
+    Harrowby.Diagnostics (1.8) - redirects: force
+      Oakhollow.Json (>= 3.0)
+    Harrowby.Text (4.3.9) - redirects: force
+      Netherby.Json (1.4.2)
+      Oakhollow.Diagnostics (6.1.5) - restriction: || (>= net461) (>= netstandard2.0)
+      Quillmere.Net (>= 9.0) - framework: net6.0
+    Ivelstone.Core (8.0.1) - restriction: >= netstandard2.0
+    Ivelstone.Json (2.7.3)
+      Greyfen.Text (>= 2.0)
+    Kestrelby.Core (1.3.1) - restriction: >= netstandard2.0
+      Netherby.Logging (>= 5.5)
+      Oakhollow.Diagnostics (>= 5.8)
+    Lowmarsh.Abstractions (3.7.9) - restriction: || (>= net461) (>= netstandard2.0)
+      Dunholme.Abstractions (4.10.9)
+      Dunholme.Text (>= 2.7) - restriction: || (>= net461) (>= netstandard2.0)
+      Oakhollow.Hosting (2.8.5) - restriction: || (>= net461) (>= netstandard2.0)
+    Lowmarsh.Core (2.1.4) - restriction: >= netstandard2.0
+      Quillmere.Hosting (>= 6.6) - framework: net6.0
+    Lowmarsh.Hosting (8.6.4-rc.2) - copy_local: true, restriction: >= net6.0
+    Lowmarsh.Json (9.4.1) - redirects: force
+      Greyfen.Net (>= 1.0)
+    Merrowdale.Net (2.13.4)
+      Eastmere.Text (>= 7.0)
+    Netherby.Core (9.12.3) - restriction: || (>= net461) (>= netstandard2.0)
+      Eastmere.Text (>= 6.7) - framework: net6.0
+      Oakhollow.Json (>= 3.0) - framework: net6.0
+      Quillmere.Core (>= 5.0)
+    Netherby.Json (1.4.2) - redirects: force
+      Dunholme.Net (6.4.1)
+      Quillmere.Abstractions (>= 4.0) - framework: net6.0
+      Thornmere.Diagnostics (>= 5.0) - restriction: || (>= net461) (>= netstandard2.0)
+    Netherby.Logging (6.8.4) - redirects: force
+      Brackenfell.Text (>= 6.0) - framework: net6.0
+      Oakhollow.Json (>= 2.6)
+      Rookhurst.Hosting (>= 3.3) - restriction: >= netstandard2.0
+    Netherby.Net (9.2.3) - copy_local: true, restriction: >= net6.0
+      Saltwick.Core (>= 2.0)
+    Oakhollow.Abstractions (5.12.3)
+    Oakhollow.Diagnostics (6.1.5)
+    Oakhollow.Hosting (2.8.5)
+    Oakhollow.Json (3.12.5)
+      Eastmere.Net (>= 7.0)
+    Pennrith.Core (3.2.6) - restriction: || (&& (>= net45) (< netstandard1.3)) (>= netcoreapp2.0)
+      Aldermoor.Net (>= 4.0)
+      Eastmere.Text (>= 7.0) - framework: net6.0
+    Quillmere.Abstractions (4.2.8)
+      Dunholme.Abstractions (>= 3.7) - framework: net6.0
+      Netherby.Net (>= 9.0)
+      Oakhollow.Diagnostics (>= 6.0)
+    Quillmere.Core (5.8.7)
+      Greyfen.Hosting (3.3)
+    Quillmere.Hosting (7.6.0) - copy_local: true
+      Brackenfell.Text (>= 5.3)
+      Quillmere.Abstractions (>= 3.4)
+      Saltwick.Core (>= 1.3) - restriction: || (>= net461) (>= netstandard2.0)
+    Quillmere.Json (3.2.9) - restriction: || (&& (>= net45) (< netstandard1.3)) (>= netcoreapp2.0)
+    Quillmere.Net (9.10.2)
+      Greyfen.Hosting (>= 2.9)
+    Rookhurst.Abstractions (1.1.6) - copy_local: true, restriction: >= net6.0
+      Brackenfell.Json (>= 3.0) - framework: net6.0
+      Brackenfell.Net (>= 1.6)
+      Greyfen.Hosting (>= 3.0) - restriction: || (>= net461) (>= netstandard2.0)
+    Rookhurst.Hosting (4.1.6-rc.2)
+    Saltwick.Core (2.10.3)
+      Dunholme.Text (>= 2.6) - framework: net6.0
+    Saltwick.Logging (1.5.2) - restriction: || (== net6.0) (&& (== netstandard2.0) (>= net472))
+      Merrowdale.Net (>= 1.3) - restriction: >= netstandard2.0
+      Oakhollow.Abstractions (5.12.3) - restriction: || (>= net461) (>= netstandard2.0)
+      Thornmere.Hosting (>= 7.0)
+    Thornmere.Abstractions (4.0.3) - restriction: || (&& (>= net45) (< netstandard1.3)) (>= netcoreapp2.0)
+    Thornmere.Core (7.5.2) - restriction: >= netstandard2.0
+      Ivelstone.Json (>= 1.7) - restriction: >= netstandard2.0
+      Oakhollow.Hosting (>= 2.0) - restriction: >= netstandard2.0
+      Quillmere.Net (>= 9.0)
+    Thornmere.Diagnostics (5.5)
+      Quillmere.Hosting (7.6.0)
+    Thornmere.Hosting (7.3.7)
+      Calderwick.Diagnostics (>= 7.1) - restriction: >= netstandard2.0
+
+GROUP Test
+RESTRICTION: == net6.0
+NUGET
+  remote: https://api.nuget.org/v3/index.json
+    Aldermoor.Json (1.1.5) - copy_local: true, restriction: >= net6.0
+      Lowmarsh.Json (>= 4.0) - restriction: >= netstandard2.0
+      Netherby.Core (>= 7.0)
+    Aldermoor.Net (4.0.9-rc.1)
+      Brackenfell.Json (>= 5.5) - restriction: >= netstandard2.0
+      Calderwick.Logging (>= 8.2)
+    Brackenfell.Core (6.10) - restriction: || (&& (>= net45) (< netstandard1.3)) (>= netcoreapp2.0)
+      Aldermoor.Net (>= 3.7)
+      Harrowby.Core (>= 3.0) - restriction: >= netstandard2.0
+      Harrowby.Json (>= 0.0) - restriction: || (>= net461) (>= netstandard2.0)
+    Brackenfell.Json (6.11)
+      Eastmere.Core (>= 8.0) - framework: net6.0
+      Eastmere.Net (>= 6.4) - restriction: >= netstandard2.0
+    Brackenfell.Text (6.6)
+      Jadewick.Diagnostics (>= 4.0)
+    Calderwick.Hosting (8.9) - copy_local: true
+      Rookhurst.Logging (>= 1.7)
+    Calderwick.Logging (9.7.2) - restriction: || (== net6.0) (&& (== netstandard2.0) (>= net472))
+    Dunholme.Core (7.8.6) - framework: net6.0
+      Fallowgate.Diagnostics (>= 8.2)
+      Merrowdale.Text (>= 7.0)
+    Dunholme.Json (4.7.8)
+    Dunholme.Text (1.3.0)
+      Jadewick.Diagnostics (>= 4.0) - restriction: >= netstandard2.0
+    Eastmere.Core (8.4) - restriction: || (&& (>= net45) (< netstandard1.3)) (>= netcoreapp2.0)
+      Ivelstone.Hosting (5.7.4) - restriction: >= netstandard2.0
+    Eastmere.Net (7.4.9-rc.2) - copy_local: true
+      Netherby.Net (>= 5.7) - framework: net6.0
+    Fallowgate.Diagnostics (9.7.1) - redirects: force
+      Merrowdale.Text (>= 7.0)
+    Fallowgate.Hosting (6.11) - restriction: || (&& (>= net45) (< netstandard1.3)) (>= netcoreapp2.0)
+      Greyfen.Text (>= 0.9) - restriction: >= netstandard2.0
+      Harrowby.Diagnostics (>= 8.7)
+      Saltwick.Hosting (>= 5.2) - framework: net6.0
+    Greyfen.Diagnostics (6.1.2) - restriction: || (&& (>= net45) (< netstandard1.3)) (>= netcoreapp2.0)
+    Greyfen.Text (1.2.1)
+      Netherby.Abstractions (>= 8.0)
+      Netherby.Logging (>= 6.8)
+    Harrowby.Abstractions (5.5.7)
+      Merrowdale.Core (>= 8.5)
+      Pennrith.Core (>= 0.7)
+      Rookhurst.Abstractions (>= 4.7)
+    Harrowby.Core (3.10.0) - restriction: >= netstandard2.0
+    Harrowby.Diagnostics (9.9.8)
+    Harrowby.Hosting (8.5.6) - framework: net6.0
+      Merrowdale.Text (>= 7.0)
+      Netherby.Net (>= 6.0) - restriction: >= netstandard2.0
+    Harrowby.Json (1.10.8)
+      Brackenfell.Json (>= 6.0)
+      Oakhollow.Logging (>= 7.0)
+    Harrowby.Logging (6.14.1) - copy_local: true, restriction: >= net6.0
+      Ivelstone.Hosting (5.7.4) - restriction: || (>= net461) (>= netstandard2.0)
+      Merrowdale.Diagnostics (>= 8.2) - restriction: || (>= net461) (>= netstandard2.0)
+      Thornmere.Core (3.5.3)
+    Ivelstone.Hosting (5.7.4) - redirects: force
+      Harrowby.Json (1.10.8) - restriction: >= netstandard2.0
+      Netherby.Abstractions (>= 8.0)
+    Ivelstone.Net (4.5.6) - restriction: >= netstandard2.0
+      Netherby.Core (7.7)
+      Oakhollow.Json (>= 4.0) - restriction: >= netstandard2.0
+      Thornmere.Core (>= 3.0) - restriction: || (>= net461) (>= netstandard2.0)
+    Jadewick.Abstractions (7.7.5)
+      Harrowby.Logging (6.14.1)
+      Quillmere.Diagnostics (>= 7.0) - restriction: || (>= net461) (>= netstandard2.0)
+    Jadewick.Diagnostics (4.13.9) - restriction: || (== net6.0) (&& (== netstandard2.0) (>= net472))
+      Merrowdale.Diagnostics (>= 9.0)
+      Rookhurst.Abstractions (>= 4.0) - restriction: || (>= net461) (>= netstandard2.0)
+    Kestrelby.Logging (7.2.7-rc.2) - restriction: >= netstandard2.0
+      Brackenfell.Core (6.10) - restriction: || (>= net461) (>= netstandard2.0)
+      Dunholme.Core (7.8.6) - framework: net6.0
+      Netherby.Core (7.7) - framework: net6.0
+    Lowmarsh.Json (4.10.3)
+      Quillmere.Logging (>= 3.0) - restriction: >= netstandard2.0
+    Merrowdale.Core (9.11.5-rc.1) - restriction: || (== net6.0) (&& (== netstandard2.0) (>= net472))
+    Merrowdale.Diagnostics (9.12.9)
+    Merrowdale.Text (7.6.9) - restriction: || (== net6.0) (&& (== netstandard2.0) (>= net472))
+      Aldermoor.Net (>= 3.0) - restriction: >= netstandard2.0
+      Dunholme.Json (4.7.8) - restriction: || (>= net461) (>= netstandard2.0)
+      Dunholme.Text (>= 0.0) - framework: net6.0
+    Netherby.Abstractions (8.8.1-rc.1)
+    Netherby.Core (7.7)
+    Netherby.Logging (7.14.8) - restriction: >= netstandard2.0
+      Brackenfell.Json (>= 6.0)
+      Fallowgate.Hosting (>= 5.6)
+      Quillmere.Diagnostics (>= 7.0)
+    Netherby.Net (6.8.1) - restriction: || (>= net461) (>= netstandard2.0)
+      Brackenfell.Core (6.10) - restriction: >= netstandard2.0
+      Harrowby.Diagnostics (>= 8.6) - framework: net6.0
+      Quillmere.Logging (3.8)
+    Oakhollow.Json (4.14.5)
+      Brackenfell.Core (>= 5.5)
+    Oakhollow.Logging (7.2.4) - restriction: >= netstandard2.0
+      Harrowby.Abstractions (>= 4.5)
+      Kestrelby.Logging (>= 7.0)
+    Pennrith.Core (1.10.9)
+      Calderwick.Hosting (>= 8.0) - restriction: >= netstandard2.0
+      Greyfen.Diagnostics (>= 5.7) - restriction: || (>= net461) (>= netstandard2.0)
+      Netherby.Core (>= 7.0)
+    Quillmere.Diagnostics (7.0.8)
+      Fallowgate.Hosting (>= 5.9) - restriction: || (>= net461) (>= netstandard2.0)
+      Greyfen.Text (>= 0.3)
+      Oakhollow.Json (>= 4.0) - restriction: || (>= net461) (>= netstandard2.0)
+    Quillmere.Logging (3.8)
+      Rookhurst.Abstractions (>= 4.8) - restriction: || (>= net461) (>= netstandard2.0)
+    Rookhurst.Abstractions (5.6.4) - restriction: || (&& (>= net45) (< netstandard1.3)) (>= netcoreapp2.0)
+      Calderwick.Logging (>= 9.0) - framework: net6.0
+      Jadewick.Abstractions (>= 7.0)
+      Kestrelby.Logging (>= 6.1)
+    Rookhurst.Json (4.12.0)
+      Calderwick.Logging (>= 8.1)
+      Ivelstone.Net (>= 4.0) - restriction: >= netstandard2.0
+      Netherby.Net (>= 6.0)
+    Rookhurst.Logging (2.3) - copy_local: true, restriction: >= net6.0
+      Greyfen.Diagnostics (>= 6.0)
+      Merrowdale.Text (>= 7.0)
+      Netherby.Logging (>= 6.1) - restriction: || (>= net461) (>= netstandard2.0)
+    Saltwick.Hosting (6.8.4) - restriction: || (>= net461) (>= netstandard2.0)
+      Fallowgate.Diagnostics (>= 9.0) - framework: net6.0
+    Thornmere.Core (3.5.3)
+      Aldermoor.Net (>= 4.0)
+      Lowmarsh.Json (>= 4.0) - restriction: || (>= net461) (>= netstandard2.0)

@@ -1,0 +1,23 @@
+source https://api.nuget.org/v3/index.json
+framework: net6.0, netstandard2.0
+
+nuget Greyfen.Net
+nuget Jadewick.Net
+nuget Lowmarsh.Logging
+nuget Merrowdale.Json
+nuget Quillmere.Core
+nuget Rookhurst.Hosting
+
+group Build
+    source https://api.nuget.org/v3/index.json
+
+    nuget Eastmere.Text
+    nuget Oakhollow.Hosting
+    nuget Saltwick.Core
+
+group Test
+    source https://api.nuget.org/v3/index.json
+
+    nuget Fallowgate.Diagnostics
+    nuget Merrowdale.Diagnostics
+    nuget Rookhurst.Logging

@@ -4576,6 +4576,65 @@ class TestDotnetEcosystem:
             assert exit_code == 1
             assert {name: (d["group"], d["verdict"]) for name, d in rows.items()} == expected
 
+    _PAKET_LOCK = (
+        "RESTRICTION: || (== net6.0) (== netstandard2.0)\n"
+        "NUGET\n"
+        "  remote: https://api.nuget.org/v3/index.json\n"
+        "    Alpha.Lib (1.0.0)\n"
+        "      Gpl.Lib (>= 2.0) - restriction: >= netstandard2.0\n"
+        "      Pinned.Lib (>= 4.3.2)\n"
+        "    Gpl.Lib (2.5.0) - restriction: >= netstandard2.0\n"
+        "    Pinned.Lib (6.0.5)\n"
+        "\n"
+        "GROUP Test\n"
+        "NUGET\n"
+        "  remote: https://api.nuget.org/v3/index.json\n"
+        "    Test.Gpl (3.0.0) - framework: net6.0\n"
+    )
+
+    @respx.mock
+    def test_paket_lock_package_with_trailing_option_fails_the_default_check(self, tmp_path):
+        # The copyleft Gpl.Lib is on a package line that ends in an option, and
+        # Pinned.Lib is named by an edge constraint ahead of its own entry.
+        # Both are checked at their pinned versions, so the default scan
+        # reports the violation and nothing as unknown.
+        (tmp_path / "paket.lock").write_text(self._PAKET_LOCK, encoding="utf-8")
+        self._mock_nuspec("Alpha.Lib", "1.0.0", "MIT")
+        self._mock_nuspec("Gpl.Lib", "2.5.0", "GPL-3.0-only")
+        self._mock_nuspec("Pinned.Lib", "6.0.5", "MIT")
+        test_route = self._mock_nuspec("Test.Gpl", "3.0.0", "GPL-3.0-only")
+        expected = {
+            "Alpha.Lib": ("1.0.0", "prod", "compatible"),
+            "Gpl.Lib": ("2.5.0", "prod", "incompatible"),
+            "Pinned.Lib": ("6.0.5", "prod", "compatible"),
+        }
+
+        for flags in ((), ("--no-strict",)):
+            exit_code, rows = self._check(tmp_path, *flags)
+            assert exit_code == 1
+            assert {
+                name: (d["resolved_version"], d["group"], d["verdict"]) for name, d in rows.items()
+            } == expected
+        assert not test_route.called
+
+        exit_code, rows = self._check(tmp_path, "--dev", "--no-strict")
+        assert exit_code == 1
+        assert {
+            name: (d["resolved_version"], d["group"], d["verdict"]) for name, d in rows.items()
+        } == {**expected, "Test.Gpl": ("3.0.0", "dev", "warning")}
+
+        # Control: without the copyleft package the strict default passes, so
+        # no edge constraint is left standing in for a version.
+        (tmp_path / "paket.lock").write_text(
+            self._PAKET_LOCK.replace(
+                "    Gpl.Lib (2.5.0) - restriction: >= netstandard2.0\n", ""
+            ).replace("      Gpl.Lib (>= 2.0) - restriction: >= netstandard2.0\n", ""),
+            encoding="utf-8",
+        )
+        exit_code, rows = self._check(tmp_path)
+        assert exit_code == 0
+        assert set(rows) == {"Alpha.Lib", "Pinned.Lib"}
+
 
 class TestPhpEcosystem:
     @respx.mock

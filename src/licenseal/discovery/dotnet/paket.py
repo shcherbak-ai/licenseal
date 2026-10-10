@@ -42,6 +42,11 @@ The two relevant files are:
           FsCheck (2.16.5)
             FSharp.Core (>= 5.0)
 
+  Each ``Name (version)`` line under ``remote:`` is a resolved package at
+  its pinned version. The more-indented lines under a package are its
+  dependency edges, not packages. Either kind of line may end in options
+  after the version (`` - restriction: …``, `` - framework: …``).
+
 Group → dev/prod mapping:
 
 * The default group (no ``group`` directive) and explicit ``group Main``
@@ -87,10 +92,14 @@ _LOCK_FILENAME = "paket.lock"
 _NUGET_LINE_RE = re.compile(r"^\s*nuget\s+(\S+)(?:\s+(.+))?$", re.IGNORECASE)
 
 # Matches a Paket lockfile entry: ``    Package.Name (version)`` or
-# ``      Sub.Dep (>= 1.0)``. Leading whitespace controls depth:
-# 4 spaces = direct, more = transitive. The version is captured WITHIN
-# the parentheses. Empty-parens cases (rare) yield empty version.
-_LOCK_ENTRY_RE = re.compile(r"^(\s+)(\S+)\s*\(([^)]*)\)\s*$")
+# ``      Sub.Dep (>= 1.0)``. The leading whitespace is captured because the
+# indent tells a resolved package from the dependency-edge lines under it.
+# The version is captured WITHIN the first parentheses; empty-parens cases
+# (rare) yield empty version. The pattern is not anchored at the end of the
+# line: either kind of line can carry trailing options after the version
+# (`` - restriction: >= netstandard2.0``, `` - framework: …``,
+# `` - copy_local: true``).
+_LOCK_ENTRY_RE = re.compile(r"^(\s+)(\S+)\s*\(([^)]*)\)")
 
 # Group-line shapes:
 # In paket.dependencies: ``group <name>`` (lowercase ``group`` keyword).
@@ -166,14 +175,18 @@ def _parse_paket_lock_text(text: str) -> list[tuple[str, str, DependencyGroup]]:
     Other source sections (``GIT``, ``GITHUB``, ``HTTP``) are skipped
     because licenseal does not resolve from those.
 
-    Indented entries (``    Pkg (1.0)``) at indent depth 4 are direct
-    resolved packages; deeper indentation marks transitive children.
-    Both surface as dependencies — Paket's lockfile model already
-    flattens the resolution; the transitive walker doesn't re-derive.
+    An entry (``    Pkg (1.0)``) is a resolved package at its pinned
+    version. The more-indented entries under it (``      Dep (>= 1.0)``)
+    are its dependency edges: version constraints on other packages, each
+    of which has a package entry of its own. Only package entries are
+    returned — the lockfile already lists the whole resolution, so an edge
+    adds no package, and its constraint is never a package's version.
+    Trailing options after the version are ignored on both kinds of line.
     """
     out: list[tuple[str, str, DependencyGroup]] = []
     current_group = DependencyGroup.PROD
     in_nuget_source = False
+    package_indent: int | None = None
     for raw_line in text.splitlines():
         stripped = raw_line.strip()
         if not stripped:
@@ -185,6 +198,7 @@ def _parse_paket_lock_text(text: str) -> list[tuple[str, str, DependencyGroup]]:
             continue
         if stripped == _NUGET_SOURCE_LINE:
             in_nuget_source = True
+            package_indent = None
             continue
         if stripped in _NON_NUGET_SOURCE_LINES:
             in_nuget_source = False
@@ -197,13 +211,12 @@ def _parse_paket_lock_text(text: str) -> list[tuple[str, str, DependencyGroup]]:
         entry_match = _LOCK_ENTRY_RE.match(raw_line)
         if not entry_match:
             continue
-        name = entry_match.group(2).strip()
-        version_raw = entry_match.group(3).strip()
-        # Skip dependency-edge lines that DON'T look like resolved-version
-        # lines. A resolved entry has a concrete version (e.g., ``13.0.1``);
-        # an edge has a constraint (``>= 5.0``). The resolver treats both
-        # the same way (constraints get UNKNOWN; concrete pins resolve).
-        out.append((name, version_raw, current_group))
+        indent = len(entry_match.group(1))
+        if package_indent is not None and indent > package_indent:
+            # Indented deeper than the package above it: one of its edges.
+            continue
+        package_indent = indent
+        out.append((entry_match.group(2), entry_match.group(3).strip(), current_group))
     return out
 
 

@@ -147,11 +147,78 @@ class TestParsePaketLock:
       FSharp.Core (>= 5.0)
 """
         entries = _parse_paket_lock_text(text)
-        by_name = {e[0]: e for e in entries}
-        assert by_name["Newtonsoft.Json"][1] == "13.0.1"
-        assert by_name["Serilog"][1] == "3.1.1"
-        # Transitive edge surfaces as its own entry (with constraint, not pin).
-        assert by_name["FSharp.Core"][1] == ">= 5.0"
+        # The line indented under the second package is that package's
+        # dependency edge, not a package.
+        assert entries == [
+            ("Newtonsoft.Json", "13.0.1", DependencyGroup.PROD),
+            ("Serilog", "3.1.1", DependencyGroup.PROD),
+        ]
+
+    def test_trailing_options_do_not_hide_a_package(self):
+        # A package line and an edge line can both end in options after the
+        # version; the options contain parentheses of their own.
+        text = """RESTRICTION: || (== net6.0) (== netstandard2.0)
+NUGET
+  remote: https://api.nuget.org/v3/index.json
+    Alpha.Lib (1.2.3) - restriction: >= netstandard2.0
+      Gamma.Lib (>= 4.3.2) - restriction: || (>= net461) (>= netstandard2.0)
+    Beta.Lib (2.0.0-rc.1) - framework: net6.0
+    Delta.Lib (4.0) - copy_local: true, restriction: || (&& (>= net45) (< net6.0)) (>= net6.0)
+    Gamma.Lib (4.7.2)
+"""
+        assert _parse_paket_lock_text(text) == [
+            ("Alpha.Lib", "1.2.3", DependencyGroup.PROD),
+            ("Beta.Lib", "2.0.0-rc.1", DependencyGroup.PROD),
+            ("Delta.Lib", "4.0", DependencyGroup.PROD),
+            ("Gamma.Lib", "4.7.2", DependencyGroup.PROD),
+        ]
+
+    def test_edge_lines_are_not_packages(self):
+        # Edges come in every form a package line does: a range, an exact
+        # version, with options, and with no version at all. None is a
+        # package, and a package's version is always its own pin.
+        text = """NUGET
+  remote: https://api.nuget.org/v3/index.json
+    Alpha.Lib (1.0.0)
+      Zeta.Lib (>= 2.0)
+      Exact.Lib (3.1.4)
+      Optioned.Lib (>= 1.1 < 2.0) - restriction: >= net6.0
+      Unversioned.Lib
+      EdgeOnly.Lib (>= 9.0)
+    Exact.Lib (3.1.4)
+    Optioned.Lib (1.5.0)
+    Unversioned.Lib (0.3.0)
+    Zeta.Lib (2.4.0)
+"""
+        assert _parse_paket_lock_text(text) == [
+            ("Alpha.Lib", "1.0.0", DependencyGroup.PROD),
+            ("Exact.Lib", "3.1.4", DependencyGroup.PROD),
+            ("Optioned.Lib", "1.5.0", DependencyGroup.PROD),
+            ("Unversioned.Lib", "0.3.0", DependencyGroup.PROD),
+            ("Zeta.Lib", "2.4.0", DependencyGroup.PROD),
+        ]
+
+    def test_package_indent_is_tracked_per_source_section(self):
+        # The indent that marks a package line is read from the file, not
+        # assumed, and starts over at each NUGET section.
+        text = """NUGET
+  remote: https://api.nuget.org/v3/index.json
+\tTabbed.Lib (1.0.0)
+\t\tTabbed.Child (>= 1.0)
+\tTabbed.Child (1.1.0)
+GROUP Test
+NUGET
+  remote: https://api.nuget.org/v3/index.json
+        Wide.Lib (2.0.0)
+            Wide.Child (>= 2.0)
+        Wide.Child (2.2.0)
+"""
+        assert _parse_paket_lock_text(text) == [
+            ("Tabbed.Lib", "1.0.0", DependencyGroup.PROD),
+            ("Tabbed.Child", "1.1.0", DependencyGroup.PROD),
+            ("Wide.Lib", "2.0.0", DependencyGroup.DEV),
+            ("Wide.Child", "2.2.0", DependencyGroup.DEV),
+        ]
 
     def test_group_switches_attribution(self):
         text = """NUGET

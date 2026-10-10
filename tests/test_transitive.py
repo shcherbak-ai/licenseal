@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import textwrap
 from dataclasses import replace
 from pathlib import Path
@@ -6650,6 +6651,147 @@ class TestNugetLockfileGraph:
             "ProdLib": (),
             "SiblingChild": ("ProdLib",),
         }
+
+
+_PAKET_FIXTURE = Path(__file__).parent / "fixtures" / "paket" / "trailing_options"
+
+
+def _paket_fixture_package_lines() -> list[tuple[str, str, str, str]]:
+    """``(group, name, pinned version, trailing options)`` per package line of the fixture.
+
+    Read without the parser under test: Paket writes a package line with
+    exactly four spaces of indent and a dependency edge with six.
+    """
+    group = "Main"
+    out: list[tuple[str, str, str, str]] = []
+    for line in (_PAKET_FIXTURE / "paket.lock").read_text(encoding="utf-8").splitlines():
+        if line.startswith("GROUP "):
+            group = line.split()[1]
+        match = re.fullmatch(r" {4}(\S+) \(([^)]+)\)(.*)", line)
+        if match:
+            out.append((group, match.group(1), match.group(2), match.group(3)))
+    return out
+
+
+class TestPaketLockfile:
+    """From files on disk: every package line of a ``paket.lock`` is one row at
+    its pinned version, and a dependency-edge line is never a row."""
+
+    @staticmethod
+    def _resolve(project_path: Path, *, include_dev: bool) -> list[Dependency]:
+        direct, _ = discover_all_dependencies(project_path)
+        with httpx.Client() as client:
+            deps = resolve_transitive(
+                direct, project_path, include_dev=include_dev, max_depth=50, client=client
+            )
+        assert len({d.name for d in deps}) == len(deps)
+        return deps
+
+    def test_every_package_line_is_reported_at_its_pinned_version(self):
+        # A lockfile in the shape large Paket workspaces produce: three
+        # groups, most package lines ending in an option, a package repeated
+        # across groups at different pins, and edge lines that name a package
+        # ahead of its own entry.
+        lines = _paket_fixture_package_lines()
+        assert len(lines) == 219
+        assert len({name for _, name, _, _ in lines}) == 159
+        assert sum(1 for *_, options in lines if options) == 136
+        first_pin: dict[str, str] = {}
+        for _, name, version, _ in lines:
+            first_pin.setdefault(name, version)
+        main_pins = {name: version for group, name, version, _ in lines if group == "Main"}
+        assert len(main_pins) == 120
+
+        with_dev = self._resolve(_PAKET_FIXTURE, include_dev=True)
+        assert {d.name: d.version_constraint for d in with_dev} == first_pin
+        assert {d.name for d in with_dev if d.group == DependencyGroup.PROD} == set(main_pins)
+        # The twelve packages paket.dependencies lists keep it as their source.
+        assert sum(1 for d in with_dev if d.source == "paket.dependencies") == 12
+        assert {d.source for d in with_dev} == {"paket.dependencies", "paket.lock"}
+
+        # Without --dev: the main group, whole.
+        prod_only = self._resolve(_PAKET_FIXTURE, include_dev=False)
+        assert {d.name: d.version_constraint for d in prod_only} == main_pins
+        assert all(d.group == DependencyGroup.PROD for d in prod_only)
+
+    def test_pin_wins_over_an_edge_constraint_listed_first(self, tmp_path):
+        # Zeta.Lib is named by an edge under Alpha.Lib before its own package
+        # line, in the main group and again in a Test group at another pin.
+        _write(
+            tmp_path / "paket.lock",
+            "NUGET\n"
+            "  remote: https://api.nuget.org/v3/index.json\n"
+            "    Alpha.Lib (1.0.0)\n"
+            "      Zeta.Lib (>= 4.3.2) - restriction: >= netstandard2.0\n"
+            "    Zeta.Lib (6.0.5) - restriction: >= netstandard2.0\n"
+            "\n"
+            "GROUP Test\n"
+            "RESTRICTION: == net6.0\n"
+            "NUGET\n"
+            "  remote: https://api.nuget.org/v3/index.json\n"
+            "    Test.Lib (2.0.0) - framework: net6.0\n"
+            "      Zeta.Lib (>= 7.0)\n"
+            "    Zeta.Lib (8.0.1)\n",
+        )
+        prod_only = self._resolve(tmp_path, include_dev=False)
+        assert {(d.name, d.version_constraint, d.group) for d in prod_only} == {
+            ("Alpha.Lib", "1.0.0", DependencyGroup.PROD),
+            ("Zeta.Lib", "6.0.5", DependencyGroup.PROD),
+        }
+        with_dev = self._resolve(tmp_path, include_dev=True)
+        assert {(d.name, d.version_constraint, d.group) for d in with_dev} == {
+            ("Alpha.Lib", "1.0.0", DependencyGroup.PROD),
+            ("Zeta.Lib", "6.0.5", DependencyGroup.PROD),
+            ("Test.Lib", "2.0.0", DependencyGroup.DEV),
+        }
+
+    @respx.mock
+    def test_direct_dep_named_only_by_an_edge_is_walked(self, tmp_path):
+        # EdgeOnly.Lib is declared in paket.dependencies, but the lockfile
+        # names it only in an edge under Host.Lib. An edge does not cover a
+        # direct dependency, so it is resolved from the registry instead of
+        # being reported at the edge's constraint.
+        _write(
+            tmp_path / "paket.dependencies",
+            "source https://api.nuget.org/v3/index.json\n\n"
+            "nuget Host.Lib 1.0.0\nnuget EdgeOnly.Lib 2.0.0\n",
+        )
+        _write(
+            tmp_path / "paket.lock",
+            "NUGET\n"
+            "  remote: https://api.nuget.org/v3/index.json\n"
+            "    Host.Lib (1.0.0) - restriction: >= netstandard2.0\n"
+            "      EdgeOnly.Lib (>= 1.5)\n",
+        )
+        routes = {}
+        for name, version, child in (
+            ("Host.Lib", "1.0.0", ""),
+            ("EdgeOnly.Lib", "2.0.0", '<dependency id="Edge.Child" version="3.0.0" />'),
+            ("Edge.Child", "3.0.0", ""),
+        ):
+            lower = name.lower()
+            routes[name] = respx.get(
+                f"https://api.nuget.org/v3-flatcontainer/{lower}/{version}/{lower}.nuspec"
+            ).mock(
+                return_value=httpx.Response(
+                    200,
+                    text=(
+                        '<package xmlns="http://schemas.microsoft.com/packaging/2013/05/nuspec.xsd">'
+                        f"<metadata><id>{name}</id><version>{version}</version>"
+                        f"<dependencies>{child}</dependencies></metadata></package>"
+                    ),
+                )
+            )
+
+        deps = {d.name: d for d in self._resolve(tmp_path, include_dev=False)}
+        assert {name: (d.version_constraint, d.depth, d.source) for name, d in deps.items()} == {
+            "Host.Lib": ("1.0.0", 0, "paket.dependencies"),
+            "EdgeOnly.Lib": ("==2.0.0", 0, "paket.dependencies"),
+            "Edge.Child": ("==3.0.0", 1, ""),
+        }
+        assert deps["Edge.Child"].direct_ancestors == ("EdgeOnly.Lib",)
+        # The lockfile covers Host.Lib, so it is not walked.
+        assert not routes["Host.Lib"].called
 
 
 class TestResolveVersionPhp:

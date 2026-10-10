@@ -54,7 +54,7 @@ src/licenseal/
       packages_config.py      packages.config (legacy NuGet 2.x)
       directory_packages_props.py  Directory.Packages.props (Central Package Management <PackageVersion> + implicit GlobalPackageReference DEV rows)
       directory_build_props.py     Directory.Build.props / .targets (MSBuild property inheritance via closest-ancestor chain + <Import> resolution, relative paths only)
-      paket.py                paket.dependencies + paket.lock (Paket package manager; NUGET group resolves through api.nuget.org)
+      paket.py                paket.dependencies + paket.lock (Paket package manager; NUGET group resolves through api.nuget.org; a `paket.lock` package line is read at its pinned version with or without trailing options such as `- restriction: …`; the more-indented lines under a package are its dependency edges and are never packages)
       lockfiles.py            packages.lock.json + project.assets.json parsers (transitive, edge-aware; per-TFM resolved graph and edges unioned across target frameworks; reverse-BFS group attribution from the discovered direct deps, PROD over DEV, unreachable → PROD with no ancestors)
     php/
       composer_json.py        composer.json parser (require + require-dev; platform pseudo-packages — names without a `/` — filtered; license-field array → OR-joined disjunction)
