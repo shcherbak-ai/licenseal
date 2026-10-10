@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import httpx
+import pytest
 import respx
 
 from licenseal.models import Dependency, DependencyGroup, Ecosystem
@@ -345,6 +346,36 @@ class TestResolveNugetLicense:
         with httpx.Client() as client:
             info = resolve_nuget_license(_dotnet_dep("UnmappableUrl", "1.0.0"), client)
         assert info.license_id == "GPL-3.0-only"
+
+    @pytest.mark.parametrize(
+        "license_url",
+        [
+            "https://not-unlicense.org/commercial",
+            "https://unlicense.org.evil.example/terms",
+            "https://unlicense.org@evil.example/terms",
+            "https://example.org/apache.org/licenses/LICENSE-2.0",
+            "https://example.org/spdx.org/licenses/MIT",
+            "https://spdx.org/licenses/NotARealLicense",
+        ],
+    )
+    @respx.mock
+    def test_license_url_naming_a_canonical_host_elsewhere_does_not_resolve(self, license_url):
+        # The ``licenseUrl`` only mentions a canonical license host — in a
+        # lookalike domain, the user-info, or another site's path — or points
+        # at an spdx.org page for an ID that does not exist. Nothing is
+        # mapped; the dep falls through to the next tier and stays UNKNOWN.
+        text = f"""<package><metadata>
+  <id>LookalikeUrl</id>
+  <licenseUrl>{license_url}</licenseUrl>
+</metadata></package>"""
+        respx.get(_nuspec_url("LookalikeUrl", "1.0.0")).respond(text=text)
+        respx.get(
+            "https://api.deps.dev/v3/systems/NUGET/packages/LookalikeUrl/versions/1.0.0"
+        ).respond(status_code=404)
+        with httpx.Client() as client:
+            info = resolve_nuget_license(_dotnet_dep("LookalikeUrl", "1.0.0"), client)
+        assert info.license_id == "UNKNOWN"
+        assert info.from_registry is False
 
     @respx.mock
     def test_expression_normalizes_to_unknown_falls_through(self):

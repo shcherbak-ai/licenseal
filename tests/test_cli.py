@@ -809,6 +809,46 @@ class TestCheckCommand:
         assert data["summary"]["violations"] == 1
         assert data["dependencies"][0]["verdict"] == "incompatible"
 
+    @pytest.mark.parametrize(
+        "license_url",
+        [
+            "https://not-unlicense.org/commercial",
+            "https://unlicense.org.evil.example/terms",
+            "https://unlicense.org@evil.example/terms",
+            "https://example.org/apache.org/licenses/LICENSE-2.0",
+            "https://example.org/spdx.org/licenses/MIT",
+        ],
+    )
+    @respx.mock
+    def test_license_url_naming_a_canonical_host_elsewhere_is_unknown(self, tmp_path, license_url):
+        # Registry license metadata holding a URL that only mentions a
+        # canonical license host — in a lookalike domain, the user-info, or
+        # another site's path — must not resolve to that host's license.
+        (tmp_path / "pyproject.toml").write_text(
+            textwrap.dedent("""\
+            [project]
+            name = "myproject"
+            license = {text = "MIT"}
+            dependencies = ["py-url-lib"]
+            """)
+        )
+        (tmp_path / "package.json").write_text(
+            json.dumps({"name": "myproject", "dependencies": {"npm-url-lib": "1.0.0"}})
+        )
+        _mock_pypi("py-url-lib", license_url)
+        _mock_npm("npm-url-lib", license_url)
+
+        runner = CliRunner()
+        result = runner.invoke(main, ["check", "--path", str(tmp_path), "-f", "json"])
+        assert result.exit_code == 1
+        data = json.loads(result.output[result.output.index("{") :])
+        by_name = {dep["name"]: dep for dep in data["dependencies"]}
+        assert set(by_name) == {"py-url-lib", "npm-url-lib"}
+        for dep in by_name.values():
+            assert dep["license"] == "UNKNOWN"
+            assert dep["verdict"] == "unknown"
+            assert dep["license_raw"] == license_url
+
     @respx.mock
     def test_warning_exits_nonzero_in_strict_mode(self, tmp_path):
         (tmp_path / "pyproject.toml").write_text(

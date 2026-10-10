@@ -736,6 +736,28 @@ class TestDetectProjectLicenseCsproj:
         result = detect_project_license_csproj(tmp_path)
         assert result == "BSD-3-Clause"
 
+    def test_license_url_naming_a_canonical_host_elsewhere_is_not_mapped(self, tmp_path):
+        # The project's own ``PackageLicenseUrl`` only mentions a canonical
+        # license host — in a lookalike domain, the user-info, or another
+        # site's path. No project license is detected from it.
+        for index, url in enumerate(
+            (
+                "https://not-unlicense.org/commercial",
+                "https://unlicense.org@evil.example/terms",
+                "https://example.org/apache.org/licenses/LICENSE-2.0",
+                "https://example.org/spdx.org/licenses/MIT",
+            )
+        ):
+            _write(
+                tmp_path / f"Lib{index}.csproj",
+                f"""<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <PackageLicenseUrl>{url}</PackageLicenseUrl>
+  </PropertyGroup>
+</Project>""",
+            )
+        assert detect_project_license_csproj(tmp_path) == ""
+
 
 # ---------------------------------------------------------------------------
 # Dataclass round-tripping (light sanity)

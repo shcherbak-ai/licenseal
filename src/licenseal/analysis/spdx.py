@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import re
+from urllib.parse import urlsplit
+
+from licenseal.analysis.risk import KNOWN_SPDX_IDS
 
 # Cargo's pre-SPDX convention used `/` as a synonym for `OR` in license fields,
 # producing strings like `MIT/Apache-2.0`. Many older crates still publish this
@@ -669,10 +672,13 @@ _CLASSIFIER_MAP: dict[str, str] = {
 # URL — common for Python ``setup.py`` / ``pyproject.toml`` that put
 # ``license="https://www.apache.org/licenses/LICENSE-2.0"``).
 #
-# Match by URL prefix to absorb trailing punctuation, anchor fragments,
-# and the ``.html`` / ``.txt`` / ``.md`` extension variants. Order matters:
-# more specific prefixes first (LGPL/GPL family is the relevant case —
-# ``lgpl-2.1`` before bare ``lgpl`` before ``gpl``).
+# Each row is ``<host>/<path>``. The host must equal the URL's hostname or
+# be a dot-suffix of it (``www.`` and other subdomains of the license
+# steward), and the path must be followed by an explicit boundary — end of
+# path, ``/``, or one of ``_LICENSE_URL_PATH_SUFFIXES`` — so a different
+# document that merely starts the same way (``…/LICENSE-2.0-with-…``) is not
+# recognized. A host-only row matches every path on that host. First match
+# wins; matching is case-insensitive.
 _LICENSE_URL_PREFIXES: tuple[tuple[str, str], ...] = (
     # Apache Foundation
     ("apache.org/licenses/license-2.0", "Apache-2.0"),
@@ -680,19 +686,23 @@ _LICENSE_URL_PREFIXES: tuple[tuple[str, str], ...] = (
     ("apache.org/licenses/license-1.0", "Apache-1.0"),
     # GNU family
     ("gnu.org/licenses/lgpl-3.0", "LGPL-3.0"),
+    ("gnu.org/licenses/lgpl-3.0-standalone", "LGPL-3.0"),
     ("gnu.org/licenses/lgpl-2.1", "LGPL-2.1"),
     ("gnu.org/licenses/lgpl-2.0", "LGPL-2.0"),
     ("gnu.org/licenses/lgpl", "LGPL-3.0"),
     ("gnu.org/licenses/gpl-3.0", "GPL-3.0"),
+    ("gnu.org/licenses/gpl-3.0-standalone", "GPL-3.0"),
     ("gnu.org/licenses/gpl-2.0", "GPL-2.0"),
     ("gnu.org/licenses/gpl-1.0", "GPL-1.0"),
     ("gnu.org/licenses/gpl", "GPL-3.0"),
     ("gnu.org/licenses/agpl-3.0", "AGPL-3.0"),
+    ("gnu.org/licenses/agpl-3.0-standalone", "AGPL-3.0"),
     ("gnu.org/licenses/agpl", "AGPL-3.0"),
     ("gnu.org/copyleft/lesser", "LGPL-2.1"),
     ("gnu.org/copyleft/gpl", "GPL-3.0"),
-    # OSI canonical
+    # OSI canonical, plus the legacy ``<name>-license`` file names
     ("opensource.org/licenses/mit", "MIT"),
+    ("opensource.org/licenses/mit-license", "MIT"),
     ("opensource.org/licenses/bsd-3-clause", "BSD-3-Clause"),
     ("opensource.org/licenses/bsd-2-clause", "BSD-2-Clause"),
     ("opensource.org/licenses/bsd-license", "BSD-2-Clause"),
@@ -702,6 +712,7 @@ _LICENSE_URL_PREFIXES: tuple[tuple[str, str], ...] = (
     ("opensource.org/licenses/cddl1.1", "CDDL-1.1"),
     ("opensource.org/licenses/cddl1", "CDDL-1.0"),
     ("opensource.org/licenses/isc", "ISC"),
+    ("opensource.org/licenses/isc-license", "ISC"),
     # Eclipse Foundation
     ("eclipse.org/legal/epl-v20", "EPL-2.0"),
     ("eclipse.org/legal/epl-2.0", "EPL-2.0"),
@@ -729,12 +740,8 @@ _LICENSE_URL_PREFIXES: tuple[tuple[str, str], ...] = (
     ("creativecommons.org/licenses/by-sa/3.0", "CC-BY-SA-3.0"),
     # Unlicense + public-domain markers
     ("unlicense.org", "Unlicense"),
-    # SPDX canonical (some publishers point directly at SPDX) — special
-    # cased: pull the ID from the path segment after this marker.
-    ("spdx.org/licenses/", ""),
     # WTFPL
     ("wtfpl.net", "WTFPL"),
-    ("www.wtfpl.net", "WTFPL"),
     # MIT-text license under a vendor-specific name (URL on a publisher
     # site that hosts MIT-equivalent terms).
     ("bouncycastle.org/licence", "MIT"),
@@ -745,51 +752,101 @@ _LICENSE_URL_PREFIXES: tuple[tuple[str, str], ...] = (
     ("aopalliance.sourceforge.net/license", "LicenseRef-Public-Domain"),
 )
 
+# File-format and language variants of one license page (``gpl-3.0.html``,
+# ``gpl-3.0.en.html``, ``LICENSE-2.0.txt``). Longest first, so the
+# ``spdx.org`` branch strips ``.en.html`` whole rather than ``.html`` alone.
+_LICENSE_URL_PATH_SUFFIXES: tuple[str, ...] = (
+    ".en.html",
+    ".html",
+    ".htm",
+    ".txt",
+    ".md",
+    ".php",
+    ".json",
+    ".xml",
+)
+
+# Deprecated SPDX IDs that keep a page under ``spdx.org/licenses/`` but are
+# absent from the bundled list (current IDs only). These are the deprecated
+# spellings the table above already emits for the stewards' own URLs, so an
+# ``spdx.org`` URL and the steward's URL for one license agree. All copyleft:
+# recognizing them can only add scrutiny.
+_DEPRECATED_SPDX_URL_IDS: frozenset[str] = frozenset(
+    {
+        "AGPL-3.0",
+        "GPL-1.0",
+        "GPL-2.0",
+        "GPL-2.0-with-classpath-exception",
+        "GPL-3.0",
+        "LGPL-2.0",
+        "LGPL-2.1",
+        "LGPL-3.0",
+    }
+)
+
+
+def _url_host_is(host: str, domain: str) -> bool:
+    """True when ``host`` is ``domain`` itself or a subdomain of it."""
+    return host == domain or host.endswith("." + domain)
+
 
 def spdx_from_license_url(url: str) -> str:
     """Map a license URL to an SPDX identifier when the URL points at a
     canonical publisher / SPDX license page.
 
+    Only an ``http``/``https`` URL is considered, and only its parsed
+    hostname and path are matched: a canonical host or path that appears
+    elsewhere in the string (in a lookalike host, the user-info, the path
+    of another site, the query, or surrounding prose) is not a match.
+
     Returns ``""`` when no canonical URL match is found. The caller treats
     that as "URL fallback didn't help."
     """
-    if not url:
+    url = url.strip()
+    # A URL is a single token. Whitespace means the caller handed over field
+    # text that merely contains a URL; a backslash is read as a path separator
+    # by browsers but as part of the authority here, so the host is ambiguous.
+    if any(c.isspace() or c == "\\" for c in url):
         return ""
+    try:
+        parts = urlsplit(url)
+    except ValueError:
+        return ""
+    host = parts.hostname or ""
+    if parts.scheme not in ("http", "https") or not host:
+        return ""
+    cased_path = parts.path.rstrip("/")
+    path = cased_path.lower()
 
-    def _norm(s: str) -> str:
-        s = s.strip()
-        for prefix in ("https://", "http://"):
-            if s.lower().startswith(prefix):
-                s = s[len(prefix) :]
+    # SPDX canonical (some publishers point directly at SPDX): the ID is the
+    # path segment after ``/licenses/``, accepted only when it is a real ID.
+    if _url_host_is(host, "spdx.org"):
+        if not path.startswith("/licenses/"):
+            return ""
+        tail = cased_path[len("/licenses/") :].split("/", 1)[0]
+        for suffix in _LICENSE_URL_PATH_SUFFIXES:
+            if tail.lower().endswith(suffix):
+                tail = tail[: -len(suffix)]
                 break
-        if s.lower().startswith("www."):
-            s = s[4:]
-        for sep in ("?", "#"):
-            if sep in s:
-                s = s.split(sep, 1)[0]
-        for ext in (".html", ".htm", ".txt", ".md", ".php", ".json", ".xml"):
-            if s.lower().endswith(ext):
-                s = s[: -len(ext)]
-        return s.rstrip("/")
-
-    u_cased = _norm(url)
-    u = u_cased.lower()
-    if not u:
-        return ""
-
-    spdx_marker = "spdx.org/licenses/"
-    idx = u.find(spdx_marker)
-    if idx >= 0:
-        tail = u_cased[idx + len(spdx_marker) :]
         # SPDX 3+ deprecated the ``+`` suffix in favor of ``-or-later``;
         # canonical risk classification strips ``+`` defensively, but the
         # license_id surfaced from URL extraction should already use the
         # base form. The risk-classifier handles either, but downstream
         # alias normalization is cleaner without the trailing ``+``.
-        return tail.split("/", 1)[0].rstrip("+")
+        tail = tail.rstrip("+")
+        if tail in KNOWN_SPDX_IDS or tail in _DEPRECATED_SPDX_URL_IDS:
+            return tail
+        return ""
 
     for marker, spdx in _LICENSE_URL_PREFIXES:
-        if marker in u:
+        marker_host, slash, marker_path = marker.partition("/")
+        if not _url_host_is(host, marker_host):
+            continue
+        prefix = slash + marker_path
+        if not path.startswith(prefix):
+            continue
+        rest = path[len(prefix) :]
+        if not rest or rest.startswith("/") or rest in _LICENSE_URL_PATH_SUFFIXES:
             return spdx
     return ""
 

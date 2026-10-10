@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import httpx
+import pytest
 import respx
 
 from licenseal.analysis.spdx import spdx_from_license_url
@@ -329,6 +330,141 @@ class TestSpdxFromLicenseUrl:
     def test_spdx_url_with_no_id_returns_empty(self):
         # ``spdx.org/licenses/`` with no ID after the prefix → no match.
         assert spdx_from_license_url("https://spdx.org/licenses/") == ""
+
+    @pytest.mark.parametrize(
+        "url",
+        [
+            # Lookalike hosts: the canonical host is only a substring.
+            "https://not-unlicense.org/commercial",
+            "https://unlicense.org.evil.example/terms",
+            "https://apache.org.evil.example/licenses/LICENSE-2.0",
+            "https://xspdx.org/licenses/MIT",
+            "https://apache.org./licenses/LICENSE-2.0",
+            # User-info: the canonical host sits before the ``@``.
+            "https://unlicense.org@evil.example/terms",
+            "https://www.apache.org:pw@evil.example/licenses/LICENSE-1.1",
+            # Canonical host and path embedded in another site's path, query
+            # or fragment.
+            "https://example.org/apache.org/licenses/LICENSE-2.0",
+            "https://example.org/spdx.org/licenses/MIT",
+            "https://example.org/?u=https://www.apache.org/licenses/LICENSE-2.0",
+            "https://example.org/#https://unlicense.org/",
+            # Right host, wrong part of the site.
+            "https://www.apache.org/foundation/licenses/LICENSE-2.0",
+            "https://spdx.org/other/MIT",
+        ],
+    )
+    def test_canonical_text_outside_host_and_path_is_not_recognized(self, url):
+        assert spdx_from_license_url(url) == ""
+
+    @pytest.mark.parametrize(
+        "url",
+        [
+            # A different document on the right host that only starts like a
+            # canonical path — the path must end at an explicit boundary.
+            "https://www.apache.org/licenses/LICENSE-2.0-with-additional-terms",
+            "https://www.apache.org/licenses/LICENSE-2.0@evil.example/",
+            "https://www.apache.org/licenses/LICENSE-2.0.html.exe",
+            "https://www.gnu.org/licenses/gpl-faq.html",
+            "https://www.gnu.org/licenses/lgpl-java.html",
+            "https://opensource.org/licenses/MIT-0",
+            "https://opensource.org/licenses/BSD-3-Clause-Clear",
+            "https://creativecommons.org/licenses/by/4.0-draft/",
+        ],
+    )
+    def test_path_must_end_at_a_boundary(self, url):
+        assert spdx_from_license_url(url) == ""
+
+    @pytest.mark.parametrize(
+        "url, expected",
+        [
+            # End of path, with and without a trailing slash.
+            ("https://www.apache.org/licenses/LICENSE-2.0", "Apache-2.0"),
+            ("https://www.apache.org/licenses/LICENSE-2.0/", "Apache-2.0"),
+            # Listed file-format / language suffixes.
+            ("https://www.apache.org/licenses/LICENSE-2.0.txt", "Apache-2.0"),
+            ("https://www.apache.org/licenses/LICENSE-2.0.html", "Apache-2.0"),
+            ("https://www.gnu.org/licenses/gpl-3.0.en.html", "GPL-3.0"),
+            ("https://www.gnu.org/licenses/gpl.txt", "GPL-3.0"),
+            ("https://www.gnu.org/licenses/lgpl.html", "LGPL-3.0"),
+            ("https://www.gnu.org/licenses/agpl-3.0.html", "AGPL-3.0"),
+            ("https://www.gnu.org/copyleft/lesser.html", "LGPL-2.1"),
+            ("http://www.opensource.org/licenses/bsd-license.php", "BSD-2-Clause"),
+            ("https://www.eclipse.org/org/documents/epl-v10.php", "EPL-1.0"),
+            ("https://www.json.org/license.html", "JSON"),
+            # ``/`` boundary: a page below the canonical path.
+            ("https://creativecommons.org/licenses/by/4.0/legalcode", "CC-BY-4.0"),
+            ("https://creativecommons.org/licenses/by-sa/4.0/", "CC-BY-SA-4.0"),
+            ("https://www.eclipse.org/org/documents/epl-2.0/EPL-2.0.txt", "EPL-2.0"),
+            ("https://www.mozilla.org/MPL/2.0/index.txt", "MPL-2.0"),
+            # Legacy file names with their own rows.
+            ("http://www.opensource.org/licenses/mit-license.php", "MIT"),
+            ("http://www.opensource.org/licenses/isc-license.txt", "ISC"),
+            ("https://www.gnu.org/licenses/gpl-3.0-standalone.html", "GPL-3.0"),
+            ("https://www.gnu.org/licenses/lgpl-3.0-standalone.html", "LGPL-3.0"),
+            ("https://www.gnu.org/licenses/agpl-3.0-standalone.html", "AGPL-3.0"),
+            # Host-only rows cover every path on the steward's host.
+            ("https://unlicense.org", "Unlicense"),
+            ("https://unlicense.org/UNLICENSE", "Unlicense"),
+            ("http://www.wtfpl.net/about/", "WTFPL"),
+            # Host comparison ignores case, port, user-info and subdomain.
+            ("HTTPS://WWW.APACHE.ORG/licenses/LICENSE-2.0", "Apache-2.0"),
+            ("https://apache.org:443/licenses/LICENSE-2.0", "Apache-2.0"),
+            ("https://user@unlicense.org/", "Unlicense"),
+            ("https://www.spdx.org/licenses/MIT.html", "MIT"),
+            # Surrounding whitespace from an XML text node is trimmed.
+            ("\n    https://www.apache.org/licenses/LICENSE-2.0\n  ", "Apache-2.0"),
+        ],
+    )
+    def test_canonical_url_variants_recognized(self, url, expected):
+        assert spdx_from_license_url(url) == expected
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            # No scheme: bare host, scheme-relative, or prose naming the host.
+            "unlicense.org",
+            "//unlicense.org/",
+            "www.apache.org/licenses/LICENSE-2.0",
+            "see unlicense.org for nothing; all rights reserved",
+            # Not http(s).
+            "ftp://unlicense.org/",
+            "file://unlicense.org/UNLICENSE",
+            # Field text that starts with a URL but is not a single URL.
+            "https://unlicense.org/ but all rights reserved",
+            "https://unlicense.org/\thttps://evil.example/",
+            # Backslash: browsers end the authority there, the parser doesn't.
+            "https://evil.example\\@unlicense.org/",
+            # Unparseable authority.
+            "https://[not-an-ip/licenses/LICENSE-2.0",
+            # Scheme with no host.
+            "https:///licenses/LICENSE-2.0",
+        ],
+    )
+    def test_only_a_single_http_url_is_considered(self, text):
+        assert spdx_from_license_url(text) == ""
+
+    @pytest.mark.parametrize(
+        "url, expected",
+        [
+            ("https://spdx.org/licenses/MIT", "MIT"),
+            ("https://spdx.org/licenses/MIT.json", "MIT"),
+            ("https://spdx.org/licenses/GPL-3.0-or-later.html", "GPL-3.0-or-later"),
+            ("https://spdx.org/licenses/Apache-2.0/", "Apache-2.0"),
+            # Deprecated IDs keep their spdx.org page; ``+`` is dropped.
+            ("https://spdx.org/licenses/GPL-2.0.html", "GPL-2.0"),
+            ("https://spdx.org/licenses/GPL-2.0+.html", "GPL-2.0"),
+            ("https://spdx.org/licenses/LGPL-2.1", "LGPL-2.1"),
+            # Not an SPDX ID: nothing is returned rather than the raw tail.
+            ("https://spdx.org/licenses/NotARealLicense", ""),
+            ("https://spdx.org/licenses/NotARealLicense.html", ""),
+            ("https://spdx.org/licenses/MIT-with-extra-terms", ""),
+            ("https://spdx.org/licenses/mit", ""),
+            ("https://spdx.org/licenses/Proprietary", ""),
+        ],
+    )
+    def test_spdx_url_tail_must_be_a_known_id(self, url, expected):
+        assert spdx_from_license_url(url) == expected
 
 
 class TestLicenseStringFromPom:
@@ -889,6 +1025,72 @@ class TestResolveMavenCentralLicense:
             )
         assert info.license_id == "MIT"
         assert info.from_registry is True
+
+    @pytest.mark.parametrize(
+        "url",
+        [
+            "https://not-unlicense.org/commercial",
+            "https://unlicense.org@evil.example/terms",
+            "https://example.org/apache.org/licenses/LICENSE-2.0",
+            "https://example.org/spdx.org/licenses/MIT",
+        ],
+    )
+    @respx.mock
+    def test_pom_url_naming_a_canonical_host_elsewhere_does_not_resolve(self, url):
+        # The ``<url>`` only mentions a canonical license host — in a
+        # lookalike domain, the user-info, or another site's path. It must
+        # not stand in for the unrecognized ``<name>``.
+        pom = f"""<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0">
+    <groupId>com.example</groupId>
+    <artifactId>lookalike</artifactId>
+    <version>1.0</version>
+    <licenses>
+        <license>
+            <name>blah blah blah</name>
+            <url>{url}</url>
+        </license>
+    </licenses>
+</project>
+"""
+        respx.get(
+            "https://repo.maven.apache.org/maven2/com/example/lookalike/1.0/lookalike-1.0.pom"
+        ).mock(return_value=httpx.Response(200, text=pom))
+        respx.get(
+            "https://api.deps.dev/v3/systems/MAVEN/packages/com.example%3Alookalike/versions/1.0"
+        ).mock(return_value=httpx.Response(404))
+        with httpx.Client() as client:
+            info = resolve_maven_central_license(
+                _java_dep(name="com.example:lookalike", version="1.0"), client
+            )
+        assert info.license_id == "UNKNOWN"
+
+    @respx.mock
+    def test_pom_lookalike_url_does_not_override_a_proprietary_name(self):
+        pom = """<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0">
+    <groupId>com.example</groupId>
+    <artifactId>commercial</artifactId>
+    <version>1.0</version>
+    <licenses>
+        <license>
+            <name>Commercial License Agreement</name>
+            <url>https://unlicense.org.evil.example/terms</url>
+        </license>
+    </licenses>
+</project>
+"""
+        respx.get(
+            "https://repo.maven.apache.org/maven2/com/example/commercial/1.0/commercial-1.0.pom"
+        ).mock(return_value=httpx.Response(200, text=pom))
+        respx.get(
+            "https://api.deps.dev/v3/systems/MAVEN/packages/com.example%3Acommercial/versions/1.0"
+        ).mock(return_value=httpx.Response(404))
+        with httpx.Client() as client:
+            info = resolve_maven_central_license(
+                _java_dep(name="com.example:commercial", version="1.0"), client
+            )
+        assert info.license_id == "Proprietary"
 
     @respx.mock
     def test_pom_with_proprietary_license_falls_back_to_deps_dev(self):

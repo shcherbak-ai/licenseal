@@ -203,6 +203,32 @@ class TestNormalizeLicense:
         # we recognized it (would corrupt downstream compat analysis).
         assert normalize_license("https://example.com/some-custom-license") == "UNKNOWN"
 
+    @pytest.mark.parametrize(
+        "raw",
+        [
+            # Lookalike host, user-info, and a canonical host/path embedded in
+            # another site's path: none of these is the canonical URL.
+            "https://not-unlicense.org/commercial",
+            "https://unlicense.org.evil.example/terms",
+            "https://unlicense.org@evil.example/terms",
+            "https://example.org/apache.org/licenses/LICENSE-2.0",
+            "https://example.org/spdx.org/licenses/MIT",
+            # Right host, different document.
+            "https://www.apache.org/licenses/LICENSE-2.0-with-additional-terms",
+            # spdx.org page for an ID that does not exist.
+            "https://spdx.org/licenses/NotARealLicense",
+            # A URL followed by prose is not a URL.
+            "https://unlicense.org/ but all rights reserved",
+        ],
+    )
+    def test_url_input_naming_a_canonical_host_elsewhere_is_unknown(self, raw):
+        assert normalize_license(raw) == "UNKNOWN"
+
+    def test_url_input_canonical_variants_still_resolve(self):
+        assert normalize_license("https://www.gnu.org/licenses/gpl-3.0.en.html") == "GPL-3.0"
+        assert normalize_license("https://www.apache.org/licenses/LICENSE-2.0.txt") == "Apache-2.0"
+        assert normalize_license("https://unlicense.org/") == "Unlicense"
+
     def test_slash_with_one_unrecognized_side_falls_through(self):
         # If only one side normalizes, fall through to the legacy slash-OR
         # rewrite (lets the existing _looks_like_spdx heuristic handle it).
