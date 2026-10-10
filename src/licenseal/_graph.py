@@ -6,24 +6,32 @@ Lives outside `transitive.py` so the lockfile parsers (imported by
 
 from __future__ import annotations
 
+from collections.abc import Hashable
+from typing import TypeVar
+
+_Node = TypeVar("_Node", bound=Hashable)
+
 
 def compute_direct_ancestors(
-    edges: dict[str, set[str]],
-    roots: dict[str, str],
-) -> dict[str, tuple[str, ...]]:
+    edges: dict[_Node, set[_Node]],
+    roots: dict[_Node, str],
+) -> dict[_Node, tuple[str, ...]]:
     """Reverse-BFS from each root through the edge graph.
 
-    `edges` maps lowercased name → set of lowercased child names.
-    `roots` maps lowercased name → original-case name for the depth-0 deps.
-    Returns lowercased name → sorted tuple of original-case ancestor names that
+    `edges` maps a node → the set of its child nodes. A node is whatever key
+    the caller's graph uses: a lowercased name where one name is one package,
+    or a tuple that also carries the version where two versions of a package
+    must not share ancestry.
+    `roots` maps each depth-0 node → its original-case name.
+    Returns node → sorted tuple of the original-case names of the roots that
     can reach it. Cycles terminate naturally via the per-root `seen` set.
     """
-    ancestors: dict[str, set[str]] = {}
-    for root_lower, root_name in roots.items():
-        front: set[str] = {root_lower}
-        seen: set[str] = {root_lower}
+    ancestors: dict[_Node, set[str]] = {}
+    for root, root_name in roots.items():
+        front: set[_Node] = {root}
+        seen: set[_Node] = {root}
         while front:
-            new_front: set[str] = set()
+            new_front: set[_Node] = set()
             for node in front:
                 for child in edges.get(node, ()):
                     if child in seen:

@@ -2547,6 +2547,232 @@ class TestProductionPrecedence:
         assert with_dev["TestOnly"] == DependencyGroup.DEV
 
 
+def _versions(deps: list[Dependency], group: DependencyGroup | None = None) -> set[tuple[str, str]]:
+    """``(name, version)`` of the rows in ``group``, or of every row."""
+    return {(d.name, d.version_constraint) for d in deps if group in (None, d.group)}
+
+
+class TestDevScanKeepsProductionRows:
+    """Without a lockfile, the PROD rows of a scan that includes dev
+    dependencies are the rows of the scan that leaves them out. A version of
+    a production package that only a dev dependency pulls in is DEV, and each
+    version carries the ancestors of that version."""
+
+    PROD = DependencyGroup.PROD
+    DEV = DependencyGroup.DEV
+
+    @staticmethod
+    def _mock_npm_versions(name: str, versions: dict[str, dict | None]) -> None:
+        """Publish ``name`` at each version, with that version's dependencies."""
+        payloads = {
+            version: _npm_version(name, version, dependencies=dependencies)
+            for version, dependencies in versions.items()
+        }
+        respx.get(f"https://registry.npmjs.org/{name}").mock(
+            return_value=httpx.Response(200, json={"versions": payloads})
+        )
+        for version, payload in payloads.items():
+            respx.get(f"https://registry.npmjs.org/{name}/{version}").mock(
+                return_value=httpx.Response(200, json=payload)
+            )
+
+    @respx.mock
+    def test_npm_version_reached_only_through_a_dev_dependency_is_dev(self, tmp_path):
+        # Production uses shared@1; the dev tool pulls in shared@2, which has
+        # a dependency of its own. ``both`` is required at one version by
+        # the two sides.
+        (tmp_path / "package.json").write_text(
+            json.dumps(
+                {
+                    "name": "app",
+                    "dependencies": {"runtime-lib": "^1.0.0"},
+                    "devDependencies": {"dev-tool": "^1.0.0"},
+                }
+            ),
+            encoding="utf-8",
+        )
+        self._mock_npm_versions("runtime-lib", {"1.0.0": {"shared": "^1.0.0", "both": "^1.0.0"}})
+        self._mock_npm_versions("dev-tool", {"1.0.0": {"shared": "^2.0.0", "both": "^1.0.0"}})
+        self._mock_npm_versions("shared", {"1.0.0": None, "2.0.0": {"only-two": "^1.0.0"}})
+        self._mock_npm_versions("both", {"1.0.0": None})
+        self._mock_npm_versions("only-two", {"1.0.0": None})
+
+        prod_only = _resolve_tree(tmp_path, include_dev=False)
+        assert _versions(prod_only) == {
+            ("runtime-lib", "==1.0.0"),
+            ("shared", "==1.0.0"),
+            ("both", "==1.0.0"),
+        }
+
+        with_dev = _resolve_tree(tmp_path, include_dev=True)
+        assert _versions(with_dev, self.PROD) == _versions(prod_only)
+        assert _versions(with_dev, self.DEV) == {
+            ("dev-tool", "==1.0.0"),
+            ("shared", "==2.0.0"),
+            ("only-two", "==1.0.0"),
+        }
+        ancestors = {(d.name, d.version_constraint): d.direct_ancestors for d in with_dev}
+        assert ancestors["shared", "==1.0.0"] == ("runtime-lib",)
+        assert ancestors["shared", "==2.0.0"] == ("dev-tool",)
+        assert ancestors["only-two", "==1.0.0"] == ("dev-tool",)
+        # Control: the version both sides pull in is PROD and names both.
+        assert ancestors["both", "==1.0.0"] == ("dev-tool", "runtime-lib")
+
+    @respx.mock
+    def test_dev_direct_pinned_to_another_version_than_production_uses(self, tmp_path):
+        # shared is a dev dependency at 2.x and a dependency of the
+        # production runtime-lib at 1.x: two rows, one of each group.
+        (tmp_path / "package.json").write_text(
+            json.dumps(
+                {
+                    "name": "app",
+                    "dependencies": {"runtime-lib": "^1.0.0"},
+                    "devDependencies": {"shared": "^2.0.0"},
+                }
+            ),
+            encoding="utf-8",
+        )
+        self._mock_npm_versions("runtime-lib", {"1.0.0": {"shared": "^1.0.0"}})
+        self._mock_npm_versions("shared", {"1.0.0": None, "2.0.0": None})
+
+        prod_only = _resolve_tree(tmp_path, include_dev=False)
+        assert _versions(prod_only) == {("runtime-lib", "==1.0.0"), ("shared", "==1.0.0")}
+
+        with_dev = _resolve_tree(tmp_path, include_dev=True)
+        assert _versions(with_dev, self.PROD) == _versions(prod_only)
+        assert {
+            (d.name, d.version_constraint, d.depth) for d in with_dev if d.group == self.DEV
+        } == {("shared", "==2.0.0", 0)}
+
+    @respx.mock
+    def test_prod_and_dev_seeds_resolving_to_one_version_are_prod(self, tmp_path):
+        # Discovery keeps one direct dep per name, so two seeds for one
+        # package do not come from a manifest today; the walk still must
+        # not report a package production declares as DEV.
+        self._mock_npm_versions("lib", {"1.0.0": None})
+        seeds = [
+            Dependency("lib", "^1.0.0", Ecosystem.NPM, group=self.DEV),
+            Dependency("lib", "~1.0.0", Ecosystem.NPM, group=self.PROD),
+        ]
+        with httpx.Client() as client:
+            deps = resolve_transitive(
+                seeds, tmp_path, include_dev=True, max_depth=50, client=client
+            )
+        assert [(d.name, d.version_constraint, d.group) for d in deps] == [
+            ("lib", "==1.0.0", self.PROD)
+        ]
+
+    @staticmethod
+    def _mock_maven_subgraph(root: str, version: str, nodes: list[tuple[str, str]]) -> None:
+        """deps.dev's resolved subgraph for ``root``: itself, then ``nodes`` in a chain."""
+        chain = [(root, version), *nodes]
+        respx.get(
+            "https://api.deps.dev/v3/systems/MAVEN/packages/"
+            f"org.example%3A{root}/versions/{version}:dependencies"
+        ).mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "nodes": [
+                        {
+                            "versionKey": {
+                                "system": "MAVEN",
+                                "name": f"org.example:{name}",
+                                "version": node_version,
+                            },
+                            "relation": "SELF" if index == 0 else "INDIRECT",
+                        }
+                        for index, (name, node_version) in enumerate(chain)
+                    ],
+                    "edges": [
+                        {"fromNode": index, "toNode": index + 1} for index in range(len(chain) - 1)
+                    ],
+                },
+            )
+        )
+
+    @staticmethod
+    def _write_pom(tmp_path, dependencies: list[tuple[str, str, str]]) -> None:
+        """A pom.xml declaring ``(artifact, version, scope)`` dependencies."""
+        declared = "".join(
+            "<dependency><groupId>org.example</groupId>"
+            f"<artifactId>{artifact}</artifactId><version>{version}</version>"
+            f"<scope>{scope}</scope></dependency>"
+            for artifact, version, scope in dependencies
+        )
+        (tmp_path / "pom.xml").write_text(
+            '<?xml version="1.0" encoding="UTF-8"?>\n'
+            '<project xmlns="http://maven.apache.org/POM/4.0.0">'
+            "<groupId>com.example</groupId><artifactId>myapp</artifactId><version>1.0.0</version>"
+            f"<dependencies>{declared}</dependencies></project>\n",
+            encoding="utf-8",
+        )
+
+    @respx.mock
+    def test_maven_version_reached_only_through_a_test_dependency_is_dev(self, tmp_path):
+        self._write_pom(tmp_path, [("runtime-lib", "1.0", "compile"), ("test-tool", "1.0", "test")])
+        self._mock_maven_subgraph("runtime-lib", "1.0", [("shared", "1.0"), ("both", "1.0")])
+        self._mock_maven_subgraph(
+            "test-tool", "1.0", [("shared", "2.0"), ("only-two", "1.0"), ("both", "1.0")]
+        )
+
+        prod_only = _resolve_tree(tmp_path, include_dev=False)
+        assert _versions(prod_only) == {
+            ("org.example:runtime-lib", "==1.0"),
+            ("org.example:shared", "==1.0"),
+            ("org.example:both", "==1.0"),
+        }
+
+        with_dev = _resolve_tree(tmp_path, include_dev=True)
+        assert _versions(with_dev, self.PROD) == _versions(prod_only)
+        assert _versions(with_dev, self.DEV) == {
+            ("org.example:test-tool", "==1.0"),
+            ("org.example:shared", "==2.0"),
+            ("org.example:only-two", "==1.0"),
+        }
+        ancestors = {(d.name, d.version_constraint): d.direct_ancestors for d in with_dev}
+        assert ancestors["org.example:shared", "==1.0"] == ("org.example:runtime-lib",)
+        assert ancestors["org.example:shared", "==2.0"] == ("org.example:test-tool",)
+        assert ancestors["org.example:only-two", "==1.0"] == ("org.example:test-tool",)
+        # Control: the version both subgraphs list is PROD, under the
+        # production direct.
+        assert ancestors["org.example:both", "==1.0"] == ("org.example:runtime-lib",)
+
+    @respx.mock
+    def test_maven_test_direct_at_another_version_than_production_pulls_in(self, tmp_path):
+        # shared is declared with test scope at 2.0; the compile-scope
+        # runtime-lib pulls in shared 1.0. other-test's subgraph lists a
+        # third version, which only test dependencies reach.
+        self._write_pom(
+            tmp_path,
+            [
+                ("runtime-lib", "1.0", "compile"),
+                ("shared", "2.0", "test"),
+                ("other-test", "1.0", "test"),
+            ],
+        )
+        self._mock_maven_subgraph("runtime-lib", "1.0", [("shared", "1.0")])
+        self._mock_maven_subgraph("shared", "2.0", [])
+        self._mock_maven_subgraph("other-test", "1.0", [("shared", "3.0")])
+
+        prod_only = _resolve_tree(tmp_path, include_dev=False)
+        assert _versions(prod_only) == {
+            ("org.example:runtime-lib", "==1.0"),
+            ("org.example:shared", "==1.0"),
+        }
+
+        with_dev = _resolve_tree(tmp_path, include_dev=True)
+        assert _versions(with_dev, self.PROD) == _versions(prod_only)
+        # The declared test version keeps its own DEV row. The version only
+        # another test dependency lists is not a further row.
+        assert {
+            (d.name, d.version_constraint, d.depth) for d in with_dev if d.group == self.DEV
+        } == {
+            ("org.example:shared", "==2.0", 0),
+            ("org.example:other-test", "==1.0", 0),
+        }
+
+
 class TestRegistrySeedFiltering:
     def test_skips_ecosystem_when_only_dev_seeds_and_no_dev(self, tmp_path):
         # Only a dev dep in this ecosystem; with include_dev=False, registry walk
@@ -4240,14 +4466,13 @@ class TestJavaTransitiveResolution:
         assert spring_jcl.direct_ancestors == ("org.springframework:spring-core",)
         assert spring_jcl.group == DependencyGroup.PROD
 
-    def test_orphan_transitive_falls_back_to_prod(self, tmp_path):
-        # Node returned by deps.dev with no incoming edge from any root —
-        # treat as PROD (conservative) rather than silently drop.
+    def test_node_without_an_edge_belongs_to_the_direct_that_lists_it(self, tmp_path):
+        # A node deps.dev returns in a direct's subgraph is attributed to
+        # that direct whether or not the response's edges connect it.
         graph = {
             ("g:a", "1.0"): (
                 [("g:transitive", "1.0"), ("g:orphan", "2.0")],
-                # Edge only from a→transitive, not a→orphan; orphan has
-                # no inbound edge from any root.
+                # Edge only from a→transitive, not a→orphan.
                 [("g:a", "1.0", "g:transitive", "1.0")],
             )
         }
@@ -4264,7 +4489,7 @@ class TestJavaTransitiveResolution:
             )
         orphan = next(d for d in deps if d.name == "g:orphan")
         assert orphan.group == DependencyGroup.PROD
-        assert orphan.direct_ancestors == ()
+        assert orphan.direct_ancestors == ("g:a",)
 
     def test_dev_root_transitive_inherits_dev_filtered_by_no_dev(self, tmp_path):
         # A DEV direct dep pulling in a transitive — the transitive

@@ -24,7 +24,7 @@ from __future__ import annotations
 
 import contextvars
 import re
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Container, Iterator
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from pathlib import Path
@@ -884,17 +884,18 @@ _TransitiveDepsFetcher = Callable[
 def _promote_directs_reached_from_prod(
     out: list[Dependency],
     start: int,
-    prod_anc: dict[str, tuple[str, ...]],
+    reached: Container[str],
 ) -> None:
     """Make the direct deps in ``out[start:]`` PROD when a PROD direct reaches them.
 
-    The Maven and NuGet edge walks emit every direct with its declared group
-    before the graph is fetched, and skip a graph node that is also a direct.
-    A DEV direct that a PROD direct pulls in ships, so production wins — the
-    same rule the lockfile parsers apply.
+    ``reached`` holds the lowercased names a PROD direct reaches. The Maven
+    and NuGet walks emit every direct with its declared group before the
+    graph is fetched, and skip a graph node that is also a direct. A DEV
+    direct that a PROD direct pulls in ships, so production wins — the same
+    rule the lockfile parsers apply.
     """
     for index in range(start, len(out)):
-        if out[index].name.lower() in prod_anc:
+        if out[index].name.lower() in reached:
             out[index] = replace(out[index], group=DependencyGroup.PROD)
 
 
@@ -1476,7 +1477,7 @@ def _resolve_java_transitive(
     pom_fetcher: Fetcher = fetch_registry_text,
     deps_fetcher: _TransitiveDepsFetcher = fetch_maven_dependencies,
 ) -> list[Dependency]:
-    """Edge-aware Java transitive resolution.
+    """Java transitive resolution.
 
     Two-path:
 
@@ -1489,11 +1490,13 @@ def _resolve_java_transitive(
     2. **deps.dev ``:dependencies``**: for direct Java deps not in any
        Gradle lockfile, hit ``api.deps.dev``'s MAVEN ``GetDependencies``
        endpoint per direct dep, in parallel. The response is the
-       fully-resolved subgraph rooted at that dep; merge subgraphs
-       across all directs, dedupe by ``(name, version)``, then run
-       :func:`compute_direct_ancestors` from PROD-root and DEV-root
-       directs for reachability-based attribution (same machinery as
-       the Go path).
+       fully-resolved subgraph rooted at that dep, so each of its nodes
+       is attributed, by ``(name, version)``, to that direct: PROD when
+       a PROD direct's subgraph lists it, otherwise DEV, with the
+       listing directs as its ancestors. A DEV direct is PROD when a
+       PROD direct's subgraph lists it at the version it declares. The
+       PROD rows of a walk that includes the DEV directs are therefore
+       the rows of a walk without them.
 
     Workspace-local filter: multi-module Maven projects link parent →
     submodule via ``<modules>``; sibling artifact coordinates aren't
@@ -1505,16 +1508,17 @@ def _resolve_java_transitive(
     so the license resolver gets a chance with the raw value — it'll
     typically UNKNOWN out, which is the right signal.
 
-    Orphan transitives (reachable from no direct root, usually because
-    one direct's ``:dependencies`` fetch failed) fall back to PROD —
-    conservative, same as the Go path.
+    A node of the same name as a direct is not a second row when that
+    direct's own row stands for it: any version for a PROD direct, the
+    declared version for a DEV direct. Another version of a DEV direct's
+    artifact that a PROD direct pulls in is a PROD transitive.
 
     ``deps_fetcher`` returns a structured ``(nodes, edges)`` tuple rather
     than a raw response dict, so the ``fetcher`` JSON-fetcher is passed
     *into* it as a keyword arg — the cache trim ``_trim_deps_dev_dependencies``
-    runs against the URL-keyed cache that wraps it. Tests inject a custom
-    ``deps_fetcher`` to drive the merge / reachability paths without
-    going through respx.
+    runs against the URL-keyed cache that wraps it. Only the nodes are used
+    here. Tests inject a custom ``deps_fetcher`` to drive the merge and
+    attribution paths without going through respx.
     """
     workspace_local_poms = _discover_workspace_local_pom_paths(
         project_path, exclude_paths=exclude_paths
@@ -1620,63 +1624,63 @@ def _resolve_java_transitive(
     if not walkable:
         return out
 
-    merged_nodes: set[tuple[str, str]] = set()
-    edges: dict[str, set[str]] = {}
-
-    def _one(
-        entry: tuple[Dependency, str],
-    ) -> tuple[list[tuple[str, str]], list[tuple[str, str, str, str]]]:
+    def _one(entry: tuple[Dependency, str]) -> list[tuple[str, str]]:
         direct, pinned = entry
-        return deps_fetcher(direct.name, pinned, client, fetcher=fetcher)
+        nodes, _edges = deps_fetcher(direct.name, pinned, client, fetcher=fetcher)
+        return nodes
 
-    # Propagate the active tethered scope into the edge-fetch workers — a bare
+    # ---- Attribution by subgraph ----
+    # deps.dev resolves each direct's subgraph on its own, so a node belongs
+    # to the directs whose subgraph lists it, at the version listed there.
+    # Nodes are keyed by (name, version): a version only a DEV direct pulls
+    # in is DEV even when a PROD direct pulls in another version of the same
+    # artifact. Attribution by name would make it PROD, and the PROD rows of
+    # a walk that includes the DEV directs would then exceed the rows of a
+    # walk that leaves them out.
+    prod_owners: dict[tuple[str, str], set[str]] = {}
+    dev_owners: dict[tuple[str, str], set[str]] = {}
+    node_names: dict[tuple[str, str], str] = {}
+    # Propagate the active tethered scope into the fetch workers — a bare
     # pool fetches in an empty context and bypasses the egress policy.
-    for nodes, edge_tuples in map_with_context(_one, walkable, max_workers):
+    subgraphs = map_with_context(_one, walkable, max_workers)
+    for (direct, _pinned), nodes in zip(walkable, subgraphs, strict=True):
+        owners = prod_owners if direct.group == DependencyGroup.PROD else dev_owners
         for node_name, node_version in nodes:
             if node_name in workspace_local:
                 continue
-            merged_nodes.add((node_name, node_version))
-        for from_name, _from_ver, to_name, _to_ver in edge_tuples:
-            if from_name in workspace_local or to_name in workspace_local:
-                continue
-            edges.setdefault(from_name.lower(), set()).add(to_name.lower())
+            key = (node_name.lower(), node_version)
+            node_names.setdefault(key, node_name)
+            owners.setdefault(key, set()).add(direct.name)
 
-    # ---- Reachability attribution ----
-    prod_root_names = {d.name.lower() for d, _ in walkable if d.group == DependencyGroup.PROD}
-    dev_root_names = {d.name.lower() for d, _ in walkable if d.group == DependencyGroup.DEV}
-    name_case: dict[str, str] = {d.name.lower(): d.name for d, _ in walkable}
-    for node_name, _ in merged_nodes:
-        name_case.setdefault(node_name.lower(), node_name)
+    prod_direct_names = {d.name.lower() for d, _ in walkable if d.group == DependencyGroup.PROD}
+    dev_direct_keys = {
+        (d.name.lower(), pinned) for d, pinned in walkable if d.group == DependencyGroup.DEV
+    }
+    dev_direct_names = {name for name, _ in dev_direct_keys}
+    # A DEV direct ships when a PROD direct pulls in the version it declares.
+    _promote_directs_reached_from_prod(
+        out, first_direct, {name for name, _ in dev_direct_keys & prod_owners.keys()}
+    )
 
-    prod_roots = {n: name_case[n] for n in prod_root_names if n in name_case}
-    dev_roots = {n: name_case[n] for n in dev_root_names if n in name_case}
-    prod_anc = compute_direct_ancestors(edges, prod_roots)
-    dev_anc = compute_direct_ancestors(edges, dev_roots)
-    _promote_directs_reached_from_prod(out, first_direct, prod_anc)
-
-    direct_lower = {d.name.lower() for d, _ in walkable}
-    for node_name, node_version in merged_nodes:
-        lower = node_name.lower()
-        if lower in direct_lower:
-            # Already emitted as a direct dep above. Skip — we don't
-            # want to double-emit at depth=1.
+    for key, node_name in node_names.items():
+        lower, node_version = key
+        if lower in prod_direct_names or key in dev_direct_keys:
+            # A direct's own row stands for the node: a PROD direct's for any
+            # version of its artifact, a DEV direct's for the version it
+            # declares (promoted above when a PROD direct pulls that in).
             continue
-        if lower in prod_anc:
-            group = DependencyGroup.PROD
-            ancestors = prod_anc[lower]
-        elif lower in dev_anc:
-            group = DependencyGroup.DEV
-            ancestors = dev_anc[lower]
+        if key in prod_owners:
+            group, owners = DependencyGroup.PROD, prod_owners[key]
+        elif lower in dev_direct_names:
+            # Another version of a DEV direct, pulled in by DEV directs only.
+            continue
         else:
-            # Orphan: reachable from no root. Conservative PROD default,
-            # mirrors the Go-side fallback for the same scenario.
-            group = DependencyGroup.PROD
-            ancestors = ()
+            group, owners = DependencyGroup.DEV, dev_owners[key]
 
         # No emission-time ``include_dev`` filter here: DEV direct deps
         # are already filtered out of ``direct_uncovered`` upstream, so
-        # ``dev_roots`` and ``dev_anc`` are empty when ``include_dev=False``
-        # — no DEV transitive can reach this point under that mode.
+        # ``dev_owners`` is empty when ``include_dev=False`` — no DEV
+        # transitive can reach this point under that mode.
 
         out.append(
             Dependency(
@@ -1685,7 +1689,7 @@ def _resolve_java_transitive(
                 ecosystem=Ecosystem.JAVA,
                 group=group,
                 depth=1,
-                direct_ancestors=ancestors,
+                direct_ancestors=tuple(sorted(owners)),
             )
         )
     return out
@@ -1769,12 +1773,16 @@ def _walk_registry(
     same ``/pypi/{name}/json`` etc.). A :class:`RegistryCache`-backed
     ``fetcher`` collapses those into one round-trip.
 
-    Records the parent->child edge graph (by lowercased name) during the walk
-    so that, after BFS terminates, we can reverse-traverse from each seed to
-    stamp every transitive with the set of direct ancestors that reach it.
-    Tracking edges by name (not by resolved version) is intentional: callers
-    want "which direct dep brings in `certifi`", and answering at the name
-    level survives version multiplicity.
+    Records the graph it follows so that, after BFS terminates, every row can
+    be stamped with its group and with the seeds that reach it. A node of
+    that graph is a package at one resolved version (with its extras), not a
+    package name: when ``lodash@^4`` and ``lodash@^3`` resolve to two
+    versions, each row carries the seeds that pull in that version, and a
+    version only a dev seed reaches is DEV even when production uses another
+    one. Attribution by name would give a version reached through a dev seed
+    the ancestors and the PROD group of the version production uses, so a
+    walk seeded with dev deps would report more PROD rows than the same walk
+    seeded without them.
     """
     # Dedup keys include `extras` because two paths reaching the same
     # (name, version) with different requested extras pull in *different*
@@ -1785,17 +1793,19 @@ def _walk_registry(
     # is always the empty frozenset so the key collapses to the prior
     # shape and behavior is unchanged.
     DedupKey = tuple[str, str, frozenset[str]]  # noqa: N806  (PEP 695-style local type alias)
+
+    def _key(dep: Dependency) -> DedupKey:
+        return (dep.name.lower(), dep.version_constraint, dep.extras)
+
     visited: set[DedupKey] = set()
-    processed_specs: set[DedupKey] = set()
     out: list[Dependency] = []
-    edges: dict[str, set[str]] = {}
-    seed_name_case: dict[str, str] = {s.name.lower(): s.name for s in seeds}
-    # Per-name group of seed deps. Used after BFS to attribute each
-    # transitive's group by *reachability* (prod-reachable wins) rather than
-    # by BFS-arrival order — important when a transitive is reached via both
-    # prod and dev chains, where the original arrival order would otherwise
-    # silently bury the prod attribution.
-    seed_groups: dict[str, DependencyGroup] = {s.name.lower(): s.group for s in seeds}
+    # The graph, for attribution after the walk. A node is a row of ``out``
+    # and is keyed like one: by the version the row is emitted with.
+    # ``node_of_spec`` maps every spec processed so far to the node it
+    # resolved to (an unresolved spec is its own node); ``child_specs`` maps
+    # each expanded node to the specs it requires.
+    node_of_spec: dict[DedupKey, DedupKey] = {}
+    child_specs: dict[DedupKey, list[DedupKey]] = {}
     depth_capped = False
     progress_total = 0
 
@@ -1807,8 +1817,8 @@ def _walk_registry(
         wave: list[Dependency] = []
         seen_in_wave: set[DedupKey] = set()
         for dep in current_level:
-            spec_key = (dep.name.lower(), dep.version_constraint, dep.extras)
-            if spec_key in processed_specs or spec_key in seen_in_wave:
+            spec_key = _key(dep)
+            if spec_key in node_of_spec or spec_key in seen_in_wave:
                 continue
             seen_in_wave.add(spec_key)
             wave.append(dep)
@@ -1820,20 +1830,21 @@ def _walk_registry(
             results = list(pool.map(_walk_one, snapshots, wave))
         next_level: list[Dependency] = []
         for dep, resolved_version, children in results:
-            processed_specs.add((dep.name.lower(), dep.version_constraint, dep.extras))
             if not resolved_version:
+                node_of_spec[_key(dep)] = _key(dep)
                 out.append(dep)
                 continue
-            key = (dep.name.lower(), resolved_version, dep.extras)
-            if key in visited:
+            resolved = replace(dep, version_constraint=f"=={resolved_version}")
+            node = node_of_spec[_key(dep)] = _key(resolved)
+            if node in visited:
                 continue
-            visited.add(key)
-            out.append(replace(dep, version_constraint=f"=={resolved_version}"))
+            visited.add(node)
+            out.append(resolved)
             progress_total += 1
             if dep.depth >= max_depth:
                 depth_capped = True
                 continue
-            edges.setdefault(dep.name.lower(), set()).update(c.name.lower() for c in children)
+            child_specs[node] = [_key(child) for child in children]
             next_level.extend(children)
         if on_wave is not None:
             on_wave(progress_total)
@@ -1846,27 +1857,32 @@ def _walk_registry(
             err=True,
         )
 
-    ancestors = compute_direct_ancestors(edges, seed_name_case)
-    prod_seed_names: set[str] = {
-        name for name, group in seed_groups.items() if group == DependencyGroup.PROD
+    # Every child spec of an expanded node went through a later wave, and every
+    # seed through the first, so each has a node.
+    edges = {node: {node_of_spec[spec] for spec in specs} for node, specs in child_specs.items()}
+    seed_roots = {node_of_spec[_key(seed)]: seed.name for seed in seeds}
+    prod_roots = {
+        node_of_spec[_key(seed)]: seed.name for seed in seeds if seed.group == DependencyGroup.PROD
     }
+    ancestors = compute_direct_ancestors(edges, seed_roots)
+    prod_reached = compute_direct_ancestors(edges, prod_roots)
 
     def _attributed_group(dep: Dependency) -> DependencyGroup:
-        """A dep is PROD iff any prod seed reaches it; else a transitive is DEV.
+        """A dep is PROD iff it is a prod seed or one reaches it; else a transitive is DEV.
 
-        That holds for a seed too: a DEV seed that a PROD seed also pulls in
-        ships with production. The walk emits it once, as the seed, so
-        without this the PROD occurrence would be lost. A seed no prod seed
-        reaches keeps its declared group.
+        That holds for a seed too: a DEV seed that a PROD seed also pulls in,
+        at the same version, ships with production. The walk emits it once,
+        as the seed, so without this the PROD occurrence would be lost. A
+        seed no prod seed reaches keeps its declared group.
 
         A transitive falls back to the BFS-assigned group when ancestor info
         is missing (cycle artifacts, disconnected nodes) so we never demote
         to DEV without evidence.
         """
-        own_ancestors = ancestors.get(dep.name.lower(), ())
-        if any(a.lower() in prod_seed_names for a in own_ancestors):
+        node = _key(dep)
+        if node in prod_roots or node in prod_reached:
             return DependencyGroup.PROD
-        if dep.depth == 0 or not own_ancestors:
+        if dep.depth == 0 or node not in ancestors:
             return dep.group
         return DependencyGroup.DEV
 
@@ -1875,7 +1891,7 @@ def _walk_registry(
         if dep.depth == 0
         else replace(
             dep,
-            direct_ancestors=ancestors.get(dep.name.lower(), ()),
+            direct_ancestors=ancestors.get(_key(dep), ()),
             group=_attributed_group(dep),
         )
         for dep in out

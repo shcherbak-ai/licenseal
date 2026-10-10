@@ -7036,6 +7036,174 @@ class TestCargoOffRegistryDependencyClosure:
         assert "1 violation" in text
 
 
+class TestDevScanKeepsProductionRows:
+    """Without a lockfile, ``--dev`` reports as production exactly the rows
+    ``--no-dev`` reports. A copyleft version of a production package that
+    only a dev dependency pulls in is a dev warning, not a violation."""
+
+    @staticmethod
+    def _production(rows: dict) -> dict:
+        return {key: value for key, value in rows.items() if value[0] == "prod"}
+
+    @staticmethod
+    def _mock_npm_versions(name: str, versions: dict[str, tuple[str, dict | None]]) -> None:
+        """Publish ``name``: ``(license, dependencies)`` for each version."""
+        payloads = {}
+        for version, (license_id, dependencies) in versions.items():
+            payloads[version] = {"name": name, "version": version, "license": license_id}
+            if dependencies:
+                payloads[version]["dependencies"] = dependencies
+        respx.get(f"https://registry.npmjs.org/{name}").mock(
+            return_value=httpx.Response(200, json={"versions": payloads})
+        )
+        for version, payload in payloads.items():
+            respx.get(f"https://registry.npmjs.org/{name}/{version}").mock(
+                return_value=httpx.Response(200, json=payload)
+            )
+
+    @respx.mock
+    @pytest.mark.parametrize(
+        ("dev_spec", "dev_exit_code"),
+        [
+            # The dev tool pulls in shared 2.x, which is GPL; production uses
+            # the MIT 1.x. Nothing copyleft ships.
+            ("^2.0.0", 0),
+            # Control: the dev tool pulls in the same 1.x production uses,
+            # now GPL. That is a production violation in both modes.
+            ("^1.0.0", 1),
+        ],
+        ids=["dev-only-version", "production-version"],
+    )
+    def test_npm_copyleft_version(self, tmp_path, dev_spec, dev_exit_code):
+        shared_one_license = "MIT" if dev_spec == "^2.0.0" else "GPL-3.0-only"
+        (tmp_path / "package.json").write_text(
+            json.dumps(
+                {
+                    "name": "app",
+                    "license": "MIT",
+                    "dependencies": {"runtime-lib": "^1.0.0"},
+                    "devDependencies": {"dev-tool": "^1.0.0"},
+                }
+            ),
+            encoding="utf-8",
+        )
+        self._mock_npm_versions("runtime-lib", {"1.0.0": ("MIT", {"shared": "^1.0.0"})})
+        self._mock_npm_versions("dev-tool", {"1.0.0": ("MIT", {"shared": dev_spec})})
+        self._mock_npm_versions(
+            "shared",
+            {
+                "1.0.0": (shared_one_license, None),
+                "2.0.0": ("GPL-3.0-only", {"only-two-gpl": "^1.0.0"}),
+            },
+        )
+        self._mock_npm_versions("only-two-gpl", {"1.0.0": ("GPL-3.0-only", None)})
+
+        no_dev_exit_code, no_dev_rows = _check_rows(tmp_path, "--no-dev", "--no-strict")
+        assert no_dev_exit_code == dev_exit_code
+        assert no_dev_rows == {
+            ("runtime-lib", "1.0.0"): ("prod", "compatible"),
+            ("shared", "1.0.0"): (
+                "prod",
+                "compatible" if shared_one_license == "MIT" else "incompatible",
+            ),
+        }
+
+        exit_code, rows = _check_rows(tmp_path, "--dev", "--no-strict")
+        assert exit_code == dev_exit_code
+        assert self._production(rows) == no_dev_rows
+        expected_dev = {("dev-tool", "1.0.0"): ("dev", "compatible")}
+        if dev_spec == "^2.0.0":
+            expected_dev[("shared", "2.0.0")] = ("dev", "warning")
+            expected_dev[("only-two-gpl", "1.0.0")] = ("dev", "warning")
+        assert {key: value for key, value in rows.items() if value[0] == "dev"} == expected_dev
+
+    @staticmethod
+    def _mock_maven_subgraph(root: str, version: str, nodes: list[tuple[str, str]]) -> None:
+        """deps.dev's resolved subgraph for ``root``: itself, then ``nodes`` in a chain."""
+        chain = [(root, version), *nodes]
+        respx.get(
+            "https://api.deps.dev/v3/systems/MAVEN/packages/"
+            f"org.example%3A{root}/versions/{version}:dependencies"
+        ).mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "nodes": [
+                        {
+                            "versionKey": {
+                                "system": "MAVEN",
+                                "name": f"org.example:{name}",
+                                "version": node_version,
+                            },
+                            "relation": "SELF" if index == 0 else "INDIRECT",
+                        }
+                        for index, (name, node_version) in enumerate(chain)
+                    ],
+                    "edges": [
+                        {"fromNode": index, "toNode": index + 1} for index in range(len(chain) - 1)
+                    ],
+                },
+            )
+        )
+
+    @respx.mock
+    def test_maven_copyleft_version_reached_only_through_a_test_dependency(self, tmp_path):
+        # runtime-lib (compile scope) pulls in shared 1.0, which is MIT.
+        # test-tool (test scope) pulls in shared 2.0 and, through it,
+        # only-two-gpl; both are GPL. pinned-test is declared with test scope
+        # at 2.0 (GPL) while runtime-lib pulls in its MIT 1.0.
+        dependencies = "".join(
+            "<dependency><groupId>org.example</groupId>"
+            f"<artifactId>{artifact}</artifactId><version>{version}</version>"
+            f"<scope>{scope}</scope></dependency>"
+            for artifact, version, scope in (
+                ("runtime-lib", "1.0", "compile"),
+                ("test-tool", "1.0", "test"),
+                ("pinned-test", "2.0", "test"),
+            )
+        )
+        (tmp_path / "pom.xml").write_text(
+            '<?xml version="1.0" encoding="UTF-8"?>\n'
+            '<project xmlns="http://maven.apache.org/POM/4.0.0">'
+            "<groupId>com.example</groupId><artifactId>myapp</artifactId><version>1.0.0</version>"
+            "<licenses><license><name>MIT</name></license></licenses>"
+            f"<dependencies>{dependencies}</dependencies></project>\n",
+            encoding="utf-8",
+        )
+        self._mock_maven_subgraph("runtime-lib", "1.0", [("shared", "1.0"), ("pinned-test", "1.0")])
+        self._mock_maven_subgraph("test-tool", "1.0", [("shared", "2.0"), ("only-two-gpl", "1.0")])
+        self._mock_maven_subgraph("pinned-test", "2.0", [])
+        _mock_deps_dev_licenses(
+            {
+                ("org.example:runtime-lib", "1.0"): "MIT",
+                ("org.example:test-tool", "1.0"): "MIT",
+                ("org.example:shared", "1.0"): "MIT",
+                ("org.example:shared", "2.0"): "GPL-3.0-only",
+                ("org.example:only-two-gpl", "1.0"): "GPL-3.0-only",
+                ("org.example:pinned-test", "1.0"): "MIT",
+                ("org.example:pinned-test", "2.0"): "GPL-3.0-only",
+            }
+        )
+
+        exit_code, no_dev_rows = _check_rows(tmp_path, "--no-dev", "--no-strict")
+        assert exit_code == 0
+        assert no_dev_rows == {
+            ("org.example:runtime-lib", "1.0"): ("prod", "compatible"),
+            ("org.example:shared", "1.0"): ("prod", "compatible"),
+            ("org.example:pinned-test", "1.0"): ("prod", "compatible"),
+        }
+
+        exit_code, rows = _check_rows(tmp_path, "--dev", "--no-strict")
+        assert exit_code == 0
+        assert self._production(rows) == no_dev_rows
+        assert {key: value for key, value in rows.items() if value[0] == "dev"} == {
+            ("org.example:test-tool", "1.0"): ("dev", "compatible"),
+            ("org.example:shared", "2.0"): ("dev", "warning"),
+            ("org.example:only-two-gpl", "1.0"): ("dev", "warning"),
+            ("org.example:pinned-test", "2.0"): ("dev", "warning"),
+        }
+
+
 class TestLockfileWithoutDirectDependencies:
     """A lockfile is scanned even when no manifest yields a direct dependency
     for its ecosystem. Its packages are checked as production, so a copyleft
