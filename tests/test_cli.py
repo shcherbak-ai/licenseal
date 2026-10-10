@@ -6522,6 +6522,199 @@ class TestProductionPrecedence:
         assert rows["TestGpl"] == ("dev", "warning")
 
 
+def _check_rows(tmp_path, *flags: str) -> tuple[int, dict[tuple[str, str], tuple[str, str]]]:
+    """Run ``check`` on ``tmp_path``: the exit code, and ``(group, verdict)``
+    for each reported ``(name, resolved version)``."""
+    out = tmp_path / "report.json"
+    result = CliRunner().invoke(
+        main, ["check", "--path", str(tmp_path), *flags, "-f", "json", "-o", str(out)]
+    )
+    data = json.loads(out.read_text(encoding="utf-8"))
+    rows = {
+        (d["name"], d["resolved_version"]): (d["group"], d["verdict"]) for d in data["dependencies"]
+    }
+    assert len(rows) == data["summary"]["total"]
+    return result.exit_code, rows
+
+
+def _mit_project(tmp_path) -> None:
+    """Declare the scanned project's own license as MIT."""
+    (tmp_path / "pyproject.toml").write_text(
+        '[project]\nname = "myproject"\nlicense = {text = "MIT"}\n', encoding="utf-8"
+    )
+
+
+def _mock_go_modules(modules: dict[tuple[str, str], tuple[str, str]]) -> None:
+    """Mock deps.dev and the module proxy for Go modules.
+
+    ``modules`` maps ``(module, version)`` to ``(license, go.mod requirements)``.
+    deps.dev answers a module the map lacks as not found; its go.mod is not
+    mocked, so a scan that asks the proxy for it fails the test.
+    """
+
+    def batch(request: httpx.Request) -> httpx.Response:
+        responses = []
+        for item in json.loads(request.content)["requests"]:
+            key = item["versionKey"]
+            entry: dict = {"request": {"versionKey": key}}
+            if (key["name"], key["version"]) in modules:
+                license_id = modules[key["name"], key["version"]][0]
+                entry["version"] = {"versionKey": key, "licenses": [license_id], "links": []}
+            responses.append(entry)
+        return httpx.Response(200, json={"responses": responses, "nextPageToken": ""})
+
+    respx.post("https://api.deps.dev/v3alpha/versionbatch").mock(side_effect=batch)
+    for (module, version), (_license, requires) in modules.items():
+        respx.get(f"https://proxy.golang.org/{module}/@v/{version}.mod").mock(
+            return_value=httpx.Response(200, text=f"module {module}\n{requires}")
+        )
+
+
+def _go_sum(*modules: tuple[str, str]) -> str:
+    """``go.sum`` text with the usual two rows for each ``(module, version)``."""
+    return "".join(
+        f"{module} {version} h1:h\n{module} {version}/go.mod h1:h\n" for module, version in modules
+    )
+
+
+class TestGoReplaceDirectives:
+    """Which module a ``replace`` directive makes the scan check decides the
+    exit code: the block form, the old-version qualifier, and a ``replace``
+    in a dependency's own go.mod."""
+
+    @respx.mock
+    @pytest.mark.parametrize(
+        "replace_directive",
+        [
+            "replace example.org/original => example.org/fork v1.2.1\n",
+            "replace (\n\texample.org/original => example.org/fork v1.2.1\n)\n",
+        ],
+        ids=["single-line", "block"],
+    )
+    def test_copyleft_replacement_fails_the_check(self, tmp_path, replace_directive):
+        # No go.sum: the rows come from go.mod alone. The required module is
+        # MIT and its replacement is GPL. The single-line form is the
+        # control; the block form must fail the same way.
+        _mit_project(tmp_path)
+        (tmp_path / "go.mod").write_text(
+            "module example.com/app\n\n"
+            "go 1.22\n\n"
+            "require (\n"
+            "\texample.org/original v1.2.0\n"
+            "\texample.org/plain v1.0.0\n"
+            ")\n\n" + replace_directive,
+            encoding="utf-8",
+        )
+        _mock_go_modules(
+            {
+                ("example.org/original", "v1.2.0"): ("MIT", ""),
+                ("example.org/fork", "v1.2.1"): ("GPL-3.0-only", ""),
+                ("example.org/plain", "v1.0.0"): ("MIT", ""),
+            }
+        )
+
+        exit_code, rows = _check_rows(tmp_path)
+        assert exit_code == 1
+        assert rows == {
+            ("example.org/fork", "v1.2.1"): ("prod", "incompatible"),
+            ("example.org/plain", "v1.0.0"): ("prod", "compatible"),
+        }
+
+    @respx.mock
+    @pytest.mark.parametrize(
+        ("replaced_version", "expected_exit", "expected_rows"),
+        [
+            # The directive names another version than the one required: the
+            # required module is checked, and it is GPL.
+            ("v1.0.0", 1, {("example.org/lib", "v1.2.0"): ("prod", "incompatible")}),
+            # Control: the directive names the required version, so the MIT
+            # replacement is checked instead.
+            ("v1.2.0", 0, {("example.org/lib-fork", "v1.0.1"): ("prod", "compatible")}),
+        ],
+        ids=["other-version", "required-version"],
+    )
+    def test_old_version_qualifier_decides_what_is_checked(
+        self, tmp_path, replaced_version, expected_exit, expected_rows
+    ):
+        _mit_project(tmp_path)
+        (tmp_path / "go.mod").write_text(
+            "module example.com/app\n\n"
+            "go 1.22\n\n"
+            "require example.org/lib v1.2.0\n\n"
+            f"replace example.org/lib {replaced_version} => example.org/lib-fork v1.0.1\n",
+            encoding="utf-8",
+        )
+        _mock_go_modules(
+            {
+                ("example.org/lib", "v1.2.0"): ("GPL-3.0-only", ""),
+                ("example.org/lib-fork", "v1.0.1"): ("MIT", ""),
+            }
+        )
+
+        exit_code, rows = _check_rows(tmp_path)
+        assert exit_code == expected_exit
+        assert rows == expected_rows
+
+    @respx.mock
+    @pytest.mark.parametrize(
+        "dependency_replace",
+        [
+            "replace example.org/shared-gpl => ../shared-gpl\n",
+            "replace example.org/shared-gpl => example.org/elsewhere v9.9.9\n",
+        ],
+        ids=["local-path", "other-module"],
+    )
+    def test_dependency_replace_does_not_hide_a_production_violation(
+        self, tmp_path, dependency_replace
+    ):
+        # runtime-lib and the dev tool gen-tool both require shared-gpl. The
+        # go.mod runtime-lib published also replaces it, which Go ignores in
+        # this build, so shared-gpl ships and the default scan must fail.
+        _mit_project(tmp_path)
+        (tmp_path / "go.mod").write_text(
+            "module example.com/app\n\n"
+            "go 1.24\n\n"
+            "require (\n"
+            "\texample.org/runtime-lib v1.0.0\n"
+            "\texample.org/gen-tool v1.0.0\n"
+            ")\n\n"
+            "tool example.org/gen-tool/cmd/gen\n",
+            encoding="utf-8",
+        )
+        modules = {
+            ("example.org/runtime-lib", "v1.0.0"): (
+                "MIT",
+                "require example.org/shared-gpl v1.0.0\n" + dependency_replace,
+            ),
+            ("example.org/gen-tool", "v1.0.0"): (
+                "MIT",
+                "require (\n\texample.org/shared-gpl v1.0.0\n\texample.org/gen-gpl v1.0.0\n)\n",
+            ),
+            ("example.org/shared-gpl", "v1.0.0"): ("GPL-3.0-only", ""),
+            ("example.org/gen-gpl", "v1.0.0"): ("GPL-3.0-only", ""),
+        }
+        (tmp_path / "go.sum").write_text(_go_sum(*modules), encoding="utf-8")
+        _mock_go_modules(modules)
+
+        exit_code, rows = _check_rows(tmp_path)
+        assert exit_code == 1
+        production = {
+            ("example.org/runtime-lib", "v1.0.0"): ("prod", "compatible"),
+            ("example.org/shared-gpl", "v1.0.0"): ("prod", "incompatible"),
+        }
+        assert rows == production
+
+        exit_code, rows = _check_rows(tmp_path, "--dev", "--no-strict")
+        assert exit_code == 1
+        assert rows == {
+            **production,
+            ("example.org/gen-tool", "v1.0.0"): ("dev", "compatible"),
+            # Control: the copyleft module only the tool requires is a
+            # dev-only warning, and the default scan leaves it out.
+            ("example.org/gen-gpl", "v1.0.0"): ("dev", "warning"),
+        }
+
+
 class TestLockfileWithoutDirectDependencies:
     """A lockfile is scanned even when no manifest yields a direct dependency
     for its ecosystem. Its packages are checked as production, so a copyleft

@@ -55,14 +55,58 @@ require (
         assert requires == [("github.com/single/dep", "v1.0.0")]
 
     def test_replace_to_other_module(self):
+        # The version on the left of ``=>`` is part of the key: the directive
+        # covers that version only.
         text = "replace github.com/old/path v1.0.0 => github.com/new/path v2.0.0\n"
         _, replaces, _ = _parse_go_mod(text)
-        assert replaces == {"github.com/old/path": ("github.com/new/path", "v2.0.0")}
+        assert replaces == {
+            ("github.com/old/path", "v1.0.0"): ("github.com/new/path", "v2.0.0"),
+        }
+
+    def test_replace_without_old_version_covers_every_version(self):
+        text = "replace github.com/old/path => github.com/new/path v2.0.0\n"
+        _, replaces, _ = _parse_go_mod(text)
+        assert replaces == {("github.com/old/path", None): ("github.com/new/path", "v2.0.0")}
 
     def test_replace_to_local_path_yields_none(self):
         text = "replace github.com/local/dep => ../local-dir\n"
         _, replaces, _ = _parse_go_mod(text)
-        assert replaces == {"github.com/local/dep": None}
+        assert replaces == {("github.com/local/dep", None): None}
+
+    def test_replace_block(self):
+        # The block form carries the same specs as the single-line form, one
+        # per line, without the keyword.
+        text = """
+require github.com/kept v1.0.0
+
+replace (
+    github.com/old/a => github.com/fork/a v1.0.1 // why it is replaced
+    github.com/old/b v1.2.0 => github.com/fork/b v1.2.1
+
+    github.com/local/c => ../c
+    github.com/local/d v0.3.0 => ./vendored/d
+    not a replacement
+)
+
+require github.com/after v2.0.0
+replace github.com/old/e => github.com/fork/e v3.0.0
+"""
+        requires, replaces, _ = _parse_go_mod(text)
+        assert replaces == {
+            ("github.com/old/a", None): ("github.com/fork/a", "v1.0.1"),
+            ("github.com/old/b", "v1.2.0"): ("github.com/fork/b", "v1.2.1"),
+            ("github.com/local/c", None): None,
+            ("github.com/local/d", "v0.3.0"): None,
+            ("github.com/old/e", None): ("github.com/fork/e", "v3.0.0"),
+        }
+        # The block ends at its closing parenthesis: directives after it are
+        # read as usual, and none of its lines is taken for a requirement.
+        assert requires == [("github.com/kept", "v1.0.0"), ("github.com/after", "v2.0.0")]
+
+    def test_empty_replace_block(self):
+        requires, replaces, _ = _parse_go_mod("replace (\n)\nrequire github.com/foo v1.0.0\n")
+        assert replaces == {}
+        assert requires == [("github.com/foo", "v1.0.0")]
 
     def test_exclude_directive_skipped(self):
         text = """
@@ -251,6 +295,96 @@ replace github.com/local => ../local
         )
         deps, _filtered = discover_go_mod_dependencies(tmp_path)
         assert deps == []
+
+    @pytest.mark.parametrize(
+        "replace_directives",
+        [
+            # Single-line directives.
+            "replace example.org/original => example.org/fork v1.2.1\n"
+            "replace example.org/local => ../local\n",
+            # The same two specs in a block.
+            "replace (\n"
+            "\texample.org/original => example.org/fork v1.2.1\n"
+            "\texample.org/local => ../local\n"
+            ")\n",
+        ],
+        ids=["single-line", "block"],
+    )
+    def test_replace_forms_are_equivalent(self, tmp_path, replace_directives):
+        (tmp_path / "go.mod").write_text(
+            "module example.com/app\n\n"
+            "go 1.22\n\n"
+            "require (\n"
+            "\texample.org/original v1.2.0\n"
+            "\texample.org/local v0.1.0\n"
+            "\texample.org/untouched v3.0.0\n"
+            ")\n\n" + replace_directives,
+            encoding="utf-8",
+        )
+        deps, _ = discover_all_dependencies(tmp_path)
+        assert [(d.name, d.version_constraint, d.source) for d in deps] == [
+            # Resolved under the replacement's identity; the original is gone.
+            ("example.org/fork", "v1.2.1", "go.mod"),
+            # The module replaced by a local path is dropped.
+            # Control: a module no directive names is reported as required.
+            ("example.org/untouched", "v3.0.0", "go.mod"),
+        ]
+
+    def test_replace_with_old_version_applies_to_that_version_only(self, tmp_path):
+        (tmp_path / "go.mod").write_text(
+            "module example.com/app\n\n"
+            "go 1.22\n\n"
+            "require (\n"
+            "\texample.org/pinned v1.0.0\n"
+            "\texample.org/moved-on v1.2.0\n"
+            "\texample.org/local-pinned v0.3.0\n"
+            "\texample.org/local-moved-on v0.4.0\n"
+            ")\n\n"
+            "replace (\n"
+            "\texample.org/pinned v1.0.0 => example.org/pinned-fork v1.0.1\n"
+            "\texample.org/moved-on v1.0.0 => example.org/moved-on-fork v1.0.1\n"
+            "\texample.org/local-pinned v0.3.0 => ../local-pinned\n"
+            "\texample.org/local-moved-on v0.3.0 => ../local-moved-on\n"
+            ")\n",
+            encoding="utf-8",
+        )
+        deps, _ = discover_all_dependencies(tmp_path)
+        assert [(d.name, d.version_constraint) for d in deps] == [
+            # The directive names the required version: replaced.
+            ("example.org/pinned-fork", "v1.0.1"),
+            # The directive names another version: the requirement stands.
+            ("example.org/moved-on", "v1.2.0"),
+            # Likewise for a local-path replacement: example.org/local-pinned
+            # is dropped, example.org/local-moved-on is kept.
+            ("example.org/local-moved-on", "v0.4.0"),
+        ]
+
+    @pytest.mark.parametrize("order", ["versioned-first", "unversioned-first"])
+    def test_replace_naming_the_version_wins_over_one_for_every_version(self, tmp_path, order):
+        directives = [
+            "replace example.org/lib v1.0.0 => example.org/exact-fork v1.0.1\n",
+            "replace example.org/lib => example.org/any-fork v9.0.0\n",
+        ]
+        if order == "unversioned-first":
+            directives.reverse()
+        (tmp_path / "go.mod").write_text(
+            "module example.com/app\n\nrequire example.org/lib v1.0.0\n\n" + "".join(directives),
+            encoding="utf-8",
+        )
+        (tmp_path / "other").mkdir()
+        (tmp_path / "other" / "go.mod").write_text(
+            "module example.com/other\n\nrequire example.org/lib2 v1.5.0\n\n"
+            "replace example.org/lib2 v1.0.0 => example.org/exact-fork2 v1.0.1\n"
+            "replace example.org/lib2 => example.org/any-fork2 v9.0.0\n",
+            encoding="utf-8",
+        )
+        deps, _ = discover_all_dependencies(tmp_path)
+        assert {(d.name, d.version_constraint) for d in deps} == {
+            ("example.org/exact-fork", "v1.0.1"),
+            # Control: at a version the first directive does not name, the
+            # one for every version applies.
+            ("example.org/any-fork2", "v9.0.0"),
+        }
 
     def test_nested_go_mod_discovered(self, tmp_path):
         # Polyglot / monorepo style: a nested ``cli/go.mod`` alongside the root.

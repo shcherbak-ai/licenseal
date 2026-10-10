@@ -17,6 +17,11 @@ The format is line-based, lightly structured:
     replace github.com/old/path => github.com/new/path v2.0.0
     replace github.com/local/dep => ../local-dir
 
+    replace (
+        github.com/pinned/dep v1.0.0 => github.com/fork/dep v1.0.1
+        github.com/other/local => ../other-dir
+    )
+
     exclude github.com/bad/dep v9.9.9
 
     // Go 1.24+: development tools
@@ -35,10 +40,14 @@ binary. Each tool import path is a sub-path of a module path that also
 appears in ``require``; we match each tool entry to its module by
 longest-prefix lookup and mark that direct dep as ``DependencyGroup.DEV``.
 
-``replace`` directives rewrite a module reference. A ``replace`` to another
-module/version is followed (the dep is resolved under the replacement's
-identity). A ``replace`` to a local filesystem path (no version) means the
-dep is satisfied locally and has no canonical registry license — drop it.
+``replace`` directives rewrite a module reference, in the single-line and the
+``replace ( ... )`` block form. A ``replace`` to another module/version is
+followed (the dep is resolved under the replacement's identity). A ``replace``
+to a local filesystem path (no version) means the dep is satisfied locally and
+has no canonical registry license — drop it. A version after the module path on
+the left of ``=>`` restricts the replacement to a requirement on that version;
+without one it covers every version. Go honours ``replace`` only in the main
+module, so the directives of a dependency's own ``go.mod`` are never applied.
 
 ``exclude`` directives drop a specific module@version from the build. The
 resolver wouldn't see it anyway (it's not in ``require``); ignored here.
@@ -54,19 +63,38 @@ from licenseal.discovery._walk import walk_project_files
 from licenseal.models import Dependency, DependencyGroup, Ecosystem
 
 _REQUIRE_LINE_RE = re.compile(r"^\s*(?P<path>\S+)\s+(?P<version>\S+)(?:\s*//\s*indirect\b)?\s*$")
-_REPLACE_LINE_RE = re.compile(
-    r"^\s*replace\s+"
-    r"(?P<old>\S+)(?:\s+\S+)?"  # optional old version
+_REPLACE_SPEC_RE = re.compile(
+    r"^\s*(?P<old>\S+)(?:\s+(?P<old_version>\S+))?"
     r"\s*=>\s*"
     r"(?P<new>\S+)(?:\s+(?P<new_version>\S+))?"
     r"\s*$"
 )
 _TOOL_LINE_RE = re.compile(r"^\s*(?P<path>\S+)\s*$")
 
+# ``(old_path, old_version)`` → ``(new_path, new_version)``, or ``None`` for a
+# local-path replacement. ``old_version`` is ``None`` when the directive names
+# no version and so covers every version of the module.
+_Replaces = dict[tuple[str, str | None], tuple[str, str] | None]
+
+
+def _record_replace(spec: str, replaces: _Replaces) -> None:
+    """Add one ``old [version] => new [version]`` spec to ``replaces``.
+
+    A spec that does not have that shape is skipped.
+    """
+    m = _REPLACE_SPEC_RE.match(spec)
+    if not m:
+        return
+    new_version = m.group("new_version")
+    # A replacement with no version is a local path (``=> ../some-dir``).
+    replaces[m.group("old"), m.group("old_version")] = (
+        None if new_version is None else (m.group("new"), new_version)
+    )
+
 
 def _parse_go_mod(
     text: str,
-) -> tuple[list[tuple[str, str]], dict[str, tuple[str, str] | None], list[str]]:
+) -> tuple[list[tuple[str, str]], _Replaces, list[str]]:
     """Return (requires, replaces, tools).
 
     ``requires`` is a list of ``(module_path, version)`` from all ``require``
@@ -75,19 +103,22 @@ def _parse_go_mod(
     on ``Dependency`` (Go's PROD/DEV distinction comes from the ``tool``
     directive, not from ``indirect``).
 
-    ``replaces`` maps old-path → either ``(new_path, new_version)`` for a
-    module replacement or ``None`` for a local-path replacement (drop the
-    dep — no registry license).
+    ``replaces`` maps ``(old_path, old_version)`` → either
+    ``(new_path, new_version)`` for a module replacement or ``None`` for a
+    local-path replacement (drop the dep — no registry license), from both
+    single-line directives and ``replace ( ... )`` blocks. ``old_version`` is
+    ``None`` for a directive without one, which covers every version.
 
     ``tools`` is a list of import paths from any ``tool`` block(s) — used
     by the discovery layer to mark the corresponding require'd modules as
     ``DependencyGroup.DEV``.
     """
     requires: list[tuple[str, str]] = []
-    replaces: dict[str, tuple[str, str] | None] = {}
+    replaces: _Replaces = {}
     tools: list[str] = []
     in_require_block = False
     in_tool_block = False
+    in_replace_block = False
     for raw in text.splitlines():
         line = _strip_line_comment_with_marker(raw)
         stripped = line.strip()
@@ -110,6 +141,13 @@ def _parse_go_mod(
             m = _TOOL_LINE_RE.match(line)
             if m:
                 tools.append(m.group("path"))
+            continue
+
+        if in_replace_block:
+            if stripped == ")":
+                in_replace_block = False
+                continue
+            _record_replace(line, replaces)
             continue
 
         if stripped.startswith("require ("):
@@ -135,18 +173,12 @@ def _parse_go_mod(
             tools.append(stripped[len("tool ") :].strip())
             continue
 
+        if stripped.startswith("replace ("):
+            in_replace_block = True
+            continue
+
         if stripped.startswith("replace "):
-            m = _REPLACE_LINE_RE.match(line)
-            if not m:
-                continue
-            old = m.group("old")
-            new = m.group("new")
-            new_version = m.group("new_version")
-            if new_version is None:
-                # Local path replacement (``=> ../some-dir``) — no version.
-                replaces[old] = None
-            else:
-                replaces[old] = (new, new_version)
+            _record_replace(stripped[len("replace ") :], replaces)
 
     return requires, replaces, tools
 
@@ -355,7 +387,10 @@ def discover_go_mod_dependencies(
         # against the post-replace module paths.
         resolved: list[tuple[str, str]] = []
         for path, version in requires:
-            target = replaces.get(path, (path, version))
+            # A directive naming the required version takes precedence over
+            # one covering every version of the module, as in Go.
+            key = (path, version) if (path, version) in replaces else (path, None)
+            target = replaces.get(key, (path, version))
             if target is None:
                 continue  # local replacement — drop
             resolved.append(target)

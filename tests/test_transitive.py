@@ -3174,13 +3174,15 @@ class TestGoEdgeAwareResolution:
             )
         assert deps == []
 
-    def test_proxy_text_replaces_are_followed_in_child_modules(self, tmp_path):
-        # A transitive's own go.mod may contain a ``replace`` rewriting
-        # one of its required modules — the edge graph should reflect the
-        # post-replace target.
+    def test_replace_in_a_dependency_go_mod_is_not_applied(self, tmp_path):
+        # Go honours ``replace`` only in the main module. A dependency whose
+        # own go.mod replaces one of its requirements still depends, in this
+        # build, on the module it requires.
         (tmp_path / "go.sum").write_text(
             "github.com/parent v1.0.0 h1:h\n"
             "github.com/parent v1.0.0/go.mod h1:h\n"
+            "github.com/old/x v1.0.0 h1:h\n"
+            "github.com/old/x v1.0.0/go.mod h1:h\n"
             "github.com/new/target v2.0.0 h1:h\n"
             "github.com/new/target v2.0.0/go.mod h1:h\n",
             encoding="utf-8",
@@ -3191,6 +3193,7 @@ class TestGoEdgeAwareResolution:
                 "require github.com/old/x v1.0.0\n"
                 "replace github.com/old/x v1.0.0 => github.com/new/target v2.0.0\n"
             ),
+            "github.com/old/x": "",
             "github.com/new/target": "",
         }
         from licenseal.transitive import _resolve_go_transitive  # noqa: PLC2701
@@ -3207,7 +3210,11 @@ class TestGoEdgeAwareResolution:
                 go_mod_fetcher=self._go_mod_fetcher(graph),
             )
         by_name = {d.name: d for d in deps}
-        assert by_name["github.com/new/target"].direct_ancestors == ("github.com/parent",)
+        assert by_name["github.com/old/x"].direct_ancestors == ("github.com/parent",)
+        # The replacement target is in go.sum for some other reason; nothing
+        # here requires it, so it is an orphan.
+        assert by_name["github.com/new/target"].direct_ancestors == ()
+        assert by_name["github.com/new/target"].group == DependencyGroup.PROD
 
     def test_proxy_fetch_returning_non_dict_treated_as_no_edges(self, tmp_path):
         # Defensive: go_mod_fetcher returning a non-dict (e.g. None on
@@ -3339,12 +3346,15 @@ class TestGoEdgeAwareResolution:
             )
         assert [d.name for d in deps] == ["github.com/dup"]
 
-    def test_transitive_module_replace_to_local_path_skipped(self, tmp_path):
-        # A child module's go.mod can include ``replace ... => ../local``
-        # (no version) — the child's requirement is satisfied locally, so
-        # the edge doesn't contribute a registry-resolvable child.
+    def test_local_path_replace_in_a_dependency_go_mod_is_not_applied(self, tmp_path):
+        # A dependency's go.mod can include ``replace ... => ../local`` (no
+        # version). That path exists only in the dependency's own checkout;
+        # in this build the requirement is met by the published module.
         (tmp_path / "go.sum").write_text(
-            "github.com/parent v1.0.0 h1:h\ngithub.com/parent v1.0.0/go.mod h1:h\n",
+            "github.com/parent v1.0.0 h1:h\n"
+            "github.com/parent v1.0.0/go.mod h1:h\n"
+            "github.com/swapped v1.0.0 h1:h\n"
+            "github.com/swapped v1.0.0/go.mod h1:h\n",
             encoding="utf-8",
         )
         graph = {
@@ -3367,9 +3377,9 @@ class TestGoEdgeAwareResolution:
                 fetcher=lambda u, c: None,
                 go_mod_fetcher=self._go_mod_fetcher(graph),
             )
-        # The local-replaced child is NOT added to the edge graph, so no
-        # extra deps appear.
-        assert [d.name for d in deps] == ["github.com/parent"]
+        by_name = {d.name: d for d in deps}
+        assert set(by_name) == {"github.com/parent", "github.com/swapped"}
+        assert by_name["github.com/swapped"].direct_ancestors == ("github.com/parent",)
 
     def test_workspace_local_modules_filtered_from_go_sum(self, tmp_path):
         # Multi-module workspaces (go.work + per-directory go.mod) leave
@@ -3476,6 +3486,184 @@ class TestGoEdgeAwareResolution:
             )
         # The workspace-local dep is filtered out → empty output.
         assert deps == []
+
+
+def _go_sum(*modules: tuple[str, str]) -> str:
+    """``go.sum`` text with the usual two rows for each ``(module, version)``."""
+    return "".join(
+        f"{module} {version} h1:h\n{module} {version}/go.mod h1:h\n" for module, version in modules
+    )
+
+
+def _mock_go_proxy(go_mods: dict[tuple[str, str], str]) -> None:
+    """Serve each ``(module, version)``'s go.mod body from the module proxy."""
+    for (module, version), requires in go_mods.items():
+        respx.get(f"https://proxy.golang.org/{module}/@v/{version}.mod").mock(
+            return_value=httpx.Response(200, text=f"module {module}\n{requires}")
+        )
+
+
+def _resolve_tree(tmp_path, *, include_dev: bool) -> list[Dependency]:
+    """Discover the tree's direct deps and expand them, as ``check`` does."""
+    direct, _ = discover_all_dependencies(tmp_path)
+    with httpx.Client() as client:
+        return resolve_transitive(
+            direct, tmp_path, include_dev=include_dev, max_depth=50, client=client
+        )
+
+
+class TestGoReplaceDirectives:
+    """``replace`` in the main module's go.mod, in both forms and with an
+    old-version qualifier, decides which module a requirement is scanned as.
+    A ``replace`` in a dependency's go.mod does not."""
+
+    @respx.mock
+    @pytest.mark.parametrize(
+        "replace_directives",
+        [
+            "replace example.org/original => example.org/fork v1.2.1\n"
+            "replace example.org/local => ../local\n",
+            "replace (\n"
+            "\texample.org/original => example.org/fork v1.2.1\n"
+            "\texample.org/local => ../local\n"
+            ")\n",
+        ],
+        ids=["single-line", "block"],
+    )
+    def test_replacement_is_the_direct_dependency(self, tmp_path, replace_directives):
+        # go.sum records the replacement module, not the one it replaces. The
+        # single-line form is the control: the block form must scan the same.
+        (tmp_path / "go.mod").write_text(
+            "module example.com/app\n\n"
+            "go 1.22\n\n"
+            "require (\n"
+            "\texample.org/original v1.2.0\n"
+            "\texample.org/local v0.1.0\n"
+            "\texample.org/plain v1.0.0\n"
+            ")\n\n" + replace_directives,
+            encoding="utf-8",
+        )
+        (tmp_path / "go.sum").write_text(
+            _go_sum(
+                ("example.org/fork", "v1.2.1"),
+                ("example.org/fork-child", "v1.0.0"),
+                ("example.org/plain", "v1.0.0"),
+            ),
+            encoding="utf-8",
+        )
+        _mock_go_proxy(
+            {
+                ("example.org/fork", "v1.2.1"): "require example.org/fork-child v1.0.0\n",
+                ("example.org/fork-child", "v1.0.0"): "",
+                ("example.org/plain", "v1.0.0"): "",
+            }
+        )
+
+        deps = _resolve_tree(tmp_path, include_dev=False)
+        assert {
+            (d.name, d.version_constraint, d.depth, d.direct_ancestors, d.source) for d in deps
+        } == {
+            ("example.org/fork", "v1.2.1", 0, (), "go.mod"),
+            ("example.org/fork-child", "v1.0.0", 1, ("example.org/fork",), ""),
+            ("example.org/plain", "v1.0.0", 0, (), "go.mod"),
+        }
+
+    @respx.mock
+    def test_old_version_qualifier_with_go_sum(self, tmp_path):
+        (tmp_path / "go.mod").write_text(
+            "module example.com/app\n\n"
+            "go 1.22\n\n"
+            "require (\n"
+            "\texample.org/pinned v1.0.0\n"
+            "\texample.org/moved-on v1.2.0\n"
+            ")\n\n"
+            "replace example.org/pinned v1.0.0 => example.org/pinned-fork v1.0.1\n"
+            "replace example.org/moved-on v1.0.0 => example.org/moved-on-fork v1.0.1\n",
+            encoding="utf-8",
+        )
+        (tmp_path / "go.sum").write_text(
+            _go_sum(("example.org/pinned-fork", "v1.0.1"), ("example.org/moved-on", "v1.2.0")),
+            encoding="utf-8",
+        )
+        _mock_go_proxy(
+            {
+                ("example.org/pinned-fork", "v1.0.1"): "",
+                ("example.org/moved-on", "v1.2.0"): "",
+            }
+        )
+
+        deps = _resolve_tree(tmp_path, include_dev=False)
+        assert {(d.name, d.version_constraint, d.depth, d.source) for d in deps} == {
+            # The directive names the required version.
+            ("example.org/pinned-fork", "v1.0.1", 0, "go.mod"),
+            # The directive names v1.0.0 and v1.2.0 is required: not replaced,
+            # so the required module is the direct dependency.
+            ("example.org/moved-on", "v1.2.0", 0, "go.mod"),
+        }
+
+    @respx.mock
+    @pytest.mark.parametrize(
+        "dependency_replace",
+        [
+            "replace example.org/shared => ../shared\n",
+            "replace example.org/shared => example.org/elsewhere v9.9.9\n",
+            "replace (\n\texample.org/shared v1.0.0 => ../shared\n)\n",
+        ],
+        ids=["local-path", "other-module", "block"],
+    )
+    def test_dependency_replace_does_not_hide_a_production_module(
+        self, tmp_path, dependency_replace
+    ):
+        # runtime-lib and the dev tool gen-tool both require shared. The
+        # go.mod runtime-lib published also replaces shared, which Go ignores
+        # here: shared ships with production.
+        (tmp_path / "go.mod").write_text(
+            "module example.com/app\n\n"
+            "go 1.24\n\n"
+            "require (\n"
+            "\texample.org/runtime-lib v1.0.0\n"
+            "\texample.org/gen-tool v1.0.0\n"
+            ")\n\n"
+            "tool example.org/gen-tool/cmd/gen\n",
+            encoding="utf-8",
+        )
+        (tmp_path / "go.sum").write_text(
+            _go_sum(
+                ("example.org/runtime-lib", "v1.0.0"),
+                ("example.org/gen-tool", "v1.0.0"),
+                ("example.org/shared", "v1.0.0"),
+                ("example.org/gen-dep", "v1.0.0"),
+            ),
+            encoding="utf-8",
+        )
+        _mock_go_proxy(
+            {
+                ("example.org/runtime-lib", "v1.0.0"): (
+                    "require example.org/shared v1.0.0\n" + dependency_replace
+                ),
+                ("example.org/gen-tool", "v1.0.0"): (
+                    "require (\n\texample.org/shared v1.0.0\n\texample.org/gen-dep v1.0.0\n)\n"
+                ),
+                ("example.org/shared", "v1.0.0"): "",
+                ("example.org/gen-dep", "v1.0.0"): "",
+            }
+        )
+
+        prod_only = _resolve_tree(tmp_path, include_dev=False)
+        assert {(d.name, d.group, d.depth, d.direct_ancestors) for d in prod_only} == {
+            ("example.org/runtime-lib", DependencyGroup.PROD, 0, ()),
+            ("example.org/shared", DependencyGroup.PROD, 1, ("example.org/runtime-lib",)),
+        }
+
+        with_dev = _resolve_tree(tmp_path, include_dev=True)
+        assert _prod_names(with_dev) == _prod_names(prod_only)
+        # Control: the module only the tool requires is DEV.
+        assert {
+            (d.name, d.direct_ancestors) for d in with_dev if d.group == DependencyGroup.DEV
+        } == {
+            ("example.org/gen-tool", ()),
+            ("example.org/gen-dep", ("example.org/gen-tool",)),
+        }
 
 
 class TestJavaTransitiveResolution:

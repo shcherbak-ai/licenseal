@@ -1680,8 +1680,9 @@ def _fetch_go_edge_graph(
 ) -> dict[str, set[str]]:
     """Fetch each module's go.mod from ``proxy.golang.org`` concurrently.
 
-    Returns ``{lower(module_path): {lower(child_module_path), ...}}``.
-    Modules whose proxy fetch fails get an empty edge set (treated as
+    Returns ``{lower(module_path): {lower(child_module_path), ...}}``: each
+    module's ``require`` entries, without that module's own ``replace``
+    directives. Modules whose proxy fetch fails get an empty edge set (treated as
     leaves by reverse-BFS — they still appear in the output via go.sum,
     but with no transitive contribution). ``go_mod_fetcher`` is decoupled
     from the JSON-API ``fetcher`` because proxy.golang.org serves plain
@@ -1699,14 +1700,11 @@ def _fetch_go_edge_graph(
         text = data.get("text", "")
         if not isinstance(text, str) or not text:
             return (module_path.lower(), set())
-        requires, replaces, _tools = _parse_go_mod(text)
-        children: set[str] = set()
-        for req_path, _req_version in requires:
-            target = replaces.get(req_path, (req_path, _req_version))
-            if target is None:
-                continue
-            children.add(target[0].lower())
-        return (module_path.lower(), children)
+        # The ``replace`` directives of this go.mod are not applied: Go honours
+        # them only in the main module, so the module's requirements are its
+        # edges as written.
+        requires, _replaces, _tools = _parse_go_mod(text)
+        return (module_path.lower(), {req_path.lower() for req_path, _ in requires})
 
     # Propagate the active tethered scope into the go.mod-fetch workers — a bare
     # pool fetches in an empty context and bypasses the egress policy.
