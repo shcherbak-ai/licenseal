@@ -832,26 +832,29 @@ def _split_top_level(expr: str, sep: str) -> list[str]:
 
 
 def _strip_outer_parens(expr: str) -> str:
-    """Strip ONE matched outer-paren wrap if the parens are the outermost grouping.
+    """Strip every matched outer-paren wrap that encloses the whole expression.
 
-    ``"(A OR B)"`` → ``"A OR B"``; ``"(A) AND (B)"`` → unchanged (outer
-    ``(`` closes before end-of-string). Repeated wraps like ``"((A))"``
-    need repeated calls; the canonicalizer calls this from inside the
-    recursive descent so each level peels one wrap.
+    ``"(A OR B)"`` and ``"((A OR B))"`` → ``"A OR B"``; ``"(A) AND (B)"`` →
+    unchanged (outer ``(`` closes before end-of-string). Peels to a
+    fixpoint so the number of redundant wraps never changes the result —
+    the canonicalizer only recurses into a level that has a top-level
+    operator, so a wrap left behind here would survive into the output.
     """
-    if not (expr.startswith("(") and expr.endswith(")")):
-        return expr
-    depth = 0
-    for i, c in enumerate(expr):
-        if c == "(":
-            depth += 1
-        elif c == ")":
-            depth -= 1
-            if depth == 0 and i < len(expr) - 1:
-                # Outer ``(`` closed before string end → these are NOT matched
-                # outermost parens (e.g. ``"(A) AND (B)"``). Leave unchanged.
-                return expr
-    return expr[1:-1].strip()
+    while expr.startswith("(") and expr.endswith(")"):
+        depth = 0
+        for i, c in enumerate(expr):
+            if c == "(":
+                depth += 1
+            elif c == ")":
+                depth -= 1
+                if depth == 0 and i < len(expr) - 1:
+                    # Outer ``(`` closed before string end → these are NOT matched
+                    # outermost parens (e.g. ``"(A) AND (B)"``). Leave unchanged.
+                    return expr
+        if depth != 0:
+            return expr  # unbalanced — leave alone
+        expr = expr[1:-1].strip()
+    return expr
 
 
 def _canonicalize_spdx_operands(expr: str) -> str:
@@ -1032,17 +1035,12 @@ def _normalize_license_inner(raw: str) -> str:
             return spdx
         # Unrecognized URL — fall through; nothing else below handles a
         # URL shape, so the function returns "UNKNOWN" at the bottom.
-    # Strip a single set of outer parens if they wrap the whole
-    # expression — common Java publisher convention is to write
-    # ``(Apache-2.0 OR EPL-2.0)`` or ``(MIT)``. The compound-expression
-    # branches below match without the wrap.
-    if (
-        stripped.startswith("(")
-        and stripped.endswith(")")
-        and stripped.count("(") == 1
-        and stripped.count(")") == 1
-    ):
-        stripped = stripped[1:-1].strip()
+    # Strip outer parens that wrap the whole expression — common Java
+    # publisher convention is to write ``(Apache-2.0 OR EPL-2.0)`` or
+    # ``(MIT)``. Every redundant wrap goes (``((MIT))`` too), so the
+    # compound-expression branches below and every downstream consumer of
+    # the normalized string see the same form at any wrap depth.
+    stripped = _strip_outer_parens(stripped)
 
     # Check classifier map first (exact match)
     if stripped in _CLASSIFIER_MAP:

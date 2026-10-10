@@ -387,6 +387,50 @@ class TestSpdxOperandCanonicalization:
         # passes through as-is rather than rotating operands or crashing.
         assert normalize_license("(MIT OR Apache-2.0") == "(MIT OR Apache-2.0"
 
+    @pytest.mark.parametrize(
+        "bare",
+        [
+            "MIT",
+            "GPL-2.0-only",
+            "MIT OR Apache-2.0",
+            "AGPL-3.0-only OR Proprietary",
+            "Unicode-DFS-2016 AND (MIT OR Apache-2.0)",
+            "(MIT) AND (Apache-2.0)",
+            "Apache-2.0 WITH LLVM-exception",
+            "MIT/Apache-2.0",
+        ],
+    )
+    def test_redundant_outer_parens_stripped_at_any_depth(self, bare):
+        # The number of fully redundant wraps must never change the result:
+        # a wrap that survives normalization hides the top-level operator
+        # (or the bare ID) from every consumer that splits or compares the
+        # normalized string.
+        expected = normalize_license(bare)
+        for depth in range(1, 4):
+            wrapped = "(" * depth + bare + ")" * depth
+            result = normalize_license(wrapped)
+            assert result == expected, wrapped
+            # Idempotent: normalizing the normalized form changes nothing.
+            assert normalize_license(result) == result, wrapped
+
+    def test_redundant_parens_around_a_nested_operand_stripped(self):
+        # The same fixpoint applies one level down: a doubly wrapped operand
+        # canonicalizes like the bare one, and an AND child that contains an
+        # OR keeps exactly the one wrap precedence requires.
+        assert normalize_license("MIT OR ((Apache-2.0))") == "Apache-2.0 OR MIT"
+        result = normalize_license("MIT AND ((GPL-2.0-only OR ISC))")
+        assert result == "(GPL-2.0-only OR ISC) AND MIT"
+        assert normalize_license(result) == result
+
+    def test_redundant_parens_with_inner_whitespace_stripped(self):
+        assert normalize_license("( ( MIT OR Apache-2.0 ) )") == "Apache-2.0 OR MIT"
+
+    def test_unbalanced_wrap_with_matching_ends_passes_through_unchanged(self):
+        # Opens twice, closes once: the first and last characters look like
+        # an outer wrap, but the parens don't balance — leave the string
+        # alone rather than peel one side of a malformed expression.
+        assert normalize_license("((MIT)") == "((MIT)"
+
     def test_whitespace_collapsed_in_canonicalization(self):
         # Multiple spaces between operands should canonicalize the same
         # as single-spaced input.

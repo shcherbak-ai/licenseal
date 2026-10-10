@@ -591,6 +591,24 @@ class TestPairLevelOverrides:
         result = check_compatibility("GPL-2.0-only OR Proprietary", li)
         assert result.verdict == CompatibilityVerdict.INCOMPATIBLE
 
+    def test_redundant_project_parens_keep_pair_conflicts(self):
+        # Pair entries key on the exact project ID, so a wrap left on the
+        # project license would switch the whole pair layer off.
+        for depth in range(4):
+            project = "(" * depth + "GPL-2.0-only" + ")" * depth
+            result = check_compatibility(project, _make_license_info("Apache-2.0"))
+            assert result.verdict == CompatibilityVerdict.INCOMPATIBLE, project
+            assert "GPLv2-incompatible" in result.reason
+
+    def test_redundant_parens_on_a_project_arm_keep_pair_conflicts(self):
+        for project in (
+            "((GPL-2.0-only)) OR Proprietary",
+            "((GPL-2.0-only OR Proprietary))",
+            "(((GPL-2.0-only)) OR (Proprietary))",
+        ):
+            result = check_compatibility(project, _make_license_info("Apache-2.0"))
+            assert result.verdict == CompatibilityVerdict.INCOMPATIBLE, project
+
     def test_unrelated_pairs_unaffected(self):
         assert (
             check_compatibility("MIT", _make_license_info("Apache-2.0")).verdict
@@ -644,3 +662,28 @@ class TestDualLicensedProjectRow:
         li = _make_license_info("GPL-3.0-only")
         result = check_compatibility("GPL-3.0-only OR SomeWeirdLicense", li)
         assert result.verdict == CompatibilityVerdict.COMPATIBLE
+
+    def test_redundant_project_parens_do_not_change_the_row(self):
+        # The strictest-row selection splits the project license on its
+        # top-level OR; a redundant wrap must not hide that operator and let
+        # the copyleft arm alone pick the row.
+        for depth in range(4):
+            project = "(" * depth + "AGPL-3.0-only OR Proprietary" + ")" * depth
+            copyleft = check_compatibility(project, _make_license_info("GPL-3.0-only"))
+            assert copyleft.verdict == CompatibilityVerdict.INCOMPATIBLE, project
+            permissive = check_compatibility(project, _make_license_info("MIT"))
+            assert permissive.verdict == CompatibilityVerdict.COMPATIBLE, project
+
+    def test_redundant_parens_on_mixed_project_arms_do_not_change_the_row(self):
+        for project in (
+            "((AGPL-3.0-only)) OR Proprietary",
+            "(AGPL-3.0-only) OR ((Proprietary))",
+            "((GPL-3.0-only) OR ((BUSL-1.1)))",
+        ):
+            result = check_compatibility(project, _make_license_info("GPL-3.0-only"))
+            assert result.verdict == CompatibilityVerdict.INCOMPATIBLE, project
+
+    def test_analyze_reports_the_unwrapped_project_license(self):
+        report = analyze("((AGPL-3.0-only OR Proprietary))", [_make_license_info("GPL-3.0-only")])
+        assert report.project_license == "AGPL-3.0-only OR Proprietary"
+        assert len(report.violations) == 1

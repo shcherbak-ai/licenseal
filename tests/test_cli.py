@@ -772,6 +772,43 @@ class TestCheckCommand:
         result = runner.invoke(main, ["check", "--path", str(tmp_path)])
         assert result.exit_code == 1
 
+    @pytest.mark.parametrize(
+        "project_license, dep_license",
+        [
+            # Dual-licensed project: the commercial arm pins the strictest row.
+            ("AGPL-3.0-only OR Proprietary", "GPL-3.0-only"),
+            ("(AGPL-3.0-only OR Proprietary)", "GPL-3.0-only"),
+            ("((AGPL-3.0-only OR Proprietary))", "GPL-3.0-only"),
+            # Single-ID project: the pair layer keys on the exact project ID.
+            ("GPL-2.0-only", "Apache-2.0"),
+            ("(GPL-2.0-only)", "Apache-2.0"),
+            ("((GPL-2.0-only))", "Apache-2.0"),
+        ],
+    )
+    @respx.mock
+    def test_redundant_project_license_parens_do_not_change_the_verdict(
+        self, tmp_path, project_license, dep_license
+    ):
+        # A hand-typed, fully redundant wrap in the project's own manifest
+        # must produce the same violation as the bare expression.
+        (tmp_path / "pyproject.toml").write_text(
+            textwrap.dedent(f"""\
+            [project]
+            name = "myproject"
+            license = "{project_license}"
+            dependencies = ["some-lib"]
+            """)
+        )
+        _mock_pypi("some-lib", dep_license)
+
+        runner = CliRunner()
+        result = runner.invoke(main, ["check", "--path", str(tmp_path), "-f", "json"])
+        assert result.exit_code == 1
+        data = json.loads(result.output[result.output.index("{") :])
+        assert data["project_license"] == project_license.strip("()")
+        assert data["summary"]["violations"] == 1
+        assert data["dependencies"][0]["verdict"] == "incompatible"
+
     @respx.mock
     def test_warning_exits_nonzero_in_strict_mode(self, tmp_path):
         (tmp_path / "pyproject.toml").write_text(
