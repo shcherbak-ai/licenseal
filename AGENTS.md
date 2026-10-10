@@ -92,7 +92,7 @@ src/licenseal/
 
 `LicenseInfo` keeps `license_id` as the detected license. A reviewed override goes in `reviewed_license_id`; the `effective_license_id` property returns the override when set, otherwise the detected one. Compatibility analysis and reports operate on the effective license; both stay visible side by side in the report.
 
-`Dependency` carries `depth` (0 for direct, ≥1 for transitive) and `direct_ancestors: tuple[str, ...]` — the depth-0 deps that pull the entry in. Reports nest transitives under their alphabetically-first direct ancestor; shared transitives carry an `(also: X, Y)` annotation. JSON output exposes the full ancestor list.
+`Dependency` carries `depth` (0 for direct, ≥1 for transitive) and `direct_ancestors: tuple[str, ...]` — the depth-0 deps that pull the entry in. Reports nest transitives under their alphabetically-first direct ancestor, matched on `(ecosystem, name)`; shared transitives carry an `(also: X, Y)` annotation. Each result is rendered as exactly one row (`report._grouped_results`), so table and Markdown row counts equal JSON's `summary.total`. JSON output exposes the full ancestor list.
 
 Review keys are `<ecosystem>:<canonical-name>@<version>`. Python names are PEP 503 normalized (`-_.` collapsed and lowercased); npm names are lowercased.
 

@@ -346,6 +346,12 @@ def _format_elapsed(seconds: float) -> str:
     return f"{seconds:.2f}s"
 
 
+def _row_order(result: CompatibilityResult) -> tuple[str, str]:
+    """Sort key for report rows: ecosystem, then case-insensitive name."""
+    dep = result.license_info.dependency
+    return (dep.ecosystem.value, dep.name.lower())
+
+
 def _sorted_results(results: list[CompatibilityResult]) -> list[CompatibilityResult]:
     """Sort results alphabetically by ecosystem then name.
 
@@ -353,13 +359,7 @@ def _sorted_results(results: list[CompatibilityResult]) -> list[CompatibilityRes
     every non-compatible result with its reason; alphabetical ordering of the
     main table makes large transitive reports scannable.
     """
-    return sorted(
-        results,
-        key=lambda r: (
-            r.license_info.dependency.ecosystem.value,
-            r.license_info.dependency.name.lower(),
-        ),
-    )
+    return sorted(results, key=_row_order)
 
 
 _VERDICT_ICONS = {
@@ -409,51 +409,42 @@ _TRANSITIVE_PREFIX = "  └─ "
 def _grouped_results(results: list[CompatibilityResult]) -> list[CompatibilityResult]:
     """Order direct deps alphabetically; nest transitives under their first ancestor.
 
-    Each transitive is listed exactly once — under its alphabetically-first
-    direct ancestor (a sorted tuple, so this is deterministic). Transitives
+    Every result is listed exactly once. A transitive goes under its
+    alphabetically-first direct ancestor (a sorted tuple, so this is
+    deterministic), matched within its own ecosystem: a transitive always
+    shares its ancestors' ecosystem, so a same-named direct dep in another
+    ecosystem is not its parent. When several direct rows share an ecosystem
+    and name (two locked versions of one package), they are ordered by
+    resolved version and the transitives go under the first. Transitives
     whose first ancestor isn't represented in the report (which shouldn't
     happen post-orphan-filter, but defensively) appear at the end.
     """
     direct = sorted(
         [r for r in results if not r.license_info.dependency.is_transitive],
-        key=lambda r: (
-            r.license_info.dependency.ecosystem.value,
-            r.license_info.dependency.name.lower(),
-        ),
+        key=lambda r: (*_row_order(r), r.license_info.resolved_version),
     )
-    direct_names = {r.license_info.dependency.name for r in direct}
-    by_first_ancestor: dict[str, list[CompatibilityResult]] = {}
+    direct_keys = {
+        (r.license_info.dependency.ecosystem, r.license_info.dependency.name) for r in direct
+    }
+    by_first_ancestor: dict[tuple[Ecosystem, str], list[CompatibilityResult]] = {}
     orphans: list[CompatibilityResult] = []
     for r in results:
         dep = r.license_info.dependency
         if not dep.is_transitive:
             continue
-        if dep.direct_ancestors and dep.direct_ancestors[0] in direct_names:
-            by_first_ancestor.setdefault(dep.direct_ancestors[0], []).append(r)
+        key = (dep.ecosystem, dep.direct_ancestors[0]) if dep.direct_ancestors else None
+        if key in direct_keys:
+            by_first_ancestor.setdefault(key, []).append(r)
         else:
             orphans.append(r)
     out: list[CompatibilityResult] = []
     for d in direct:
         out.append(d)
-        bucket = by_first_ancestor.get(d.license_info.dependency.name, [])
-        out.extend(
-            sorted(
-                bucket,
-                key=lambda r: (
-                    r.license_info.dependency.ecosystem.value,
-                    r.license_info.dependency.name.lower(),
-                ),
-            )
-        )
-    out.extend(
-        sorted(
-            orphans,
-            key=lambda r: (
-                r.license_info.dependency.ecosystem.value,
-                r.license_info.dependency.name.lower(),
-            ),
-        )
-    )
+        dep = d.license_info.dependency
+        # ``pop``, not ``get``: a bucket is emitted under the first direct row
+        # that claims it and never again.
+        out.extend(sorted(by_first_ancestor.pop((dep.ecosystem, dep.name), []), key=_row_order))
+    out.extend(sorted(orphans, key=_row_order))
     return out
 
 

@@ -1397,6 +1397,111 @@ class TestHierarchicalLayout:
         # then `b` direct (shared is NOT re-listed under b).
         assert names == ["a", "a-only", "shared", "b"]
 
+    def test_grouped_results_lists_transitives_once_under_duplicate_direct_rows(self):
+        # Two direct rows for one package (two resolved versions): the shared
+        # transitive is listed once, under the row with the first version,
+        # whatever order the results arrive in.
+        def root(version: str) -> CompatibilityResult:
+            return _make_result(
+                "root",
+                "MIT",
+                RiskLevel.PERMISSIVE,
+                CompatibilityVerdict.COMPATIBLE,
+                resolved_version=version,
+            )
+
+        child = _make_result(
+            "child",
+            "MIT",
+            RiskLevel.PERMISSIVE,
+            CompatibilityVerdict.COMPATIBLE,
+            depth=1,
+            direct_ancestors=("root",),
+        )
+        for results in (
+            [root("2.0.0"), root("1.0.0"), child],
+            [child, root("1.0.0"), root("2.0.0")],
+        ):
+            ordered = _grouped_results(results)
+            assert [
+                (r.license_info.dependency.name, r.license_info.resolved_version) for r in ordered
+            ] == [("root", "1.0.0"), ("child", ""), ("root", "2.0.0")]
+
+    def test_grouped_results_matches_ancestors_within_their_ecosystem(self):
+        def result(name: str, ecosystem: Ecosystem, ancestors: tuple[str, ...] = ()):
+            return _make_result(
+                name,
+                "MIT",
+                RiskLevel.PERMISSIVE,
+                CompatibilityVerdict.COMPATIBLE,
+                ecosystem=ecosystem,
+                depth=1 if ancestors else 0,
+                direct_ancestors=ancestors,
+            )
+
+        results = [
+            result("shared", Ecosystem.PYTHON),
+            result("shared", Ecosystem.NPM),
+            result("python-child", Ecosystem.PYTHON, ("shared",)),
+            # Its only ancestor name belongs to roots of other ecosystems.
+            result("stray", Ecosystem.RUST, ("shared",)),
+        ]
+        ordered = _grouped_results(results)
+        assert [
+            (r.license_info.dependency.ecosystem.value, r.license_info.dependency.name)
+            for r in ordered
+        ] == [
+            ("npm", "shared"),
+            ("python", "shared"),
+            ("python", "python-child"),
+            ("rust", "stray"),
+        ]
+
+    def test_duplicate_direct_rows_do_not_repeat_rows_details_or_reviews(self):
+        report = AnalysisReport(
+            project_license="MIT",
+            results=[
+                _make_result(
+                    "root",
+                    "MIT",
+                    RiskLevel.PERMISSIVE,
+                    CompatibilityVerdict.COMPATIBLE,
+                    resolved_version=version,
+                )
+                for version in ("1.0.0", "2.0.0")
+            ]
+            + [
+                _make_result(
+                    "child",
+                    "UNKNOWN",
+                    RiskLevel.STRONG_COPYLEFT,
+                    CompatibilityVerdict.INCOMPATIBLE,
+                    reason="child is under a copyleft license",
+                    resolved_version="0.3.0",
+                    reviewed_license_id="GPL-3.0-only",
+                    review_note="confirmed in the repository",
+                    depth=1,
+                    direct_ancestors=("root",),
+                ),
+            ],
+        )
+        total = json.loads(render_json(report))["summary"]["total"]
+
+        md = render_markdown(report)
+        main_table, _, reviewed_table = md.partition("## Reviewed")
+        assert sum(line.startswith("|") for line in main_table.splitlines()) - 2 == total == 3
+        assert "**Summary:** 1 violation, " in md
+        assert md.count("- ✗ child is under a copyleft license") == 1
+        assert reviewed_table.count("[child (0.3.0)]") == 1
+
+        console, buf = _make_console()
+        render_table(report, console)
+        table = buf.getvalue()
+        assert table.count("└─ child (0.3.0)") == 1
+        assert "1 violation" in table
+        assert table.count("child is under a copyleft license") == 1
+        assert table.count("confirmed in the repository") == 1
+
     def test_table_renders_indented_transitive_with_also_suffix(self):
         report = AnalysisReport(
             project_license="MIT",
