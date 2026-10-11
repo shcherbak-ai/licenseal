@@ -16,6 +16,7 @@ from licenseal.discovery.python import (
     source_table_origin,
     table_spec,
 )
+from licenseal.discovery.python.requirements import referenced_requirements
 from licenseal.models import Dependency, DependencyGroup, Ecosystem
 
 # PEP 503: collapse runs of `-`, `_`, `.` to a single `-` and lowercase.
@@ -66,6 +67,49 @@ def _extract_deps(
         dep = requirement_dependency(dep_str, group, source, base_dir, scan_root)
         if dep is not None:
             deps.append(dep)
+    return deps
+
+
+def _dynamic_files(filepath: Path, table: dict, key: str, section: str) -> list[str]:
+    """The files one ``[tool.setuptools.dynamic]`` entry reads its value from.
+
+    ``table[key]`` is the entry, ``{file = "a.txt"}`` or ``{file = ["a.txt",
+    "b.txt"]}``, and ``section`` what a gap calls it. An entry with no
+    ``file`` key names none.
+    """
+    entry = typed_field(filepath, table, key, dict, section) or {}
+    files = entry.get("file")
+    if isinstance(files, str):
+        return [files]
+    return _string_list(filepath, files, section, entry=True)
+
+
+def _setuptools_dynamic_deps(filepath: Path, data: dict, scan_root: Path) -> list[Dependency]:
+    """The dependencies ``[tool.setuptools.dynamic]`` reads from requirements files.
+
+    ``dependencies = {file = …}`` names the files of the production
+    requirements, and each entry of ``optional-dependencies`` those of one
+    extra. A file is relative to the directory of the pyproject.toml and is
+    read like a ``-r`` include of a requirements file.
+    """
+    tool = typed_field(filepath, data, "tool", dict) or {}
+    setuptools = typed_field(filepath, tool, "setuptools", dict, "tool.setuptools") or {}
+    section = "tool.setuptools.dynamic"
+    dynamic = typed_field(filepath, setuptools, "dynamic", dict, section) or {}
+    named = [
+        (DependencyGroup.PROD, name)
+        for name in _dynamic_files(filepath, dynamic, "dependencies", f"{section}.dependencies")
+    ]
+    optional_section = f"{section}.optional-dependencies"
+    optional = typed_field(filepath, dynamic, "optional-dependencies", dict, optional_section) or {}
+    for extra in optional:
+        group = DependencyGroup.DEV if extra.lower() in DEV_GROUP_NAMES else DependencyGroup.PROD
+        named.extend(
+            (group, name) for name in _dynamic_files(filepath, optional, extra, optional_section)
+        )
+    deps: list[Dependency] = []
+    for group, name in named:
+        deps.extend(referenced_requirements(filepath, name, group, scan_root))
     return deps
 
 
@@ -248,6 +292,9 @@ def _parse_pyproject_deps(
         )
         extra_deps = _string_list(filepath, group_deps, optional_section, entry=True)
         deps.extend(_extract_deps(extra_deps, group, source, base_dir, scan_root))
+
+    # setuptools: dependencies it reads from requirements files at build time.
+    deps.extend(_setuptools_dynamic_deps(filepath, data, scan_root))
 
     # PEP 735: [dependency-groups] (uv, pdm). Two-pass to resolve
     # ``{ include-group = "<other>" }`` directives correctly:

@@ -155,6 +155,23 @@ def _parse_requirements_file(
     return deps
 
 
+def referenced_requirements(
+    manifest: Path, value: str, group: DependencyGroup, project_path: Path
+) -> list[Dependency]:
+    """Read the requirements file another manifest names, like a ``-r`` include.
+
+    ``value`` is a path written in ``manifest`` (a setuptools ``file:``
+    directive), relative to its directory. It is followed under the rules of
+    an include (:func:`_included_file`), and one that is not followed is a
+    gap on ``manifest``. The requirements of the file, and of every file it
+    includes with ``-r``, take ``group``; ``source`` names the file that
+    declares each.
+    """
+    scan_root = _resolved(project_path) or project_path
+    target = _included_file(manifest, value, scan_root)
+    return [] if target is None else _parse_requirements_file(target, group, scan_root)
+
+
 def discover_requirements_dependencies(
     project_path: Path,
     *,

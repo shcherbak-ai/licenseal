@@ -8,7 +8,11 @@ from pathlib import Path
 from licenseal.discovery._read import decode_text, record_parse_failure
 from licenseal.discovery._walk import walk_project_files
 from licenseal.discovery.python import DEV_GROUP_NAMES, requirement_dependency
+from licenseal.discovery.python.requirements import referenced_requirements
 from licenseal.models import Dependency, DependencyGroup
+
+# What starts an option value that names files instead of listing requirements.
+_FILE_DIRECTIVE = "file:"
 
 
 def _parse_setup_cfg(setup_cfg: Path, source: str, scan_root: Path) -> list[Dependency]:
@@ -35,26 +39,40 @@ def _parse_setup_cfg(setup_cfg: Path, source: str, scan_root: Path) -> list[Depe
         record_parse_failure(setup_cfg, "INI")
         return []
 
-    deps: list[Dependency] = []
-
     # [options] install_requires
-    for line in install_requires.strip().splitlines():
-        dep = _parse_dep_line(
-            line.strip(), DependencyGroup.PROD, source, setup_cfg.parent, scan_root
-        )
-        if dep:
-            deps.append(dep)
+    deps = _option_deps(install_requires, DependencyGroup.PROD, source, setup_cfg, scan_root)
 
     # [options.extras_require]
     for extra_name, extra_deps_str in extras_require:
         group = (
             DependencyGroup.DEV if extra_name.lower() in DEV_GROUP_NAMES else DependencyGroup.PROD
         )
-        for line in extra_deps_str.strip().splitlines():
-            dep = _parse_dep_line(line.strip(), group, source, setup_cfg.parent, scan_root)
-            if dep:
-                deps.append(dep)
+        deps.extend(_option_deps(extra_deps_str, group, source, setup_cfg, scan_root))
 
+    return deps
+
+
+def _option_deps(
+    value: str, group: DependencyGroup, source: str, setup_cfg: Path, scan_root: Path
+) -> list[Dependency]:
+    """The dependencies one option value declares, a requirement to a line.
+
+    A line that starts with ``file:`` is the setuptools directive: it names
+    the files that hold the requirements, separated by commas and relative
+    to the directory of the setup.cfg. Each is read like a ``-r`` include of
+    a requirements file. ``file://`` starts a URL, which is a requirement.
+    """
+    deps: list[Dependency] = []
+    for line in value.strip().splitlines():
+        line = line.strip()
+        if line.startswith(_FILE_DIRECTIVE) and not line.startswith("file://"):
+            for name in line[len(_FILE_DIRECTIVE) :].split(","):
+                if name.strip():
+                    deps.extend(referenced_requirements(setup_cfg, name.strip(), group, scan_root))
+            continue
+        dep = _parse_dep_line(line, group, source, setup_cfg.parent, scan_root)
+        if dep:
+            deps.append(dep)
     return deps
 
 
