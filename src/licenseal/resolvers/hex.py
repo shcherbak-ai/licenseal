@@ -1,11 +1,16 @@
 """Resolve license information for Hex packages from hex.pm.
 
-License is **package-level** on hex.pm (every version of a package shares
-``meta.licenses``), so license resolution needs only one endpoint:
+License is **package-level** on hex.pm: a package has one ``meta.licenses``,
+overwritten each time a release is published, so it holds the license of the
+release published last. License resolution needs only one endpoint:
 
 * ``GET /api/packages/{name}`` — ``meta.licenses`` (the SPDX-ish string array),
   ``meta.links`` (repo / homepage URLs), ``latest_stable_version``, and
-  ``releases``, the versions a declared requirement is resolved against.
+  ``releases``, the versions a declared requirement is resolved against, each
+  with the time it was published.
+
+The license reported for any other release than the one published last is an
+estimate (``LicenseInfo.license_estimated``).
 
 The per-version release endpoint
 (``GET /api/packages/{name}/releases/{version}``) carries no license — only the
@@ -139,6 +144,29 @@ def _published_versions(data: dict) -> list[str]:
     ]
 
 
+def _described_version(data: dict) -> str:
+    """The release a package response's ``meta`` describes; "" when it cannot be told.
+
+    That is the release published last, which is the highest version unless
+    a release on an older line followed it. It is told from the
+    ``inserted_at`` of each ``releases`` entry: UTC timestamps in one fixed
+    ISO 8601 layout, so the strings order as the times do. A response whose
+    entries do not all name a version and a time describes no release that
+    can be told.
+    """
+    releases = data.get("releases")
+    if not isinstance(releases, list):
+        return ""
+    newest = ("", "")
+    for release in releases:
+        published = release.get("inserted_at") if isinstance(release, dict) else None
+        version = release.get("version") if isinstance(release, dict) else None
+        if not isinstance(published, str) or not isinstance(version, str):
+            return ""
+        newest = max(newest, (published, version))
+    return newest[1]
+
+
 def _select_version(spec: str, data: dict) -> str:
     """The version ``spec`` resolves to on a package response; "" when there is none.
 
@@ -185,6 +213,10 @@ def resolve_hex_license(
     (:func:`_select_version`). A requirement that selects no release is
     UNKNOWN with no version: the license is the package's, but no published
     version of it is the one declared.
+
+    The license is the one of the release published last
+    (:func:`_described_version`). For any other reported version it is an
+    estimate.
     """
     # `effective_registry_name` is the real hex.pm package for a `hex:`-renamed
     # dep (declared local app name ≠ published package); else just the name.
@@ -212,6 +244,7 @@ def resolve_hex_license(
         resolved_version=resolved_version,
         from_registry=True,
         all_apply_license_id=all_apply_license_id,
+        license_estimated=resolved_version != _described_version(data),
     )
 
 

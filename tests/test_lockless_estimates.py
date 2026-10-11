@@ -912,7 +912,10 @@ class TestReportFormats:
         md = self._render(self._project(tmp_path), "markdown")
         assert "[ranged (~1.0.0)](https://www.npmjs.com/package/ranged)" in md
         assert "[pinned (1.0.0)](https://www.npmjs.com/package/pinned)" in md
-        legend = "`~` marks an estimated version: picked from the registry, not locked or pinned"
+        legend = (
+            "`~` marks an estimate: a version picked from the registry (not locked or pinned), "
+            "or a license read from metadata for another release"
+        )
         lines = md.splitlines()
         assert lines.count(legend) == 1
         # Its own paragraph between the table and the summary.
@@ -946,7 +949,10 @@ class TestReportFormats:
         table = self._render(self._project(tmp_path), "table")
         assert "ranged (~1.0.0)" in table
         assert "pinned (1.0.0)" in table
-        legend = "~ marks an estimated version: picked from the registry, not locked or pinned"
+        legend = (
+            "~ marks an estimate: a version picked from the registry (not locked or pinned), "
+            "or a license read from metadata for another release\n"
+        )
         assert table.count(legend) == 1
         assert "1 analysis gap" in table
         assert "Analysis gaps" in table

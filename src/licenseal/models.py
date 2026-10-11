@@ -216,6 +216,12 @@ class LicenseInfo:
     # this holds it read as every entry applying. Compatibility is judged
     # under both. Empty when the source defines what its list means.
     all_apply_license_id: str = ""
+    # True when ``license_id`` was read from metadata that describes a release
+    # other than ``resolved_version``: a registry that keeps one license per
+    # package (the CRAN index, hex.pm), or the latest PyPI release standing in
+    # for one that declares nothing. False when the reported release is the
+    # one the metadata describes.
+    license_estimated: bool = False
 
     @property
     def detected_license_id(self) -> str:

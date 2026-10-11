@@ -6,11 +6,13 @@ import json
 from pathlib import Path
 
 import httpx
+import pytest
 import respx
 
 from licenseal.analysis.compatibility import check_compatibility
 from licenseal.models import CompatibilityVerdict, Dependency, DependencyGroup, Ecosystem
 from licenseal.resolvers.hex import (
+    _described_version,
     _extract_homepage_url,
     _extract_pinned_version,
     _extract_repository_url,
@@ -23,6 +25,7 @@ from licenseal.resolvers.hex import (
 )
 from licenseal.resolvers.http import (
     _HEX_PACKAGE_KEEP,
+    _HEX_PACKAGE_RELEASE_KEEP,
     _HEX_RELEASE_KEEP,
     RegistryCache,
     _trim_for_cache,
@@ -138,6 +141,47 @@ class TestLatestVersion:
         assert _latest_version({}) == ""
 
 
+class TestDescribedVersion:
+    """The package-level ``meta`` is that of the release published last."""
+
+    def test_release_published_last_not_the_highest_version(self):
+        releases = [
+            {"version": "2.0.0", "inserted_at": "2024-03-01T10:00:00.000000Z"},
+            {"version": "1.9.1", "inserted_at": "2024-05-01T10:00:00.000000Z"},
+            {"version": "1.9.0", "inserted_at": "2024-01-01T10:00:00.000000Z"},
+        ]
+        assert _described_version({"releases": releases}) == "1.9.1"
+
+    def test_single_release(self):
+        releases = [{"version": "0.1.0", "inserted_at": "2024-01-01T10:00:00.000000Z"}]
+        assert _described_version({"releases": releases}) == "0.1.0"
+
+    @pytest.mark.parametrize(
+        "releases",
+        [
+            None,
+            "1.0.0",
+            {"1.0.0": "2024-01-01T10:00:00.000000Z"},
+            [],
+            ["1.0.0"],
+            [{"version": "1.0.0"}],
+            [{"inserted_at": "2024-01-01T10:00:00.000000Z"}],
+            [{"version": 1, "inserted_at": "2024-01-01T10:00:00.000000Z"}],
+            [{"version": "1.0.0", "inserted_at": 1704103200}],
+            # One undated entry is enough: it may be the one published last.
+            [
+                {"version": "2.0.0", "inserted_at": "2024-03-01T10:00:00.000000Z"},
+                {"version": "1.9.1"},
+            ],
+        ],
+    )
+    def test_releases_that_are_not_all_dated_describe_none(self, releases):
+        assert _described_version({"releases": releases}) == ""
+
+    def test_no_releases_key(self):
+        assert _described_version({}) == ""
+
+
 class TestResolveHexLicense:
     @respx.mock
     def test_pinned_extracts_license_and_links(self):
@@ -154,6 +198,21 @@ class TestResolveHexLicense:
         assert info.repository_url == "https://github.com/phoenixframework/phoenix"
         assert info.homepage_url == "https://www.phoenixframework.org"
         assert info.from_registry is True
+        # The license is the one of 1.8.0-rc.0, the release published last.
+        assert info.license_estimated is True
+
+    @respx.mock
+    def test_release_published_last_has_its_own_license(self):
+        respx.get(_hex_package_url("phoenix")).mock(
+            return_value=httpx.Response(
+                200, json=json.loads((_FIXTURES / "phoenix" / "package.json").read_text())
+            )
+        )
+        with httpx.Client() as client:
+            info = resolve_hex_license(_hex_dep("phoenix", "==1.8.0-rc.0"), client)
+        assert info.license_id == "MIT"
+        assert info.resolved_version == "1.8.0-rc.0"
+        assert info.license_estimated is False
 
     @respx.mock
     def test_renamed_dep_resolves_under_registry_name(self):
@@ -185,6 +244,8 @@ class TestResolveHexLicense:
         with httpx.Client() as client:
             info = resolve_hex_license(_hex_dep("phoenix", ""), client)
         assert info.resolved_version == "1.7.14"  # latest_stable_version
+        # A prerelease was published after it, and the license is that one's.
+        assert info.license_estimated is True
 
     @staticmethod
     def _resolve_licenses(licenses):
@@ -342,6 +403,9 @@ class TestRegistryCacheTrim:
     def test_release_keep_set_documented(self):
         assert frozenset({"version", "requirements"}) == _HEX_RELEASE_KEEP
 
+    def test_package_release_keep_set_documented(self):
+        assert frozenset({"version", "inserted_at"}) == _HEX_PACKAGE_RELEASE_KEEP
+
     def test_trim_package_drops_extra_and_reduces_meta(self):
         raw = json.loads((_FIXTURES / "phoenix" / "package.json").read_text())
         trimmed = _trim_hex_package(raw)
@@ -350,8 +414,13 @@ class TestRegistryCacheTrim:
         assert set(trimmed["meta"]) == {"licenses", "links"}
         assert trimmed["latest_stable_version"] == "1.7.14"
         # The published-version list is what a declared range is matched
-        # against, so it is kept, reduced to the version of each release.
-        assert trimmed["releases"] == [{"version": "1.7.14"}, {"version": "1.7.10"}]
+        # against, and its publication times tell which release ``meta``
+        # describes: each release is kept, reduced to those two fields.
+        assert trimmed["releases"] == [
+            {"version": "1.8.0-rc.0", "inserted_at": "2025-01-23T17:12:40.509482Z"},
+            {"version": "1.7.14", "inserted_at": "2024-06-18T19:53:11.482915Z"},
+            {"version": "1.7.10", "inserted_at": "2023-11-03T21:02:57.103774Z"},
+        ]
 
     def test_trim_package_release_list_of_the_wrong_shape(self):
         # A list that is not a list is cached as given; an entry that is not
@@ -415,6 +484,25 @@ class TestRegistryCacheTrim:
         assert info.license_id == "MIT"
         assert info.repository_url == "https://github.com/phoenixframework/phoenix"
         assert info.resolved_version == "1.7.10"
+
+    @pytest.mark.parametrize(
+        ("spec", "estimated"),
+        [("==1.8.0-rc.0", False), ("==1.7.14", True), ("==1.7.10", True)],
+    )
+    @respx.mock
+    def test_publication_times_survive_the_cache_trim(self, spec, estimated):
+        # Dropping ``inserted_at`` in the trim would make every release an
+        # estimate on the cached path only.
+        respx.get(_hex_package_url("phoenix")).mock(
+            return_value=httpx.Response(
+                200, json=json.loads((_FIXTURES / "phoenix" / "package.json").read_text())
+            )
+        )
+        cache = RegistryCache()
+        with httpx.Client() as client:
+            info = resolve_hex_license(_hex_dep("phoenix", spec), client, fetcher=cache.fetch)
+        assert info.license_id == "MIT"
+        assert info.license_estimated is estimated
 
     @respx.mock
     def test_fetch_dependencies_through_registry_cache(self):

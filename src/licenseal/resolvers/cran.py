@@ -7,11 +7,12 @@ licenseal fetches it once per scan (the same index ``install.packages`` / ``pak`
 consult), parses it, and resolves every R package's license and transitive
 closure locally — no per-package requests and no community mirror.
 
-The index carries only *current* versions. R licenses are version-stable, so a
-``renv.lock`` / ``packrat.lock`` pin to an older version resolves to that
-package's current license (the pinned version is still what's reported). A
-package absent from the index (archived, or off-CRAN such as Bioconductor /
-GitHub) resolves to UNKNOWN. R's ``License`` grammar is translated to SPDX by
+The index carries only *current* versions. A ``renv.lock`` / ``packrat.lock``
+pin to another version is reported at the pinned version with the license the
+index records for the current one, marked as an estimate
+(``LicenseInfo.license_estimated``). A package absent from the index
+(archived, or off-CRAN such as Bioconductor / GitHub) resolves to UNKNOWN.
+R's ``License`` grammar is translated to SPDX by
 :func:`~licenseal.analysis.spdx.normalize_r_license`. The ``LICENSE`` file a
 ``+ file LICENSE`` spec points at is never fetched: on a license other than
 MIT or BSD its terms are reported as an ``UNKNOWN`` operand joined to that
@@ -125,16 +126,19 @@ def resolve_r_license(dep: Dependency, index: CranIndex) -> LicenseInfo:
 
     A package absent from the current index (archived / off-CRAN) resolves to
     UNKNOWN. The reported ``resolved_version`` is the lockfile pin when
-    present, else the index's current version. The index carries no
-    repository/homepage URLs, so those stay empty for R. A package with an
-    ``origin`` (GitHub / Bioconductor / Local) is not a CRAN package; the CLI
-    never passes one to this function.
+    present, else the index's current version. The index records the license
+    of that current version only, so the license of a pin to any other
+    version is an estimate. The index carries no repository/homepage URLs, so
+    those stay empty for R. A package with an ``origin`` (GitHub /
+    Bioconductor / Local) is not a CRAN package; the CLI never passes one to
+    this function.
     """
     record = index.get(dep.identity)
     if record is None:
         return _unknown(dep, from_registry=False)
     raw = record.get("License", "").strip()
     pinned = _extract_pinned_version(dep.version_constraint)
+    current = record.get("Version", "").strip()
     return LicenseInfo(
         dependency=dep,
         # ``<license> + file LICENSE`` on a license other than MIT / BSD
@@ -142,6 +146,7 @@ def resolve_r_license(dep: Dependency, index: CranIndex) -> LicenseInfo:
         # terms stay in the license as an operand that did not resolve.
         license_id=normalize_r_license(raw, file_terms_bind=True) if raw else "UNKNOWN",
         license_raw=raw,
-        resolved_version=pinned or record.get("Version", "").strip(),
+        resolved_version=pinned or current,
         from_registry=True,
+        license_estimated=pinned is not None and pinned != current,
     )

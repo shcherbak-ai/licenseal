@@ -200,7 +200,7 @@ class TestScan:
         )
         assert result.exit_code == 0, result.output
         assert "com.example:lib (~2.0.0)" in result.output
-        assert "marks an estimated version" in result.output
+        assert "~ marks an estimate: a version picked from the registry" in result.output
 
     @respx.mock
     def test_dev_configuration_is_estimated_the_same_way(self, tmp_path: Path):

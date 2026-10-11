@@ -272,6 +272,22 @@ def _extract_wheel_url(data: dict) -> str:
     return ""
 
 
+def _same_release(described: object, reported: str) -> bool:
+    """Whether metadata naming the version ``described`` is about the ``reported`` release.
+
+    Compared as PEP 440 versions, so two spellings of one release agree
+    (``1.0`` and ``1.0.0``) and a ``+local`` build is not the public release
+    of the same number. A value that is not a PEP 440 version matches only an
+    identical string.
+    """
+    if not isinstance(described, str):
+        return False
+    try:
+        return Version(described) == Version(reported)
+    except ValueError:
+        return described == reported
+
+
 def _license_from_pep658(
     data: dict,
     client: httpx.Client,
@@ -437,13 +453,17 @@ def resolve_python_license(
     # Older releases publish sparse per-version metadata (no license_expression,
     # no classifiers); the project-level endpoint reflects current metadata for
     # the same package, so consult it as a last resort — only when neither the
-    # release's JSON nor its sidecar declared anything.
+    # release's JSON nor its sidecar declared anything. That endpoint describes
+    # the latest release: unless the reported release is that one, the license
+    # taken from it is an estimate.
+    license_estimated = False
     if not raw_license:
         if project_data is None:
             project_data = fetcher(f"{_PYPI_URL}/{name}/json", client)
         if project_data is not None and project_data is not data:
             project_info = object_field(project_data, "info")
             raw_license, classifiers = _extract_raw_license(project_info)
+            license_estimated = not _same_release(project_info.get("version"), resolved_version)
             if not repository_url:
                 repository_url = _extract_repository_url(project_info)
             if not homepage_url:
@@ -460,6 +480,7 @@ def resolve_python_license(
         resolved_version=resolved_version,
         from_registry=True,
         all_apply_license_id=all_apply_license_id,
+        license_estimated=license_estimated,
     )
 
 

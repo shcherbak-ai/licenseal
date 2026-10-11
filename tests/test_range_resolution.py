@@ -326,8 +326,23 @@ class TestHex:
             """,
         )
 
+    @classmethod
+    def _releases(cls) -> list[dict[str, str]]:
+        """The published releases as the package response lists them.
+
+        Each one was published a year after the one below it, so the
+        prerelease is the release published last.
+        """
+        return [
+            {"version": version, "inserted_at": f"{2025 - age}-03-01T10:00:00.000000Z"}
+            for age, version in enumerate(cls._PUBLISHED)
+        ]
+
     def _registry(self) -> respx.Route:
-        """Serve the package, latest stable release 2.0.0. Its license is per package."""
+        """Serve the package, latest stable release 2.0.0.
+
+        Its license is per package: the one of the release published last.
+        """
         for version in self._PUBLISHED:
             _json(f"{self._PACKAGE}/releases/{version}", {"requirements": {}})
         return _json(
@@ -337,45 +352,50 @@ class TestHex:
                 "latest_stable_version": "2.0.0",
                 "latest_version": "2.1.0-rc.1",
                 "releases": [
-                    {"version": version, "url": f"{self._PACKAGE}/releases/{version}"}
-                    for version in self._PUBLISHED
+                    {**release, "url": f"{self._PACKAGE}/releases/{release['version']}"}
+                    for release in self._releases()
                 ],
             },
         )
 
     @pytest.mark.parametrize("mode", _MODES)
     @pytest.mark.parametrize(
-        ("requirement", "version"),
+        ("requirement", "version", "estimated"),
         [
-            ("~> 1.2", "1.4.0"),
-            ("~> 1.2.0", "1.2.0"),
-            (">= 1.0.0 and < 1.3.0", "1.2.0"),
-            ("~> 0.9 or ~> 1.2.0", "1.2.0"),
-            ("< 1.0.0", "0.9.0"),
-            (">= 1.0.0", "2.0.0"),
+            # The package's one license belongs to another release than the
+            # selected one, so it is an estimate beside the version.
+            ("~> 1.2", "1.4.0", ["license", "version"]),
+            ("~> 1.2.0", "1.2.0", ["license", "version"]),
+            (">= 1.0.0 and < 1.3.0", "1.2.0", ["license", "version"]),
+            ("~> 0.9 or ~> 1.2.0", "1.2.0", ["license", "version"]),
+            ("< 1.0.0", "0.9.0", ["license", "version"]),
+            (">= 1.0.0", "2.0.0", ["license", "version"]),
             # A prerelease is selected only by a requirement that names one.
-            ("~> 2.1.0-rc", "2.1.0-rc.1"),
+            # It is the release published last: the license is its own.
+            ("~> 2.1.0-rc", "2.1.0-rc.1", _ESTIMATED),
         ],
     )
     @respx.mock
     def test_range_selects_the_highest_release_inside_it(
-        self, tmp_path: Path, mode: str, requirement: str, version: str
+        self, tmp_path: Path, mode: str, requirement: str, version: str, estimated: list[str]
     ):
         self._project(tmp_path, requirement)
         package = self._registry()
-        assert _row(tmp_path, mode) == (version, "MIT", _ESTIMATED)
+        assert _row(tmp_path, mode) == (version, "MIT", estimated)
         # The releases come with the package response the license is read from.
         assert package.call_count == 1
 
     @pytest.mark.parametrize("mode", _MODES)
     @pytest.mark.parametrize("requirement", ["1.2.0", "== 1.2.0"])
     @respx.mock
-    def test_exact_requirement_is_not_an_estimate(
+    def test_exact_requirement_is_not_a_version_estimate(
         self, tmp_path: Path, mode: str, requirement: str
     ):
+        # The version is the declared one. The license is the package's,
+        # which is that of 2.1.0-rc.1.
         self._project(tmp_path, requirement)
         self._registry()
-        assert _row(tmp_path, mode) == ("1.2.0", "MIT", [])
+        assert _row(tmp_path, mode) == ("1.2.0", "MIT", ["license"])
 
     @pytest.mark.parametrize("mode", _MODES)
     @pytest.mark.parametrize(
@@ -392,7 +412,8 @@ class TestHex:
     @respx.mock
     def test_releases_survive_the_cache(self):
         # The release list is read from the cached package response, so it
-        # must be among the fields the cache keeps.
+        # must be among the fields the cache keeps, with each release's
+        # publication time.
         package = self._registry()
         dep = Dependency(name="lib", version_constraint="~> 1.2", ecosystem=Ecosystem.HEX)
         cache = RegistryCache()
@@ -403,7 +424,7 @@ class TestHex:
             cached = cache.fetch(self._PACKAGE, client)
         assert package.call_count == 1
         assert cached is not None
-        assert cached["releases"] == [{"version": version} for version in self._PUBLISHED]
+        assert cached["releases"] == self._releases()
 
     @pytest.mark.parametrize("releases", [None, "wrong", ["wrong", {"version": 2}, {"url": "u"}]])
     @respx.mock

@@ -375,25 +375,45 @@ def _source_terminal_url(result: CompatibilityResult, project_path: Path | None)
 
 
 _ESTIMATE_MARK = "~"
-_ESTIMATE_LEGEND = "marks an estimated version: picked from the registry, not locked or pinned"
+_ESTIMATE_LEGEND = (
+    "marks an estimate: a version picked from the registry (not locked or pinned), "
+    "or a license read from metadata for another release"
+)
 
 
 def _estimated_fields(result: CompatibilityResult) -> list[str]:
     """Which reported values of ``result`` are estimates, sorted.
 
+    ``"license"`` when the license shown was read from metadata that
+    describes a release other than the reported one. A license supplied by a
+    review is the reviewer's, and an unknown license names nothing to
+    qualify: neither is an estimate.
+
     ``"version"`` when the resolved version was picked from the registry
-    rather than fixed by a lockfile entry or an exact pin. A dependency with
-    no resolved version has no version to qualify.
+    rather than fixed by a lockfile entry or an exact pin.
+
+    A dependency with no resolved version reports no release: it has no
+    version to qualify, and no release its license could be another one's.
     """
     info = result.license_info
-    if info.dependency.version_estimated and info.resolved_version:
-        return ["version"]
-    return []
+    if not info.resolved_version:
+        return []
+    fields: list[str] = []
+    if info.license_estimated and not info.reviewed and not info.is_unknown:
+        fields.append("license")
+    if info.dependency.version_estimated:
+        fields.append("version")
+    return fields
 
 
 def _any_estimated(results: list[CompatibilityResult]) -> bool:
     """Whether any row carries the estimate mark, so the legend is needed."""
     return any(_estimated_fields(result) for result in results)
+
+
+def _license_mark(result: CompatibilityResult) -> str:
+    """The estimate mark to put before the row's license, or nothing."""
+    return _ESTIMATE_MARK if "license" in _estimated_fields(result) else ""
 
 
 def _package_label(result: CompatibilityResult) -> str:
@@ -747,7 +767,10 @@ def render_table(
             _rich_link(dep.source, _source_terminal_url(result, project_path))
             if dep.source
             else "",
-            _rich_license_label(result.license_info.effective_license_id),
+            Text.assemble(
+                _license_mark(result),
+                _rich_license_label(result.license_info.effective_license_id),
+            ),
             _risk_style(result),
             _glyphs(_VERDICT_ICONS[result.verdict], console.encoding),
         )
@@ -755,7 +778,8 @@ def render_table(
     _fit_table(console, table)
     console.print(table)
     if _any_estimated(grouped):
-        console.print(f"  [dim]{_ESTIMATE_MARK} {_ESTIMATE_LEGEND}[/dim]")
+        # One line whatever the console's width: a terminal wraps it itself.
+        console.print(f"  [dim]{_ESTIMATE_MARK} {_ESTIMATE_LEGEND}[/dim]", soft_wrap=True)
     console.print()
 
     # Summary line
@@ -933,7 +957,8 @@ def render_markdown(report: AnalysisReport, *, encoding: str = "utf-8") -> str:
                     dep.ecosystem.value,
                     dep.group.value,
                     _markdown_link(dep.source, _url_quote(_source_url(result))),
-                    _markdown_license_label(result.license_info.effective_license_id),
+                    _license_mark(result)
+                    + _markdown_license_label(result.license_info.effective_license_id),
                     result.risk_level.value,
                     icon,
                 ]

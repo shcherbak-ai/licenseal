@@ -151,6 +151,32 @@ class TestResolveRLicense:
     def test_unpinned_uses_index_version(self):
         info = resolve_r_license(_r_dep("cli", ">= 1.0"), _index())
         assert info.resolved_version == "3.6.6"  # index's current version
+        assert info.license_estimated is False
+
+    @pytest.mark.parametrize(
+        ("pinned", "estimated"),
+        [("1.2.1", False), ("1.1.4", True), ("1.2.1.9000", True)],
+        ids=["current", "older", "not-on-cran"],
+    )
+    def test_license_of_a_pin_is_the_current_versions(self, pinned, estimated):
+        # The index records one version per package. Only a pin to that
+        # version gets a license recorded for the pinned release itself.
+        info = resolve_r_license(_r_dep("dplyr", f"=={pinned}"), _index())
+        assert info.license_id == "MIT"
+        assert info.resolved_version == pinned
+        assert info.license_estimated is estimated
+
+    @respx.mock
+    def test_pin_against_a_record_without_a_version_is_an_estimate(self):
+        respx.get(_CRAN_INDEX_URL).mock(
+            return_value=httpx.Response(200, text="Package: pkg\nLicense: MIT\n")
+        )
+        cache = RegistryCache()
+        with httpx.Client() as client:
+            index = fetch_cran_index(client, fetcher=cache.fetch_text)
+        info = resolve_r_license(_r_dep("pkg", "==1.0"), index)
+        assert (info.license_id, info.resolved_version) == ("MIT", "1.0")
+        assert info.license_estimated is True
 
     def test_grammar_translations(self):
         idx = _index()

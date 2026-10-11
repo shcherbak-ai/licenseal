@@ -946,13 +946,14 @@ _RUBYGEMS_VERSIONS_KEEP = frozenset({"number"})
 # hex.pm package endpoint (``hex.pm/api/packages/{name}``) returns the
 # package-level ``meta`` (with ``licenses`` / ``links``), the latest version,
 # and the ``releases`` a declared requirement is resolved against. Everything
-# else (``owners``, ``downloads``, ``security_advisories``, timestamps, …) is
-# heavy and unused.
+# else (``owners``, ``downloads``, ``security_advisories``, the package's own
+# timestamps, …) is heavy and unused.
 _HEX_PACKAGE_KEEP = frozenset({"meta", "latest_stable_version", "latest_version", "releases"})
 # Within ``meta`` only the license array and the repo/homepage link map matter.
 _HEX_META_KEEP = frozenset({"licenses", "links"})
-# Of a ``releases`` entry only the version number is read.
-_HEX_PACKAGE_RELEASE_KEEP = frozenset({"version"})
+# Of a ``releases`` entry the version number is read, and the time it was
+# published: ``meta`` describes the release published last.
+_HEX_PACKAGE_RELEASE_KEEP = frozenset({"version", "inserted_at"})
 
 # hex.pm release endpoint (``hex.pm/api/packages/{name}/releases/{version}``)
 # carries no license — only the ``requirements`` edge map for the manifest-only
@@ -1170,7 +1171,7 @@ def _trim_hex_package(data: dict) -> dict:
 
     Drops the heavy ``owners`` / ``downloads`` blocks; reduces the nested
     ``meta`` to just ``licenses`` and ``links``, and each ``releases`` entry
-    to its ``version``.
+    to its ``version`` and ``inserted_at``.
     """
     out = {k: v for k, v in data.items() if k in _HEX_PACKAGE_KEEP}
     meta = out.get("meta")

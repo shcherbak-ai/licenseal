@@ -3524,6 +3524,7 @@ class TestSidecarBeforeProjectLevel:
         assert info.license_raw == "GPL-3.0-only"
         assert info.resolved_version == "1.0.0"
         assert info.from_registry is True
+        assert info.license_estimated is False
         # The release answered for itself: the latest release is not consulted.
         assert not project_route.called
 
@@ -3540,6 +3541,8 @@ class TestSidecarBeforeProjectLevel:
         info = self._resolve("==1.0.0")
         assert info.license_id == "MIT"
         assert info.resolved_version == "1.0.0"
+        # MIT is what release 2.0.0 declares.
+        assert info.license_estimated is True
         assert info.repository_url == "https://example.test/pkg-a"
         assert [str(call.request.url) for call in respx.calls] == [
             self._RELEASE_URL,
@@ -3557,6 +3560,14 @@ class TestSidecarBeforeProjectLevel:
         info = self._resolve(">=1.0,<2.0")
         assert info.resolved_version == "1.0.0"
         assert info.license_id == "GPL-3.0-only"
+        assert info.license_estimated is False
+
+    @respx.mock
+    def test_range_selected_release_borrowing_the_latest_license_is_an_estimate(self):
+        self._mock(404)
+        info = self._resolve(">=1.0,<2.0")
+        assert (info.resolved_version, info.license_id) == ("1.0.0", "MIT")
+        assert info.license_estimated is True
 
     @respx.mock
     def test_sidecar_license_that_cannot_be_classified_is_not_replaced(self):

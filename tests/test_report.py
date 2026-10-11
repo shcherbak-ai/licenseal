@@ -2621,7 +2621,15 @@ _ESTIMATE = ReportDiagnostic(
     reason="declares dependencies that no lockfile covers",
     severity="estimate",
 )
-_LEGEND = "marks an estimated version: picked from the registry, not locked or pinned"
+_LEGEND = (
+    "marks an estimate: a version picked from the registry (not locked or pinned), "
+    "or a license read from metadata for another release"
+)
+
+
+def _license_estimated(result: CompatibilityResult) -> CompatibilityResult:
+    """``result`` with its license marked as read from another release's metadata."""
+    return replace(result, license_info=replace(result.license_info, license_estimated=True))
 
 
 class TestEstimates:
@@ -2781,3 +2789,106 @@ class TestEstimates:
         table = self._table(report)
         assert "3 ok, 2 estimated manifests\n" in table
         assert "Estimates (" in table and "Analysis gaps" not in table
+
+
+class TestLicenseEstimates:
+    """A license read from another release's metadata is marked in every format."""
+
+    @staticmethod
+    def _report() -> AnalysisReport:
+        ok = (RiskLevel.PERMISSIVE, CompatibilityVerdict.COMPATIBLE)
+        unknown = (RiskLevel.UNKNOWN, CompatibilityVerdict.UNKNOWN)
+        return AnalysisReport(
+            project_license="MIT",
+            results=[
+                _make_result("own", "MIT", *ok, resolved_version="1.0.0"),
+                _license_estimated(_make_result("borrowed", "MIT", *ok, resolved_version="1.0.0")),
+                _license_estimated(
+                    _make_result("choice", "Apache-2.0 OR MIT", *ok, resolved_version="1.0.0")
+                ),
+                _license_estimated(
+                    _estimated(_make_result("both", "MIT", *ok, resolved_version="2.3.0"))
+                ),
+                # No release is reported for the first, nothing was read for
+                # the next two, and a review supplies the license of the last.
+                _license_estimated(_make_result("unversioned", "MIT", *ok)),
+                _license_estimated(_make_result("blank", "UNKNOWN", *unknown)),
+                _license_estimated(_make_result("none", "", *unknown, resolved_version="1.0.0")),
+                _license_estimated(
+                    _make_result(
+                        "reviewed",
+                        "GPL-3.0-only",
+                        *ok,
+                        resolved_version="1.0.0",
+                        reviewed_license_id="MIT",
+                        review_note="1.0.0 shipped under MIT",
+                    )
+                ),
+            ],
+        )
+
+    def test_json_names_what_is_estimated_sorted(self):
+        data = json.loads(render_json(self._report()))
+        assert {d["name"]: d["estimated"] for d in data["dependencies"]} == {
+            "own": [],
+            "borrowed": ["license"],
+            "choice": ["license"],
+            "both": ["license", "version"],
+            "unversioned": [],
+            "blank": [],
+            "none": [],
+            "reviewed": [],
+        }
+
+    def test_markdown_marks_the_license_before_its_first_link(self):
+        md = render_markdown(self._report())
+        mit = "[MIT](https://spdx.org/licenses/MIT.html)"
+        apache = "[Apache-2.0](https://spdx.org/licenses/Apache-2.0.html)"
+        assert f"|[own (1.0.0)](https://pypi.org/project/own/)|python|prod||{mit}|" in md
+        assert f"|[borrowed (1.0.0)](https://pypi.org/project/borrowed/)|python|prod||~{mit}|" in md
+        assert f"|python|prod||~{apache} OR {mit}|" in md
+        assert f"|[both (~2.3.0)](https://pypi.org/project/both/)|python|prod||~{mit}|" in md
+        assert "|python|prod||UNKNOWN|unknown|?|" in md
+        # The main table shows the reviewed license, unmarked; the Reviewed
+        # section shows the detected one as it was detected.
+        assert f"|[reviewed (1.0.0)](https://pypi.org/project/reviewed/)|python|prod||{mit}|" in md
+        assert f"|GPL-3.0-only|{mit}|1.0.0 shipped under MIT|" in md
+        assert md.count("~") == 5
+        assert md.count(f"`~` {_LEGEND}") == 1
+
+    def test_table_marks_the_license_and_explains_the_mark_once(self):
+        console, buf = _make_console(width=200)
+        render_table(self._report(), console)
+        table = buf.getvalue()
+        assert [
+            (_cells(line)[0], _cells(line)[4])
+            for line in _first_table(table)[1]
+            if _cells(line)[4].startswith("~")
+        ] == [
+            ("borrowed (1.0.0)", "~MIT"),
+            ("both (~2.3.0)", "~MIT"),
+            ("choice (1.0.0)", "~Apache-2.0 OR MIT"),
+        ]
+        assert table.count(f"  ~ {_LEGEND}\n") == 1
+
+    def test_legend_stays_on_one_line_on_a_narrow_console(self):
+        console, buf = _make_console(width=60)
+        render_table(self._report(), console)
+        assert buf.getvalue().count(f"  ~ {_LEGEND}\n") == 1
+
+    def test_license_estimate_alone_brings_the_legend(self):
+        report = AnalysisReport(
+            project_license="MIT",
+            results=[
+                _license_estimated(
+                    _make_result(
+                        "borrowed",
+                        "MIT",
+                        RiskLevel.PERMISSIVE,
+                        CompatibilityVerdict.COMPATIBLE,
+                        resolved_version="1.0.0",
+                    )
+                )
+            ],
+        )
+        assert render_markdown(report).count(f"`~` {_LEGEND}") == 1

@@ -51,6 +51,8 @@ def test_attrs_sparse_per_version_falls_back_to_project_level() -> None:
     assert li.license_id == "MIT"
     assert li.from_registry is True
     assert li.resolved_version == "24.3.0"
+    # The project-level endpoint describes a later release.
+    assert li.license_estimated is True
 
 
 @respx.mock
@@ -66,6 +68,7 @@ def test_maturin_sparse_per_version_falls_back_to_project_level() -> None:
     dep = Dependency(name="maturin", version_constraint="==1.9.4", ecosystem=Ecosystem.PYTHON)
     li = _resolve(dep)
     assert li.license_id == "Apache-2.0 OR MIT"
+    assert li.license_estimated is True
 
 
 @respx.mock
