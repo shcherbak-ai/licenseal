@@ -101,7 +101,8 @@ LOCKFILES: dict[str, tuple[str, ...]] = {
     "r": ("renv.lock", "packrat.lock"),
 }
 
-DIFF_FIELDS = ("license", "detected_license", "risk", "verdict", "group", "depth")
+DIFF_FIELDS = ("license", "detected_license", "risk", "verdict", "group", "depth", "estimated")
+PROJECT_FIELDS = ("project_license", "project_license_source")
 
 
 def run(cmd: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
@@ -462,13 +463,18 @@ def cmd_report(args: argparse.Namespace) -> int:
 
 def _index(data: dict) -> dict[tuple, dict]:
     return {
-        (d.get("ecosystem"), d.get("name"), d.get("resolved_version", "")): d
+        (d.get("ecosystem"), d.get("name"), d.get("resolved_version", ""), d.get("origin", "")): d
         for d in data.get("dependencies", [])
     }
 
 
+def _name(key: tuple) -> str:
+    origin = f" from {key[3]}" if key[3] else ""
+    return f"{key[0]}:{key[1]}@{key[2]}{origin}"
+
+
 def _label(key: tuple, dep: dict) -> str:
-    return f"{key[0]}:{key[1]}@{key[2]} [{dep.get('license')}/{dep.get('verdict')}]"
+    return f"{_name(key)} [{dep.get('license')}/{dep.get('verdict')}]"
 
 
 def _diff_one(tag: str, base: dict, fresh: dict, limit: int) -> list[str]:
@@ -480,9 +486,11 @@ def _diff_one(tag: str, base: dict, fresh: dict, limit: int) -> list[str]:
         if any(b[k].get(x) != f[k].get(x) for x in DIFF_FIELDS)
     ]
     bs, fs = base.get("summary", {}), fresh.get("summary", {})
-    if not (added or removed or changed) and bs == fs:
+    project = [x for x in PROJECT_FIELDS if base.get(x) != fresh.get(x)]
+    if not (added or removed or changed or project) and bs == fs:
         return []
     lines = [f"- {tag}: +{len(added)} -{len(removed)} ~{len(changed)}"]
+    lines += [f"  - {x}: {base.get(x)!r} -> {fresh.get(x)!r}" for x in project]
     lines += [
         f"  - summary.{key}: {bs.get(key)} -> {fs.get(key)}"
         for key in sorted(set(bs) | set(fs))
@@ -492,12 +500,12 @@ def _diff_one(tag: str, base: dict, fresh: dict, limit: int) -> list[str]:
     lines += [f"  - removed {_label(k, b[k])}" for k in removed[:limit]]
     for k, delta in changed[:limit]:
         detail = "; ".join(f"{x}: {old} -> {new}" for x, (old, new) in delta.items())
-        lines.append(f"  - changed {k[0]}:{k[1]}@{k[2]} {detail}")
+        lines.append(f"  - changed {_name(k)} {detail}")
     return lines
 
 
 def cmd_diff(args: argparse.Namespace) -> int:
-    """Compare ``fresh`` outputs with ``baseline``, keyed by (ecosystem, name, version)."""
+    """Compare ``fresh`` outputs with ``baseline``, keyed by (ecosystem, name, version, origin)."""
     lines = ["# fresh vs baseline", ""]
     differs = False
     for repo in load_corpus(args.only):
