@@ -37,7 +37,8 @@ sink, partitioned into:
 
 One gap can be accepted by the user: a manifest whose dependencies no lockfile
 covers (``missing_lockfile=True``). The analysis ran, on versions and a
-dependency graph estimated from the registry. It is a gap by default;
+dependency graph estimated from the registry, or without what an
+off-registry dependency requires. It is a gap by default;
 ``check --no-require-lockfile`` reports it as an estimate instead.
 
 The CLI drains the sink to stderr after a scan. Outside an active sink
@@ -289,22 +290,28 @@ def decode_lockfile_text(path: Path) -> str | None:
     return text
 
 
-def record_missing_lockfile(manifest: Path) -> None:
+def record_missing_lockfile(manifest: Path, *, off_registry: bool = False) -> None:
     """Record that ``manifest`` declares dependencies no lockfile covers.
 
     Those dependencies were resolved through the registry: the version of
     each one that is not pinned exactly, and every transitive dependency, is
-    what the registry offers today, not what the project installs. The
-    manifest itself was read in full, so this is the one gap the user can
-    accept (``check --no-require-lockfile``).
+    what the registry offers today, not what the project installs.
+
+    With ``off_registry`` the dependencies come from a git repository, a
+    URL, or a path, and no lockfile holds a row for them. Nothing is fetched
+    for such a dependency, so what it depends on is listed nowhere.
+
+    The manifest itself was read in full either way, so this is the one gap
+    the user can accept (``check --no-require-lockfile``).
     """
-    _record(
-        manifest,
-        "declares dependencies that no lockfile covers; their versions and "
-        "transitive dependencies are estimated from the registry",
-        is_gap=True,
-        missing_lockfile=True,
+    reason = (
+        "declares off-registry dependencies that no lockfile records; "
+        "what they depend on is not in this report"
+        if off_registry
+        else "declares dependencies that no lockfile covers; their versions and "
+        "transitive dependencies are estimated from the registry"
     )
+    _record(manifest, reason, is_gap=True, missing_lockfile=True)
 
 
 def record_unread_dependencies(manifest: Path, name: str, version: str) -> None:

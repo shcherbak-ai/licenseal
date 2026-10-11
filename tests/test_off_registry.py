@@ -46,6 +46,13 @@ from licenseal.review import (
 from licenseal.transitive import resolve_transitive
 from tests._helpers import _check_json, _dirs, _file_diagnostics, _no_registry, _write
 
+# What a manifest is recorded with when it declares an off-registry
+# dependency and no lockfile holds a row for it.
+_UNRECORDED_SOURCE = (
+    "declares off-registry dependencies that no lockfile records; "
+    "what they depend on is not in this report"
+)
+
 
 def _refuse_everything_else() -> None:
     """Answer 404 to any request no earlier route matched, so that it is on record."""
@@ -927,10 +934,14 @@ class TestRubyGitGem:
         (tmp_path / REVIEW_FILE_NAME).write_text(
             scaffold.replace('license = ""', 'license = "MIT"'), encoding="utf-8", newline="\n"
         )
-        result, data = _check_json(tmp_path)
+        # The review clears the row; the lockfile that would say what the
+        # repository requires is still missing.
+        result, data = _check_json(tmp_path, "--no-require-lockfile")
         assert result.exit_code == 0
         assert _rows(data)["edge-fork"]["origin"] == declared
         assert _requests_mentioning("edge-fork") == []
+        strict, _ = _check_json(tmp_path)
+        assert strict.exit_code == 1
 
 
 class TestRubyGemSources:
@@ -1280,6 +1291,7 @@ class TestHexOffRegistry:
             [{<<"regular">>,{pkg,<<"regular">>,<<"1.0.0">>},0},
              {<<"near_copy">>,{path,"../near_copy",{mtime,<<"2024-01-01T00:00:00Z">>}},0},
              {<<"own_app">>,{path,"apps/own_app",{mtime,<<"2024-01-01T00:00:00Z">>}},0},
+             {<<"odd_source">>,{custom_resource,some_atom},0},
              {<<"svn_fork">>,{svn,"https://svn.example.org/svn_fork/trunk"},0}]}.
             """,
         )
@@ -1889,7 +1901,9 @@ class TestPythonDirectReferences:
             encoding="utf-8",
             newline="\n",
         )
-        result, data = _check_json(tmp_path)
+        # No lockfile records the reference: that is accepted here, so the
+        # row alone decides the exit code.
+        result, data = _check_json(tmp_path, "--no-require-lockfile")
         assert result.exit_code == 0
         assert _rows(data)["Git_Fork"]["license"] == "BSD-3-Clause"
         assert respx.calls.call_count == 0
@@ -2790,7 +2804,11 @@ class TestLockfileCannotClearADeclaredSource:
             ("", "MIT", "1.2.0", "pyproject.toml"),
             (origin, "UNKNOWN", "", "tools/requirements.txt"),
         ]
-        assert _file_diagnostics(data) == []
+        # The lockfile holds no row for the reference: what it requires is
+        # not in the report.
+        assert _file_diagnostics(data) == [
+            {"path": "tools/requirements.txt", "reason": _UNRECORDED_SOURCE, "severity": "gap"}
+        ]
 
         _review_file(
             tmp_path,
@@ -2802,7 +2820,7 @@ class TestLockfileCannotClearADeclaredSource:
             license = "MIT"
             """,
         )
-        reviewed, _ = _check_json(tmp_path)
+        reviewed, _ = _check_json(tmp_path, "--no-require-lockfile")
         assert reviewed.exit_code == 0
 
 
@@ -3069,9 +3087,11 @@ class TestRegistryAndOffRegistryDeclarationsOfOnePackage:
             ("", "MIT", "1.0.0", [], "a/package.json"),
             ("git+https://github.com/team/shared@abc", "UNKNOWN", "", [], "b/package.json"),
         ]
-        # The lockfile covers the one registry requirement there is, and a
-        # declaration with an origin asks for no lockfile.
-        assert data["diagnostics"] == []
+        # The lockfile covers the one registry requirement there is. Nothing
+        # records the repository the other manifest declares.
+        assert data["diagnostics"] == [
+            {"path": "b/package.json", "reason": _UNRECORDED_SOURCE, "severity": "gap"}
+        ]
 
         _review_file(
             tmp_path,
@@ -3083,7 +3103,7 @@ class TestRegistryAndOffRegistryDeclarationsOfOnePackage:
             license = "MIT"
             """,
         )
-        reviewed, _ = _check_json(tmp_path)
+        reviewed, _ = _check_json(tmp_path, "--no-require-lockfile")
         assert reviewed.exit_code == 0
 
     @respx.mock
@@ -3309,7 +3329,9 @@ class TestRubyGemfileSourceBlocks:
         )
         _mock_gem_latest("hub-a", "9.9.9", "MIT")
         _refuse_everything_else()
-        result, _ = _check_json(tmp_path)
+        # There is no Gemfile.lock: that is accepted here, so the row alone
+        # decides the exit code.
+        result, _ = _check_json(tmp_path, "--no-require-lockfile")
         assert result.exit_code == 1
 
         _review_file(
@@ -3322,7 +3344,7 @@ class TestRubyGemfileSourceBlocks:
             license = "MIT"
             """,
         )
-        result, data = _check_json(tmp_path)
+        result, data = _check_json(tmp_path, "--no-require-lockfile")
         assert result.exit_code == 0
         assert _rows(data)["hub-a"]["reviewed"] is True
         assert respx.calls.call_count == 0
@@ -5255,7 +5277,9 @@ class TestComposerRepositoryGap:
         }
         vcs = {"type": "vcs", "url": "https://git.example.org/acme/fork"}
         project = self._project(tmp_path, [inline, vcs], require={"acme/inline": "*", "php": "^8"})
-        result, data = _check_json(project, "--no-strict")
+        # The inline package has no lockfile entry, which is accepted here:
+        # the repository gap is the one this is about.
+        result, data = _check_json(project, "--no-strict", "--no-require-lockfile")
         assert result.exit_code == 0
         assert self._gaps(data) == []
         assert respx.calls.call_count == 0

@@ -139,6 +139,12 @@ def _location(origin: str) -> tuple[str, str] | None:
     return "path", origin.replace("\\", "/")
 
 
+def is_remote(origin: str) -> bool:
+    """Whether an origin names a repository or a URL, as opposed to a path or no place."""
+    location = _location(origin)
+    return location is not None and location[0] != "path"
+
+
 def _is_archive_of(url: str, repository: str) -> bool:
     """Whether a URL is served by a repository's host from under that repository's path.
 

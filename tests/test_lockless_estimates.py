@@ -45,6 +45,10 @@ _MISSING = (
     "declares dependencies that no lockfile covers; their versions and "
     "transitive dependencies are estimated from the registry"
 )
+_UNRECORDED = (
+    "declares off-registry dependencies that no lockfile records; "
+    "what they depend on is not in this report"
+)
 
 
 def _scan(project: Path, *, include_dev: bool = True) -> tuple[dict[str, tuple[str, bool]], list]:
@@ -66,7 +70,9 @@ def _scan(project: Path, *, include_dev: bool = True) -> tuple[dict[str, tuple[s
             fetcher=cache.fetch,
             pom_fetcher=cache.fetch_text,
         )
-    assert all(d.is_gap and d.missing_lockfile and d.reason == _MISSING for d in diags)
+    assert all(
+        d.is_gap and d.missing_lockfile and d.reason in (_MISSING, _UNRECORDED) for d in diags
+    )
     rows = {d.name: (d.version_constraint, d.version_estimated) for d in deps}
     assert len(rows) == len(deps)
     return rows, sorted(d.path.relative_to(project).as_posix() for d in diags)
@@ -207,17 +213,29 @@ class TestRecordMissingLockfiles:
     def test_dependency_without_a_manifest_path_is_not_recorded(self, tmp_path: Path):
         assert self._recorded(tmp_path, [_dep(Ecosystem.RUBY, "", source="")]) == []
 
-    def test_dependency_with_an_origin_is_not_recorded(self, tmp_path: Path):
-        # It is not resolved through the registry, so a lockfile would not
-        # change its row. A registry gem beside it still has its manifest
-        # recorded.
+    def test_dependency_with_an_origin_is_recorded_with_a_reason_of_its_own(self, tmp_path: Path):
+        # Nothing is fetched for it, so without a lockfile what it depends
+        # on is listed nowhere. A registry gem beside it is the other reason.
         forked = replace(
             _dep(Ecosystem.RUBY, "", name="forked", source="Gemfile"),
             origin="git+https://example.invalid/forked.git",
         )
-        assert self._recorded(tmp_path, [forked]) == []
+        other = replace(forked, name="other-fork")
         published = _dep(Ecosystem.RUBY, "", name="published", source="Gemfile")
-        assert self._recorded(tmp_path, [forked, published]) == ["Gemfile"]
+        with collect_read_diagnostics() as diags:
+            _record_missing_lockfiles(tmp_path, [forked, published, other])
+        assert diags == [
+            ReadDiagnostic(tmp_path / "Gemfile", _MISSING, is_gap=True, missing_lockfile=True),
+            ReadDiagnostic(tmp_path / "Gemfile", _UNRECORDED, is_gap=True, missing_lockfile=True),
+        ]
+
+    def test_manifest_with_no_lockfile_format_is_not_recorded_for_an_origin_either(
+        self, tmp_path: Path
+    ):
+        local_jar = replace(
+            _dep(Ecosystem.JAVA, "1.0", source="pom.xml"), origin="${basedir}/lib/local.jar"
+        )
+        assert self._recorded(tmp_path, [local_jar]) == []
 
     def test_diagnostic_is_a_gap_marked_as_missing_lockfile(self, tmp_path: Path):
         with collect_read_diagnostics() as diags:
@@ -409,13 +427,14 @@ class TestRegistryWalkPerEcosystem:
         assert missing == ["Gemfile"]
 
     @respx.mock
-    def test_off_registry_gems_alone_record_nothing(self, tmp_path: Path):
+    def test_off_registry_gem_alone_is_no_estimate_and_still_lacks_a_lockfile(self, tmp_path: Path):
         # A git gem is not looked up on the registry: no version is picked
-        # for it, so it is not an estimate, and a lockfile is not asked for.
+        # for it, so it is not an estimate. What it requires is listed only
+        # by a lockfile, so the Gemfile is recorded all the same.
         (tmp_path / "Gemfile").write_text('gem "forked", git: "https://example.invalid/f.git"\n')
         rows, missing = _scan(tmp_path)
         assert rows == {"forked": ("", False)}
-        assert missing == []
+        assert missing == ["Gemfile"]
 
     def _mock_hex(self) -> None:
         hexpm = "https://hex.pm/api/packages"

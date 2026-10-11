@@ -38,6 +38,10 @@ _MISSING = (
     "declares dependencies that no lockfile covers; their versions and "
     "transitive dependencies are estimated from the registry"
 )
+_UNRECORDED = (
+    "declares off-registry dependencies that no lockfile records; "
+    "what they depend on is not in this report"
+)
 
 
 def _refuse_everything_else() -> None:
@@ -573,8 +577,11 @@ class TestEveryLockfileFormat:
             (fmt.name, "", "1.0.0", _GPL, f"a/{fmt.manifest}"),
             (fmt.name, fmt.declared("team", "v9"), "", "UNKNOWN", f"b/{fmt.manifest}"),
         ]
-        # The lockfile covers the one registry requirement there is.
-        assert data["diagnostics"] == []
+        # The lockfile covers the one registry requirement there is. No
+        # lockfile says what the repository requires.
+        assert data["diagnostics"] == [
+            {"path": f"b/{fmt.manifest}", "reason": _UNRECORDED, "severity": "gap"}
+        ]
 
     @respx.mock
     def test_repository_row_does_not_cover_a_registry_declaration(self, tmp_path, layout):
@@ -632,7 +639,8 @@ class TestEveryLockfileFormat:
         _mock_registries()
         _review(tmp_path, fmt, fmt.locked)
 
-        result, data = _check_json(tmp_path)
+        # The missing lockfile is accepted, so the rows decide the exit code.
+        result, data = _check_json(tmp_path, "--no-require-lockfile")
 
         # The review of one repository does not clear the other.
         assert result.exit_code == 1
@@ -640,7 +648,10 @@ class TestEveryLockfileFormat:
             (fmt.name, fmt.declared("other", "main"), "", "UNKNOWN", f"b/{fmt.manifest}"),
             (fmt.name, fmt.locked, fmt.locked_version, "UNKNOWN", f"a/{fmt.manifest}"),
         ]
-        assert data["diagnostics"] == []
+        # The lockfile holds the first repository, not the second.
+        assert data["diagnostics"] == [
+            {"path": f"b/{fmt.manifest}", "reason": _UNRECORDED, "severity": "estimate"}
+        ]
         assert _registry_requests() == []
 
 

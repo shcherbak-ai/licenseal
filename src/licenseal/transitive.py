@@ -40,7 +40,7 @@ import httpx
 
 from licenseal._concurrency import map_with_context
 from licenseal._graph import compute_direct_ancestors
-from licenseal.discovery._origin import UNRECORDED, same_source
+from licenseal.discovery._origin import UNRECORDED, is_remote, same_source
 from licenseal.discovery._read import (
     decode_text,
     read_xml_bytes,
@@ -254,18 +254,44 @@ _MANIFESTS_WITHOUT_LOCKFILE_FORMAT = frozenset({"pom.xml", "packages.config", "M
 def _record_missing_lockfiles(project_path: Path, deps: list[Dependency]) -> None:
     """Record each manifest that declares one of ``deps`` as lacking a lockfile.
 
-    ``deps`` are the direct deps resolved through the registry because no
-    lockfile covers them. A manifest is recorded once, however many of them
-    it declares. Nothing is recorded for a dep with an origin (it is not
-    resolved through the registry, and a lockfile would not change its row),
-    for a dep without a manifest path, or for a manifest of a tool with no
-    lockfile format: Maven ``pom.xml``, NuGet ``packages.config``, an
-    erlang.mk ``Makefile``.
+    ``deps`` are the direct deps no lockfile covers. One without an origin is
+    resolved through the registry. One with an origin is a row as it is
+    declared: nothing is fetched for it, so without a lockfile what it
+    depends on is listed nowhere. A manifest is recorded once for each of
+    the two kinds, however many deps of that kind it declares. Nothing is
+    recorded for a dep without a manifest path, or for a manifest of a tool
+    with no lockfile format: Maven ``pom.xml``, NuGet ``packages.config``,
+    an erlang.mk ``Makefile``.
     """
-    for source in sorted({d.source for d in deps if not d.origin}):
-        manifest = _manifest_path(project_path, source)
-        if manifest is not None and manifest.name not in _MANIFESTS_WITHOUT_LOCKFILE_FORMAT:
-            record_missing_lockfile(manifest)
+    for off_registry in (False, True):
+        for source in sorted({d.source for d in deps if bool(d.origin) is off_registry}):
+            manifest = _manifest_path(project_path, source)
+            if manifest is not None and manifest.name not in _MANIFESTS_WITHOUT_LOCKFILE_FORMAT:
+                record_missing_lockfile(manifest, off_registry=off_registry)
+
+
+def _lockfile_stands_for(
+    dep: Dependency, project_path: Path, lockfiles: Iterable[Path], *, below: str = ""
+) -> bool:
+    """Whether a lockfile that holds no row for a path dependency records what it requires.
+
+    Two formats never hold a row for a path dependency, and list the packages
+    it requires all the same: ``mix.lock`` has no entry for a Mix ``path:``
+    dependency, and a NuGet lockfile lists a ``<ProjectReference>`` with no
+    version. Nothing is then missing from the report, and no lockfile can be
+    asked to cover the dependency. That holds when one of ``lockfiles`` sits
+    where the tool writes it for the manifest that declares ``dep``: beside
+    it, in its ``below`` subdirectory when one is named, and otherwise in a
+    directory above it (an umbrella root).
+
+    This is the one place a lockfile is paired with a manifest by directory,
+    and it decides only whether the missing-lockfile diagnostic is recorded.
+    Coverage (:func:`_covers`) never pairs them: a lockfile covers what it
+    holds, wherever it is.
+    """
+    manifest_dir = (project_path / dep.source).parent
+    near = {manifest_dir, manifest_dir / below} if below else {manifest_dir, *manifest_dir.parents}
+    return any(lockfile.parent in near for lockfile in lockfiles)
 
 
 # The direct deps that declare each package, by (ecosystem, identity), in
@@ -538,11 +564,16 @@ def resolve_transitive(
     # covered by name: walking one would fetch a registry package of the
     # same name and its different transitive set (phantom-version bug — see
     # ``parse_cargo_lock`` docstring).
+    #
+    # ``rowless`` tells the uncovered deps that no lockfile of their tool
+    # ever holds a row for and whose requirements a lockfile records all the
+    # same (:func:`_lockfile_stands_for`): no lockfile is asked for those.
     def _walk_uncovered(
         ecosystem: Ecosystem,
         lockfile_output: list[Dependency],
         lockfile_names: set[str],
         origins: Mapping[str, str | None] | None = None,
+        rowless: Callable[[Dependency], bool] | None = None,
     ) -> list[Dependency]:
         uncovered = [
             d
@@ -555,7 +586,9 @@ def resolve_transitive(
         ]
         if not uncovered:
             return []
-        _record_missing_lockfiles(project_path, uncovered)
+        _record_missing_lockfiles(
+            project_path, [d for d in uncovered if not (rowless and rowless(d))]
+        )
         return _walk_registry(
             uncovered,
             ecosystem,
@@ -808,7 +841,17 @@ def resolve_transitive(
                 )
             )
         out.extend(locked)
-        out.extend(_walk_uncovered(Ecosystem.HEX, locked, set()))
+
+        def _mix_path_dep_is_locked(dep: Dependency) -> bool:
+            # Mix writes no ``mix.lock`` entry for a ``path:`` dependency.
+            return (
+                bool(dep.origin)
+                and not is_remote(dep.origin)
+                and Path(dep.source).name == "mix.exs"
+                and _lockfile_stands_for(dep, project_path, mix_locks)
+            )
+
+        out.extend(_walk_uncovered(Ecosystem.HEX, locked, set(), rowless=_mix_path_dep_is_locked))
         handled.add(Ecosystem.HEX)
 
     # R / CRAN transitive resolution. renv.lock / packrat.lock (when present)
@@ -1438,7 +1481,8 @@ def _resolve_dotnet_transitive(
     # walks (its children are reached through it) but is not emitted.
     direct_prod_names = {d.identity for d in direct_dotnet_deps if d.group == DependencyGroup.PROD}
     direct_dev_names = {d.identity for d in direct_dotnet_deps if d.group == DependencyGroup.DEV}
-    for nuget_lock in find_nuget_lockfiles(project_path, exclude_paths=exclude_paths):
+    nuget_locks = find_nuget_lockfiles(project_path, exclude_paths=exclude_paths)
+    for nuget_lock in nuget_locks:
         for dep in parse_nuget_lockfile(
             nuget_lock,
             prod_root_names=direct_prod_names,
@@ -1474,7 +1518,17 @@ def _resolve_dotnet_transitive(
     ]
     if not direct_uncovered:
         return out
-    _record_missing_lockfiles(project_path, direct_uncovered)
+    # A NuGet lockfile lists a project reference with no version, which is no
+    # row: ``packages.lock.json`` beside the project file, or
+    # ``project.assets.json`` in its ``obj`` directory, is not asked for one.
+    _record_missing_lockfiles(
+        project_path,
+        [
+            d
+            for d in direct_uncovered
+            if not (d.origin and _lockfile_stands_for(d, project_path, nuget_locks, below="obj"))
+        ],
+    )
 
     # Direct deps whose declared version resolves to a version can be
     # walked; ones that don't (unresolved $() tokens, a range nothing
