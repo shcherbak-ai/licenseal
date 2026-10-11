@@ -814,6 +814,73 @@ class TestBidirectionalControlsAndEmphasis:
         assert "declares '**Custom** terms\u2067' which" in deps["star*name"]["reason"]
 
 
+class TestDirectionMarksAndLineSeparators:
+    """A direction mark and a line or paragraph separator in a name are shown
+    escaped in the table, in Markdown and on stderr. A zero-width character
+    is left as it is: a joiner is part of the spelling in some scripts."""
+
+    NAME = "m\u200ea\u200fr\u061ck\u2028s\u2029x"
+    SHOWN = "m\\u200ea\\u200fr\\u061ck\\u2028s\\u2029x"
+    JOINED = "zero\u200dwidth"
+    ESCAPED = re.compile("[\u061c\u200e\u200f\u2028\u2029]")
+
+    def _project(self, project: Path) -> None:
+        # No registry has the two packages, so both rows are unresolved and
+        # both names reach the diagnostics.
+        dependencies = {"parent": "1.0.0", self.NAME: "1.0.0", self.JOINED: "1.0.0"}
+        (project / "package.json").write_text(
+            json.dumps({"name": "app", "license": "MIT", "dependencies": dependencies}),
+            encoding="ascii",
+        )
+        _mock_npm_registry_with_misses({"parent": {"license": "MIT"}})
+
+    @respx.mock
+    def test_stderr_shows_the_name_escaped(self, tmp_path):
+        self._project(tmp_path)
+        out_file = tmp_path / "report.json"
+        result = CliRunner().invoke(
+            main,
+            [
+                "check",
+                "--path",
+                str(tmp_path),
+                "--no-require-lockfile",
+                "-f",
+                "json",
+                "-o",
+                str(out_file),
+            ],
+        )
+        assert result.exit_code == 1
+        lines = result.stderr_bytes.splitlines()
+        for name in (self.SHOWN.encode(), self.JOINED.encode()):
+            assert (
+                b"Warning: package.json: the dependencies of " + name + b" 1.0.0 could not be "
+                b"read from the registry; its transitive dependencies may be missing"
+            ) in lines
+            reason = "has no license information — manual review required".encode()
+            assert b"  ? " + name + b" " + reason in lines
+        assert not self.ESCAPED.search(result.stderr_bytes.decode("utf-8"))
+        # The JSON report keeps both names as they are.
+        saved = json.loads(out_file.read_text(encoding="utf-8"))
+        names = {dep["name"] for dep in saved["dependencies"]}
+        assert names == {"parent", self.NAME, self.JOINED}
+
+    @respx.mock
+    def test_table_and_markdown_show_the_name_escaped(self, tmp_path):
+        self._project(tmp_path)
+        exit_code, table = _check_to_file(tmp_path, "table", "--no-strict")
+        md_exit_code, markdown = _check_to_file(tmp_path, "markdown", "--no-strict")
+        assert exit_code == md_exit_code == 0
+        assert f"{self.SHOWN} (1.0.0)" in table
+        assert f"{self.JOINED} (1.0.0)" in table
+        doubled = self.SHOWN.replace("\\", "\\\\")
+        assert f"|[{doubled} (1.0.0)](https://www.npmjs.com/package/" in markdown
+        assert f"|[{self.JOINED} (1.0.0)](https://www.npmjs.com/package/" in markdown
+        for report in (table, markdown):
+            assert not self.ESCAPED.search(report)
+
+
 class TestAnalysisGaps:
     """A manifest the scan could not analyze is named in the table and Markdown reports."""
 

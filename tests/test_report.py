@@ -1912,9 +1912,21 @@ class TestUntrustedStrings:
         )
         assert _printable("a\u2066b\u2067c\u2068d\u2069e") == "a\\u2066b\\u2067c\\u2068d\\u2069e"
         # The characters on either side of the two ranges are left as they are.
-        assert _printable("\u2029\u202f\u2065\u206a") == "\u2029\u202f\u2065\u206a"
+        assert _printable("\u2027\u202f\u2065\u206a") == "\u2027\u202f\u2065\u206a"
         # Right-to-left text needs no control character and is not rewritten.
         assert _printable("\u05e9\u05dc\u05d5\u05dd") == "\u05e9\u05dc\u05d5\u05dd"
+
+    def test_printable_shows_direction_marks_and_line_separators(self):
+        assert _printable("a\u061cb\u200ec\u200fd") == "a\\u061cb\\u200ec\\u200fd"
+        assert _printable("one\u2028two\u2029three") == "one\\u2028two\\u2029three"
+        # Their neighbours are ordinary characters.
+        assert _printable("\u061b\u061d\u200d\u2010") == "\u061b\u061d\u200d\u2010"
+
+    def test_printable_leaves_zero_width_characters_alone(self):
+        # A joiner or a non-joiner is part of the spelling in some scripts.
+        zero_width = "\u200b\u200c\u200d\u2060\ufeff"
+        assert _printable(zero_width) == zero_width
+        assert _printable("\u0646\u200c\u0647") == "\u0646\u200c\u0647"
 
     def test_table_with_lone_surrogates_can_be_written(self):
         for console, buf in (

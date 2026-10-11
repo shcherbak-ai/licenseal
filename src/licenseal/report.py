@@ -35,10 +35,13 @@ _SPDX_OPERATORS = {"AND", "OR", "WITH"}
 
 _LINE_BREAKS_AND_TABS = re.compile(r"\r\n|[\n\r\t]")
 _CONTROL_CHARS = re.compile(r"[\x00-\x1f\x7f-\x9f]")
-# A surrogate in a ``str`` is always a lone one: a decoded pair is a single
-# character. The other two ranges are the bidirectional embedding, override
-# and isolate controls.
-_SURROGATES_AND_BIDI_CONTROLS = re.compile(r"[\ud800-\udfff\u202a-\u202e\u2066-\u2069]")
+# Characters shown as a ``\uNNNN`` escape. A surrogate in a ``str`` is always
+# a lone one: a decoded pair is a single character. The rest are the
+# bidirectional marks (U+061C, U+200E, U+200F), the line and paragraph
+# separators (U+2028, U+2029), and the bidirectional embedding, override
+# and isolate controls. The zero-width characters are not among them: a
+# joiner is part of the spelling in some scripts.
+_SHOWN_AS_CODE_POINT = re.compile(r"[\ud800-\udfff\u061c\u200e\u200f\u2028-\u202e\u2066-\u2069]")
 _MARKDOWN_SPECIALS = re.compile(r"[\\`\[\]<>|*]")
 
 
@@ -54,15 +57,17 @@ def _printable(value: str) -> str:
     A lone surrogate (an unpaired ``\\uD800``-style JSON escape) cannot be
     written to a terminal or a file in any encoding; it is shown as a
     ``\\uNNNN`` escape, so a report never fails to print or save over one.
-    A bidirectional control is shown the same way: it reorders the text
-    around it on screen, so a name could be displayed as another one.
+    A bidirectional mark or control is shown the same way: it reorders the
+    text around it on screen, so a name could be displayed as another one.
+    So is a line or paragraph separator, which breaks a line where the
+    report has none.
 
     Presentation only: the data model and the JSON report keep the original
     string, so a dependency's identity is never rewritten.
     """
     value = _LINE_BREAKS_AND_TABS.sub(" ", value)
     value = _CONTROL_CHARS.sub(lambda match: f"\\x{ord(match.group()):02x}", value)
-    return _SURROGATES_AND_BIDI_CONTROLS.sub(lambda match: f"\\u{ord(match.group()):04x}", value)
+    return _SHOWN_AS_CODE_POINT.sub(lambda match: f"\\u{ord(match.group()):04x}", value)
 
 
 def _escape_md(value: str) -> str:
