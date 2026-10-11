@@ -564,7 +564,13 @@ def resolve_transitive(
         # ``GetDependencies`` endpoint isn't available for Go — only npm,
         # Cargo, Maven, PyPI per Google's docs; the Go module proxy is
         # the canonical source the ``go`` toolchain itself consults).
-        direct_go_deps = [d for d in direct_deps if d.ecosystem == Ecosystem.GO]
+        go_deps = [d for d in direct_deps if d.ecosystem == Ecosystem.GO]
+        # A module replaced by a local path the scan does not read is a row
+        # as it stands: no go.sum lists it, and the proxy is not asked for it.
+        out.extend(
+            d for d in go_deps if d.origin and (include_dev or d.group != DependencyGroup.DEV)
+        )
+        direct_go_deps = [d for d in go_deps if not d.origin]
         out.extend(
             _resolve_go_transitive(
                 direct_go_deps=direct_go_deps,

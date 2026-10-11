@@ -4037,8 +4037,12 @@ class TestGoReplaceDirectives:
         } == {
             ("example.org/fork", "v1.2.1", 0, (), "go.mod"),
             ("example.org/fork-child", "v1.0.0", 1, ("example.org/fork",), ""),
+            # Replaced by a path outside the scan: a row of its own, and the
+            # proxy mock, which does not serve it, is not asked.
+            ("example.org/local", "", 0, (), "go.mod"),
             ("example.org/plain", "v1.0.0", 0, (), "go.mod"),
         }
+        assert {d.name: d.origin for d in deps if d.origin} == {"example.org/local": "../local"}
 
     @respx.mock
     def test_old_version_qualifier_with_go_sum(self, tmp_path):
@@ -4301,6 +4305,7 @@ class TestGoDirectRequirementsBesideGoSum:
 
         assert _go_rows(_resolve_tree(tmp_path, include_dev=False)) == {
             ("example.org/fork", "v1.2.1", self.PROD, 0, (), "go.mod"),
+            ("example.org/local", "", self.PROD, 0, (), "go.mod"),
             ("example.org/plain", "v1.0.0", self.PROD, 0, (), "go.mod"),
         }
 

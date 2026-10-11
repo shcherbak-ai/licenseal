@@ -43,8 +43,11 @@ longest-prefix lookup and mark that direct dep as ``DependencyGroup.DEV``.
 ``replace`` directives rewrite a module reference, in the single-line and the
 ``replace ( ... )`` block form. A ``replace`` to another module/version is
 followed (the dep is resolved under the replacement's identity). A ``replace``
-to a local filesystem path (no version) means the dep is satisfied locally and
-has no canonical registry license — drop it. A version after the module path on
+to a local filesystem path (no version) means the dep is satisfied locally:
+nothing is looked up for it. When the scan reads that path (a directory of the
+scanned tree that the walk enters) the module is the project's own code, its
+own ``go.mod`` is scanned, and it is no dependency. Any other path makes the
+module a dependency with that path as its origin. A version after the module path on
 the left of ``=>`` restricts the replacement to a requirement on that version;
 without one it covers every version. Go honours ``replace`` only in the main
 module, so the directives of a dependency's own ``go.mod`` are never applied.
@@ -58,6 +61,7 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
+from licenseal.discovery._origin import path_origin
 from licenseal.discovery._read import decode_text, rejected_path_reference
 from licenseal.discovery._walk import walk_project_files
 from licenseal.models import Dependency, DependencyGroup, Ecosystem
@@ -71,10 +75,11 @@ _REPLACE_SPEC_RE = re.compile(
 )
 _TOOL_LINE_RE = re.compile(r"^\s*(?P<path>\S+)\s*$")
 
-# ``(old_path, old_version)`` → ``(new_path, new_version)``, or ``None`` for a
-# local-path replacement. ``old_version`` is ``None`` when the directive names
-# no version and so covers every version of the module.
-_Replaces = dict[tuple[str, str | None], tuple[str, str] | None]
+# ``(old_path, old_version)`` → ``(new_path, new_version)``; ``new_version`` is
+# ``None`` for a local-path replacement, where ``new_path`` is that path.
+# ``old_version`` is ``None`` when the directive names no version and so covers
+# every version of the module.
+_Replaces = dict[tuple[str, str | None], tuple[str, str | None]]
 
 
 def _record_replace(spec: str, replaces: _Replaces) -> None:
@@ -85,11 +90,8 @@ def _record_replace(spec: str, replaces: _Replaces) -> None:
     m = _REPLACE_SPEC_RE.match(spec)
     if not m:
         return
-    new_version = m.group("new_version")
     # A replacement with no version is a local path (``=> ../some-dir``).
-    replaces[m.group("old"), m.group("old_version")] = (
-        None if new_version is None else (m.group("new"), new_version)
-    )
+    replaces[m.group("old"), m.group("old_version")] = (m.group("new"), m.group("new_version"))
 
 
 def _parse_go_mod(
@@ -103,11 +105,11 @@ def _parse_go_mod(
     on ``Dependency`` (Go's PROD/DEV distinction comes from the ``tool``
     directive, not from ``indirect``).
 
-    ``replaces`` maps ``(old_path, old_version)`` → either
-    ``(new_path, new_version)`` for a module replacement or ``None`` for a
-    local-path replacement (drop the dep — no registry license), from both
-    single-line directives and ``replace ( ... )`` blocks. ``old_version`` is
-    ``None`` for a directive without one, which covers every version.
+    ``replaces`` maps ``(old_path, old_version)`` → ``(new_path,
+    new_version)``, from both single-line directives and ``replace ( ... )``
+    blocks. ``new_version`` is ``None`` for a local-path replacement, whose
+    ``new_path`` is the path. ``old_version`` is ``None`` for a directive
+    without one, which covers every version.
 
     ``tools`` is a list of import paths from any ``tool`` block(s) — used
     by the discovery layer to mark the corresponding require'd modules as
@@ -243,20 +245,29 @@ def lists_all_requirements(text: str) -> bool:
     return False
 
 
+def _replacement(path: str, version: str, replaces: _Replaces) -> tuple[str, str | None]:
+    """Return what ``replaces`` turns the requirement ``path`` at ``version`` into.
+
+    A directive naming the required version takes precedence over one covering
+    every version of the module, as in Go. The returned version is ``None``
+    when the requirement is replaced by a local path, which is then returned
+    in place of the module path.
+    """
+    key = (path, version) if (path, version) in replaces else (path, None)
+    return replaces.get(key, (path, version))
+
+
 def apply_replaces(requires: list[tuple[str, str]], replaces: _Replaces) -> list[tuple[str, str]]:
     """Return the ``(module, version)`` requirements once ``replaces`` is applied.
 
     A requirement replaced by another module becomes that module and version;
-    one replaced by a local path is dropped, having no registry identity. A
-    directive naming the required version takes precedence over one covering
-    every version of the module, as in Go.
+    one replaced by a local path is dropped, having no registry identity.
     """
     resolved: list[tuple[str, str]] = []
     for path, version in requires:
-        key = (path, version) if (path, version) in replaces else (path, None)
-        target = replaces.get(key, (path, version))
-        if target is not None:
-            resolved.append(target)
+        new_path, new_version = _replacement(path, version, replaces)
+        if new_version is not None:
+            resolved.append((new_path, new_version))
     return resolved
 
 
@@ -401,7 +412,9 @@ def discover_go_mod_dependencies(
 
     Returns ``(deps, filtered_count)``. ``deps`` is a flat list of
     ``Dependency`` entries (one per ``require`` directive, after applying
-    ``replace`` rewrites). ``filtered_count`` is the number of require
+    ``replace`` rewrites). A requirement replaced by a local path that the
+    scan reads is not a dependency; replaced by any other local path it is
+    one with that path as its origin and no version. ``filtered_count`` is the number of require
     entries dropped because their name matches a workspace-local module
     path (sibling go.mod in a monorepo, or a target of a ``go.work``
     ``use`` directive — see :func:`_discover_workspace_local_module_paths`).
@@ -429,23 +442,34 @@ def discover_go_mod_dependencies(
 
         # Resolve replace rewrites first so the tool-to-module match runs
         # against the post-replace module paths.
-        resolved = apply_replaces(requires, replaces)
+        resolved: list[tuple[str, str, str]] = []  # (module, version, origin)
+        for path, version in requires:
+            new_path, new_version = _replacement(path, version, replaces)
+            if new_version is not None:
+                resolved.append((new_path, new_version, ""))
+                continue
+            # Replaced by a local path. One the scan reads is the project's
+            # own module; any other is a dependency no registry describes.
+            origin = path_origin(new_path, gm.parent, project_path)
+            if origin is not None:
+                resolved.append((path, "", origin))
 
         resolved_paths = [r[0] for r in resolved]
         tool_modules = {mp for t in tools if (mp := _module_for_tool_path(t, resolved_paths))}
 
-        for new_path, new_version in resolved:
-            if new_path in workspace_local:
+        for module, module_version, origin in resolved:
+            if module in workspace_local:
                 filtered += 1
                 continue
-            group = DependencyGroup.DEV if new_path in tool_modules else DependencyGroup.PROD
+            group = DependencyGroup.DEV if module in tool_modules else DependencyGroup.PROD
             out.append(
                 Dependency(
-                    name=new_path,
-                    version_constraint=new_version,
+                    name=module,
+                    version_constraint=module_version,
                     ecosystem=Ecosystem.GO,
                     group=group,
                     source=source,
+                    origin=origin,
                 )
             )
     return out, filtered

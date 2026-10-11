@@ -116,10 +116,10 @@ require (
         _, replaces, _ = _parse_go_mod(text)
         assert replaces == {("github.com/old/path", None): ("github.com/new/path", "v2.0.0")}
 
-    def test_replace_to_local_path_yields_none(self):
+    def test_replace_to_local_path_records_the_path(self):
         text = "replace github.com/local/dep => ../local-dir\n"
         _, replaces, _ = _parse_go_mod(text)
-        assert replaces == {("github.com/local/dep", None): None}
+        assert replaces == {("github.com/local/dep", None): ("../local-dir", None)}
 
     def test_replace_block(self):
         # The block form carries the same specs as the single-line form, one
@@ -143,8 +143,8 @@ replace github.com/old/e => github.com/fork/e v3.0.0
         assert replaces == {
             ("github.com/old/a", None): ("github.com/fork/a", "v1.0.1"),
             ("github.com/old/b", "v1.2.0"): ("github.com/fork/b", "v1.2.1"),
-            ("github.com/local/c", None): None,
-            ("github.com/local/d", "v0.3.0"): None,
+            ("github.com/local/c", None): ("../c", None),
+            ("github.com/local/d", "v0.3.0"): ("./vendored/d", None),
             ("github.com/old/e", None): ("github.com/fork/e", "v3.0.0"),
         }
         # The block ends at its closing parenthesis: directives after it are
@@ -334,15 +334,58 @@ replace github.com/old/x v1.0.0 => github.com/new/x v2.0.0
         assert deps[0].name == "github.com/new/x"
         assert deps[0].version_constraint == "v2.0.0"
 
-    def test_replace_to_local_drops_dep(self, tmp_path):
+    def test_replace_to_a_directory_the_scan_walks_drops_dep(self, tmp_path):
+        (tmp_path / "local").mkdir()
         (tmp_path / "go.mod").write_text(
             """require github.com/local v1.0.0
-replace github.com/local => ../local
+replace github.com/local => ./local
 """,
             encoding="utf-8",
         )
         deps, _filtered = discover_go_mod_dependencies(tmp_path)
         assert deps == []
+
+    @pytest.mark.parametrize(
+        "written",
+        ["../local", "./vendor/local", "./missing", "/opt/go/local"],
+        ids=["outside", "skipped-directory", "missing", "rooted"],
+    )
+    def test_replace_to_a_path_the_scan_does_not_read_is_a_dependency(self, tmp_path, written):
+        (tmp_path / "vendor" / "local").mkdir(parents=True)
+        (tmp_path / "go.mod").write_text(
+            f"require github.com/local v1.0.0\nreplace github.com/local => {written}\n",
+            encoding="utf-8",
+        )
+        deps, _filtered = discover_go_mod_dependencies(tmp_path)
+        assert [(d.name, d.version_constraint, d.origin, d.source) for d in deps] == [
+            ("github.com/local", "", written, "go.mod")
+        ]
+
+    def test_tool_module_replaced_by_a_local_path_is_dev(self, tmp_path):
+        (tmp_path / "go.mod").write_text(
+            "require github.com/local/gen v1.0.0\n"
+            "replace github.com/local/gen => ../gen\n"
+            "tool github.com/local/gen/cmd/gen\n",
+            encoding="utf-8",
+        )
+        deps, _filtered = discover_go_mod_dependencies(tmp_path)
+        assert [(d.name, d.origin, d.group) for d in deps] == [
+            ("github.com/local/gen", "../gen", DependencyGroup.DEV)
+        ]
+
+    def test_workspace_module_replaced_by_an_unread_path_is_still_filtered(self, tmp_path):
+        # The module is declared by a go.mod of the scanned tree, so it is
+        # the project's own whatever the directive points at.
+        (tmp_path / "lib").mkdir()
+        (tmp_path / "lib" / "go.mod").write_text("module example.com/lib\n", encoding="utf-8")
+        (tmp_path / "go.mod").write_text(
+            "module example.com/app\n"
+            "require example.com/lib v0.0.0\n"
+            "replace example.com/lib => ../elsewhere/lib\n",
+            encoding="utf-8",
+        )
+        deps, filtered = discover_go_mod_dependencies(tmp_path)
+        assert (deps, filtered) == ([], 1)
 
     @pytest.mark.parametrize(
         "replace_directives",
@@ -373,7 +416,9 @@ replace github.com/local => ../local
         assert [(d.name, d.version_constraint, d.source) for d in deps] == [
             # Resolved under the replacement's identity; the original is gone.
             ("example.org/fork", "v1.2.1", "go.mod"),
-            # The module replaced by a local path is dropped.
+            # The module replaced by a local path the scan does not read is
+            # kept under its own name, with no version.
+            ("example.org/local", "", "go.mod"),
             # Control: a module no directive names is reported as required.
             ("example.org/untouched", "v3.0.0", "go.mod"),
         ]
@@ -403,7 +448,8 @@ replace github.com/local => ../local
             # The directive names another version: the requirement stands.
             ("example.org/moved-on", "v1.2.0"),
             # Likewise for a local-path replacement: example.org/local-pinned
-            # is dropped, example.org/local-moved-on is kept.
+            # is built from the path, example.org/local-moved-on is kept.
+            ("example.org/local-pinned", ""),
             ("example.org/local-moved-on", "v0.4.0"),
         ]
 

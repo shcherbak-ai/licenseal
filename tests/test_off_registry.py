@@ -4509,3 +4509,156 @@ class TestComposerRepositoryGap:
         result, data = _check_json(project, "--no-transitive")
         assert result.exit_code == 1
         assert self._gaps(data) == [("composer.json", _repository_gap("vcs"))]
+
+
+# ------------------------------------------------ Go: local-path replacements
+
+
+def _mock_go_module(module: str, version: str, license_id: str = "MIT") -> None:
+    """Answer the module proxy for one Go module; deps.dev is :func:`_mock_go_licenses`."""
+    respx.get(f"https://proxy.golang.org/{module}/@v/{version}.mod").mock(
+        return_value=httpx.Response(200, text=f"module {module}\n")
+    )
+    _GO_LICENSES[module, version] = license_id
+
+
+_GO_LICENSES: dict[tuple[str, str], str] = {}
+
+
+def _mock_go_licenses() -> None:
+    """Answer the deps.dev batch lookup from the modules mocked so far."""
+
+    def batch(request: httpx.Request) -> httpx.Response:
+        responses = []
+        for item in json.loads(request.content)["requests"]:
+            key = item["versionKey"]
+            entry: dict = {"request": {"versionKey": key}}
+            license_id = _GO_LICENSES.get((key["name"], key["version"]))
+            if license_id:
+                entry["version"] = {"versionKey": key, "licenses": [license_id], "links": []}
+            responses.append(entry)
+        return httpx.Response(200, json={"responses": responses, "nextPageToken": ""})
+
+    respx.post("https://api.deps.dev/v3alpha/versionbatch").mock(side_effect=batch)
+
+
+class TestGoLocalReplacements:
+    """A module replaced by a local path is a row unless the scan reads that path."""
+
+    _UNREAD = {
+        "example.org/outside": "../outside",
+        "example.org/vendored": "./vendor/vendored",
+        "example.org/missing": "./missing",
+        "example.org/rooted": "/opt/go/rooted",
+    }
+
+    def _project(self, tmp_path: Path, *, go_sum: bool) -> Path:
+        project = tmp_path / "project"
+        _dirs(project, "vendor/vendored", "internal/walked")
+        _write(project / "internal" / "walked" / "go.mod", "module example.org/walked-elsewhere\n")
+        _write(
+            project / "go.mod",
+            """\
+            module example.com/app
+
+            go 1.22
+
+            require (
+                example.org/regular v1.0.0
+                example.org/outside v0.1.0
+                example.org/vendored v0.2.0
+                example.org/missing v0.3.0
+                example.org/rooted v0.4.0
+                example.org/walked v0.5.0
+            )
+
+            replace (
+                example.org/outside => ../outside
+                example.org/vendored => ./vendor/vendored
+                example.org/missing => ./missing
+                example.org/rooted => /opt/go/rooted
+                example.org/walked => ./internal/walked
+            )
+            """,
+        )
+        _write(project / "LICENSE", "MIT License\n")
+        if go_sum:
+            _write(
+                project / "go.sum",
+                "example.org/regular v1.0.0 h1:h\nexample.org/regular v1.0.0/go.mod h1:h\n",
+            )
+        _GO_LICENSES.clear()
+        _mock_go_module("example.org/regular", "v1.0.0")
+        # The public index knows every replaced module, under another license.
+        for module, version in (
+            ("example.org/outside", "v0.1.0"),
+            ("example.org/vendored", "v0.2.0"),
+            ("example.org/missing", "v0.3.0"),
+            ("example.org/rooted", "v0.4.0"),
+            ("example.org/walked", "v0.5.0"),
+        ):
+            _mock_go_module(module, version, "GPL-3.0-only")
+        _mock_go_licenses()
+        _refuse_everything_else()
+        return project
+
+    @respx.mock
+    @pytest.mark.parametrize("go_sum", [True, False], ids=["go.sum", "no-go.sum"])
+    def test_module_replaced_by_a_path_the_scan_does_not_read_is_an_unknown_row(
+        self, tmp_path, go_sum
+    ):
+        project = self._project(tmp_path, go_sum=go_sum)
+        result, data = _check_json(project, "--no-strict")
+        assert result.exit_code == 0
+        assert _versions(data) == {
+            "example.org/regular": ("", "v1.0.0"),
+            **{module: (origin, "") for module, origin in self._UNREAD.items()},
+        }
+        rows = _rows(data)
+        assert all(rows[module]["license"] == "UNKNOWN" for module in self._UNREAD)
+        assert rows["example.org/outside"]["source"] == "go.mod"
+        assert rows["example.org/regular"]["license"] == "MIT"
+        # Neither deps.dev nor the module proxy is asked about a replaced
+        # module, the one the scan reads included.
+        assert _requests_mentioning(*self._UNREAD, "example.org/walked") == []
+
+    @respx.mock
+    def test_unknown_rows_fail_a_strict_scan_until_reviewed(self, tmp_path):
+        project = self._project(tmp_path, go_sum=True)
+        result, data = _check_json(project)
+        assert result.exit_code == 1
+        stanzas = "".join(
+            f'[[review]]\necosystem = "go"\npackage = "{dep["name"]}"\n'
+            f'source = "{dep["origin"]}"\nlicense = "MIT"\nnote = "read at that path"\n\n'
+            for dep in data["dependencies"]
+            if dep["origin"]
+        )
+        (project / REVIEW_FILE_NAME).write_text(stanzas, encoding="utf-8", newline="\n")
+        result, data = _check_json(project)
+        assert result.exit_code == 0
+        assert data["summary"]["reviewed"] == len(self._UNREAD)
+
+    @respx.mock
+    def test_dev_tool_replaced_by_a_local_path_follows_the_dev_flag(self, tmp_path):
+        project = tmp_path / "project"
+        _write(
+            project / "go.mod",
+            """\
+            module example.com/app
+
+            go 1.24
+
+            require example.org/gen v1.0.0
+
+            replace example.org/gen => ../gen
+
+            tool example.org/gen/cmd/gen
+            """,
+        )
+        _refuse_everything_else()
+        result, data = _check_json(project, "--no-strict")
+        assert (result.exit_code, data["dependencies"]) == (0, [])
+        result, data = _check_json(project, "--no-strict", "--dev")
+        row = _rows(data)["example.org/gen"]
+        assert (row["origin"], row["group"], row["license"]) == ("../gen", "dev", "UNKNOWN")
+        assert respx.calls.call_count == 0

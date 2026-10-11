@@ -7015,9 +7015,10 @@ class TestGoDirectRequirementsBesideGoSum:
         self, tmp_path, fork_in_go_sum
     ):
         # The GPL module is replaced by an MIT fork, and another requirement
-        # is replaced by a local path. Neither original is requested: the
-        # mocks do not serve them.
+        # is replaced by a local directory of the project. Neither original
+        # is requested: the mocks do not serve them.
         _mit_project(tmp_path)
+        (tmp_path / "local").mkdir()
         (tmp_path / "go.mod").write_text(
             "module example.com/app\n\n"
             "go 1.22\n\n"
@@ -7028,7 +7029,7 @@ class TestGoDirectRequirementsBesideGoSum:
             ")\n\n"
             "replace (\n"
             "\texample.org/original-gpl => example.org/fork v1.2.1\n"
-            "\texample.org/local => ../local\n"
+            "\texample.org/local => ./local\n"
             ")\n",
             encoding="utf-8",
         )
@@ -7196,9 +7197,9 @@ class TestGoModWithUnlistedRequirements:
 
     @respx.mock
     def test_requirements_that_are_not_scanned_need_no_row(self, tmp_path):
-        # One requirement is replaced by a local path and one is a module of
-        # this workspace: neither is scanned. A third is replaced by a fork,
-        # and it is the fork that needs the go.sum row.
+        # One requirement is replaced by a local path the scan reads and one
+        # is a module of this workspace: neither is scanned. A third is
+        # replaced by a fork, and it is the fork that needs the go.sum row.
         _mit_project(tmp_path)
         self._write_go_mod(
             tmp_path / "go.mod",
@@ -7207,9 +7208,13 @@ class TestGoModWithUnlistedRequirements:
             ("example.com/app/sibling", "v0.0.0"),
             ("example.org/original", "v1.2.0"),
             extra=(
-                "replace example.org/local => ../local\n"
+                "replace example.org/local => ./local\n"
                 "replace example.org/original => example.org/fork v1.2.1\n"
             ),
+        )
+        (tmp_path / "local").mkdir()
+        (tmp_path / "local" / "go.mod").write_text(
+            "module example.org/local\n\ngo 1.22\n", encoding="utf-8"
         )
         (tmp_path / "sibling").mkdir()
         (tmp_path / "sibling" / "go.mod").write_text(
