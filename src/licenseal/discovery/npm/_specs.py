@@ -3,10 +3,10 @@
 A ``package.json`` dependency is normally ``name: <semver range or tag>``. It
 can also point at a git repository (``git+https://…``, ``github:user/repo``,
 the bare ``user/repo`` shorthand), at a tarball URL, or at a path
-(``file:../dir``). A lockfile records where each package was fetched from in
-the same vocabulary. A dependency from a repository, a tarball URL, or a path
-is not the registry package of its name: it gets an origin (see
-:mod:`licenseal.discovery._origin`) and is never looked up.
+(``file:../dir``, ``../dir``). A lockfile records where each package was
+fetched from in the same vocabulary. A dependency from a repository, a
+tarball URL, or a path is not the registry package of its name: it gets an
+origin (see :mod:`licenseal.discovery._origin`) and is never looked up.
 """
 
 from __future__ import annotations
@@ -35,9 +35,16 @@ _SCP_GIT_RE = re.compile(r"[^/@:\s]+@[^/:\s]+:\S+")
 _GITHUB_SHORTHAND_RE = re.compile(r"[^\s/@:#.~][^\s/@:#]*/[^\s/@:#]+(?:#.*)?")
 
 # Specs that name a directory or an archive on disk, by protocol or as a
-# bare path.
+# bare path. npm (``npm-package-arg``) reads a spec as a file or a directory
+# when it starts like a path: a dot, ``~/``, a slash or a backslash, a drive
+# letter. So it does a spec that is no URL and no repository and that holds
+# a slash, or ends like an archive: no version range and no dist-tag does.
 _PATH_PROTOCOLS = ("file:", "link:", "portal:")
-_BARE_PATH_PREFIXES = ("./", "../", "/", "~/", ".\\", "..\\")
+_PATH_START_RE = re.compile(r"[.]|~/|[/\\]|[A-Za-z]:")
+_ARCHIVE_SUFFIXES = (".tgz", ".tar.gz", ".tar")
+# ``scheme:`` starts a URL, an alias (``npm:``), or a protocol of another
+# package manager (``workspace:``, ``catalog:``).
+_SCHEME_RE = re.compile(r"(?:git\+)?[A-Za-z]+:")
 
 # A tarball in the layout every npm registry serves:
 # ``<registry>/<name>/-/<file>.tgz``.
@@ -49,13 +56,22 @@ _REGISTRY_DOWNLOAD_PREFIXES = ("https://npm.pkg.github.com/download/",)
 def path_spec(spec: str) -> str | None:
     """The path a spec names, or ``None`` when it does not name one.
 
-    ``file:``, ``link:``, and ``portal:`` specs name a path, and so does a
-    spec written as a bare relative, rooted, or home-relative path.
+    ``file:``, ``link:``, and ``portal:`` specs name a path. So does a spec
+    written as a bare path: relative, rooted, home-relative, drive-qualified
+    or UNC, a directory several segments deep (``libs/pkg/dist``), and a
+    bare archive name (``pkg-1.0.0.tgz``). A version range, a dist-tag, a
+    URL, an alias, a git remote, and a hosting shorthand (``user/repo``)
+    name none.
     """
     for protocol in _PATH_PROTOCOLS:
         if spec.startswith(protocol):
             return spec[len(protocol) :]
-    return spec if spec.startswith(_BARE_PATH_PREFIXES) or spec in (".", "..") else None
+    if _PATH_START_RE.match(spec):
+        return spec
+    if _SCHEME_RE.match(spec) or npm_spec_origin(spec):
+        return None
+    bare_path = "/" in spec or "\\" in spec or spec.lower().endswith(_ARCHIVE_SUFFIXES)
+    return spec if bare_path else None
 
 
 def git_spec_origin(spec: str) -> str:

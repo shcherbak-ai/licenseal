@@ -38,7 +38,7 @@ src/licenseal/
       pipfile.py              Pipfile (Pipenv manifest; `git` / `hg` / `svn` / `bzr` / `path` / `file` entries → `origin`, a path the scan reads → not a dependency)
       lockfiles.py            uv.lock, poetry.lock, Pipfile.lock parsers (transitive; edge-aware for uv/poetry, section-based for Pipfile; git / url sources and path sources the scan does not read → `origin`, alternate-index sources stay registry rows)
     npm/
-      package_json.py         package.json (recursive, skips node_modules; filters workspace-internal names; git / hosting-shorthand / tarball-URL specs and `file:` / `link:` / `portal:` paths the scan does not read → `origin`)
+      package_json.py         package.json (recursive, skips node_modules; filters workspace-internal names; git / hosting-shorthand / tarball-URL specs and `file:` / `link:` / `portal:` or bare paths the scan does not read → `origin`; `_specs.path_spec` tells a path from a range the way npm does)
       _specs.py               npm spec and `resolved` classifier (git URL, `github:` and `user/repo` shorthands, tarball URL → origin; path specs; a lockfile's `resolved` tarball in the registry layout on any host is a registry package)
       lockfiles.py            package-lock.json (v1 + v2/v3), pnpm-lock.yaml (lockfileVersion 6 and 9), yarn.lock (v1 and Berry), bun.lock parsers (transitive, edge-aware; `find_npm_lockfiles` returns one per directory and none under a `test` / `tests` directory; packages fetched from git, a non-registry tarball URL, or a path the scan does not read → `origin`)
     rust/
