@@ -101,6 +101,38 @@ class TestDecodeText:
             f"has a {label} byte-order mark but is not valid {label}; skipped"
         )
 
+    @pytest.mark.parametrize(
+        "data",
+        [
+            pytest.param(b"\x00\x00\x00\x00", id="nul-bytes"),
+            pytest.param(b"flask==3.0.0\n\x00", id="one-nul-at-the-end"),
+            pytest.param("flask==3.0.0\n".encode("utf-16-le"), id="utf16-le-without-bom"),
+            pytest.param("flask==3.0.0\n".encode("utf-16-be"), id="utf16-be-without-bom"),
+            pytest.param("flask==3.0.0\n".encode("utf-32-le"), id="utf32-le-without-bom"),
+            pytest.param(b"\xef\xbb\xbfflask==3.0.0\n\x00", id="after-a-utf8-bom"),
+            # The mark names the codec; the decoded text still holds a NUL.
+            pytest.param(
+                b"\xff\xfe" + "flask\x00==3.0.0\n".encode("utf-16-le"), id="in-utf16-with-bom"
+            ),
+            # Not valid UTF-8 either: one gap, and no latin-1 recovery note.
+            pytest.param(b"\x00\xff\xd8\xff", id="binary"),
+        ],
+    )
+    @pytest.mark.parametrize("requires_utf8", ["", "TOML"])
+    def test_text_that_holds_a_nul_character_is_a_gap(self, tmp_path: Path, data, requires_utf8):
+        p = tmp_path / "f.txt"
+        p.write_bytes(data)
+        with collect_read_diagnostics() as diags:
+            assert decode_text(p, requires_utf8=requires_utf8) is None
+        assert [(d.path, d.reason, d.is_gap) for d in diags] == [
+            (
+                p,
+                "contains NUL characters and is not read as text "
+                "(UTF-16 needs a byte-order mark); skipped",
+                True,
+            )
+        ]
+
     def test_utf8_bom_with_invalid_byte_recovers_like_the_file_without_a_bom(self, tmp_path: Path):
         # A UTF-8 BOM in front of a stray non-UTF-8 byte must not change the
         # outcome: the same latin-1 recovery, the same text, the BOM dropped.

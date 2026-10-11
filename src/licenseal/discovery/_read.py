@@ -452,6 +452,18 @@ _BOM_CODECS = (
 )
 
 
+def _holds_nul(path: Path, holds_nul: bool) -> bool:
+    """Record a gap and return True when the text of ``path`` holds a NUL character."""
+    if holds_nul:
+        _record(
+            path,
+            "contains NUL characters and is not read as text "
+            "(UTF-16 needs a byte-order mark); skipped",
+            is_gap=True,
+        )
+    return holds_nul
+
+
 def decode_text(path: Path, *, requires_utf8: str = "") -> str | None:
     """Decode a text manifest to ``str``, or ``None`` if it can't be read or decoded.
 
@@ -474,6 +486,12 @@ def decode_text(path: Path, *, requires_utf8: str = "") -> str | None:
     1 and 2 are unchanged, so a file with a byte-order mark is still read in
     the encoding the mark names.
 
+    A file whose text holds a NUL character is not text: it is recorded as a
+    gap and skipped, wherever the character is. UTF-16 and UTF-32 without a
+    byte-order mark are the common case (each ASCII character decodes with
+    NUL characters beside it), and a line-oriented parser would otherwise
+    match no line of such a file and read it as an empty one.
+
     We deliberately do *not* replicate pip's ``locale.getpreferredencoding()``
     fallback: it would make the same bytes decode differently across machines,
     breaking scan reproducibility.
@@ -484,7 +502,7 @@ def decode_text(path: Path, *, requires_utf8: str = "") -> str | None:
     for boms, codec in _BOM_CODECS:
         if data.startswith(boms):
             try:
-                return data.decode(codec)
+                text = data.decode(codec)
             except UnicodeDecodeError:
                 label = codec.upper()
                 _record(
@@ -493,6 +511,12 @@ def decode_text(path: Path, *, requires_utf8: str = "") -> str | None:
                     is_gap=True,
                 )
                 return None
+            return None if _holds_nul(path, "\x00" in text) else text
+    # Without one of those marks a NUL character is a NUL byte, in UTF-8 and
+    # in latin-1 alike. Checked first, so that a binary file is one gap and
+    # is not also noted as recovered through latin-1.
+    if _holds_nul(path, b"\x00" in data):
+        return None
     try:
         # ``utf-8-sig`` strips a leading UTF-8 BOM and is plain UTF-8 without one.
         return data.decode("utf-8-sig")

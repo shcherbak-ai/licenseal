@@ -659,7 +659,6 @@ _UNPARSEABLE_SOURCES = {
     "leading_zero_octal": 'import os\nos.chmod("build.sh", 0755)\n',
     "diamond_operator": "import sys\nif sys.version_info[0] <> 3:\n    raise SystemExit\n",
     "tab_space_mix": "if True:\n\tname = 'x'\n        version = '1'\n",
-    "embedded_nul": 'from setuptools import setup\nsetup(name="x")\x00\n',
 }
 
 
@@ -683,9 +682,10 @@ class TestSetupPyParseGaps:
 
     @pytest.mark.parametrize("error", [ValueError, RecursionError, MemoryError])
     def test_parser_value_and_recursion_errors_record_gap(self, tmp_path, error):
-        # ``ast.parse`` raises these for an embedded NUL and for an expression
-        # nested past the parser's depth limit; which input triggers them
-        # varies by interpreter version, so the error is injected.
+        # ``ast.parse`` raises these for source it refuses outright and for an
+        # expression nested past the parser's depth limit; which input
+        # triggers them varies by interpreter version, so the error is
+        # injected.
         (tmp_path / "setup.py").write_text(_VALID_SETUP_PY, encoding="utf-8")
         with (
             patch("licenseal.discovery.python.setup_py.ast.parse", side_effect=error("boom")),

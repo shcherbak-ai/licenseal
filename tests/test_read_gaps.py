@@ -274,7 +274,6 @@ class TestBadManifestBesideAHealthyOne:
             # A quoted marker value is read as a Python string literal.
             pytest.param(f'platform_release == "C:{_BACKSLASH}Users"', id="invalid-escape"),
             pytest.param(f'os_name == "{_BACKSLASH}"', id="lone-backslash"),
-            pytest.param('os_name == "po\x00six"', id="embedded-nul"),
         ],
     )
     def test_requirement_whose_marker_the_parser_cannot_read_keeps_its_name(
@@ -284,6 +283,21 @@ class TestBadManifestBesideAHealthyOne:
         # its own error type, is handled like every other malformed line.
         line = f"flask>=2; {marker}\n"
         (project / "sub" / "requirements.txt").write_text(line, encoding="utf-8", newline="\n")
+        with collect_read_diagnostics() as diags:
+            deps, _ = discover_all_dependencies(project)
+        assert {(d.name, d.version_constraint) for d in deps} == {
+            ("requests", "==2.31.0"),
+            ("flask", ">=2"),
+        }
+        assert diags == []
+
+    def test_requirement_whose_marker_holds_an_escaped_nul_keeps_its_name(self, project: Path):
+        # The file is text: the NUL is written as an escape and reaches the
+        # requirement only once the TOML is parsed.
+        (project / "sub" / "pyproject.toml").write_text(
+            '[project]\nname = "app"\ndependencies = ["flask>=2; os_name == \\"po\\u0000six\\""]\n',
+            encoding="utf-8",
+        )
         with collect_read_diagnostics() as diags:
             deps, _ = discover_all_dependencies(project)
         assert {(d.name, d.version_constraint) for d in deps} == {
@@ -589,6 +603,91 @@ class TestNonUtf8Toml:
         rows, diags = _resolve(tmp_path)
         assert diags == []
         assert {(name, version) for name, version, _ in rows} == {pinned}
+
+
+_NOT_TEXT = (
+    "contains NUL characters and is not read as text (UTF-16 needs a byte-order mark); skipped"
+)
+
+# The manifests and lockfiles that are read line by line, each declaring or
+# pinning one package. No parser rejects such a file for what it holds: one
+# that is not text matches no line and would read as an empty file.
+_LINE_ORIENTED = {
+    "requirements.txt": "markerpkg==1.0\n",
+    "setup.cfg": "[options]\ninstall_requires =\n    markerpkg==1.0\n",
+    "setup.py": 'from setuptools import setup\nsetup(install_requires=["markerpkg==1.0"])\n',
+    "Gemfile": 'source "https://rubygems.org"\ngem "markerpkg", "1.0.0"\n',
+    "Gemfile.lock": (
+        "GEM\n  remote: https://rubygems.org/\n  specs:\n    markerpkg (1.0.0)\n\n"
+        "DEPENDENCIES\n  markerpkg\n"
+    ),
+    "app.gemspec": (
+        'Gem::Specification.new do |s|\n  s.name = "app"\n'
+        '  s.add_dependency "markerpkg", "1.0.0"\nend\n'
+    ),
+    "go.mod": "module example.org/app\n\ngo 1.22\n\nrequire example.org/markerpkg v1.0.0\n",
+    "go.sum": "example.org/markerpkg v1.0.0 h1:h\nexample.org/markerpkg v1.0.0/go.mod h1:h\n",
+    "build.gradle": "dependencies {\n    implementation 'org.example:markerpkg:1.0'\n}\n",
+    "gradle.lockfile": "org.example:markerpkg:1.0=runtimeClasspath\nempty=\n",
+    "paket.dependencies": "source https://api.nuget.org/v3/index.json\nnuget markerpkg 1.0.0\n",
+    "paket.lock": "NUGET\n  remote: https://api.nuget.org/v3/index.json\n    markerpkg (1.0.0)\n",
+    "mix.exs": (
+        'defmodule App.MixProject do\n  defp deps do\n    [{:markerpkg, "== 1.0.0"}]\n  end\nend\n'
+    ),
+    "mix.lock": (
+        '%{\n  "markerpkg": {:hex, :markerpkg, "1.0.0", "aa", [:mix], [], "hexpm", "bb"},\n}\n'
+    ),
+    "rebar.config": '{deps, [{markerpkg, "1.0.0"}]}.\n',
+    "rebar.lock": '{"1.2.0",\n[{<<"markerpkg">>,{pkg,<<"markerpkg">>,<<"1.0.0">>},0}]}.\n',
+    "DESCRIPTION": "Package: app\nVersion: 1.0\nImports: markerpkg\n",
+    "packrat/packrat.lock": (
+        "PackratFormat: 1.4\n\nPackage: markerpkg\nSource: CRAN\nVersion: 1.0\n"
+    ),
+    "yarn.lock": '# yarn lockfile v1\n\n\nmarkerpkg@1.0.0:\n  version "1.0.0"\n',
+    "Makefile": "PROJECT = app\nDEPS = markerpkg\ndep_markerpkg = hex 1.0.0\ninclude erlang.mk\n",
+}
+
+_NOT_TEXT_VARIANTS = {
+    "nul-bytes": lambda text: b"\x00\x00\x00\x00",
+    "utf16-le-without-bom": lambda text: text.encode("utf-16-le"),
+    "utf16-be-without-bom": lambda text: text.encode("utf-16-be"),
+    "one-nul-at-the-end": lambda text: text.encode("utf-8") + b"\x00",
+}
+
+
+class TestFileThatIsNotText:
+    """A text manifest or lockfile that holds a NUL character is a gap.
+
+    UTF-16 without a byte-order mark is the common case: every ASCII
+    character decodes with a NUL beside it.
+    """
+
+    @respx.mock
+    @pytest.mark.parametrize("variant", _NOT_TEXT_VARIANTS)
+    @pytest.mark.parametrize("name", _LINE_ORIENTED)
+    def test_gap_fails_only_strict_beside_a_healthy_manifest(self, tmp_path: Path, name, variant):
+        good = tmp_path / "good" / "requirements.txt"
+        good.parent.mkdir()
+        good.write_text("flask==1.0.0\n", encoding="utf-8")
+        bad = tmp_path / name
+        bad.parent.mkdir(exist_ok=True)
+        bad.write_bytes(_NOT_TEXT_VARIANTS[variant](_LINE_ORIENTED[name]))
+        _mock_pypi("flask", "BSD-3-Clause")
+
+        _assert_gap_fails_only_strict(
+            tmp_path, bad, _NOT_TEXT, [("flask", "BSD-3-Clause")], repair=bad.unlink
+        )
+
+    @pytest.mark.parametrize(
+        "name",
+        [name for name in _LINE_ORIENTED if not name.endswith((".lock", ".sum", "lockfile"))],
+    )
+    def test_manifest_with_a_byte_order_mark_is_read_in_its_encoding(self, tmp_path: Path, name):
+        # The codec writes the mark: the same text, UTF-16, and not a gap.
+        (tmp_path / name).write_bytes(_LINE_ORIENTED[name].encode("utf-16"))
+        names, diags = _discover(tmp_path)
+        assert [found.rsplit(":", 1)[-1].rsplit("/", 1)[-1] for found in names] == ["markerpkg"]
+        assert diags == []
 
 
 class TestLocalPomGaps:
