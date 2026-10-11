@@ -193,6 +193,11 @@ _GPL_INCOMPATIBLE_WEAK_DEP_IDS: frozenset[str] = frozenset(
     }
 )
 
+# Exceptions that lift the Apache-2.0 / GPL-2.0-only conflict: the LLVM
+# exception lets a recipient waive the Apache-2.0 sections that conflict
+# with GPLv2 when the code is combined with GPLv2 code.
+_APACHE_GPL2_WAIVER_EXCEPTIONS: frozenset[str] = frozenset({"LLVM-exception"})
+
 _GPL_FAMILY_PROJECT_IDS: frozenset[str] = frozenset(
     {
         "GPL-2.0-only",
@@ -230,11 +235,13 @@ def _pair_conflict(project_spdx: str, dep_leaf: str) -> tuple[CompatibilityVerdi
     A ``WITH`` leaf is looked up by its bare license: an exception that only
     adds a permission, and one the rules do not recognize, both leave that
     license's conflicts standing (``Apache-2.0 WITH Swift-exception`` and
-    ``Apache-2.0 WITH Commons-Clause`` conflict like ``Apache-2.0``). The
-    one exception that lifts them is a linking exception on a
-    strong-copyleft license, which permits the combination whatever the
-    other license is — the case in which it relaxes the risk class to weak
-    copyleft.
+    ``Apache-2.0 WITH Commons-Clause`` conflict like ``Apache-2.0``). Two
+    recognized exceptions lift a conflict. A linking exception on a
+    strong-copyleft license permits the combination whatever the other
+    license is — the case in which it relaxes the risk class to weak
+    copyleft — so no entry applies to it. An exception in
+    ``_APACHE_GPL2_WAIVER_EXCEPTIONS`` lifts the Apache-2.0 entry under a
+    GPL-2.0-only project and no other.
     """
     base, exception = split_exception(dep_leaf)
     if (
@@ -251,7 +258,7 @@ def _pair_conflict(project_spdx: str, dep_leaf: str) -> tuple[CompatibilityVerdi
                 f"{leaf} carries GPLv3-family terms that GPLv2 § 6 treats as further "
                 f"restrictions, and a GPL-2.0-only project has no upgrade clause",
             )
-        if leaf == "Apache-2.0":
+        if leaf == "Apache-2.0" and exception not in _APACHE_GPL2_WAIVER_EXCEPTIONS:
             return (
                 CompatibilityVerdict.INCOMPATIBLE,
                 "the FSF documents Apache-2.0 as GPLv2-incompatible (patent-termination "

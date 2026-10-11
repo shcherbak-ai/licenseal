@@ -16,6 +16,7 @@ from licenseal.analysis.compatibility import (
     check_compatibility,
     is_recognised_project_license,
 )
+from licenseal.analysis.risk import _ADDED_PERMISSION_EXCEPTIONS
 from licenseal.analysis.spdx import (
     and_join_licenses,
     collapse_bundled_license_pairs,
@@ -570,9 +571,12 @@ class TestMalformedExpressionVerdict:
         assert result.verdict == CompatibilityVerdict.INCOMPATIBLE
         assert "is not a well-formed license expression" in result.reason
         assert "GPL-2.0-only code cannot be combined into a GPL-3.0-only work" in result.reason
-        apache = self._check("GPL-2.0-only", "(Apache-2.0 WITH LLVM-exception OR MIT")
+        apache = self._check("GPL-2.0-only", "(Apache-2.0 WITH Swift-exception OR MIT")
         assert apache.verdict == CompatibilityVerdict.INCOMPATIBLE
         assert "GPLv2-incompatible" in apache.reason
+        # An exception that lifts the conflict leaves nothing to report.
+        waived = self._check("GPL-2.0-only", "(Apache-2.0 WITH LLVM-exception OR MIT")
+        assert waived.verdict == CompatibilityVerdict.UNKNOWN
 
     def test_dev_dependency_with_a_malformed_expression_stays_unknown(self):
         # The violation is downgraded for a dev dependency, and the operand
@@ -1067,9 +1071,12 @@ class TestWithExceptionVerdicts:
     @pytest.mark.parametrize(
         "project, with_term, bare",
         [
-            ("GPL-2.0-only", "Apache-2.0 WITH LLVM-exception", "Apache-2.0"),
             ("GPL-2.0-only", "Apache-2.0 WITH Swift-exception", "Apache-2.0"),
             ("GPL-2.0-only", "GPL-3.0-only WITH Autoconf-exception-3.0", "GPL-3.0-only"),
+            # The one pair an exception lifts is Apache-2.0 under GPL-2.0-only;
+            # the same exception on another license lifts nothing.
+            ("GPL-2.0-only", "GPL-3.0-only WITH LLVM-exception", "GPL-3.0-only"),
+            ("GPL-3.0-only", "GPL-2.0-only WITH LLVM-exception", "GPL-2.0-only"),
             ("GPL-2.0-only", "GPL-3.0-or-later WITH GCC-exception-3.1", "GPL-3.0-or-later"),
             ("GPL-2.0-only", "LGPL-3.0-only WITH OCaml-LGPL-linking-exception", "LGPL-3.0-only"),
             ("GPL-3.0-only", "GPL-2.0-only WITH Linux-syscall-note", "GPL-2.0-only"),
@@ -1090,6 +1097,36 @@ class TestWithExceptionVerdicts:
         # Same pair entry: the reasons differ only in the license they name.
         assert result.reason.split(" — ", 1)[1] == control.reason.split(" — ", 1)[1]
         assert result.risk_level == control.risk_level
+
+    def test_llvm_exception_lifts_the_apache_conflict_with_a_gplv2_project(self):
+        assert self._check("GPL-2.0-only", "Apache-2.0").verdict == (
+            CompatibilityVerdict.INCOMPATIBLE
+        )
+        result = self._check("GPL-2.0-only", "Apache-2.0 WITH LLVM-exception")
+        assert result.verdict == CompatibilityVerdict.COMPATIBLE
+        assert result.risk_level == RiskLevel.PERMISSIVE
+        assert result.reason == "Apache-2.0 WITH LLVM-exception is permissive license"
+        # The same holds for each GPL-2.0-only arm of a multi-licensed
+        # project, and as an operand or a choice of a larger expression.
+        for project, license_id in (
+            ("GPL-2.0-only OR MIT", "Apache-2.0 WITH LLVM-exception"),
+            ("GPL-2.0-only", "Apache-2.0 WITH LLVM-exception AND MIT"),
+            ("GPL-2.0-only", "Apache-2.0 WITH LLVM-exception OR GPL-3.0-only"),
+        ):
+            assert self._check(project, license_id).verdict == CompatibilityVerdict.COMPATIBLE
+
+    def test_llvm_exception_does_not_cover_a_bare_apache_operand_beside_it(self):
+        result = self._check("GPL-2.0-only", "Apache-2.0 AND Apache-2.0 WITH LLVM-exception")
+        assert result.verdict == CompatibilityVerdict.INCOMPATIBLE
+        assert "GPLv2-incompatible" in result.reason
+
+    def test_only_the_llvm_exception_lifts_the_apache_conflict(self):
+        others = sorted(_ADDED_PERMISSION_EXCEPTIONS - {"LLVM-exception"})
+        assert len(others) == 13
+        for exception in others:
+            result = self._check("GPL-2.0-only", f"Apache-2.0 WITH {exception}")
+            assert result.verdict == CompatibilityVerdict.INCOMPATIBLE, exception
+            assert "GPLv2-incompatible" in result.reason
 
     def test_or_later_license_with_an_exception_keeps_its_upgrade_clause(self):
         for project, with_term in (
@@ -1266,7 +1303,8 @@ class TestWithExceptionDrivesTheExitCode:
                 "incompatible",
                 "unknown",
             ),
-            # Recognized exceptions: clean, a warning, and a pair-level violation.
+            # Recognized exceptions: clean, a warning, a pair-level violation,
+            # and the pair-level violation one exception lifts.
             ("MIT", "Apache-2.0 WITH LLVM-exception", [], 0, "compatible", "permissive"),
             (
                 "MIT",
@@ -1278,12 +1316,13 @@ class TestWithExceptionDrivesTheExitCode:
             ),
             (
                 "GPL-2.0-only",
-                "Apache-2.0 WITH LLVM-exception",
+                "Apache-2.0 WITH Swift-exception",
                 ["--no-strict"],
                 1,
                 "incompatible",
                 "permissive",
             ),
+            ("GPL-2.0-only", "Apache-2.0 WITH LLVM-exception", [], 0, "compatible", "permissive"),
             (
                 "GPL-2.0-only",
                 "GPL-3.0-only WITH Classpath-exception-2.0",
