@@ -10,7 +10,13 @@ Planned for release as 1.0.0 and updated as work lands. Everything below is rela
 
 Most of these changes close cases where a scan passed although it had missed dependencies, misread a license, or skipped a file without saying so. A check that passes on 0.4.2 can therefore fail on this version with no change to the project. A `licenseal.review.toml` entry can also stop matching, which is an error, when its dependency is now reported at another version or is no longer reported. Every change of that kind is listed under **Breaking changes**, together with changes to defaults, report values, the review file, and install requirements.
 
-Three of them reach almost every project: a project without a lockfile fails strict mode unless `--no-require-lockfile` is passed, the project's own license is read only from the scanned directory, and a dependency installed from git, a URL, or a path is reported as UNKNOWN instead of being looked up by name.
+### Upgrading from 0.4.x
+
+- **No lockfile committed.** `check` fails in strict mode. Commit the lockfile, or pass `--no-require-lockfile` to accept versions estimated from the registry.
+- **License declared only in a sub-package or a `LICENSE` file.** The project is checked as `Proprietary`, and the report says so. Declare the license in a manifest of the scanned directory, or scan the sub-package with `--path`.
+- **Dependencies from git, a URL, or a path.** Each is an UNKNOWN row and is no longer looked up by name. Run `licenseal init-review-file --merge` to scaffold review entries keyed on their source.
+- **An existing `licenseal.review.toml`.** An entry that no longer matches a reported row, or whose `license` names no license, is an error. For Go, Java, npm, and Ruby, `package` must match the reported name's case exactly.
+- **A checked-in `LICENSES.md`.** Regenerate it: the header, the escaping, and the row layout changed.
 
 ### Breaking changes
 
