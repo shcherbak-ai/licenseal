@@ -68,6 +68,8 @@ Two rules decide what is sent:
 - Document the rationale for each override in the entry's `note` field.
 - Re-validate review entries periodically when their resolved versions change upstream.
 
+`composer.lock` decides a license directly too: the `license` field an entry embeds is used without a Packagist request, so an edited entry changes the verdict for that package. Review changes to `composer.lock` the same way.
+
 ## Recommendations
 
 - Run `licenseal check` in CI on every PR; fail the build on non-zero exit.
