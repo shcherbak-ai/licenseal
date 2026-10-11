@@ -15,9 +15,13 @@ dependency list.
 
 Dep entries come as a bare atom, ``{name, "version"}``, ``{name, "version",
 [opts]}``, ``{name, {pkg, hexname, "version"}}`` (hex package rename), or
-``{name, {git, ...}}`` (also ``git_subdir`` and ``hg``). The source-control
-forms are emitted with an ``origin`` and never looked up; the others resolve
-from hex.pm.
+``{name, Source}`` with a source tuple, optionally after a version pattern.
+Every source tuple but ``{pkg, …}`` is emitted with an ``origin`` and never
+looked up: ``{git, …}`` (also ``git_subdir``, ``hg``, and any other tuple
+that holds a location string) with the repository, ``{path, …}`` with the
+path, and a tuple that holds no location as an unrecorded source. A
+``{path, …}`` that the scan reads is the project's own code and is not a
+dependency. The other entries resolve from hex.pm.
 """
 
 from __future__ import annotations
@@ -31,17 +35,19 @@ from licenseal.discovery.hex.mix_lock import (  # noqa: PLC2701
     _split_top_level,
     _strip_line_comments,
 )
-from licenseal.discovery.hex.rebar_lock import _balanced_braces, scm_origin  # noqa: PLC2701
+from licenseal.discovery.hex.rebar_lock import _balanced_braces, source_origin  # noqa: PLC2701
 from licenseal.models import Dependency, DependencyGroup, Ecosystem
+
+# Key of a package name in the name sets below (see ``Ecosystem.identity``).
+_key = Ecosystem.HEX.identity
 
 # Leading lowercase atom (a dep name or the ``pkg`` hex-rename target).
 _ATOM_RE = re.compile(r"[a-z][a-zA-Z0-9_]*")
 # ``{pkg, hexname, ...}`` — the real hex package name to resolve.
 _PKG_NAME_RE = re.compile(r"\{\s*pkg\s*,\s*([a-z][a-zA-Z0-9_]*)")
 _STRING_RE = re.compile(r'"([^"]*)"')
-# A source-control source inside a dep entry: ``{git, …}``, ``{git_subdir, …}``,
-# ``{hg, …}``.
-_SCM_RE = re.compile(r"\{\s*(?:git|git_subdir|hg)\s*,")
+# The one source tuple that names a hex.pm package.
+_HEX_SOURCE_RE = re.compile(r"\{\s*pkg\b")
 # rebar3 profiles whose deps are development-only.
 _DEV_PROFILES = ("test", "dev")
 
@@ -84,13 +90,13 @@ def _values_for(terms: list[str], key: str) -> list[str]:
     return out
 
 
-def _parse_dep(entry: str) -> tuple[str, str, str]:
-    """Parse one dep entry → (name, version, origin); the origin is empty for hex.pm."""
+def _parse_dep(entry: str, config_dir: Path, scan_root: Path) -> tuple[str, str, str | None]:
+    """Parse one dep entry of a ``rebar.config`` in ``config_dir`` → (name, version, origin).
+
+    The origin is empty for a hex.pm package and ``None`` for a ``{path, …}``
+    source that the scan reads.
+    """
     entry = entry.strip()
-    if not entry:
-        return "", "", ""
-    scm = _SCM_RE.search(entry)
-    origin = scm_origin(entry[scm.start() :]) if scm else ""
     if not entry.startswith("{"):
         # Bare atom dep, e.g. ``cowlib`` (latest).
         m = _ATOM_RE.match(entry)
@@ -103,50 +109,53 @@ def _parse_dep(entry: str) -> tuple[str, str, str]:
         name = m.group(0) if m else ""
     if not name:
         return "", "", ""
-    version = ""
-    if not origin:
-        sm = _STRING_RE.search(entry)
-        version = sm.group(1).strip() if sm else ""
-    return name, version, origin
+    # The source is the tuple after the name, or after the version pattern
+    # that an entry can put between the two.
+    source = next((e for e in _elements(entry, "{}")[1:] if e.startswith("{")), "")
+    if source and not _HEX_SOURCE_RE.match(source):
+        return name, "", source_origin(source, config_dir, scan_root)
+    sm = _STRING_RE.search(entry)
+    return name, sm.group(1).strip() if sm else "", ""
 
 
-def _parse_dep_list(dep_list: str, group: DependencyGroup, source: str) -> list[Dependency]:
-    """Parse the ``[...]`` value of a ``{deps, [...]}`` term into Dependencies."""
-    out: list[Dependency] = []
-    for entry in _elements(dep_list, "[]"):
-        name, version, origin = _parse_dep(entry)
-        if not name:
-            continue
-        out.append(
-            Dependency(
-                name=name,
-                version_constraint=version,
-                ecosystem=Ecosystem.HEX,
-                group=group,
-                source=source,
-                origin=origin,
-            )
-        )
-    return out
+def _parse_rebar_config_text(
+    text: str, source: str, config_dir: Path, scan_root: Path
+) -> tuple[list[Dependency], list[str]]:
+    """Parse the body of a ``rebar.config`` in ``config_dir`` into direct Dependencies.
 
-
-def _parse_rebar_config_text(text: str, source: str) -> list[Dependency]:
-    """Parse a ``rebar.config`` body into direct Dependencies."""
+    Returns ``(deps, own)``: ``own`` names the entries whose source is a path
+    that the scan reads, which are the project's own code.
+    """
     terms = _top_level_terms(_strip_line_comments(text, "%"))
 
     out: list[Dependency] = []
+    own: list[str] = []
     seen: set[tuple[str, str]] = set()
 
-    def _emit(deps: list[Dependency]) -> None:
-        for dep in deps:
-            key = (dep.identity, dep.group.value)
-            if key in seen:
+    def _emit(dep_list: str, group: DependencyGroup) -> None:
+        """Add the entries of one ``{deps, [...]}`` value, each once per group."""
+        for entry in _elements(dep_list, "[]"):
+            name, version, origin = _parse_dep(entry, config_dir, scan_root)
+            key = (_key(name), group.value)
+            if not name or key in seen:
                 continue
             seen.add(key)
-            out.append(dep)
+            if origin is None:
+                own.append(name)
+                continue
+            out.append(
+                Dependency(
+                    name=name,
+                    version_constraint=version,
+                    ecosystem=Ecosystem.HEX,
+                    group=group,
+                    source=source,
+                    origin=origin,
+                )
+            )
 
     for dep_list in _values_for(terms, "deps"):
-        _emit(_parse_dep_list(dep_list, DependencyGroup.PROD, source))
+        _emit(dep_list, DependencyGroup.PROD)
     for profiles in _values_for(terms, "profiles"):
         for profile in _elements(profiles, "[]"):
             # ``{Name, [Options]}``. Only ``test`` / ``dev`` are development
@@ -156,8 +165,8 @@ def _parse_rebar_config_text(text: str, source: str) -> list[Dependency]:
                 continue
             group = DependencyGroup.DEV if elements[0] in _DEV_PROFILES else DependencyGroup.PROD
             for dep_list in _values_for(_elements(elements[1], "[]"), "deps"):
-                _emit(_parse_dep_list(dep_list, group, source))
-    return out
+                _emit(dep_list, group)
+    return out, own
 
 
 def discover_rebar_config_dependencies(
@@ -176,7 +185,9 @@ def discover_rebar_config_dependencies(
         if text is None:
             continue
         source = rebar_config.relative_to(project_path).as_posix()
-        for dep in _parse_rebar_config_text(text, source):
+        deps, own = _parse_rebar_config_text(text, source, rebar_config.parent, project_path)
+        filtered += sum(_key(name) in workspace_names for name in own)
+        for dep in deps:
             if dep.identity in workspace_names:
                 filtered += 1
                 continue

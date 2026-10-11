@@ -1191,6 +1191,114 @@ class TestHexOffRegistry:
         assert _requests_mentioning("edge_fork") == []
 
     @respx.mock
+    def test_mix_exs_source_option_with_a_quoted_or_paired_key(self, tmp_path):
+        project = tmp_path / "project"
+        _write(
+            project / "mix.exs",
+            """\
+            defmodule M.MixProject do
+              def project, do: [app: :m, deps: deps()]
+              defp deps do
+                [
+                  {:regular, "~> 1.0"},
+                  {:paired_fork, [{:git, "https://git.example.org/paired_fork.git"}]},
+                  {:quoted_fork, "github": "team/quoted_fork", "tag": "v3"},
+                  {:paired_outside, "~> 1.0", [{:path, "../paired_outside"}]}
+                ]
+              end
+            end
+            """,
+        )
+        _mock_hex("regular", "1.0.0")
+        _refuse_everything_else()
+        result, data = _check_json(project, "--no-strict")
+        assert result.exit_code == 0
+        assert {name: (row["origin"], row["license"]) for name, row in _rows(data).items()} == {
+            "regular": ("", "MIT"),
+            "paired_fork": ("git+https://git.example.org/paired_fork.git", "UNKNOWN"),
+            "quoted_fork": ("git+https://github.com/team/quoted_fork.git@v3", "UNKNOWN"),
+            "paired_outside": ("../paired_outside", "UNKNOWN"),
+        }
+        assert _requests_mentioning("paired_fork", "quoted_fork", "paired_outside") == []
+
+    @respx.mock
+    def test_rebar_sources_other_than_git_with_and_without_a_lockfile(self, tmp_path):
+        project = tmp_path / "project"
+        _dirs(project, "apps/own_app")
+        _write(
+            project / "rebar.config",
+            """\
+            {deps, [
+                {regular, "1.0.0"},
+                {near_copy, {path, "../near_copy"}},
+                {svn_fork, {svn, "https://svn.example.org/svn_fork/trunk"}},
+                {odd_source, {custom_resource, some_atom}},
+                {own_app, {path, "apps/own_app"}}
+            ]}.
+            """,
+        )
+        _mock_hex("regular", "1.0.0")
+        _refuse_everything_else()
+        expected = {
+            "regular": ("", "MIT", "rebar.config"),
+            "near_copy": ("../near_copy", "UNKNOWN", "rebar.config"),
+            "svn_fork": ("svn+https://svn.example.org/svn_fork/trunk", "UNKNOWN", "rebar.config"),
+            "odd_source": ("unrecorded source", "UNKNOWN", "rebar.config"),
+        }
+        off_registry = ("near_copy", "svn_fork", "odd_source", "own_app")
+
+        result, data = _check_json(project, "--no-strict")
+        assert result.exit_code == 0
+        rows = _rows(data)
+        assert {n: (r["origin"], r["license"], r["source"]) for n, r in rows.items()} == expected
+        assert _requests_mentioning(*off_registry) == []
+
+        # The lockfile records the same sources; the path the scan reads is
+        # no row there either.
+        _write(
+            project / "rebar.lock",
+            """\
+            {"1.2.0",
+            [{<<"regular">>,{pkg,<<"regular">>,<<"1.0.0">>},0},
+             {<<"near_copy">>,{path,"../near_copy",{mtime,<<"2024-01-01T00:00:00Z">>}},0},
+             {<<"own_app">>,{path,"apps/own_app",{mtime,<<"2024-01-01T00:00:00Z">>}},0},
+             {<<"svn_fork">>,{svn,"https://svn.example.org/svn_fork/trunk"},0}]}.
+            """,
+        )
+        result, data = _check_json(project, "--no-strict")
+        assert result.exit_code == 0
+        rows = _rows(data)
+        assert {n: (r["origin"], r["license"], r["source"]) for n, r in rows.items()} == expected
+        assert _requests_mentioning(*off_registry) == []
+
+        strict, _ = _check_json(project)
+        assert strict.exit_code == 1
+        _review_file(
+            project,
+            """\
+            [[review]]
+            ecosystem = "hex"
+            package = "near_copy"
+            source = "../near_copy"
+            license = "MIT"
+
+            [[review]]
+            ecosystem = "hex"
+            package = "svn_fork"
+            source = "svn+https://svn.example.org/svn_fork/trunk"
+            license = "Apache-2.0"
+
+            [[review]]
+            ecosystem = "hex"
+            package = "odd_source"
+            source = "unrecorded source"
+            license = "MIT"
+            """,
+        )
+        reviewed, _ = _check_json(project)
+        assert reviewed.exit_code == 0
+
+    @respx.mock
     def test_erlang_mk_git_dep(self, tmp_path):
         _write(
             tmp_path / "Makefile",

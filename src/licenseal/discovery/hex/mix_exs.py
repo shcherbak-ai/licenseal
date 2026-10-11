@@ -9,7 +9,8 @@ pieces:
   ``git:`` / ``github:`` / ``path:`` marking non-hex.pm sources, which are
   emitted with an ``origin`` and never looked up; ``in_umbrella: true`` and a
   ``path:`` that the scan reads are the project's own apps and are
-  not dependencies;
+  not dependencies. A source option is read in each spelling of its key:
+  ``git: "…"``, ``"git": "…"``, and the pair ``{:git, "…"}``;
 * the ``package`` config's ``licenses: ["X", "Y"]`` (the project's own license);
 * each project's ``app: :name`` atom (for the umbrella workspace-internal filter).
 
@@ -74,6 +75,11 @@ _SOURCE_OPTION_RE = re.compile(
 # ``in_umbrella: true`` names a sibling app of the same umbrella project.
 _IN_UMBRELLA_RE = re.compile(r"(?<![\w:])in_umbrella:\s*true\b")
 
+# The two other spellings of a keyword-list key: quoted (``"git": "…"``) and
+# as the first element of a pair (``{:git, "…"}``).
+_QUOTED_KEY_RE = re.compile(r'"(\w+)":')
+_PAIRED_KEY_RE = re.compile(r"\{\s*:(\w+)\s*,")
+
 
 def _strip_comments(text: str) -> str:
     """Drop Elixir ``# ...`` line comments (see :func:`_strip_line_comments`)."""
@@ -126,6 +132,16 @@ def _is_dev_only(entry: str) -> bool:
     return "prod" not in envs
 
 
+def _keyword_form(entry: str) -> str:
+    """A dep tuple with every option key spelled ``key:``.
+
+    ``"git": "…"`` and the pair ``{:git, "…"}`` both mean ``git: "…"``. The
+    tuple's own opening ``{:name,`` is not an option and is left as it is.
+    """
+    options = _QUOTED_KEY_RE.sub(r"\1:", entry[1:])
+    return entry[:1] + _PAIRED_KEY_RE.sub(r"\1:", options)
+
+
 def _dep_origin(entry: str, mix_dir: Path, scan_root: Path) -> str | None:
     """Origin a dep tuple's own options declare.
 
@@ -133,7 +149,9 @@ def _dep_origin(entry: str, mix_dir: Path, scan_root: Path) -> str | None:
     (``in_umbrella: true``, or a ``path:`` that the scan reads). A
     source option whose value is not a string literal still takes the dep off
     the registry; its origin then says only that the source is not recorded.
+    An option is read in every spelling of its key (:func:`_keyword_form`).
     """
+    entry = _keyword_form(entry)
     if _IN_UMBRELLA_RE.search(entry):
         return None
     options = {m.group("key"): m.group("value") for m in _SOURCE_OPTION_RE.finditer(entry)}

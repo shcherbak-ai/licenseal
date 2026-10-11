@@ -13,9 +13,11 @@ Each lock entry is ``{<<"name">>, <source>, Level}`` — a 3-tuple whose last
 element is the integer dependency level (0 = direct, ≥1 = transitive). The
 2-tuple ``{<<"name">>,<<"hash">>}`` entries in the trailing ``pkg_hash``
 sections are distinguished by arity and skipped. ``{pkg, …}`` sources are
-registry-backed. Any other source (``{git, …}``, ``{git_subdir, …}``,
-``{hg, …}``) is emitted with an ``origin`` (the repository URL plus the
-locked ``{ref, …}``) and is never looked up.
+registry-backed. Any other source is emitted with an ``origin`` and is never
+looked up: a source-control one (``{git, …}``, ``{git_subdir, …}``,
+``{hg, …}``) with the repository URL plus the locked ``{ref, …}``, and
+``{path, …}`` with the path. A path that the scan reads is the project's own
+code and gets no row.
 
 Group attribution: level-0 (direct) entries are PROD unless the name is in the
 ``rebar.config`` test/dev-profile set; level-≥1 transitives default to PROD with
@@ -27,7 +29,7 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
-from licenseal.discovery._origin import UNRECORDED, git_origin
+from licenseal.discovery._origin import UNRECORDED, git_origin, path_origin
 from licenseal.discovery._read import decode_text
 from licenseal.discovery._walk import walk_project_files
 from licenseal.discovery.hex.mix_lock import (  # noqa: PLC2701
@@ -50,6 +52,9 @@ _LEVEL_RE = re.compile(r"[0-9]{1,9}")
 _SCM_SOURCE_RE = re.compile(r'\{\s*(?P<scm>[a-z][a-z0-9_]*)\s*,\s*"(?P<url>[^"]*)"')
 # The revision of one: ``{ref, "sha"}``, ``{tag, "v1"}``, ``{branch, "main"}``.
 _SCM_REVISION_RE = re.compile(r'\{\s*(?:ref|tag|branch)\s*,\s*"(?P<revision>[^"]*)"\s*\}')
+# A path source: ``{path, "dir"}``, with whatever a lockfile adds after the
+# directory.
+_PATH_SOURCE_RE = re.compile(r'\{\s*path\s*,\s*(?:"(?P<path>[^"]*)")?')
 
 
 def scm_origin(source: str) -> str:
@@ -65,6 +70,22 @@ def scm_origin(source: str) -> str:
     revision = _SCM_REVISION_RE.search(source)
     vcs = "git" if scm.group("scm").startswith("git") else scm.group("scm")
     return git_origin(scm.group("url"), revision.group("revision") if revision else "", vcs=vcs)
+
+
+def source_origin(source: str, base_dir: Path, scan_root: Path) -> str | None:
+    """Origin of an Erlang-terms dependency source that is not a Hex package.
+
+    ``source`` is the source tuple of a ``rebar.config`` or ``rebar.lock``
+    entry in ``base_dir``. ``{path, "dir", …}`` is the path, or ``None`` when
+    the scan reads it. Every other tuple is read as a source-control source
+    (:func:`scm_origin`), so one that holds no location records no source.
+    """
+    path = _PATH_SOURCE_RE.match(source)
+    if path is None:
+        return scm_origin(source)
+    if not path.group("path"):
+        return UNRECORDED
+    return path_origin(path.group("path"), base_dir, scan_root)
 
 
 def find_rebar_lockfiles(
@@ -100,10 +121,13 @@ def _balanced_braces(text: str, start: int) -> str | None:
     return None
 
 
-def _parse_lock_entry(elements: list[str]) -> tuple[str, str, int, str]:
+def _parse_lock_entry(
+    elements: list[str], lock_dir: Path, scan_root: Path
+) -> tuple[str, str, int, str | None]:
     """``[<<"name">>, <source>, Level]`` → (name, version, level, origin).
 
-    The origin is empty for a ``{pkg, …}`` source.
+    The origin is empty for a ``{pkg, …}`` source and ``None`` for a
+    ``{path, …}`` source that the scan reads.
     """
     level = int(elements[2].strip())
     # The caller has checked that elements[0] holds a complete ``<<"name">>``
@@ -118,7 +142,7 @@ def _parse_lock_entry(elements: list[str]) -> tuple[str, str, int, str]:
         version = bins[1] if len(bins) > 1 else ""
         return name, version, level, ""
     # {git, ...} / other → not a hex.pm package, keyed by the entry name.
-    return entry_name, "", level, scm_origin(source)
+    return entry_name, "", level, source_origin(source, lock_dir, scan_root)
 
 
 def parse_rebar_lock(
@@ -126,6 +150,7 @@ def parse_rebar_lock(
     *,
     dev_direct_names: set[str],
     include_dev: bool,
+    scan_root: Path | None = None,
 ) -> list[Dependency]:
     """Parse ``rebar.lock`` into Dependencies (level/section-based attribution).
 
@@ -133,11 +158,15 @@ def parse_rebar_lock(
     ``rebar.config`` test/dev profile; a level-0 entry in that set is DEV.
     Level-≥1 transitives are PROD (no edge data to attribute them otherwise),
     with empty ``direct_ancestors``.
+
+    ``scan_root`` is the scanned directory, the lockfile's own directory when
+    omitted. A ``{path, …}`` entry that the scan reads gets no row.
     """
     text = decode_text(path)
     if text is None:
         return []
     text = _strip_line_comments(text, "%")
+    scan_root = scan_root or path.parent
 
     out: list[Dependency] = []
     for match in re.finditer(r'\{<<"', text):
@@ -155,7 +184,9 @@ def parse_rebar_lock(
             or not _LEVEL_RE.fullmatch(elements[2].strip())
         ):
             continue
-        name, version, level, origin = _parse_lock_entry(elements)
+        name, version, level, origin = _parse_lock_entry(elements, path.parent, scan_root)
+        if origin is None:
+            continue
         is_direct = level == 0
         if is_direct and _key(name) in dev_direct_names:
             group = DependencyGroup.DEV

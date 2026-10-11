@@ -105,6 +105,44 @@ class TestDiscoverMixExsDependencies:
         # beside the workspace app that is declared by version.
         assert filtered == 2
 
+    def test_source_options_with_a_quoted_or_paired_key(self, tmp_path):
+        # A keyword-list key can be quoted, or written as the first element
+        # of a pair. Either way the dep is not a hex.pm package.
+        (tmp_path / "apps" / "inside").mkdir(parents=True)
+        (tmp_path / "mix.exs").write_text(
+            "defmodule M.MixProject do\n"
+            "  defp deps do\n"
+            "    [\n"
+            '      {:paired_git, [{:git, "https://example.org/paired_git.git"}, {:tag, "v2"}]},\n'
+            '      {:paired_hub, [{ :github , "me/paired_hub"}]},\n'
+            '      {:paired_path, "~> 1.0", [{:path, "../paired_path"}]},\n'
+            '      {:paired_inside, [{:path, "apps/inside"}]},\n'
+            "      {:paired_sibling, [{:in_umbrella, true}]},\n"
+            '      {:quoted_git, "git": "https://example.org/quoted_git.git", "ref": "abc123"},\n'
+            '      {:quoted_path, "path": "../quoted_path"},\n'
+            "      {:computed_pair, [{:git, repo_url()}]},\n"
+            # A package whose own name is one of the option keys.
+            '      {:path, "~> 1.0"},\n'
+            '      {:tag, "~> 2.0", only: :test}\n'
+            "    ]\n"
+            "  end\n"
+            "end\n"
+        )
+        deps, filtered = discover_mix_exs_dependencies(
+            tmp_path, workspace_names=frozenset({"paired_sibling"})
+        )
+        assert {d.name: (d.version_constraint, d.origin) for d in deps} == {
+            "paired_git": ("", "git+https://example.org/paired_git.git@v2"),
+            "paired_hub": ("", "git+https://github.com/me/paired_hub.git"),
+            "paired_path": ("", "../paired_path"),
+            "quoted_git": ("", "git+https://example.org/quoted_git.git@abc123"),
+            "quoted_path": ("", "../quoted_path"),
+            "computed_pair": ("", "unrecorded source"),
+            "path": ("~> 1.0", ""),
+            "tag": ("~> 2.0", ""),
+        }
+        assert filtered == 1
+
     def test_umbrella_workspace_filter(self):
         workspace = workspace_mix_names(_FIXTURES / "umbrella")
         deps, filtered = discover_mix_exs_dependencies(
@@ -493,51 +531,127 @@ class TestDiscoverRebarConfigDependencies:
         assert [d.name for d in deps] == ["complete"]
 
 
+class TestRebarConfigOwnCode:
+    def test_path_source_the_scan_reads_is_not_a_dependency(self, tmp_path):
+        for app in ("local_a", "local_b"):
+            (tmp_path / "apps" / app).mkdir(parents=True)
+        (tmp_path / "rebar.config").write_text(
+            "{deps, [\n"
+            '    {cowlib, "2.0"},\n'
+            '    {local_a, {path, "apps/local_a"}},\n'
+            '    {local_b, {path, "apps/local_b"}},\n'
+            '    {outside, {path, "../outside"}}\n'
+            "]}.\n"
+            '{profiles, [{test, [{deps, [{local_a, {path, "apps/local_a"}}]}]}]}.\n',
+            encoding="utf-8",
+        )
+        deps, filtered = discover_rebar_config_dependencies(
+            tmp_path, workspace_names=frozenset({"local_a"})
+        )
+        assert [(d.name, d.origin) for d in deps] == [("cowlib", ""), ("outside", "../outside")]
+        # Only the one that is a workspace app counts as a filtered reference,
+        # once for each group that declares it.
+        assert filtered == 2
+
+    def test_path_is_relative_to_the_file_that_declares_it(self, tmp_path):
+        (tmp_path / "shared").mkdir()
+        (tmp_path / "apps" / "one").mkdir(parents=True)
+        (tmp_path / "apps" / "one" / "rebar.config").write_text(
+            '{deps, [{shared, {path, "../../shared"}}, {beyond, {path, "../../../beyond"}}]}.\n',
+            encoding="utf-8",
+        )
+        deps, _ = discover_rebar_config_dependencies(tmp_path)
+        assert [(d.name, d.origin, d.source) for d in deps] == [
+            ("beyond", "../../../beyond", "apps/one/rebar.config")
+        ]
+
+
 class TestParseRebarDep:
-    def test_bare_atom(self):
-        assert _parse_dep("cowlib") == ("cowlib", "", "")
+    @staticmethod
+    def _parse(entry: str, tmp_path: Path):
+        return _parse_dep(entry, tmp_path, tmp_path)
 
-    def test_name_version(self):
-        assert _parse_dep('{ranch, "1.8.0"}') == ("ranch", "1.8.0", "")
+    def test_bare_atom(self, tmp_path):
+        assert self._parse("cowlib", tmp_path) == ("cowlib", "", "")
 
-    def test_git_off_registry(self):
-        name, version, origin = _parse_dep('{jsx, {git, "https://x/y.git", {tag, "v3"}}}')
-        assert (name, version, origin) == ("jsx", "", "git+https://x/y.git@v3")
+    def test_name_version(self, tmp_path):
+        assert self._parse('{ranch, "1.8.0"}', tmp_path) == ("ranch", "1.8.0", "")
 
-    def test_git_branch_and_bare_forms(self):
-        assert _parse_dep('{a, {git, "https://x/a.git", {branch, "main"}}}')[2] == (
+    def test_name_version_and_options(self, tmp_path):
+        assert self._parse('{ranch, "1.8.0", [raw]}', tmp_path) == ("ranch", "1.8.0", "")
+
+    def test_git_off_registry(self, tmp_path):
+        entry = '{jsx, {git, "https://x/y.git", {tag, "v3"}}}'
+        assert self._parse(entry, tmp_path) == ("jsx", "", "git+https://x/y.git@v3")
+
+    def test_git_branch_and_bare_forms(self, tmp_path):
+        assert self._parse('{a, {git, "https://x/a.git", {branch, "main"}}}', tmp_path)[2] == (
             "git+https://x/a.git@main"
         )
-        assert _parse_dep('{b, { git , "https://x/b.git"}}')[2] == "git+https://x/b.git"
+        assert self._parse('{b, { git , "https://x/b.git"}}', tmp_path)[2] == "git+https://x/b.git"
 
-    def test_legacy_form_with_a_version_pattern_before_the_source(self):
+    def test_legacy_form_with_a_version_pattern_before_the_source(self, tmp_path):
         entry = '{c, ".*", {git, "https://x/c.git", {ref, "abc"}}}'
-        assert _parse_dep(entry) == ("c", "", "git+https://x/c.git@abc")
+        assert self._parse(entry, tmp_path) == ("c", "", "git+https://x/c.git@abc")
+        assert self._parse('{c, ".*", {path, "../c"}, [raw]}', tmp_path) == ("c", "", "../c")
 
-    def test_git_subdir_and_hg(self):
-        assert _parse_dep('{d, {git_subdir, "https://x/mono.git", {tag, "v1"}, "apps/d"}}')[2] == (
-            "git+https://x/mono.git@v1"
+    def test_git_subdir_and_hg(self, tmp_path):
+        entry = '{d, {git_subdir, "https://x/mono.git", {tag, "v1"}, "apps/d"}}'
+        assert self._parse(entry, tmp_path)[2] == "git+https://x/mono.git@v1"
+        assert self._parse('{e, {hg, "https://x/e", {tag, "tip"}}}', tmp_path)[2] == (
+            "hg+https://x/e@tip"
         )
-        assert _parse_dep('{e, {hg, "https://x/e", {tag, "tip"}}}')[2] == "hg+https://x/e@tip"
 
-    def test_git_source_with_no_literal_url_records_no_source(self):
-        assert _parse_dep("{f, {git, Url, {tag, Tag}}}") == ("f", "", "unrecorded source")
+    def test_git_source_with_no_literal_url_records_no_source(self, tmp_path):
+        assert self._parse("{f, {git, Url, {tag, Tag}}}", tmp_path) == (
+            "f",
+            "",
+            "unrecorded source",
+        )
 
-    def test_pkg_rename(self):
-        assert _parse_dep('{renamed, {pkg, real_name, "2.0.0"}}') == (
+    def test_other_source_with_a_location_keeps_its_name(self, tmp_path):
+        entry = '{g, {svn, "https://u:p@svn.example.org/g/trunk"}}'
+        assert self._parse(entry, tmp_path) == ("g", "", "svn+https://svn.example.org/g/trunk")
+
+    def test_source_tuple_of_an_unknown_shape_records_no_source(self, tmp_path):
+        for source in ("{custom, an_atom}", '{custom, an_atom, "1.0"}', "{}"):
+            assert self._parse(f"{{h, {source}}}", tmp_path) == ("h", "", "unrecorded source")
+
+    def test_path_outside_the_scanned_directory(self, tmp_path):
+        assert self._parse('{i, {path, "../i"}}', tmp_path) == ("i", "", "../i")
+        assert self._parse('{i, { path , "/opt/i"}}', tmp_path) == ("i", "", "/opt/i")
+
+    def test_path_the_scan_reads_is_own_code(self, tmp_path):
+        (tmp_path / "apps" / "j").mkdir(parents=True)
+        assert self._parse('{j, {path, "apps/j"}}', tmp_path) == ("j", "", None)
+        # One the scan does not walk is a dependency.
+        assert self._parse('{j, {path, "vendor/j"}}', tmp_path) == ("j", "", "vendor/j")
+
+    def test_path_with_no_literal_directory_records_no_source(self, tmp_path):
+        for source in ("{path, Dir}", '{path, ""}'):
+            assert self._parse(f"{{k, {source}}}", tmp_path) == ("k", "", "unrecorded source")
+
+    def test_pkg_rename(self, tmp_path):
+        assert self._parse('{renamed, {pkg, real_name, "2.0.0"}}', tmp_path) == (
             "real_name",
             "2.0.0",
             "",
         )
+        assert self._parse('{renamed, "2.0.0", {pkg, real_name}}', tmp_path) == (
+            "real_name",
+            "2.0.0",
+            "",
+        )
+        assert self._parse("{renamed, {pkg, real_name}}", tmp_path) == ("real_name", "", "")
 
-    def test_empty_entry(self):
-        assert _parse_dep("") == ("", "", "")
+    def test_empty_entry(self, tmp_path):
+        assert self._parse("", tmp_path) == ("", "", "")
 
-    def test_atomless_braced_entry(self):
-        assert _parse_dep('{42, "x"}') == ("", "", "")
+    def test_atomless_braced_entry(self, tmp_path):
+        assert self._parse('{42, "x"}', tmp_path) == ("", "", "")
 
-    def test_atomless_bare_entry(self):
-        assert _parse_dep("123") == ("", "", "")
+    def test_atomless_bare_entry(self, tmp_path):
+        assert self._parse("123", tmp_path) == ("", "", "")
 
 
 class TestDiscoverErlangMk:

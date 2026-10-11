@@ -474,33 +474,82 @@ class TestRebarLockHelpers:
     def test_balanced_braces_unbalanced(self):
         assert _balanced_braces("{a, b", 0) is None
 
-    def test_parse_lock_entry_pkg_three_tuple(self):
+    @staticmethod
+    def _parse(elements: list[str], tmp_path: Path):
+        return _parse_lock_entry(elements, tmp_path, tmp_path)
+
+    def test_parse_lock_entry_pkg_three_tuple(self, tmp_path):
         elements = ['<<"cowlib">>', '{pkg,<<"cowlib">>,<<"2.12.1">>}', "0"]
-        assert _parse_lock_entry(elements) == ("cowlib", "2.12.1", 0, "")
+        assert self._parse(elements, tmp_path) == ("cowlib", "2.12.1", 0, "")
 
-    def test_parse_lock_entry_pkg_four_tuple(self):
+    def test_parse_lock_entry_pkg_four_tuple(self, tmp_path):
         elements = ['<<"t">>', '{pkg,<<"t">>,<<"1.0">>,<<"hash">>}', "1"]
-        assert _parse_lock_entry(elements) == ("t", "1.0", 1, "")
+        assert self._parse(elements, tmp_path) == ("t", "1.0", 1, "")
 
-    def test_parse_lock_entry_git(self):
+    def test_parse_lock_entry_git(self, tmp_path):
         elements = ['<<"jsx">>', '{git,"https://x/y.git",{ref,"abc"}}', "0"]
-        assert _parse_lock_entry(elements) == ("jsx", "", 0, "git+https://x/y.git@abc")
+        assert self._parse(elements, tmp_path) == ("jsx", "", 0, "git+https://x/y.git@abc")
 
-    def test_parse_lock_entry_git_subdir_is_a_git_repository(self):
+    def test_parse_lock_entry_git_subdir_is_a_git_repository(self, tmp_path):
         elements = ['<<"sub">>', '{git_subdir,"https://x/mono.git",{ref,"abc"},"apps/sub"}', "1"]
-        assert _parse_lock_entry(elements) == ("sub", "", 1, "git+https://x/mono.git@abc")
+        assert self._parse(elements, tmp_path) == ("sub", "", 1, "git+https://x/mono.git@abc")
 
-    def test_parse_lock_entry_other_scm_keeps_its_name(self):
+    def test_parse_lock_entry_other_scm_keeps_its_name(self, tmp_path):
         elements = ['<<"old">>', '{hg,"https://x/old",{ref,"tip"}}', "0"]
-        assert _parse_lock_entry(elements) == ("old", "", 0, "hg+https://x/old@tip")
+        assert self._parse(elements, tmp_path) == ("old", "", 0, "hg+https://x/old@tip")
 
-    def test_parse_lock_entry_without_a_url_records_no_source(self):
+    def test_parse_lock_entry_without_a_url_records_no_source(self, tmp_path):
         elements = ['<<"odd">>', "{raw,something}", "0"]
-        assert _parse_lock_entry(elements) == ("odd", "", 0, "unrecorded source")
+        assert self._parse(elements, tmp_path) == ("odd", "", 0, "unrecorded source")
 
-    def test_parse_lock_entry_pkg_no_binaries_falls_back_to_entry_name(self):
+    def test_parse_lock_entry_pkg_no_binaries_falls_back_to_entry_name(self, tmp_path):
         # Malformed {pkg} with no name binary → fall back to the entry name.
-        assert _parse_lock_entry(['<<"x">>', "{pkg}", "0"]) == ("x", "", 0, "")
+        assert self._parse(['<<"x">>', "{pkg}", "0"], tmp_path) == ("x", "", 0, "")
 
-    def test_parse_lock_entry_pkg_only_name_no_version(self):
-        assert _parse_lock_entry(['<<"x">>', '{pkg,<<"x">>}', "0"]) == ("x", "", 0, "")
+    def test_parse_lock_entry_pkg_only_name_no_version(self, tmp_path):
+        assert self._parse(['<<"x">>', '{pkg,<<"x">>}', "0"], tmp_path) == ("x", "", 0, "")
+
+    def test_parse_lock_entry_path_outside_the_scanned_directory(self, tmp_path):
+        elements = ['<<"near">>', '{path,"../near",{mtime,<<"2024-01-01T00:00:00Z">>}}', "0"]
+        assert self._parse(elements, tmp_path) == ("near", "", 0, "../near")
+
+    def test_parse_lock_entry_path_the_scan_reads_is_own_code(self, tmp_path):
+        (tmp_path / "apps" / "own").mkdir(parents=True)
+        elements = ['<<"own">>', '{path,"apps/own"}', "0"]
+        assert self._parse(elements, tmp_path) == ("own", "", 0, None)
+
+    def test_parse_lock_entry_path_without_a_directory_records_no_source(self, tmp_path):
+        elements = ['<<"odd">>', "{path,Dir}", "0"]
+        assert self._parse(elements, tmp_path) == ("odd", "", 0, "unrecorded source")
+
+
+class TestRebarLockPathEntries:
+    _LOCK = (
+        '{"1.2.0",\n'
+        '[{<<"cowlib">>,{pkg,<<"cowlib">>,<<"2.12.1">>},0},\n'
+        ' {<<"own">>,{path,"apps/own",{mtime,<<"2024-01-01T00:00:00Z">>}},0},\n'
+        ' {<<"near">>,{path,"../near",{mtime,<<"2024-01-01T00:00:00Z">>}},0}]}.\n'
+    )
+
+    def test_path_entry_the_scan_reads_has_no_row(self, tmp_path):
+        project = tmp_path / "project"
+        (project / "apps" / "own").mkdir(parents=True)
+        (project / "rebar.lock").write_text(self._LOCK, encoding="utf-8")
+        deps = parse_rebar_lock(project / "rebar.lock", dev_direct_names=set(), include_dev=True)
+        assert [(d.name, d.version_constraint, d.origin) for d in deps] == [
+            ("cowlib", "==2.12.1", ""),
+            ("near", "", "../near"),
+        ]
+
+    def test_path_is_judged_against_the_scanned_directory(self, tmp_path):
+        # The lockfile is in a subdirectory: ``../near`` leaves that directory
+        # but not the scan, where it is a directory the walk enters.
+        project = tmp_path / "project"
+        (project / "sub" / "apps" / "own").mkdir(parents=True)
+        (project / "near").mkdir()
+        lock = project / "sub" / "rebar.lock"
+        lock.write_text(self._LOCK, encoding="utf-8")
+        alone = parse_rebar_lock(lock, dev_direct_names=set(), include_dev=True)
+        assert [d.name for d in alone] == ["cowlib", "near"]
+        whole = parse_rebar_lock(lock, dev_direct_names=set(), include_dev=True, scan_root=project)
+        assert [d.name for d in whole] == ["cowlib"]

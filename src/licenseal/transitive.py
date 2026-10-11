@@ -712,6 +712,7 @@ def resolve_transitive(
                         rebar_lock,
                         dev_direct_names=dev_direct_hex_names,
                         include_dev=include_dev,
+                        scan_root=project_path,
                     )
                 )
             )
