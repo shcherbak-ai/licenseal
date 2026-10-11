@@ -1288,10 +1288,9 @@ def _resolve_dotnet_transitive(
     ``Ecosystem.identity`` keys. A lockfile package no root reaches → PROD
     fallback, conservative (matches the Java + Go paths).
     """
-    workspace_local_ids = _discover_workspace_local_project_ids(
+    workspace_local_lower = _discover_workspace_local_project_ids(
         project_path, exclude_paths=exclude_paths
     )
-    workspace_local_lower = {_dotnet_key(wid) for wid in workspace_local_ids}
 
     declarations = _declarations(direct_dotnet_deps)
 

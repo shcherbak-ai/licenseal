@@ -470,7 +470,7 @@ class TestChooseBranchesAndReferenceMetadata:
             ("Branch.Lib", "$(LibVersion)"),
             ("Root.Lib", "$(LibVersion)"),
         }
-        assert _discover_workspace_local_project_ids(tmp_path) == {"App"}
+        assert _discover_workspace_local_project_ids(tmp_path) == {"app"}
 
     def test_choose_nested_past_the_recursion_limit_is_read(self, tmp_path):
         depth = 5_000
@@ -855,7 +855,8 @@ class TestDiscoverWorkspaceLocalProjectIds:
     def test_file_stem_used_as_default_project_id(self, tmp_path):
         _write(tmp_path / "MyLib.csproj", """<Project Sdk="Microsoft.NET.Sdk" />""")
         ids = _discover_workspace_local_project_ids(tmp_path)
-        assert ids == {"MyLib"}
+        # A NuGet id is the same id in any case: it comes back as its identity key.
+        assert ids == {"mylib"}
 
     def test_packageid_overrides_file_stem(self, tmp_path):
         _write(
@@ -867,13 +868,13 @@ class TestDiscoverWorkspaceLocalProjectIds:
 </Project>""",
         )
         ids = _discover_workspace_local_project_ids(tmp_path)
-        assert ids == {"Custom.Name"}
+        assert ids == {"custom.name"}
 
     def test_malformed_file_skipped(self, tmp_path):
         _write(tmp_path / "Good.csproj", """<Project Sdk="Microsoft.NET.Sdk" />""")
         _write(tmp_path / "Bad.csproj", "<not closed")
         ids = _discover_workspace_local_project_ids(tmp_path)
-        assert ids == {"Good"}
+        assert ids == {"good"}
 
     def test_unreadable_file_skipped(self, tmp_path, monkeypatch):
         _write(tmp_path / "Good.csproj", """<Project Sdk="Microsoft.NET.Sdk" />""")
@@ -887,7 +888,7 @@ class TestDiscoverWorkspaceLocalProjectIds:
 
         monkeypatch.setattr(Path, "read_bytes", explode)
         ids = _discover_workspace_local_project_ids(tmp_path)
-        assert ids == {"Good"}
+        assert ids == {"good"}
 
 
 # ---------------------------------------------------------------------------

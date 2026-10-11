@@ -361,7 +361,11 @@ def _discover_workspace_local_project_ids(
     *,
     exclude_paths: frozenset[Path] = frozenset(),
 ) -> set[str]:
-    """Collect ``project_id`` for every in-tree .NET project file.
+    """Collect ``project_id`` for every in-tree .NET project file, as identity keys.
+
+    NuGet ids are compared without regard to case, so the ids are returned
+    as ``Ecosystem.identity`` keys, and a package id is looked up in the set
+    by its own key.
 
     Used to filter ``<PackageReference Include="X" />`` entries where ``X``
     matches an in-tree project's ID — that would be a workspace-local
@@ -387,7 +391,7 @@ def _discover_workspace_local_project_ids(
             continue
         # ``project_id`` defaults to the file stem (always non-empty), so a
         # successfully-parsed project file always contributes an id.
-        local.add(data.project_id)
+        local.add(Ecosystem.DOTNET.identity(data.project_id))
     return local
 
 
@@ -505,7 +509,7 @@ def _dependencies_from_refs(
     out: list[Dependency] = []
     filtered = 0
     for ref in refs:
-        if ref.package_id in workspace_local:
+        if Ecosystem.DOTNET.identity(ref.package_id) in workspace_local:
             filtered += 1
             continue
         out.append(

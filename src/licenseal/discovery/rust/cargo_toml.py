@@ -355,7 +355,7 @@ def discover_cargo_toml_dependencies(
     of deps removed because their name matched a workspace-local crate.
     """
     deps, _own, _patches, local_names = _scan_cargo_tomls(project_path, exclude_paths)
-    kept = [d for d in deps if d.name not in local_names]
+    kept = [d for d in deps if d.identity not in local_names]
     return kept, len(deps) - len(kept)
 
 
@@ -399,15 +399,14 @@ def cargo_sources(
     dependency.
     """
     deps, own, patches, local_names = _scan_cargo_tomls(project_path, exclude_paths)
-    roots = [(_key(name), group) for name, group in own if name not in local_names]
-    redirected = {_key(name): origin for name, origin in patches.items()}
-    origins: dict[str, str | None] = dict(redirected)
+    roots = [(_key(name), group) for name, group in own if _key(name) not in local_names]
+    origins: dict[str, str | None] = dict(patches)
     origins.update((dep.identity, dep.origin) for dep in deps if dep.origin)
     return CargoSources(
         prod_roots={name for name, group in roots if group == DependencyGroup.PROD},
         dev_roots={name for name, group in roots if group == DependencyGroup.DEV},
         origins=origins,
-        patches=redirected,
+        patches=patches,
     )
 
 
@@ -422,7 +421,9 @@ def _scan_cargo_tomls(
     name and group of each dependency that is a path that the scan
     reads; the crates some manifest redirects to git or a path, with
     the origin of each; and the ``[package].name`` of every crate in the
-    tree.
+    tree. The last two are keyed by ``Ecosystem.identity``: a crate name
+    is the same crate in any case, in a ``[patch]`` table and in a
+    workspace member's manifest alike.
     """
     parsed: list[tuple[Path, dict[str, Any]]] = []
     for ct in walk_project_files(project_path, "Cargo.toml", exclude_paths=exclude_paths):
@@ -440,7 +441,10 @@ def _scan_cargo_tomls(
         file_deps, ws_refs, file_own = _parse_cargo_deps(data, source, ct.parent, project_path)
         declared.extend(file_deps)
         own.extend(file_own)
-        patches.update(_patch_origins(data, ct.parent, project_path))
+        patches.update(
+            (_key(name), origin)
+            for name, origin in _patch_origins(data, ct.parent, project_path).items()
+        )
         pending_refs.extend((ct.parent, alias, group) for alias, group in ws_refs)
         catalog = _workspace_catalog(data)
         if catalog is not None:
@@ -452,10 +456,10 @@ def _scan_cargo_tomls(
     # built from that git repository or path, not from the registry.
     deps: list[Dependency] = []
     for dep in declared:
-        if dep.origin or dep.name not in patches:
+        if dep.origin or dep.identity not in patches:
             deps.append(dep)
             continue
-        origin = patches[dep.name]
+        origin = patches[dep.identity]
         if origin is None:
             own.append((dep.name, dep.group))
         else:
@@ -470,7 +474,7 @@ def _collect_local_rust_names(parsed: list[tuple[Path, dict[str, Any]]]) -> set[
         if isinstance(package, dict):
             name = cast("dict[str, Any]", package).get("name")
             if isinstance(name, str) and name:
-                names.add(name)
+                names.add(_key(name))
     return names
 
 
