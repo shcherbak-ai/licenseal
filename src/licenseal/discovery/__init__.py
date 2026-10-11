@@ -118,6 +118,15 @@ def _named(filename: str) -> Callable[[str], bool]:
 # comes first as the modern canonical source, and setup.py ahead of the other
 # ecosystems so legacy Python projects still surface their license. Only R's
 # license grammar needs a normalizer of its own.
+#
+# A .NET solution usually has no project file in its root: its projects live
+# in subdirectories and take shared package properties, the license among
+# them, from the root ``Directory.Build.props``, which MSBuild imports into
+# each of them. That file is the same XML as a project file and is read by
+# the same probe: the properties of its own ``<PropertyGroup>`` elements,
+# whatever their ``Condition``, and nothing it imports. A project file in the
+# scanned directory is consulted first, as its own property overrides the
+# imported one.
 _PROJECT_LICENSE_MANIFESTS: tuple[
     tuple[Callable[[str], bool], Callable[[Path], str], Callable[[str], str]], ...
 ] = (
@@ -132,6 +141,7 @@ _PROJECT_LICENSE_MANIFESTS: tuple[
         detect_project_license_csproj,
         normalize_license,
     ),
+    (_named("Directory.Build.props"), detect_project_license_csproj, normalize_license),
     (_named("composer.json"), detect_project_license_composer_json, normalize_license),
     (lambda name: name.endswith(".gemspec"), detect_project_license_gemspec, normalize_license),
     (_named("mix.exs"), detect_project_license_mix_exs, normalize_license),

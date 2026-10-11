@@ -13,6 +13,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import httpx
 import pytest
 import respx
 from click.testing import CliRunner
@@ -60,6 +61,14 @@ _MANIFESTS = [
         "</PropertyGroup></Project>",
         "LGPL-3.0-only",
         "LGPL-3.0-only",
+    ),
+    (
+        "Directory.Build.props",
+        "<Project><PropertyGroup>"
+        "<PackageLicenseExpression>Zlib</PackageLicenseExpression>"
+        "</PropertyGroup></Project>",
+        "Zlib",
+        "Zlib",
     ),
     (
         "composer.json",
@@ -522,3 +531,187 @@ class TestSetupCfgValueThatCannotBeInterpolated:
         assert _ASSUMED in result.stderr.splitlines()
         review = (tmp_path / "licenseal.review.toml").read_text(encoding="utf-8")
         assert 'package = "gpl-lib"' in review
+
+
+_APACHE_URL = "https://www.apache.org/licenses/LICENSE-2.0"
+
+
+def _msbuild(*properties: str, group: str = "<PropertyGroup>") -> str:
+    """An MSBuild file whose one property group holds ``properties``."""
+    return f"<Project>{group}{''.join(properties)}</PropertyGroup></Project>"
+
+
+def _expression(license_id: str) -> str:
+    return f"<PackageLicenseExpression>{license_id}</PackageLicenseExpression>"
+
+
+class TestDirectoryBuildProps:
+    """A solution's shared package properties carry its license.
+
+    The projects of a .NET solution live in subdirectories and take
+    ``PackageLicenseExpression`` from the ``Directory.Build.props`` in the
+    solution root, so the scanned directory holds no project file to read.
+    """
+
+    def test_license_url_is_read_when_there_is_no_expression(self, tmp_path: Path):
+        _write(
+            tmp_path / "Directory.Build.props",
+            _msbuild(f"<PackageLicenseUrl>{_APACHE_URL}</PackageLicenseUrl>"),
+        )
+        assert detect_project_license(tmp_path) == ProjectLicense(
+            license="Apache-2.0",
+            source="Directory.Build.props",
+            declared=(("Directory.Build.props", _APACHE_URL),),
+        )
+
+    def test_expression_is_read_ahead_of_the_license_url(self, tmp_path: Path):
+        _write(
+            tmp_path / "Directory.Build.props",
+            _msbuild(f"<PackageLicenseUrl>{_APACHE_URL}</PackageLicenseUrl>", _expression("MIT")),
+        )
+        detected = detect_project_license(tmp_path)
+        assert (detected.license, detected.declared) == (
+            "MIT",
+            (("Directory.Build.props", "MIT"),),
+        )
+
+    def test_project_file_in_the_scanned_directory_decides_first(self, tmp_path: Path):
+        # A project's own property overrides the one it imports.
+        _write(tmp_path / "Directory.Build.props", _msbuild(_expression("Apache-2.0")))
+        _write(tmp_path / "App.csproj", _msbuild(_expression("MIT")))
+        assert detect_project_license(tmp_path) == ProjectLicense(
+            license="MIT",
+            source="App.csproj",
+            declared=(("App.csproj", "MIT"), ("Directory.Build.props", "Apache-2.0")),
+        )
+
+    def test_project_file_without_a_license_leaves_the_props_file_to_decide(self, tmp_path: Path):
+        _write(tmp_path / "Directory.Build.props", _msbuild(_expression("Apache-2.0")))
+        _write(tmp_path / "App.csproj", _msbuild("<TargetFramework>net8.0</TargetFramework>"))
+        detected = detect_project_license(tmp_path)
+        assert (detected.license, detected.source) == ("Apache-2.0", "Directory.Build.props")
+
+    @pytest.mark.parametrize(
+        "content",
+        [
+            _msbuild(
+                _expression("MIT"), group="<PropertyGroup Condition=\"'$(IsPackable)' == 'true'\">"
+            ),
+            _msbuild(
+                "<PackageLicenseExpression Condition=\"'$(Configuration)' == 'Release'\">MIT"
+                "</PackageLicenseExpression>"
+            ),
+        ],
+        ids=["group-condition", "property-condition"],
+    )
+    def test_conditions_are_not_evaluated(self, tmp_path: Path, content):
+        # The property is read whether or not its condition would hold.
+        _write(tmp_path / "Directory.Build.props", content)
+        detected = detect_project_license(tmp_path)
+        assert (detected.license, detected.source) == ("MIT", "Directory.Build.props")
+
+    def test_imports_are_not_followed(self, tmp_path: Path):
+        _write(tmp_path / "build" / "Common.props", _msbuild(_expression("MIT")))
+        _write(
+            tmp_path / "Directory.Build.props",
+            '<Project><Import Project="build/Common.props" /></Project>',
+        )
+        assert detect_project_license(tmp_path) == ProjectLicense()
+
+    def test_property_inside_a_choose_branch_is_not_read(self, tmp_path: Path):
+        _write(
+            tmp_path / "Directory.Build.props",
+            "<Project><Choose><When Condition=\"'$(OS)' == 'Windows_NT'\">"
+            f"<PropertyGroup>{_expression('MIT')}</PropertyGroup></When></Choose></Project>",
+        )
+        assert detect_project_license(tmp_path) == ProjectLicense()
+
+    @pytest.mark.parametrize(
+        "name",
+        ["Directory.Build.targets", "Directory.Packages.props", "directory.build.props"],
+    )
+    def test_no_other_shared_file_declares_the_license(self, tmp_path: Path, name):
+        # The file name is matched as MSBuild looks it up, by its exact spelling.
+        _write(tmp_path / name, _msbuild(_expression("MIT")))
+        assert detect_project_license(tmp_path) == ProjectLicense()
+
+    def test_value_that_is_not_a_license_is_reported_and_not_used(self, tmp_path: Path):
+        _write(tmp_path / "Directory.Build.props", _msbuild(_expression("$(SharedLicense)")))
+        assert detect_project_license(tmp_path) == ProjectLicense(
+            declared=(("Directory.Build.props", "$(SharedLicense)"),)
+        )
+
+    def test_file_that_is_not_xml_is_a_gap_and_the_next_manifest_decides(self, tmp_path: Path):
+        broken = _write(tmp_path / "Directory.Build.props", "<Project><PropertyGroup>")
+        _write(tmp_path / "composer.json", '{"name": "vendor/app", "license": "MIT"}')
+        with collect_read_diagnostics() as diags:
+            detected = detect_project_license(tmp_path)
+        assert (detected.license, detected.source) == ("MIT", "composer.json")
+        assert [(d.path, d.reason, d.is_gap) for d in diags] == [
+            (broken, "is not valid XML; skipped", True)
+        ]
+
+    @staticmethod
+    def _solution(tmp_path: Path) -> Path:
+        """A solution whose one project, in a subdirectory, references a GPL package."""
+        _write(
+            tmp_path / "src" / "App" / "App.csproj",
+            '<Project Sdk="Microsoft.NET.Sdk"><ItemGroup>'
+            '<PackageReference Include="GplPkg" Version="1.0.0" />'
+            "</ItemGroup></Project>",
+        )
+        respx.get("https://api.nuget.org/v3-flatcontainer/gplpkg/1.0.0/gplpkg.nuspec").mock(
+            return_value=httpx.Response(
+                200,
+                text=(
+                    '<?xml version="1.0" encoding="utf-8"?>\n'
+                    '<package xmlns="http://schemas.microsoft.com/packaging/2013/05/nuspec.xsd">'
+                    "<metadata><id>GplPkg</id><version>1.0.0</version>"
+                    '<license type="expression">GPL-3.0-only</license></metadata></package>'
+                ),
+            )
+        )
+        return tmp_path
+
+    @respx.mock
+    def test_solution_is_judged_against_the_license_of_its_root_props_file(self, tmp_path: Path):
+        project = self._solution(tmp_path)
+        _write(project / "Directory.Build.props", _msbuild(_expression("GPL-3.0-only")))
+
+        result, data = _check_json(project, _NO_LOCKFILE)
+        assert result.exit_code == 0
+        assert (data["project_license"], data["project_license_source"]) == (
+            "GPL-3.0-only",
+            "Directory.Build.props",
+        )
+        assert _verdicts(data) == {"GplPkg": "compatible"}
+        assert (
+            "Project license: GPL-3.0-only (from Directory.Build.props)."
+            in result.stderr.splitlines()
+        )
+
+    @respx.mock
+    def test_props_file_of_a_subdirectory_is_not_the_solution_license(self, tmp_path: Path):
+        # Control for the test above: the same declaration one level down
+        # belongs to the projects under it, and the solution is Proprietary.
+        project = self._solution(tmp_path)
+        _write(project / "src" / "Directory.Build.props", _msbuild(_expression("GPL-3.0-only")))
+
+        result, data = _check_json(project, _NO_LOCKFILE)
+        assert result.exit_code == 1
+        assert (data["project_license"], data["project_license_source"]) == ("Proprietary", "")
+        assert _verdicts(data) == {"GplPkg": "incompatible"}
+        assert _ASSUMED in result.stderr.splitlines()
+
+    @respx.mock
+    def test_markdown_report_names_the_props_file(self, tmp_path: Path):
+        project = self._solution(tmp_path)
+        _write(project / "Directory.Build.props", _msbuild(_expression("GPL-3.0-only")))
+        markdown = CliRunner().invoke(
+            main, ["check", "--path", str(project), "-f", "markdown", _NO_LOCKFILE]
+        )
+        assert markdown.exit_code == 0
+        assert (
+            "**Project license:** GPL-3.0-only (from "
+            "[Directory.Build.props](Directory.Build.props))" in markdown.stdout.splitlines()
+        )

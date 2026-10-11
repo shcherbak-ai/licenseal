@@ -65,7 +65,7 @@
 | Field | Type | Description |
 | --- | --- | --- |
 | `project_license` | string | SPDX license of the scanned project, as declared by a manifest in the scanned directory itself (never a nested one), or `"Proprietary"` when none declares a recognised license. |
-| `project_license_source` | string | Project-relative path of the manifest that supplied `project_license` (`"pyproject.toml"`, `"package.json"`, `"App.csproj"`, …). `""` when no manifest in the scanned directory declares a recognised license and `Proprietary` is assumed. |
+| `project_license_source` | string | Project-relative path of the manifest that supplied `project_license` (`"pyproject.toml"`, `"package.json"`, `"App.csproj"`, `"Directory.Build.props"`, …). `""` when no manifest in the scanned directory declares a recognised license and `Proprietary` is assumed. |
 | `elapsed_seconds` | number | Wall-clock seconds for the run. |
 | `summary` | object | Verdict counts. |
 | `dependencies` | array of object | Each scanned dependency. Sorted alphabetically by `(ecosystem, name)`. |
