@@ -212,13 +212,13 @@ class TestEchoReadDiagnostics:
         required, accepted = capsys.readouterr().err.splitlines()
         assert required == (
             "Warning: 2 manifest(s) declare dependencies that no lockfile covers, so the "
-            "report is an estimate for them. Commit a lockfile, or pass "
-            "--no-require-lockfile to accept the estimate."
+            "report is estimated or incomplete for them. Commit a lockfile, or pass "
+            "--no-require-lockfile to accept that."
         )
         assert accepted == (
             "Warning: 2 manifest(s) declare dependencies that no lockfile covers, so the "
-            "report is an estimate for them (accepted by --no-require-lockfile). Commit a "
-            "lockfile for an exact report."
+            "report is estimated or incomplete for them (accepted by --no-require-lockfile). "
+            "Commit a lockfile for an exact report."
         )
 
 

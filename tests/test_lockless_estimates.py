@@ -749,8 +749,8 @@ class TestCheckCommand:
         # The two ways out.
         assert (
             "Warning: 1 manifest(s) declare dependencies that no lockfile covers, so the "
-            "report is an estimate for them. Commit a lockfile, or pass "
-            "--no-require-lockfile to accept the estimate." in result.output
+            "report is estimated or incomplete for them. Commit a lockfile, or pass "
+            "--no-require-lockfile to accept that." in result.output
         )
 
     @respx.mock
@@ -770,8 +770,8 @@ class TestCheckCommand:
         assert f"Warning: package.json: {_MISSING}" in result.output
         assert "could not be fully analyzed" not in result.output
         assert (
-            "report is an estimate for them (accepted by --no-require-lockfile). Commit a "
-            "lockfile for an exact report." in result.output
+            "report is estimated or incomplete for them (accepted by --no-require-lockfile). "
+            "Commit a lockfile for an exact report." in result.output
         )
 
     @respx.mock
@@ -781,7 +781,7 @@ class TestCheckCommand:
         assert data["summary"]["gaps"] == 1
         assert data["diagnostics"][0]["severity"] == "gap"
         assert "(fails --strict)" not in result.output
-        assert "pass --no-require-lockfile to accept the estimate" in result.output
+        assert "pass --no-require-lockfile to accept that" in result.output
 
     @respx.mock
     def test_json_marks_the_estimated_versions(self, tmp_path: Path):
@@ -963,8 +963,8 @@ class TestReportFormats:
         assert "## Analysis gaps" not in md
         section = md[md.index("## Estimates") :]
         assert (
-            "These manifests were scanned without a lockfile; the versions and transitive "
-            "dependencies reported for them are estimates." in section
+            "These manifests were scanned without a lockfile; the report is estimated or "
+            "incomplete for them, as each reason says." in section
         )
         assert f"|[package.json](package.json)|{_MISSING}|" in section
 
@@ -990,8 +990,8 @@ class TestReportFormats:
         assert "Analysis gaps" not in table
         flat = " ".join(table.split())
         assert (
-            "Estimates (the versions and transitive dependencies reported for them are "
-            "estimates):" in flat
+            "Estimates (the report is estimated or incomplete for them, as each reason "
+            "says):" in flat
         )
         assert f"package.json: {_MISSING}" in flat
 

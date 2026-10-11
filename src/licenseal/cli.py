@@ -521,20 +521,20 @@ def _echo_missing_lockfiles(diagnostics: list[ReadDiagnostic], *, require_lockfi
     """Say what a scan without a lockfile means and how to settle it.
 
     One stderr line for all the manifests recorded as lacking a lockfile,
-    after the per-file warnings: the report is an estimate for them, and the
-    user either commits a lockfile or accepts the estimate.
+    after the per-file warnings: the report is estimated or incomplete for
+    them (each file's own warning says which), and the user either commits a
+    lockfile or accepts that.
     """
     count = len({diag.path for diag in diagnostics if diag.missing_lockfile})
     if not count:
         return
     estimated = (
         f"Warning: {count} manifest(s) declare dependencies that no lockfile covers, so the "
-        "report is an estimate for them"
+        "report is estimated or incomplete for them"
     )
     if require_lockfile:
         click.echo(
-            f"{estimated}. Commit a lockfile, or pass --no-require-lockfile to accept the "
-            "estimate.",
+            f"{estimated}. Commit a lockfile, or pass --no-require-lockfile to accept that.",
             err=True,
         )
     else:

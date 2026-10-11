@@ -685,7 +685,7 @@ def _gap_rows(gaps: list[ReportDiagnostic]) -> list[tuple[str, str, str]]:
     return sorted((*_gap_file(d.path), d.reason) for d in gaps)
 
 
-_ESTIMATE_NOTE = "the versions and transitive dependencies reported for them are estimates"
+_ESTIMATE_NOTE = "the report is estimated or incomplete for them, as each reason says"
 
 
 def _estimate_diagnostics(report: AnalysisReport) -> list[ReportDiagnostic]:

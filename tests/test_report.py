@@ -2760,8 +2760,8 @@ class TestEstimates:
             "|File|Reason|\n|------|--------|\n"
             "|[broken/pyproject.toml](broken/pyproject.toml)|is not valid TOML; skipped|\n\n"
             "## Estimates\n\n"
-            "These manifests were scanned without a lockfile; the versions and transitive "
-            "dependencies reported for them are estimates.\n\n"
+            "These manifests were scanned without a lockfile; the report is estimated or "
+            "incomplete for them, as each reason says.\n\n"
             "|File|Reason|\n|------|--------|\n"
             "|[web/package.json](web/package.json)|declares dependencies that no lockfile "
             "covers|\n"
@@ -2770,8 +2770,8 @@ class TestEstimates:
         table = self._table(report)
         assert "  Summary: 1 unknown, 3 ok, 1 analysis gap, 1 estimated manifest\n" in table
         assert (
-            "  Estimates (the versions and transitive dependencies reported for them are "
-            "estimates):\n"
+            "  Estimates (the report is estimated or incomplete for them, as each reason "
+            "says):\n"
             "    web/package.json: declares dependencies that no lockfile covers\n"
         ) in table
 
