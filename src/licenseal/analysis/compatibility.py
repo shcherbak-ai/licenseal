@@ -11,6 +11,7 @@ from licenseal.analysis.risk import (
     _strip_outer_parens,
     classify_risk,
     split_exception,
+    unrecognized_exception,
 )
 from licenseal.analysis.spdx import (
     canonical_license_id,
@@ -226,15 +227,21 @@ def _pair_conflict(project_spdx: str, dep_leaf: str) -> tuple[CompatibilityVerdi
     ``GPL-3.0-or-later``. That has to happen before the ``+`` is stripped —
     stripped first, an 'or later' grant would read as the bare, 'only' ID.
 
-    A ``WITH`` leaf is looked up by its bare license when the exception
-    leaves the risk class of that license unchanged (``Apache-2.0 WITH
-    LLVM-exception`` conflicts like ``Apache-2.0``). An exception that
-    changes the class has no entry: a linking exception on a strong-copyleft
-    license permits the combination whatever the other license is, and a
-    leaf with an unrecognized exception is already UNKNOWN.
+    A ``WITH`` leaf is looked up by its bare license: an exception that only
+    adds a permission, and one the rules do not recognize, both leave that
+    license's conflicts standing (``Apache-2.0 WITH Swift-exception`` and
+    ``Apache-2.0 WITH Commons-Clause`` conflict like ``Apache-2.0``). The
+    one exception that lifts them is a linking exception on a
+    strong-copyleft license, which permits the combination whatever the
+    other license is — the case in which it relaxes the risk class to weak
+    copyleft.
     """
     base, exception = split_exception(dep_leaf)
-    if exception and classify_risk(dep_leaf) != classify_risk(base):
+    if (
+        exception
+        and classify_risk(base) == RiskLevel.STRONG_COPYLEFT
+        and classify_risk(dep_leaf) == RiskLevel.WEAK_COPYLEFT
+    ):
         return None
     leaf = canonical_license_id(base).rstrip("+")
     if project_spdx == "GPL-2.0-only":
@@ -295,7 +302,10 @@ def _elect(project_risk: RiskLevel, project_leaf: str, dep_expr: str) -> _Outcom
     parser with bind/elect semantics:
 
     * **leaf** → its risk class, its pair override against ``project_leaf``,
-      and the leaf itself when it classifies UNKNOWN.
+      and the leaf itself when it classifies UNKNOWN or carries a ``WITH``
+      exception the rules do not recognize. The second case matters for a
+      copyleft license, whose class stays known: the unread exception still
+      has to be reviewed wherever the license alone would pass.
     * **AND** → every operand binds: the risk classes aggregate as in
       :func:`classify_risk`, the worst pair conflict stands, and the
       unresolved licenses add up.
@@ -322,8 +332,8 @@ def _elect(project_risk: RiskLevel, project_leaf: str, dep_expr: str) -> _Outcom
     parts = or_parts if is_or else _split_top_level(expr, " AND ")
     if len(parts) == 1:
         risk = classify_risk(expr)
-        unresolved = [expr] if risk == RiskLevel.UNKNOWN else []
-        return _Outcome(risk, _pair_conflict(project_leaf, expr), unresolved)
+        unread = risk == RiskLevel.UNKNOWN or unrecognized_exception(expr)
+        return _Outcome(risk, _pair_conflict(project_leaf, expr), [expr] if unread else [])
 
     arms = [_elect(project_risk, project_leaf, part) for part in parts]
     worst = _worst_pair_conflict([arm.pair for arm in arms if arm.pair is not None])
@@ -365,17 +375,21 @@ def _project_pair_leaves(project_spdx: str) -> list[str]:
     """Simple-ID leaves of the project expression, for pair-conflict checks.
 
     Both ``OR`` and ``AND`` flatten: a multi-licensed project distributes
-    under every arm it offers, so the dep must clear each one. WITH-compound
-    leaves are dropped — pair entries key on exact simple IDs, and a
-    GPL-with-exception project doesn't match the bare-GPL conflict entries.
-    Each leaf is returned in its current SPDX spelling, the form the pair
-    entries key on.
+    under every arm it offers, so the dep must clear each one. A leaf with a
+    recognized ``WITH`` exception is dropped — pair entries key on exact
+    simple IDs, and a GPL-with-exception project doesn't match the bare-GPL
+    conflict entries. A leaf with an exception the rules do not recognize
+    keeps the entries of its bare license: terms nobody read cannot lift a
+    conflict. Each leaf is returned in its current SPDX spelling, the form
+    the pair entries key on.
     """
     expr = _strip_outer_parens(project_spdx.strip())
     for sep in (" OR ", " AND "):
         parts = _split_top_level(expr, sep)
         if len(parts) > 1:
             return [leaf for part in parts for leaf in _project_pair_leaves(part)]
+    if unrecognized_exception(expr):
+        expr = split_exception(expr)[0]
     return [canonical_license_id(expr)] if " " not in expr else []
 
 
@@ -538,6 +552,7 @@ def _check_compat(
     # to manual review — but never soften the stricter INCOMPATIBLE, which
     # already flags a definite conflict (e.g. the same dep in a permissive
     # project).
+    exception = _unread_exception(dep_license)
     if outcome.unresolved and verdict in (
         CompatibilityVerdict.COMPATIBLE,
         CompatibilityVerdict.WARNING,
@@ -546,10 +561,16 @@ def _check_compat(
             license_info=license_info,
             risk_level=dep_risk,
             verdict=CompatibilityVerdict.UNKNOWN,
-            reason=_unresolved_and_reason(license_info, outcome.unresolved),
+            reason=(
+                _unread_exception_reason(license_info, exception)
+                if exception
+                else _unresolved_and_reason(license_info, outcome.unresolved)
+            ),
         )
 
-    if pair_fragment:
+    if exception and verdict == CompatibilityVerdict.UNKNOWN and not pair_fragment:
+        reason = _unread_exception_reason(license_info, exception)
+    elif pair_fragment:
         reason = _pair_conflict_reason(license_info, pair_fragment, is_dev)
     else:
         # The reason names the dependency's own risk class when that class
@@ -567,12 +588,44 @@ def _check_compat(
             verdict,
             is_dev,
         )
+    if exception and (verdict != CompatibilityVerdict.UNKNOWN or pair_fragment):
+        # The verdict comes from the license itself; say that the exception
+        # beside it was not part of it.
+        reason += (
+            f" — '{exception}' is not an exception licenseal recognizes, so the license "
+            f"is judged without it"
+        )
 
     return CompatibilityResult(
         license_info=license_info,
         risk_level=dep_risk,
         verdict=verdict,
         reason=reason,
+    )
+
+
+def _unread_exception(dep_license: str) -> str:
+    """The unrecognized ``WITH`` exception of a single license whose own class is known.
+
+    ``""`` for a compound expression, a recognized or absent exception, and a
+    license that does not classify either: there the license itself is what
+    did not resolve.
+    """
+    if " AND " in dep_license or " OR " in dep_license:
+        return ""
+    exception = unrecognized_exception(dep_license)
+    if exception and classify_risk(split_exception(dep_license)[0]) != RiskLevel.UNKNOWN:
+        return exception
+    return ""
+
+
+def _unread_exception_reason(license_info: LicenseInfo, exception: str) -> str:
+    """Reason for a license that would pass but carries an exception nobody read."""
+    name = license_info.dependency.name
+    dep_license = license_info.effective_license_id
+    return (
+        f"{name} uses {dep_license} — '{exception}' is not an exception licenseal "
+        f"recognizes, so the terms it adds were not evaluated; manual review required"
     )
 
 
@@ -736,21 +789,6 @@ def _build_reason(
                 f"license — manual review required"
             )
         return f"{dep_name} has no license information — manual review required"
-    # A single license whose own class is known but whose ``WITH`` exception
-    # is not one the rules recognize: name the exception, since the license
-    # itself is not what needs review.
-    base, exception = split_exception(dep_license)
-    if (
-        exception
-        and " AND " not in dep_license
-        and " OR " not in dep_license
-        and dep_risk == RiskLevel.UNKNOWN
-        and classify_risk(base) != RiskLevel.UNKNOWN
-    ):
-        return (
-            f"{dep_name} uses {dep_license} — '{exception}' is not an exception licenseal "
-            f"recognizes, so the terms it adds were not evaluated; manual review required"
-        )
     return f"{dep_name} uses {dep_license} — could not determine compatibility with {project_spdx}"
 
 

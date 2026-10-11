@@ -10,6 +10,7 @@ from licenseal.analysis.risk import (
     KNOWN_SPDX_IDS,
     classify_risk,
     split_exception,
+    unrecognized_exception,
 )
 from licenseal.models import RiskLevel
 
@@ -358,17 +359,16 @@ class TestWithExpressionRisk:
             "MIT WITH GPL-3.0-only",
             # Names that only start like a recognized exception, or differ
             # from one in case.
-            "GPL-3.0-only WITH Classpath-exception-evil",
-            "GPL-3.0-only WITH Classpath-exception",
-            "GPL-3.0-only WITH Classpath-exception-2.0-shorter",
-            "GPL-2.0-only WITH classpath-exception-2.0",
             "Apache-2.0 WITH LLVM-exception-2",
             "Apache-2.0 WITH llvm-exception",
+            "LGPL-2.1-only WITH Classpath-exception-evil",
             # A real SPDX exception the rules do not reason about.
-            "GPL-2.0-only WITH Qwt-exception-1.0",
+            "LGPL-2.1-only WITH Qwt-exception-1.0",
             # Not a single exception.
             "Apache-2.0 WITH LLVM-exception WITH Commons-Clause",
             "Apache-2.0 WITH (LLVM-exception)",
+            # Nothing about the term is known.
+            "SomeCustomLicense WITH Commons-Clause",
         ],
     )
     def test_unrecognized_exception_makes_the_term_unknown(self, expression):
@@ -378,6 +378,37 @@ class TestWithExpressionRisk:
         assert classify_risk(f"MIT AND {expression}") == RiskLevel.UNKNOWN
         assert classify_risk(f"MIT OR {expression}") == RiskLevel.PERMISSIVE
         assert classify_risk(f"AGPL-3.0-only AND {expression}") == RiskLevel.NETWORK_COPYLEFT
+
+    @pytest.mark.parametrize(
+        "expression, risk",
+        [
+            # Names that only start like the Classpath exception, or differ
+            # from it in case: no relaxation to weak copyleft.
+            ("GPL-3.0-only WITH Classpath-exception-evil", RiskLevel.STRONG_COPYLEFT),
+            ("GPL-3.0-only WITH Classpath-exception", RiskLevel.STRONG_COPYLEFT),
+            ("GPL-3.0-only WITH Classpath-exception-2.0-shorter", RiskLevel.STRONG_COPYLEFT),
+            ("GPL-2.0-only WITH classpath-exception-2.0", RiskLevel.STRONG_COPYLEFT),
+            # A real SPDX exception the rules do not reason about.
+            ("GPL-2.0-only WITH Qwt-exception-1.0", RiskLevel.STRONG_COPYLEFT),
+            ("GPL-3.0-or-later WITH Qt-GPL-exception-1.0", RiskLevel.STRONG_COPYLEFT),
+            ("AGPL-3.0-only WITH Commons-Clause", RiskLevel.NETWORK_COPYLEFT),
+        ],
+    )
+    def test_unrecognized_exception_does_not_lower_a_copyleft_license(self, expression, risk):
+        # The term is its license together with an operand nobody read, like
+        # ``<license> AND UNKNOWN``: a copyleft class stays known.
+        license_id = split_exception(expression)[0]
+        assert classify_risk(expression) == risk
+        assert classify_risk(expression) == classify_risk(f"{license_id} AND UNKNOWN")
+        assert classify_risk(f"MIT AND {expression}") == risk
+        assert classify_risk(f"MIT OR {expression}") == RiskLevel.PERMISSIVE
+
+    def test_unrecognized_exception_helper(self):
+        assert unrecognized_exception("MIT") == ""
+        assert unrecognized_exception("Apache-2.0 WITH LLVM-exception") == ""
+        assert unrecognized_exception("GPL-2.0-only WITH Classpath-exception-2.0") == ""
+        assert unrecognized_exception("Apache-2.0 WITH Commons-Clause") == "Commons-Clause"
+        assert unrecognized_exception("MIT WITH A WITH B") == "A WITH B"
 
     def test_recognized_exceptions_are_real_spdx_exception_ids(self):
         # The vendored list holds license IDs only; an exception ID that also

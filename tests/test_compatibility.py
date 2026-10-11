@@ -954,7 +954,12 @@ class TestPairLevelOverrides:
 class TestWithExceptionVerdicts:
     """A ``WITH`` term is judged by its exception: one the rules recognize
     keeps its effect, one that only adds a permission leaves the license's own
-    verdict, and any other makes the term an unresolved operand."""
+    verdict, and any other makes the term its license together with an
+    operand nobody read."""
+
+    _NOT_JUDGED = (
+        " — '{}' is not an exception licenseal recognizes, so the license is judged without it"
+    )
 
     @staticmethod
     def _check(project: str, license_id: str, group: DependencyGroup = DependencyGroup.PROD):
@@ -966,11 +971,13 @@ class TestWithExceptionVerdicts:
             ("Apache-2.0 WITH Commons-Clause", "Commons-Clause"),
             ("MIT WITH NonCommercialRestriction", "NonCommercialRestriction"),
             ("MIT WITH GPL-3.0-only", "GPL-3.0-only"),
-            ("GPL-3.0-only WITH Classpath-exception-evil", "Classpath-exception-evil"),
+            ("LGPL-2.1-only WITH Qwt-exception-1.0", "Qwt-exception-1.0"),
         ],
     )
-    def test_unrecognized_exception_is_unknown_under_every_project(self, license_id, exception):
-        for project in ("MIT", "MPL-2.0", "GPL-2.0-only", "GPL-3.0-only", "AGPL-3.0-only"):
+    def test_unrecognized_exception_on_a_license_that_would_pass_is_unknown(
+        self, license_id, exception
+    ):
+        for project in ("MIT", "MPL-2.0", "GPL-3.0-only", "AGPL-3.0-only"):
             result = self._check(project, license_id)
             assert result.verdict == CompatibilityVerdict.UNKNOWN, project
             assert result.risk_level == RiskLevel.UNKNOWN
@@ -978,6 +985,47 @@ class TestWithExceptionVerdicts:
                 f"dep uses {license_id} — '{exception}' is not an exception licenseal "
                 "recognizes, so the terms it adds were not evaluated; manual review required"
             )
+
+    @pytest.mark.parametrize(
+        "license_id, exception",
+        [
+            ("GPL-3.0-only WITH Classpath-exception-evil", "Classpath-exception-evil"),
+            ("GPL-3.0-only WITH Qt-GPL-exception-1.0", "Qt-GPL-exception-1.0"),
+            ("GPL-2.0-or-later WITH Commons-Clause", "Commons-Clause"),
+            ("AGPL-3.0-only WITH Commons-Clause", "Commons-Clause"),
+        ],
+    )
+    def test_unrecognized_exception_does_not_lower_a_violation(self, license_id, exception):
+        bare_license = license_id.split(" WITH ")[0]
+        for project in ("MIT", "Apache-2.0", "MPL-2.0", "Proprietary"):
+            bare = self._check(project, bare_license)
+            assert bare.verdict == CompatibilityVerdict.INCOMPATIBLE
+            result = self._check(project, license_id)
+            assert result.verdict == CompatibilityVerdict.INCOMPATIBLE, project
+            assert result.risk_level == bare.risk_level
+            # The reason of the bare license, then the exception by name.
+            assert result.reason == bare.reason.replace(
+                f"uses {bare_license} ", f"uses {license_id} "
+            ) + self._NOT_JUDGED.format(exception)
+
+    def test_unrecognized_exception_on_a_copyleft_license_the_project_can_take_is_unknown(self):
+        # The license alone would pass; the exception beside it was not read.
+        for project in ("GPL-3.0-only", "AGPL-3.0-only"):
+            assert self._check(project, "GPL-3.0-only").verdict == CompatibilityVerdict.COMPATIBLE
+            result = self._check(project, "GPL-3.0-only WITH Qt-GPL-exception-1.0")
+            assert result.verdict == CompatibilityVerdict.UNKNOWN, project
+            assert result.risk_level == RiskLevel.STRONG_COPYLEFT
+            assert result.reason == (
+                "dep uses GPL-3.0-only WITH Qt-GPL-exception-1.0 — 'Qt-GPL-exception-1.0' is "
+                "not an exception licenseal recognizes, so the terms it adds were not "
+                "evaluated; manual review required"
+            )
+        # A warning for the bare license is not reported as one either.
+        warning = self._check("GPL-3.0-only", "AGPL-3.0-only WITH Commons-Clause")
+        assert self._check("GPL-3.0-only", "AGPL-3.0-only").verdict == (
+            CompatibilityVerdict.WARNING
+        )
+        assert warning.verdict == CompatibilityVerdict.UNKNOWN
 
     def test_bare_licenses_are_the_control(self):
         assert self._check("MIT", "Apache-2.0").verdict == CompatibilityVerdict.COMPATIBLE
@@ -1075,28 +1123,112 @@ class TestWithExceptionVerdicts:
         result = self._check("GPL-3.0-only", "EPL-1.0 WITH Classpath-exception-2.0")
         assert result.verdict == CompatibilityVerdict.INCOMPATIBLE
 
-    def test_unrecognized_exception_never_makes_a_pair_conflict_compatible(self):
-        # No pair entry applies, and none is needed: the term is unresolved.
-        for project, license_id in (
-            ("GPL-2.0-only", "Apache-2.0 WITH Commons-Clause"),
-            ("GPL-2.0-only", "GPL-3.0-only WITH Classpath-exception-evil"),
-            ("GPL-3.0-only", "GPL-2.0-only WITH Classpath-exception"),
-        ):
-            assert self._check(project, license_id).verdict == CompatibilityVerdict.UNKNOWN
+    @pytest.mark.parametrize(
+        "project, with_term, bare, exception",
+        [
+            ("GPL-2.0-only", "Apache-2.0 WITH Commons-Clause", "Apache-2.0", "Commons-Clause"),
+            (
+                "GPL-2.0-only",
+                "GPL-3.0-only WITH Classpath-exception-evil",
+                "GPL-3.0-only",
+                "Classpath-exception-evil",
+            ),
+            (
+                "GPL-3.0-only",
+                "GPL-2.0-only WITH Classpath-exception",
+                "GPL-2.0-only",
+                "Classpath-exception",
+            ),
+            ("GPL-3.0-only", "EPL-1.0 WITH Commons-Clause", "EPL-1.0", "Commons-Clause"),
+        ],
+    )
+    def test_unrecognized_exception_keeps_the_pair_conflicts_of_its_license(
+        self, project, with_term, bare, exception
+    ):
+        control = self._check(project, bare)
+        assert control.verdict == CompatibilityVerdict.INCOMPATIBLE
+        result = self._check(project, with_term)
+        assert result.verdict == CompatibilityVerdict.INCOMPATIBLE
+        assert result.reason == (
+            f"dep uses {with_term} — "
+            + control.reason.split(" — ", 1)[1]
+            + self._NOT_JUDGED.format(exception)
+        )
 
-    def test_dev_dependency_with_an_unrecognized_exception_stays_unknown(self):
-        result = self._check("MIT", "Apache-2.0 WITH Commons-Clause", group=DependencyGroup.DEV)
+    def test_pair_warning_of_a_license_with_an_unrecognized_exception_is_unknown(self):
+        # EPL-2.0 alone warns in a GPL project; the unread exception makes it
+        # a term to review, not one to wave through with a warning.
+        assert self._check("GPL-3.0-only", "EPL-2.0").verdict == CompatibilityVerdict.WARNING
+        result = self._check("GPL-3.0-only", "EPL-2.0 WITH Commons-Clause")
         assert result.verdict == CompatibilityVerdict.UNKNOWN
+        assert "'Commons-Clause' is not an exception licenseal recognizes" in result.reason
 
-    def test_project_license_with_an_unrecognized_exception_is_unclassified(self):
-        # The project's own terms are not known, so nothing is judged against
-        # them; a recognized exception leaves the project's row in place.
+    def test_dev_dependency_with_an_unrecognized_exception_is_unknown(self):
+        # A dev dependency's violation is downgraded, and the unread
+        # exception then sends it to review.
+        for project, license_id, exception in (
+            ("MIT", "Apache-2.0 WITH Commons-Clause", "Commons-Clause"),
+            ("MIT", "GPL-3.0-only WITH Qt-GPL-exception-1.0", "Qt-GPL-exception-1.0"),
+            ("GPL-2.0-only", "Apache-2.0 WITH Commons-Clause", "Commons-Clause"),
+        ):
+            result = self._check(project, license_id, group=DependencyGroup.DEV)
+            assert result.verdict == CompatibilityVerdict.UNKNOWN, (project, license_id)
+            assert result.reason == (
+                f"dep uses {license_id} — '{exception}' is not an exception licenseal "
+                "recognizes, so the terms it adds were not evaluated; manual review required"
+            )
+
+    def test_dev_pair_conflict_under_an_unclassified_project_names_the_exception(self):
+        # No matrix row: the pair-level violation of a dev dependency stops
+        # at unknown, and its reason still says the exception was not judged.
+        project = "(GPL-2.0-only OR MIT) AND SomeUnrecognizedLicense"
+        result = self._check(project, "Apache-2.0 WITH Commons-Clause", group=DependencyGroup.DEV)
+        assert result.verdict == CompatibilityVerdict.UNKNOWN
+        assert "GPLv2-incompatible" in result.reason
+        assert result.reason.endswith(self._NOT_JUDGED.format("Commons-Clause"))
+
+    def test_project_license_with_an_unrecognized_exception(self):
+        # Read like ``<license> AND <unknown>``: a copyleft project keeps its
+        # row, any other project license cannot be classified. A recognized
+        # exception leaves the project's row in place.
         unknown = check_compatibility("MIT WITH Commons-Clause", _make_license_info("MIT"))
         assert unknown.verdict == CompatibilityVerdict.UNKNOWN
+        copyleft = "GPL-3.0-only WITH Qt-GPL-exception-1.0"
+        assert check_compatibility(copyleft, _make_license_info("MIT")).verdict == (
+            CompatibilityVerdict.COMPATIBLE
+        )
+        assert check_compatibility(copyleft, _make_license_info("AGPL-3.0-only")).verdict == (
+            CompatibilityVerdict.WARNING
+        )
         known = check_compatibility(
             "GPL-3.0-or-later WITH GCC-exception-3.1", _make_license_info("MIT")
         )
         assert known.verdict == CompatibilityVerdict.COMPATIBLE
+
+    @pytest.mark.parametrize(
+        "project, dep_license",
+        [
+            ("GPL-2.0-only WITH Qt-GPL-exception-1.0", "Apache-2.0"),
+            ("GPL-2.0-only WITH Qt-GPL-exception-1.0", "GPL-3.0-only"),
+            ("GPL-3.0-only WITH Qt-GPL-exception-1.0", "GPL-2.0-only"),
+            ("(GPL-3.0-only WITH Qt-GPL-exception-1.0) AND MIT", "EPL-1.0"),
+        ],
+    )
+    def test_project_license_with_an_unrecognized_exception_keeps_its_pair_conflicts(
+        self, project, dep_license
+    ):
+        bare_project = project.replace(" WITH Qt-GPL-exception-1.0", "")
+        bare = check_compatibility(bare_project, _make_license_info(dep_license))
+        assert bare.verdict == CompatibilityVerdict.INCOMPATIBLE
+        result = check_compatibility(project, _make_license_info(dep_license))
+        assert result.verdict == CompatibilityVerdict.INCOMPATIBLE
+        assert result.reason == bare.reason
+
+    def test_project_license_with_a_recognized_exception_has_no_pair_conflicts(self):
+        result = check_compatibility(
+            "GPL-2.0-only WITH Classpath-exception-2.0", _make_license_info("Apache-2.0")
+        )
+        assert result.verdict == CompatibilityVerdict.COMPATIBLE
 
 
 class TestWithExceptionDrivesTheExitCode:
@@ -1109,7 +1241,31 @@ class TestWithExceptionDrivesTheExitCode:
             ("MIT", "Apache-2.0 WITH Commons-Clause", [], 1, "unknown", "unknown"),
             ("MIT", "Apache-2.0 WITH Commons-Clause", ["--no-strict"], 0, "unknown", "unknown"),
             ("MIT", "MIT WITH GPL-3.0-only", [], 1, "unknown", "unknown"),
-            ("MIT", "GPL-3.0-only WITH Classpath-exception-evil", [], 1, "unknown", "unknown"),
+            # An unrecognized exception does not lower a violation.
+            (
+                "MIT",
+                "GPL-3.0-only WITH Classpath-exception-evil",
+                ["--no-strict"],
+                1,
+                "incompatible",
+                "strong-copyleft",
+            ),
+            (
+                "MIT",
+                "GPL-3.0-only WITH Qt-GPL-exception-1.0",
+                ["--no-strict"],
+                1,
+                "incompatible",
+                "strong-copyleft",
+            ),
+            (
+                "GPL-2.0-only",
+                "Apache-2.0 WITH Commons-Clause",
+                ["--no-strict"],
+                1,
+                "incompatible",
+                "unknown",
+            ),
             # Recognized exceptions: clean, a warning, and a pair-level violation.
             ("MIT", "Apache-2.0 WITH LLVM-exception", [], 0, "compatible", "permissive"),
             (

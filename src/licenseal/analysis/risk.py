@@ -228,10 +228,14 @@ _RISK_OVERRIDES: dict[str, RiskLevel] = {
 # --- ``WITH`` exceptions ------------------------------------------------------
 #
 # The operand after ``WITH`` is matched whole against the two sets below. An
-# exception in neither set makes its term UNKNOWN: the operand is arbitrary
-# registry text, and a use restriction written after ``WITH`` would otherwise
-# ride along on the license it follows. The vendored SPDX list holds license
-# IDs only, so the exceptions the rules reason about are named here.
+# exception in neither set is an operand nobody can read: the text is
+# arbitrary registry content, and a use restriction written after ``WITH``
+# would otherwise ride along on the license it follows. Such a term is
+# classified as its license together with one unknown operand, the same as
+# ``<license> AND UNKNOWN`` — it cannot come out cleaner than UNKNOWN, and a
+# license that is a copyleft violation by itself stays one. The vendored SPDX
+# list holds license IDs only, so the exceptions the rules reason about are
+# named here.
 
 # Linking exceptions: permission to link the covered library with independent
 # modules "regardless of the license terms of these independent modules" —
@@ -303,6 +307,18 @@ def split_exception(leaf: str) -> tuple[str, str]:
     return base.strip(), exception.strip()
 
 
+def unrecognized_exception(leaf: str) -> str:
+    """The ``WITH`` exception of ``leaf`` when the rules do not recognize it.
+
+    ``""`` for a leaf without ``WITH`` and for one whose exception is in
+    either set above.
+    """
+    _, exception = split_exception(leaf)
+    if exception in _LINKING_EXCEPTIONS or exception in _ADDED_PERMISSION_EXCEPTIONS:
+        return ""
+    return exception
+
+
 def classify_risk(spdx_id: str) -> RiskLevel:
     """Classify a normalized SPDX license ID into a risk level.
 
@@ -311,7 +327,8 @@ def classify_risk(spdx_id: str) -> RiskLevel:
     - AND: takes the most restrictive (all conditions must be met)
     - WITH: an exception in ``_LINKING_EXCEPTIONS`` relaxes a strong-copyleft
       license to weak copyleft, one in ``_ADDED_PERMISSION_EXCEPTIONS`` leaves
-      the license's own class, and any other exception is UNKNOWN
+      the license's own class, and any other exception makes the term its
+      license ``AND`` an unknown operand
 
     Respects SPDX precedence (AND binds tighter than OR) and parenthesized
     grouping such as ``(MIT OR Apache-2.0) AND Unicode-DFS-2016``.
@@ -357,15 +374,16 @@ def classify_risk(spdx_id: str) -> RiskLevel:
 
     if " WITH " in expr:
         base, exception = split_exception(expr)
+        base_risk = classify_risk(base)
         if exception in _LINKING_EXCEPTIONS:
             # Matches the deprecated ``GPL-2.0-with-classpath-exception``
             # override above.
-            base_risk = classify_risk(base)
             if base_risk == RiskLevel.STRONG_COPYLEFT:
                 return RiskLevel.WEAK_COPYLEFT
             return base_risk
         if exception in _ADDED_PERMISSION_EXCEPTIONS:
-            return classify_risk(base)
+            return base_risk
+        return _aggregate([base_risk, RiskLevel.UNKNOWN], prefer_lower=False)
 
     return RiskLevel.UNKNOWN
 
