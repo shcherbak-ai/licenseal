@@ -1890,6 +1890,10 @@ class TestResolvePythonLicenseFallback:
         with httpx.Client() as client:
             info = resolve_python_license(dep, client)
         assert info.license_id == "MIT"
+        # The pinned release stays the one reported. The license is the one
+        # of whichever release the project endpoint describes.
+        assert info.resolved_version == "1.0.0"
+        assert info.license_estimated is True
 
     @respx.mock
     def test_pinned_sparse_and_project_fallback_also_404(self):
@@ -1912,9 +1916,12 @@ class TestResolvePythonLicenseFallback:
         # 404s. The project DOES exist on PyPI under other versions with
         # the canonical license. Without this fallback, every such dep
         # surfaces as UNKNOWN despite being a well-known licensed project.
+        # PyPI has neither the local build nor a public release of the same
+        # number here, so the latest release answers.
         respx.get("https://pypi.org/pypi/torch/2.6.0%2Bcu124/json").mock(
             return_value=httpx.Response(404)
         )
+        respx.get("https://pypi.org/pypi/torch/2.6.0/json").mock(return_value=httpx.Response(404))
         respx.get("https://pypi.org/pypi/torch/json").mock(
             return_value=httpx.Response(
                 200,
@@ -1927,9 +1934,16 @@ class TestResolvePythonLicenseFallback:
             )
         )
         dep = _python_dep("torch", version="==2.6.0+cu124")
+        cache = RegistryCache()
         with httpx.Client() as client:
-            info = resolve_python_license(dep, client)
+            info = resolve_python_license(
+                dep, client, fetcher=cache.fetch, not_found=cache.not_found
+            )
         assert info.license_id == "BSD-3-Clause"
+        # Reported under the pinned version, as the license of another release.
+        assert info.resolved_version == "2.6.0+cu124"
+        assert info.license_estimated is True
+        assert info.dependency.version_estimated is False
 
     @respx.mock
     def test_pinned_per_version_404_and_project_404_returns_unknown(self):
@@ -1939,14 +1953,21 @@ class TestResolvePythonLicenseFallback:
         respx.get("https://pypi.org/pypi/nonexistent/1.0.0/json").mock(
             return_value=httpx.Response(404)
         )
-        respx.get("https://pypi.org/pypi/nonexistent/json").mock(return_value=httpx.Response(404))
+        project = respx.get("https://pypi.org/pypi/nonexistent/json").mock(
+            return_value=httpx.Response(404)
+        )
         respx.get("https://api.deps.dev/v3/systems/PYPI/packages/nonexistent/versions/1.0.0").mock(
             return_value=httpx.Response(404)
         )
         dep = _python_dep("nonexistent", version="==1.0.0")
+        cache = RegistryCache()
         with httpx.Client() as client:
-            info = resolve_python_license(dep, client)
+            info = resolve_python_license(
+                dep, client, fetcher=cache.fetch, not_found=cache.not_found
+            )
         assert info.license_id == "UNKNOWN"
+        assert info.resolved_version == "1.0.0"
+        assert project.called
 
 
 class TestResilienceFallbackToDepsDev:
@@ -1964,11 +1985,14 @@ class TestResilienceFallbackToDepsDev:
     @respx.mock
     def test_pypi_outage_recovers_via_deps_dev(self):
         # PyPI per-version + project-level both 500 (real outage shape);
-        # deps.dev stable GET returns the license.
+        # deps.dev stable GET returns the license. The project-level endpoint
+        # is not asked: a failed lookup of the pinned release borrows nothing.
         respx.get("https://pypi.org/pypi/requests/2.32.3/json").mock(
             return_value=httpx.Response(500)
         )
-        respx.get("https://pypi.org/pypi/requests/json").mock(return_value=httpx.Response(500))
+        project = respx.get("https://pypi.org/pypi/requests/json").mock(
+            return_value=httpx.Response(500)
+        )
         respx.get("https://api.deps.dev/v3/systems/PYPI/packages/requests/versions/2.32.3").mock(
             return_value=httpx.Response(
                 200,
@@ -1984,6 +2008,8 @@ class TestResilienceFallbackToDepsDev:
             info = resolve_python_license(dep, client)
         assert info.license_id == "Apache-2.0"
         assert info.from_registry is True
+        assert info.license_estimated is False
+        assert not project.called
 
     @respx.mock
     def test_npm_outage_recovers_via_deps_dev(self):

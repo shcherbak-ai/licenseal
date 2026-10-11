@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from collections.abc import Callable
-from dataclasses import replace
 
 import httpx
 from packaging.markers import Marker
@@ -278,7 +277,8 @@ def _same_release(described: object, reported: str) -> bool:
     Compared as PEP 440 versions, so two spellings of one release agree
     (``1.0`` and ``1.0.0``) and a ``+local`` build is not the public release
     of the same number. A value that is not a PEP 440 version matches only an
-    identical string.
+    identical string, and a ``described`` that is not a string names no
+    release at all.
     """
     if not isinstance(described, str):
         return False
@@ -338,12 +338,18 @@ def _license_from_pep658(
     return ""
 
 
+# Default ``not_found`` of :func:`resolve_python_license`: no URL is known to
+# have been answered with HTTP 404.
+_NO_KNOWN_404: Callable[[str], bool] = frozenset[str]().__contains__
+
+
 def resolve_python_license(
     dep: Dependency,
     client: httpx.Client,
     *,
     fetcher: Fetcher = fetch_registry_json,
     pep658_fetcher: Callable[[str, httpx.Client], dict[str, str] | None] = fetch_pep658_metadata,
+    not_found: Callable[[str], bool] = _NO_KNOWN_404,
 ) -> LicenseInfo:
     """Resolve license for a Python package from PyPI.
 
@@ -351,25 +357,41 @@ def resolve_python_license(
     method of a :class:`~licenseal.resolvers.http.RegistryCache` to dedupe
     URLs that the transitive walker has already pulled. Same URLs are
     hit either way; the cache just short-circuits the second visit.
+
+    ``not_found`` tells whether PyPI answered a URL that ``fetcher`` returned
+    nothing for with HTTP 404 (``RegistryCache.not_found`` beside a
+    cache-backed ``fetcher``). It decides what a pinned release with no
+    metadata of its own gets. A 404 means PyPI does not have the release:
+    another release then stands in for its license, reported as an estimate
+    under the pinned version. Any other miss is a lookup that failed, and
+    nothing is borrowed for it. The default knows of no 404, so with it every
+    miss is a failed lookup.
     """
     name = dep.name
     spec = dep.version_constraint.strip()
 
     pinned_version = _extract_pinned_version(spec)
     project_data: dict | None = None
+    # The pinned version, once ``data`` is another release standing in for it.
+    stood_in_for = ""
     if pinned_version:
         url = f"{_PYPI_URL}/{name}/{pinned_version}/json"
         data = fetcher(url, client)
-        # Custom-index versions (CUDA/ROCm GPU builds, internal mirrors,
-        # PEP 440 local-version segments like `+cu124`) are pinned in the
-        # project's lockfile but published to a separate index — PyPI 404s
-        # on the per-version URL. The project exists on PyPI under a
-        # different version with the canonical license; fall back to that
-        # so the dep doesn't surface as UNKNOWN just because the wheel
-        # binary lives elsewhere.
-        if data is None:
-            project_url = f"{_PYPI_URL}/{name}/json"
-            project_data = fetcher(project_url, client)
+        # A release PyPI does not have is a build published on another index
+        # (an internal mirror, an accelerator-specific wheel index, a PEP 440
+        # ``+local`` version), pinned in the project's lockfile. The project
+        # itself is on PyPI, so the closest release PyPI does have stands in
+        # for the license rather than leaving the dep UNKNOWN: the public
+        # release a ``+local`` build was made from, then the latest release.
+        # A lookup that failed is not a missing release and gets neither.
+        pinned = Version(pinned_version)
+        if data is None and not_found(url) and pinned.local is not None:
+            stood_in_for = pinned_version
+            url = f"{_PYPI_URL}/{name}/{pinned.public}/json"
+            data = fetcher(url, client)
+        if data is None and not_found(url):
+            stood_in_for = pinned_version
+            project_data = fetcher(f"{_PYPI_URL}/{name}/json", client)
             data = project_data
     elif not spec:
         url = f"{_PYPI_URL}/{name}/json"
@@ -401,7 +423,8 @@ def resolve_python_license(
         # (Google API gateway vs PyPI's Fastly + PSF infra), so a
         # correlated outage is unlikely. Only fires when we know a
         # concrete version to query — unpinned specs whose range
-        # resolution failed have no version to look up.
+        # resolution failed have no version to look up. Its answer is for
+        # that exact version: nothing is borrowed from another release.
         if pinned_version:
             return resolve_via_deps_dev_stable_get(
                 dep,
@@ -418,11 +441,12 @@ def resolve_python_license(
         )
     info = object_field(data, "info")
     version = info.get("version")
-    resolved_version = version if isinstance(version, str) else ""
-    if pinned_version and data is project_data:
-        # The pinned release has no metadata on PyPI, so the version reported
-        # below is the project's latest release, not the pinned one.
-        dep = replace(dep, version_estimated=True)
+    # The release the license is read for: the one ``data`` describes, until
+    # another answers below.
+    license_version: object = version if isinstance(version, str) else ""
+    # A stand-in is read in place of the pinned release, which stays the
+    # version reported.
+    resolved_version = stood_in_for or (version if isinstance(version, str) else "")
     repository_url = _extract_repository_url(info)
     homepage_url = _extract_homepage_url(info)
 
@@ -454,16 +478,14 @@ def resolve_python_license(
     # no classifiers); the project-level endpoint reflects current metadata for
     # the same package, so consult it as a last resort — only when neither the
     # release's JSON nor its sidecar declared anything. That endpoint describes
-    # the latest release: unless the reported release is that one, the license
-    # taken from it is an estimate.
-    license_estimated = False
+    # the latest release.
     if not raw_license:
         if project_data is None:
             project_data = fetcher(f"{_PYPI_URL}/{name}/json", client)
         if project_data is not None and project_data is not data:
             project_info = object_field(project_data, "info")
             raw_license, classifiers = _extract_raw_license(project_info)
-            license_estimated = not _same_release(project_info.get("version"), resolved_version)
+            license_version = project_info.get("version")
             if not repository_url:
                 repository_url = _extract_repository_url(project_info)
             if not homepage_url:
@@ -480,7 +502,10 @@ def resolve_python_license(
         resolved_version=resolved_version,
         from_registry=True,
         all_apply_license_id=all_apply_license_id,
-        license_estimated=license_estimated,
+        # An estimate unless the release the license was read for is the one
+        # reported: a stand-in release, or the latest release answering for a
+        # release that declares nothing.
+        license_estimated=not _same_release(license_version, resolved_version),
     )
 
 

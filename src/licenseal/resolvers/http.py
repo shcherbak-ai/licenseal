@@ -372,13 +372,22 @@ def quote_coordinate(value: str, *, safe: str = "") -> str:
 
 
 def fetch_registry_json(
-    url: str, client: httpx.Client, *, rate_limits: RateLimitReport | None = None
+    url: str,
+    client: httpx.Client,
+    *,
+    rate_limits: RateLimitReport | None = None,
+    not_found: set[str] | None = None,
 ) -> dict | None:
     """Fetch a JSON object with brief retries for transient registry failures.
 
     Returns ``None`` for every failed lookup: an error status, an exhausted
     retry budget, an oversized body, or a body that is not a JSON object (see
     :func:`_decode_json_object`).
+
+    One of those says something the others do not. HTTP 404 is the registry
+    answering that it has no such resource; after any other failure, whether
+    it exists is not known. ``url`` is added to ``not_found`` when the lookup
+    ends on a 404, for a caller that has to tell the two apart.
 
     A URL that cannot be sent is a failed lookup too, here and in the other
     GET fetchers below. One with no UTF-8 encoding (a lone surrogate in a name
@@ -416,6 +425,8 @@ def fetch_registry_json(
                 try:
                     response.raise_for_status()
                 except httpx.HTTPStatusError:
+                    if response.status_code == 404 and not_found is not None:
+                        not_found.add(url)
                     return None
 
                 raw = _read_capped_bytes(response)
@@ -1379,6 +1390,10 @@ class RegistryCache:
         # ``rate_limits.abandoned`` after resolution to explain the lookups
         # that came back empty because a host was still rate limiting.
         self.rate_limits = RateLimitReport(on_rate_limit_pause)
+        # URLs a JSON fetch ended on HTTP 404 for. A failed fetch is cached
+        # as ``None`` whatever its cause; this keeps the one cause that says
+        # the registry has no such resource (see :meth:`not_found`).
+        self._not_found: set[str] = set()
 
     def fetch(self, url: str, client: httpx.Client) -> dict | None:
         """Return cached body for ``url`` or fetch it (deduping in-flight calls).
@@ -1389,7 +1404,22 @@ class RegistryCache:
         finishes. Failed fetches are cached as ``None`` so the scan
         doesn't hammer a dead endpoint.
         """
-        return self._fetch(url, client, partial(fetch_registry_json, rate_limits=self.rate_limits))
+        return self._fetch(
+            url,
+            client,
+            partial(fetch_registry_json, rate_limits=self.rate_limits, not_found=self._not_found),
+        )
+
+    def not_found(self, url: str) -> bool:
+        """Whether the registry answered a :meth:`fetch` of ``url`` with HTTP 404.
+
+        True says the registry has no such resource. False says nothing of
+        the kind: the fetch succeeded, was never made, or failed some other
+        way (a retry budget spent on server errors or on a connection that
+        could not be made, another error status, a body that is not a JSON
+        object), and after such a failure the resource may well exist.
+        """
+        return url in self._not_found
 
     def fetch_text(self, url: str, client: httpx.Client) -> dict | None:
         """Cached text-endpoint variant of :meth:`fetch`.

@@ -2529,6 +2529,9 @@ class TestPythonAlternateIndex:
         assert result.exit_code == 0
         row = _rows(data)["mirrored"]
         assert (row["origin"], row["license"]) == ("", "BSD-3-Clause")
+        # The row is the pinned build, with the public package's license as
+        # an estimate for it.
+        assert (row["resolved_version"], row["estimated"]) == ("2.1.0+cu124", ["license"])
         assert _requests_mentioning("mirrored")
 
 

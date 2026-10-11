@@ -845,11 +845,11 @@ class TestCheckCommand:
         )
 
     @respx.mock
-    def test_pinned_release_missing_from_pypi_is_reported_at_an_estimated_version(
-        self, tmp_path: Path
-    ):
+    def test_pinned_release_missing_from_pypi_keeps_its_version(self, tmp_path: Path):
         # A lockfile pins a build published on another index. PyPI has no
-        # metadata for it, so what is reported is the project's latest release.
+        # metadata for it or for the public release of that number, so the
+        # license is the latest release's. The version is still the locked
+        # one, which is no estimate.
         _write(
             tmp_path / "pyproject.toml",
             """\
@@ -877,9 +877,10 @@ class TestCheckCommand:
             source = { registry = "https://example.invalid/simple" }
             """,
         )
-        respx.get("https://pypi.org/pypi/accelerated/2.1.0+local/json").mock(
-            return_value=httpx.Response(404)
-        )
+        for missing in ("2.1.0+local", "2.1.0"):
+            respx.get(f"https://pypi.org/pypi/accelerated/{missing}/json").mock(
+                return_value=httpx.Response(404)
+            )
         _json(
             "https://pypi.org/pypi/accelerated/json",
             {"info": {"version": "2.5.0", "license": "MIT"}, "releases": {"2.5.0": []}},
@@ -888,7 +889,11 @@ class TestCheckCommand:
         assert result.exit_code == 0
         assert data["diagnostics"] == []
         (row,) = data["dependencies"]
-        assert (row["resolved_version"], row["estimated"]) == ("2.5.0", ["version"])
+        assert (row["resolved_version"], row["license"], row["estimated"]) == (
+            "2.1.0+local",
+            "MIT",
+            ["license"],
+        )
 
 
 class TestReportFormats:

@@ -751,7 +751,14 @@ def _resolve_license_infos(
                     )
                     if cached is not None:
                         return cached
-                    return resolve_python_license(dep, client, fetcher=registry_cache.fetch)
+                    # A pinned release PyPI answers 404 for is read from a
+                    # stand-in release; one whose lookup failed is not.
+                    return resolve_python_license(
+                        dep,
+                        client,
+                        fetcher=registry_cache.fetch,
+                        not_found=registry_cache.not_found,
+                    )
                 if dep.ecosystem == Ecosystem.RUST:
                     cached = _from_advisory_cache(
                         rust_batch_cache,
