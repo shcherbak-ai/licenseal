@@ -991,8 +991,9 @@ def check(
         with timings.phase("discovery"), shared_walk_cache():
             project_license = _detect_project_license(project_path, exclude_paths)
             detected_license = project_license.license
+            # A direct-only scan reads no lockfile.
             all_deps, local_filter_counts = discover_all_dependencies(
-                project_path, exclude_paths=exclude_paths
+                project_path, exclude_paths=exclude_paths, lockfiles_read=transitive
             )
         deps = all_deps if include_dev else [d for d in all_deps if d.group != DependencyGroup.DEV]
 

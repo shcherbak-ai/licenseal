@@ -24,9 +24,11 @@ repository) and a ``dist``. The lockfile alone does not tell them apart, so
 the composer.json beside it is consulted. An entry is not a Packagist package
 when its ``source.url`` is the URL of a ``vcs`` repository that composer.json
 declares, or when its name is one a ``package`` repository there defines; its
-origin is then the repository plus the locked ``source.reference``. Every
-other entry is a registry row, including one from a ``composer`` repository
-(another registry).
+origin is then the repository plus the locked ``source.reference``. An entry
+with no ``source`` whose ``dist.url`` is a filesystem path is an archive from
+an ``artifact`` repository: the dist of a registry package is always a URL.
+Every other entry is a registry row, including one from a ``composer``
+repository (another registry).
 """
 
 from __future__ import annotations
@@ -151,6 +153,13 @@ def _entry_origin(
     from_vcs = isinstance(source_url, str) and repository_key(source_url) in vcs_keys
     if from_vcs or name.lower() in inline:
         return package_origin(entry, lock_dir, scan_root)
+    # An archive on the local filesystem, as an ``artifact`` repository
+    # provides: the dist of a registry package is always a URL.
+    dist = entry.get("dist")
+    dist_url = dist.get("url") if isinstance(dist, dict) else None
+    local_archive = isinstance(dist_url, str) and dist_url and "://" not in dist_url
+    if local_archive and not isinstance(source_url, str):
+        return path_origin(dist_url, lock_dir, scan_root)
     return ""
 
 

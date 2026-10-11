@@ -190,6 +190,7 @@ def discover_all_dependencies(
     project_path: Path,
     *,
     exclude_paths: frozenset[Path] = frozenset(),
+    lockfiles_read: bool = True,
 ) -> tuple[list[Dependency], dict[str, int]]:
     """Discover all dependencies in a project across ecosystems.
 
@@ -204,18 +205,25 @@ def discover_all_dependencies(
     per-submodule ``pom.xml`` artifact coordinates); the Gradle side has
     no workspace-local filter (see :mod:`.java.build_gradle` docstring).
 
+    ``lockfiles_read`` is false for a scan that will not read lockfiles (a
+    direct-only scan). A manifest that needs its lockfile to say where a
+    package comes from is then a gap even when that lockfile exists.
+
     Every per-ecosystem discover/workspace probe below walks the project tree;
     wrapping them in :func:`shared_walk_cache` collapses the ~25 walks into a
     single one, so scan time no longer grows linearly with ecosystem count.
     """
     with shared_walk_cache(), scan_exclusions(exclude_paths):
-        return _discover_all_dependencies(project_path, exclude_paths=exclude_paths)
+        return _discover_all_dependencies(
+            project_path, exclude_paths=exclude_paths, lockfiles_read=lockfiles_read
+        )
 
 
 def _discover_all_dependencies(
     project_path: Path,
     *,
     exclude_paths: frozenset[Path] = frozenset(),
+    lockfiles_read: bool = True,
 ) -> tuple[list[Dependency], dict[str, int]]:
     deps: list[Dependency] = []
 
@@ -284,7 +292,7 @@ def _discover_all_dependencies(
 
     # PHP / Composer sources
     php_deps, php_filtered = discover_composer_dependencies(
-        project_path, exclude_paths=exclude_paths
+        project_path, exclude_paths=exclude_paths, lockfiles_read=lockfiles_read
     )
     deps.extend(php_deps)
 

@@ -3864,6 +3864,8 @@ class TestComposerLockSources:
         "acme/inline-zip": ("https://dl.example.org/inline-zip-2.0.0.zip#abc123", "2.0.0"),
         "acme/inline-bare": ("unrecorded source", "0.1.0"),
         "acme/outside-lib": ("../outside-lib", "dev-main"),
+        # An archive from an ``artifact`` repository: its dist is a path.
+        "acme/zipped": ("artifacts/acme-zipped-3.0.0.zip", "3.0.0"),
     }
     _REGISTRY = {
         "acme/regular": "1.0.0",
@@ -3871,6 +3873,7 @@ class TestComposerLockSources:
         "acme/child": "1.1.0",
         "acme/via-vcs": "1.0.0",
         "acme/own-dep": "1.0.0",
+        "acme/odd-dist": "1.0.0",
     }
 
     def _lock(self) -> dict:
@@ -3941,6 +3944,14 @@ class TestComposerLockSources:
                     "acme/own-lib", "dev-main", dist={"type": "path", "url": "packages/own-lib"}
                 ),
                 _lock_entry("acme/own-dep", "1.0.0"),
+                _lock_entry(
+                    "acme/zipped",
+                    "3.0.0",
+                    dist={"type": "zip", "url": "artifacts/acme-zipped-3.0.0.zip", "shasum": "ff"},
+                    license=["GPL-3.0-only"],
+                ),
+                # Not a string where the URL goes: read as a registry entry.
+                _lock_entry("acme/odd-dist", "1.0.0", dist={"type": "zip", "url": 7}),
             ],
             "packages-dev": [],
         }
@@ -3979,7 +3990,9 @@ class TestComposerLockSources:
         project = self._project(tmp_path, repositories=[])
         result, data = _check_json(project, "--no-strict", "--dev")
         origins = _origins(data)
+        # A path entry and a local archive say what they are by themselves.
         assert origins.pop("acme/outside-lib") == "../outside-lib"
+        assert origins.pop("acme/zipped") == "artifacts/acme-zipped-3.0.0.zip"
         assert "acme/inline-own" not in origins
         assert "acme/own-lib" not in origins
         assert set(origins.values()) == {""}
@@ -4013,6 +4026,7 @@ class TestComposerLockSources:
         _result, data = _check_json(project, "--no-strict")
         origins = _origins(data)
         assert origins.pop("acme/outside-lib") == "../outside-lib"
+        assert origins.pop("acme/zipped") == "artifacts/acme-zipped-3.0.0.zip"
         assert set(origins.values()) == {""}
         assert respx.calls.call_count == 0
 
@@ -4371,3 +4385,127 @@ class TestPathsInsideTheScanThatNothingReads:
         assert result.exit_code == 0
         assert data["summary"]["reviewed"] == len(self._UNREAD)
         assert _requests_mentioning(*self._UNREAD, *self._OWN) == []
+
+
+# ------------------------- Composer repositories that do not name their packages
+
+
+def _repository_gap(*kinds: str) -> str:
+    listed = ", ".join(f"`{kind}`" for kind in kinds)
+    return (
+        f"declares repositories ({listed}) without naming their packages, and no composer.lock "
+        "was read for it: those packages cannot be told from registry packages and may have "
+        "been resolved from Packagist"
+    )
+
+
+class TestComposerRepositoryGap:
+    """A repository composer.json cannot map to packages is a gap without a lockfile."""
+
+    @staticmethod
+    def _project(tmp_path: Path, repositories: list, require: dict | None = None) -> Path:
+        project = tmp_path / "project"
+        _dirs(project, "packages", "vendor/kept")
+        manifest = {
+            "name": "acme/app",
+            "license": "MIT",
+            "repositories": repositories,
+            "require": {"acme/regular": "^1.0"} if require is None else require,
+        }
+        _write(project / "composer.json", json.dumps(manifest))
+        _mock_packagist("acme/regular")
+        _refuse_everything_else()
+        return project
+
+    @staticmethod
+    def _gaps(data: dict) -> list[tuple[str, str]]:
+        return [(d["path"], d["reason"]) for d in data["diagnostics"] if d["severity"] == "gap"]
+
+    @respx.mock
+    @pytest.mark.parametrize(
+        ("repositories", "kinds"),
+        [
+            ([{"type": "vcs", "url": "https://git.example.org/acme/fork"}], ("vcs",)),
+            ([{"type": "github", "url": "https://github.com/acme/fork"}], ("github",)),
+            ([{"type": "artifact", "url": "artifacts/"}], ("artifact",)),
+            ([{"type": "path", "url": "../outside-lib"}], ("path",)),
+            ([{"type": "path", "url": "../libs/*"}], ("path",)),
+            # In the scanned directory, under a directory nothing scans.
+            ([{"type": "path", "url": "vendor/kept"}], ("path",)),
+            (
+                [
+                    {"type": "vcs", "url": "https://git.example.org/acme/one"},
+                    {"type": "path", "url": "../outside-lib"},
+                    {"type": "vcs", "url": "https://git.example.org/acme/two"},
+                ],
+                ("vcs", "path"),
+            ),
+        ],
+        ids=["vcs", "github", "artifact", "path-outside", "path-glob", "path-unread", "several"],
+    )
+    def test_gap_fails_a_strict_scan_that_is_otherwise_clean(self, tmp_path, repositories, kinds):
+        project = self._project(tmp_path, repositories)
+        result, data = _check_json(project, "--no-strict")
+        assert result.exit_code == 0
+        assert self._gaps(data) == [("composer.json", _repository_gap(*kinds))]
+        assert data["summary"]["gaps"] == 1
+        # Every row resolves to a permissive license: the gap alone fails.
+        assert {d["license"] for d in data["dependencies"]} == {"MIT"}
+        result, _ = _check_json(project)
+        assert result.exit_code == 1
+        assert _repository_gap(*kinds) in result.output
+
+    @respx.mock
+    @pytest.mark.parametrize(
+        "repositories",
+        [
+            [],
+            [{"type": "composer", "url": "https://packages.internal.example.org"}],
+            [{"type": "path", "url": "packages/*"}],
+            [{"type": "path", "url": "./packages"}],
+            [{"type": "path", "url": 7}, {"packagist.org": False}],
+            [
+                {
+                    "type": "package",
+                    "package": {"name": "acme/inline", "version": "1.0.0", "source": {}},
+                }
+            ],
+        ],
+        ids=["none", "composer", "path-glob-read", "path-read", "malformed", "package"],
+    )
+    def test_repositories_the_file_maps_to_packages_are_no_gap(self, tmp_path, repositories):
+        project = self._project(tmp_path, repositories)
+        result, data = _check_json(project)
+        assert result.exit_code == 0
+        assert self._gaps(data) == []
+
+    @respx.mock
+    def test_no_gap_when_nothing_is_looked_up_on_the_registry(self, tmp_path):
+        inline = {
+            "type": "package",
+            "package": {"name": "acme/inline", "version": "1.0.0", "source": {}},
+        }
+        vcs = {"type": "vcs", "url": "https://git.example.org/acme/fork"}
+        project = self._project(tmp_path, [inline, vcs], require={"acme/inline": "*", "php": "^8"})
+        result, data = _check_json(project, "--no-strict")
+        assert result.exit_code == 0
+        assert self._gaps(data) == []
+        assert respx.calls.call_count == 0
+
+    @respx.mock
+    def test_composer_lock_beside_the_file_closes_the_gap(self, tmp_path):
+        project = self._project(tmp_path, [{"type": "vcs", "url": "https://example.org/a/fork"}])
+        lock = {"packages": [_lock_entry("acme/regular", "1.0.0")]}
+        _write(project / "composer.lock", json.dumps(lock))
+        result, data = _check_json(project)
+        assert result.exit_code == 0
+        assert self._gaps(data) == []
+
+    @respx.mock
+    def test_direct_only_scan_reads_no_lockfile_so_the_gap_stays(self, tmp_path):
+        project = self._project(tmp_path, [{"type": "vcs", "url": "https://example.org/a/fork"}])
+        lock = {"packages": [_lock_entry("acme/regular", "1.0.0")]}
+        _write(project / "composer.lock", json.dumps(lock))
+        result, data = _check_json(project, "--no-transitive")
+        assert result.exit_code == 1
+        assert self._gaps(data) == [("composer.json", _repository_gap("vcs"))]

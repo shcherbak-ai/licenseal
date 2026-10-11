@@ -72,6 +72,7 @@ __all__ = [
     "record_unexpected_type",
     "record_unfollowed_reference",
     "record_unlisted_dependencies",
+    "record_unmapped_repositories",
     "record_unread_entries",
     "record_walk_error",
     "rejected_path_reference",
@@ -307,6 +308,29 @@ def record_unlisted_dependencies(manifest: Path, why: str, remedy: str) -> None:
     ``remedy`` says what makes the scan complete.
     """
     _record(manifest, f"{why}; what they depend on is not in this report ({remedy})", is_gap=True)
+
+
+def record_unmapped_repositories(
+    manifest: Path, kinds: list[str], lockfile: str, registry: str
+) -> None:
+    """Record that ``manifest`` takes packages from repositories it does not name them for (a gap).
+
+    ``kinds`` are the repository types as the manifest writes them. Which
+    packages such a repository provides is learned by reading the repository,
+    or from ``lockfile``. With neither, a requirement the repository
+    satisfies looks like any other: it is looked up on ``registry``, and what
+    comes back is the license of the registry package of that name, if there
+    is one. The scan cannot say which rows those are, so the whole file is a
+    gap.
+    """
+    listed = ", ".join(f"`{kind}`" for kind in kinds)
+    _record(
+        manifest,
+        f"declares repositories ({listed}) without naming their packages, and no {lockfile} "
+        "was read for it: those packages cannot be told from registry packages and may have "
+        f"been resolved from {registry}",
+        is_gap=True,
+    )
 
 
 def rejected_path_reference(manifest: Path, value: str) -> bool:

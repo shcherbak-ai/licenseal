@@ -27,11 +27,14 @@ What composer.json alone lets us determine:
   packages: a requirement that names one (by the ``name`` of a composer.json
   found there) is not a dependency.
 
-What it does not: which requirements a ``vcs`` repository, or a ``path``
-repository that the scan does not read, provides. Composer learns that by
-reading the repository. Those names are looked up on Packagist unless a
-composer.lock says where each package came from. A ``composer`` repository
-is another registry: its packages are looked up on Packagist by name.
+What it does not: which requirements a ``vcs`` repository, an ``artifact``
+repository, or a ``path`` repository that the scan does not read, provides.
+Composer learns that by reading the repository. Those names are looked up on
+Packagist unless a composer.lock says where each package came from, so a
+composer.json that declares such a repository and requires a registry
+package is recorded as a gap when no composer.lock is read for it. A
+``composer`` repository is another registry: its packages are looked up on
+Packagist by name.
 """
 
 from __future__ import annotations
@@ -46,6 +49,7 @@ from licenseal.discovery._origin import UNRECORDED, git_origin, path_origin, url
 from licenseal.discovery._read import (
     load_json,
     record_unexpected_type,
+    record_unmapped_repositories,
     root_table,
     typed_field,
 )
@@ -203,12 +207,50 @@ def _own_path_packages(
     return own
 
 
+# A character that starts the wildcard part of a ``path`` repository URL.
+_GLOB_CHARS = frozenset("*?[{")
+
+
+def _unmapped_repository_kinds(
+    repositories: list[dict[str, Any]], base_dir: Path, scan_root: Path
+) -> list[str]:
+    """Types of the repositories whose packages composer.json does not name.
+
+    A version-control repository and an ``artifact`` repository (a directory
+    of archives) say nothing about what they hold. A ``path`` repository
+    does not either, but the scan reads the composer.json files of one it
+    walks; it counts here when the scan does not read the directory its URL
+    names, taken up to the first wildcard segment (``packages/*``). Each
+    type is listed once, in declaration order.
+    """
+    kinds: list[str] = []
+    for repo in repositories:
+        kind = repo.get("type")
+        if kind == "path":
+            url = repo.get("url")
+            if not isinstance(url, str):
+                continue
+            literal: list[str] = []
+            for segment in url.replace("\\", "/").split("/"):
+                if not _GLOB_CHARS.isdisjoint(segment):
+                    break
+                literal.append(segment)
+            if path_origin("/".join(literal), base_dir, scan_root) is None:
+                continue
+        elif kind not in VCS_REPOSITORY_TYPES and kind != "artifact":
+            continue
+        if kind not in kinds:
+            kinds.append(kind)
+    return kinds
+
+
 def _parse_composer_json(
     filepath: Path,
     data: dict[str, Any],
     source: str,
     scan_root: Path,
     names_by_dir: dict[Path, str],
+    lockfiles_read: bool = True,
 ) -> tuple[list[Dependency], int]:
     """Parse a single composer.json document into direct Dependencies.
 
@@ -221,6 +263,10 @@ def _parse_composer_json(
     a package of the scanned tree, held by a ``path`` repository of this
     file, is the project's own code: it is counted in ``filtered`` and not
     returned.
+
+    A gap is recorded when the file requires a registry package, declares a
+    repository whose packages it does not name, and no composer.lock is read
+    for it: none beside it, or ``lockfiles_read`` is false.
     """
     deps: list[Dependency] = []
     filtered = 0
@@ -254,6 +300,11 @@ def _parse_composer_json(
                     origin=origin,
                 )
             )
+    locked = lockfiles_read and (filepath.parent / "composer.lock").is_file()
+    if not locked and any(not dep.origin for dep in deps):
+        kinds = _unmapped_repository_kinds(repositories, filepath.parent, scan_root)
+        if kinds:
+            record_unmapped_repositories(filepath, kinds, "composer.lock", "Packagist")
     return deps, filtered
 
 
@@ -261,12 +312,18 @@ def discover_composer_dependencies(
     project_path: Path,
     *,
     exclude_paths: frozenset[Path] = frozenset(),
+    lockfiles_read: bool = True,
 ) -> tuple[list[Dependency], int]:
     """Discover all PHP dependencies from composer.json files in the tree.
 
     Returns ``(deps, filtered_count)``. The filter count is the number of
     requirements on a package of the scanned tree that a ``path`` repository
     of the requiring composer.json holds: the project's own code.
+
+    ``lockfiles_read`` says whether the scan reads composer.lock files. A
+    direct-only scan does not, and passes false: a composer.json whose
+    repositories do not name their packages is then a gap whether or not a
+    composer.lock lies beside it.
     """
     composer_files = walk_project_files(project_path, "composer.json", exclude_paths=exclude_paths)
     parsed = [
@@ -280,7 +337,7 @@ def discover_composer_dependencies(
     for cj, data in parsed:
         source = cj.relative_to(project_path).as_posix()
         file_deps, file_filtered = _parse_composer_json(
-            cj, data, source, project_path, names_by_dir
+            cj, data, source, project_path, names_by_dir, lockfiles_read
         )
         deps.extend(file_deps)
         filtered += file_filtered
