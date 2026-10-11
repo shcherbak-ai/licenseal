@@ -131,7 +131,7 @@ The exit code is non-zero when there are unreviewed violations, warnings, unknow
 | `--transitive` | Scans the transitive dependency tree by default. Use `--no-transitive` for direct dependencies only. |
 | `--no-dev` | Dev dependencies are excluded unless `--dev` is set. |
 | `--strict` | Warnings, unknown licenses, and analysis gaps fail CI in addition to violations. |
-| `--require-lockfile` | A manifest without an up-to-date lockfile is an analysis gap. `--no-require-lockfile` accepts versions estimated from the registry, marked `~1.2.3`, and the manifest does not fail the check. |
+| `--require-lockfile` | A manifest without an up-to-date lockfile is an analysis gap. `--no-require-lockfile` accepts the estimated or incomplete result (estimated versions are marked `~1.2.3`), and the manifest does not fail the check. |
 | Violations always fail | `--no-strict` demotes warnings, unknown licenses, and analysis gaps only; definite incompatibilities still fail. |
 | Project license from the scanned directory, else `Proprietary` | Read from a manifest in the scanned directory, never from a nested package. If none declares a license, or the first that does declares a value that is not a recognised license, the project is checked as `Proprietary`: permissive dependencies pass, copyleft ones are flagged. See [USAGE.md](USAGE.md#project-license). |
 

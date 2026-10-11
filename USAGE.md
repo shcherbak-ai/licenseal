@@ -227,7 +227,7 @@ licenseal is a license resolver, not a dependency resolver: it does not resolve 
 
 ## License expressions
 
-How a declared license string is read before the matrix and the pair-specific rules in the [README](README.md#-how-licenseal-decides) apply.
+How a declared license string is read before the matrix and the pair-level overrides in the [README](README.md#-how-licenseal-decides) apply.
 
 - **`OR` expressions.** The dependency gets the verdict of the choice that suits the project best, each choice judged as a whole. The report's Risk column shows its least restrictive choice.
 - **`WITH` exceptions** are matched against a fixed list.

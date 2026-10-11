@@ -114,7 +114,7 @@ _FALLBACK_POM_REGISTRIES: tuple[str, ...] = (
     # Vendor-operated Maven repository serving artifacts not mirrored to
     # Central. Required when a scan target's dependencies, or the parents
     # and BOMs they inherit from, are published only here. See SECURITY.md
-    # for the inclusion criterion and per-host trust rationale.
+    # for the inclusion criterion.
     "https://dl.google.com/dl/android/maven2/"
     "{group_path}/{artifact}/{version}/{artifact}-{version}.pom",
     # Foundation-operated Maven repository serving artifacts not mirrored
