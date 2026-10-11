@@ -49,12 +49,11 @@ The two relevant files are:
 
 Group → dev/prod mapping:
 
-* The default group (no ``group`` directive) and explicit ``group Main``
-  → PROD.
-* ``group Test`` → DEV.
-* ``group Build`` / ``group Tools`` / any other custom group → DEV
-  (conservative — Maven's scope mapping uses the same posture, classifying
-  unknown scopes as DEV to avoid runtime exposure).
+* ``group Test`` / ``group Build`` / ``group Tools``, and a group whose name
+  ends in ``test`` (``IntegrationTest``), in any letter case → DEV.
+* Every other group → PROD: the default group (no ``group`` directive),
+  an explicit ``group Main``, and a custom group under any other name. A
+  group nothing marks as development is taken to ship.
 
 Source kinds:
 
@@ -119,9 +118,9 @@ _DEV_GROUP_NAMES = frozenset({"test", "build", "tools"})
 def _group_to_dependency_group(group_name: str) -> DependencyGroup:
     """Map a Paket group name to ``DependencyGroup``.
 
-    ``Main`` (the default group) and unknown-but-not-obviously-dev names
-    stay PROD; ``Test``, ``Build``, ``Tools``, and any other recognized
-    dev-class group go DEV. Case-insensitive match.
+    ``Test``, ``Build``, ``Tools``, and a name that ends in ``test`` are
+    DEV. Every other name is PROD, ``Main`` (the default group) and custom
+    names included. Case-insensitive match.
     """
     normalized = group_name.strip().lower()
     if normalized in _DEV_GROUP_NAMES or normalized.endswith("test"):

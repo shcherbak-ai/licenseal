@@ -86,8 +86,13 @@ _DEPS_DEV_MAVEN_VERSION_URL = (
     "https://api.deps.dev/v3/systems/MAVEN/packages/{name}/versions/{version}"
 )
 
-# Public Maven registry fallbacks tried in order when Maven Central 404s
-# on a POM. Each entry is a base URL that serves the standard layout
+# Public Maven registry fallbacks, tried in order after Maven Central for
+# any POM (a dependency's own, a parent, an imported BOM) that Central
+# gives no usable body for: a 404, another error status, a request that
+# still fails after its retries, an empty body. An artifact's
+# ``maven-metadata.xml`` is read from the same registries under the same
+# condition (:data:`_VERSION_LIST_URLS`). Each entry is a base URL that
+# serves the standard layout
 # ``{base}/{group/path}/{artifact}/{version}/{artifact}-{version}.pom``.
 #
 # Inclusion criterion (also documented in SECURITY.md):
@@ -105,14 +110,14 @@ _DEPS_DEV_MAVEN_VERSION_URL = (
 # already granted to scanned manifests). Adding a new entry requires a
 # licenseal release.
 _FALLBACK_POM_REGISTRIES: tuple[str, ...] = (
-    # Vendor-operated Maven repository serving a parent-POM chain not mirrored
-    # to Central. Required when a scan target's parent inheritance resolves
-    # to artifacts published only here. See SECURITY.md for the inclusion
-    # criterion and per-host trust rationale.
+    # Vendor-operated Maven repository serving artifacts not mirrored to
+    # Central. Required when a scan target's dependencies, or the parents
+    # and BOMs they inherit from, are published only here. See SECURITY.md
+    # for the inclusion criterion and per-host trust rationale.
     "https://dl.google.com/dl/android/maven2/"
     "{group_path}/{artifact}/{version}/{artifact}-{version}.pom",
-    # Foundation-operated Maven repository serving a parent-POM chain not
-    # mirrored to Central. Same inclusion criterion as above; see SECURITY.md.
+    # Foundation-operated Maven repository serving artifacts not mirrored
+    # to Central. Same inclusion criterion as above; see SECURITY.md.
     "https://repo.jenkins-ci.org/public/{group_path}/{artifact}/{version}/{artifact}-{version}.pom",
 )
 
@@ -172,18 +177,22 @@ def _fetch_pom(
     fetcher: Fetcher,
 ) -> _PomData | None:
     """Fetch a POM from Maven Central, falling back to other well-known
-    public Maven registries on 404.
+    public Maven registries when Central gives no usable body.
 
-    Tries each URL in turn:
+    Any POM is fetched this way: a dependency's own, a parent, an imported
+    BOM. Tries each URL in turn and takes the first non-empty body:
 
     1. Maven Central (``repo.maven.apache.org``) — the canonical primary.
     2. Each entry in :data:`_FALLBACK_POM_REGISTRIES`. Hard-coded list
        covering OSS JVM artifacts not mirrored to Central; see SECURITY.md
        for the per-host inclusion criterion.
 
-    Returns ``None`` when every registry returns no body (404 or network
-    error) or the body isn't parseable XML. The caller routes those
-    cases through the deps.dev fallback for license metadata.
+    A registry gives no usable body when the fetch fails (a 404, another
+    error status, a request that still fails after its retries) or the
+    body is empty. Returns ``None`` when no registry gives one, and when
+    the first body found isn't parseable XML: the next registry is not
+    asked for a POM another one served. The caller routes those cases
+    through the deps.dev fallback for license metadata.
 
     Per-scan URL cache deduplication still applies: each registry URL is
     cached independently, so the same fallback POM is fetched at most
@@ -313,10 +322,10 @@ def _licenses_from_deps_dev(
     response only exposes SPDX-shaped names, no canonical URLs.
 
     Used as the parent-chain-fallback inside :func:`_walk_for_licenses`
-    when a parent POM 404s on Maven Central: the parent may still be
-    indexed by deps.dev (which mirrors a broader version set than
-    Central's primary cache, including some artifacts only published to
-    secondary repos like ``repo.jenkins-ci.org``). Empty list when
+    when no registry :func:`_fetch_pom` asks serves a parent POM: the
+    parent may still be indexed by deps.dev (which mirrors a broader
+    version set than Central's primary cache, including artifacts
+    published only to secondary repositories). Empty list when
     deps.dev also has nothing, or answers with its ``non-standard``
     marker, alone or beside other entries — the same array is no answer in
     the batch pre-pass either.
@@ -347,11 +356,12 @@ def _walk_for_licenses(
     * Otherwise resolves the parent coordinates (with property expansion
       against the current POM's own ``<properties>`` — parent versions
       are commonly interpolated, e.g. ``<version>${revision}</version>``).
-    * Fetches the parent POM from Maven Central, recurses up to
+    * Fetches the parent POM through :func:`_fetch_pom` (Maven Central,
+      then the fallback registries), recurses up to
       :data:`_MAX_PARENT_DEPTH` levels deep.
-    * When Maven Central 404s on a parent (the parent is published only
-      to a secondary repository like ``repo.jenkins-ci.org`` or a
-      retired vendor mirror), falls back to deps.dev's ``MAVEN``
+    * When none of those registries serves the parent (it is published
+      only to a repository licenseal does not ask, or to a retired vendor
+      mirror), falls back to deps.dev's ``MAVEN``
       index for the parent's own ``<licenses>``. deps.dev does not
       expose POM content, so we can't continue the parent walk past
       that point — but the licenses for that specific parent are often
@@ -381,7 +391,7 @@ def _walk_for_licenses(
             return []
         parent_pom = _fetch_pom(parent_group, parent_artifact, parent_version, client, fetcher)
         if parent_pom is None:
-            # Maven Central can't serve this parent — try deps.dev for
+            # No registry serves this parent — try deps.dev for
             # the parent's own licenses. If deps.dev also has nothing,
             # the chain ends here (we have no POM body to read the
             # grandparent from).

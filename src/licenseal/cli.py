@@ -113,8 +113,9 @@ _REGISTRY_HOSTS = [
     "api.deps.dev:443",
     "proxy.golang.org:443",
     "repo.maven.apache.org:443",
-    # Fallback Maven registries — queried only when Maven Central 404s on
-    # a parent POM. See :data:`maven_central._FALLBACK_POM_REGISTRIES`
+    # Fallback Maven registries — queried after Maven Central, for any POM
+    # and for an artifact's ``maven-metadata.xml``, whenever Central gives
+    # no usable body for it. See :data:`maven_central._FALLBACK_POM_REGISTRIES`
     # and SECURITY.md for the inclusion criterion. tethered allow rules are
     # host:port-granular, so ``dl.google.com:443`` permits the whole host even
     # though licenseal only ever requests its ``/dl/android/maven2`` path — it

@@ -628,9 +628,11 @@ def resolve_transitive(
     ):
         # .NET transitive resolution: lockfile-first (NuGet
         # ``packages.lock.json`` / ``project.assets.json`` AND Paket's
-        # ``paket.lock``), else deps.dev ``:dependencies`` walk per direct
-        # dep. Same lockfile-first posture as Java's Gradle path. Mixed
-        # NuGet + Paket workspaces walk both lockfile flavors.
+        # ``paket.lock``), else a recursive walk of each direct dep's
+        # ``.nuspec`` dependencies, read from ``api.nuget.org`` (deps.dev
+        # serves no dependency graph for NuGet). Same lockfile-first
+        # posture as Java's Gradle path. Mixed NuGet + Paket workspaces
+        # walk both lockfile flavors.
         direct_dotnet_deps = [d for d in direct_deps if d.ecosystem == Ecosystem.DOTNET]
         out.extend(
             _resolve_dotnet_transitive(
