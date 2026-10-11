@@ -567,7 +567,7 @@ class TestApplyReviewsBySource:
         with pytest.raises(click.ClickException) as raised:
             self._apply(tmp_path, self._BY_SOURCE, [registry])
         assert not registry.reviewed
-        assert "A stanza with a `source` key applies only to that exact source" in (
+        assert "An entry with a `source` key applies only to that exact source" in (
             raised.value.message
         )
 
