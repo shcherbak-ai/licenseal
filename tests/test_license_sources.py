@@ -758,6 +758,82 @@ class TestDeclaredProprietaryLicense:
         assert exit_code == 0
         assert (dep["license"], dep["verdict"]) == ("MIT", "compatible")
 
+    @pytest.mark.parametrize(
+        "declared",
+        [
+            "Proprietary - All rights reserved",
+            "Copyright 2024 Acme. Proprietary.",
+            "Commercial license. All rights reserved.",
+            "Closed source, copyright Acme",
+        ],
+    )
+    @respx.mock
+    def test_pypi_declaration_beside_a_notice_is_not_discarded_as_text(self, tmp_path, declared):
+        # A copyright notice or "all rights reserved" marks license text,
+        # which is discarded. A declared value that carries one is still the
+        # declaration.
+        _pypi_project(tmp_path)
+        _mock_pypi({"license": declared, "classifiers": [_MIT_CLASSIFIER]})
+        exit_code, dep = _check(tmp_path)
+        assert exit_code == 1
+        assert (dep["license"], dep["license_raw"]) == ("Proprietary", declared)
+        assert dep["verdict"] == "unknown"
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            pytest.param("All rights reserved", id="notice-alone"),
+            pytest.param("Copyright (c) 2024 Acme", id="copyright-alone"),
+            pytest.param("Proprietary software.\nAll rights reserved.", id="several-lines"),
+            pytest.param(
+                "Copyright (c) 2024 Acme. " + _LICENSE_TEXT + " Not for proprietary use.",
+                id="long-text",
+            ),
+        ],
+    )
+    @respx.mock
+    def test_pypi_notice_or_text_is_still_discarded(self, tmp_path, text):
+        _pypi_project(tmp_path)
+        _mock_pypi({"license": text, "classifiers": [_MIT_CLASSIFIER]})
+        exit_code, dep = _check(tmp_path)
+        assert exit_code == 0
+        assert (dep["license"], dep["verdict"]) == ("MIT", "compatible")
+
+    @respx.mock
+    def test_pypi_wheel_metadata_declaration_beside_a_notice_is_not_discarded(self, tmp_path):
+        # The pinned release's JSON declares nothing; its wheel metadata does.
+        # Discarding that value would leave the latest release's MIT to answer.
+        (tmp_path / "pyproject.toml").write_text(
+            '[project]\nname = "app"\nversion = "0.1.0"\nlicense = "MIT"\n'
+            'dependencies = ["dep==1.0.0"]\n'
+        )
+        wheel = "https://files.pythonhosted.org/packages/aa/bb/dep-1.0.0-py3-none-any.whl"
+        respx.get("https://pypi.org/pypi/dep/1.0.0/json").mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "info": {"version": "1.0.0", "requires_dist": []},
+                    "urls": [{"packagetype": "bdist_wheel", "url": wheel}],
+                },
+            )
+        )
+        respx.get(wheel + ".metadata").mock(
+            return_value=httpx.Response(
+                200, text="Metadata-Version: 2.1\nLicense: Proprietary - All rights reserved\n\n"
+            )
+        )
+        latest = respx.get("https://pypi.org/pypi/dep/json").mock(
+            return_value=httpx.Response(200, json={"info": {"version": "2.0.0", "license": "MIT"}})
+        )
+        exit_code, dep = _check(tmp_path)
+        assert exit_code == 1
+        assert (dep["license"], dep["license_raw"]) == (
+            "Proprietary",
+            "Proprietary - All rights reserved",
+        )
+        assert dep["estimated"] == []
+        assert not latest.called
+
     @respx.mock
     def test_pypi_recognised_license_is_the_control(self, tmp_path):
         _pypi_project(tmp_path)

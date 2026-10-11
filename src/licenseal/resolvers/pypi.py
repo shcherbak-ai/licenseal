@@ -11,6 +11,7 @@ from packaging.version import Version
 
 from licenseal.analysis.spdx import (
     all_apply_reading,
+    declares_proprietary,
     is_license_file_pointer,
     normalize_license,
     read_license_array,
@@ -72,7 +73,15 @@ def _release_url(name: str, version: str) -> str:
 
 
 def _is_junk_license(value: str) -> bool:
-    """Check if a license field contains copyright text or other non-license junk."""
+    """Check if a license field contains copyright text or other non-license junk.
+
+    A declared value that says the package is proprietary is read first and
+    is never junk, whatever notice it carries (``Proprietary - All rights
+    reserved``): discarding it would leave a classifier, or another release,
+    to answer for a package that declared itself proprietary.
+    """
+    if declares_proprietary(value):
+        return False
     lower = value.strip().lower()
     return any(indicator in lower for indicator in _JUNK_INDICATORS)
 
@@ -352,7 +361,9 @@ def _license_from_pep658(
     # landed on a single line; (3) ``_is_junk_license`` rejects short values
     # that still carry prose markers like "copyright" or "permission is
     # hereby" — the no-prose-extraction rule covers short scalars that are
-    # actually narrative, not just full license-text bodies.
+    # actually narrative, not just full license-text bodies. A value that
+    # declares the package proprietary is not one of those, whatever notice
+    # it carries.
     if isinstance(legacy, str) and "\n" not in legacy:
         legacy = legacy.strip()
         if legacy and len(legacy) < _LEGACY_LICENSE_MAX_LEN and not _is_junk_license(legacy):

@@ -203,6 +203,15 @@ class TestJunkLicenseDetection:
         assert _is_junk_license("Apache-2.0") is False
         assert _is_junk_license("GPL-3.0-only") is False
 
+    def test_proprietary_declaration_beside_a_notice_is_not_junk(self):
+        assert _is_junk_license("Proprietary - All Rights Reserved") is False
+        assert _is_junk_license("Copyright 2024 Acme. Commercial license.") is False
+
+    def test_text_that_only_mentions_the_word_is_still_junk(self):
+        # Several lines, or longer than a declared value.
+        assert _is_junk_license("Proprietary software.\nAll rights reserved.") is True
+        assert _is_junk_license("Copyright (c) Acme. " + "Proprietary terms apply. " * 5) is True
+
 
 class TestPEP639Resolution:
     @respx.mock
