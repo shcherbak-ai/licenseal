@@ -95,7 +95,11 @@ from licenseal.review import (
     render_review_template,
     writable_entries,
 )
-from licenseal.transitive import flag_version_estimate, resolve_transitive
+from licenseal.transitive import (
+    flag_version_estimate,
+    resolve_declared_versions,
+    resolve_transitive,
+)
 
 _STDERR_CONSOLE = Console(stderr=True)
 
@@ -639,6 +643,16 @@ def _resolve_license_infos(
                             exclude_paths=exclude_paths,
                         )
             else:
+                # A ``pom.xml`` dependency whose version its parent chain
+                # supplies gets that version, as in a transitive scan; only
+                # the parent and BOM POMs are read for it.
+                deps = resolve_declared_versions(
+                    deps,
+                    project_path,
+                    client=client,
+                    pom_fetcher=registry_cache.fetch_text,
+                    exclude_paths=exclude_paths,
+                )
                 # No lockfile is consulted here: a direct dep declared with a
                 # range, or with no constraint, is reported at the version
                 # its registry lookup picks.

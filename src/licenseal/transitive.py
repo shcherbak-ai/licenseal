@@ -1798,6 +1798,95 @@ def _resolve_managed_version(
     return ""
 
 
+def _leaves_version_to_parent_chain(dep: Dependency) -> bool:
+    """Whether ``dep`` is a ``pom.xml`` dependency whose own POM states no version for it.
+
+    Either the declaration has no ``<version>``, or its version still holds
+    a ``${…}`` token after discovery expanded the POM's own properties. A
+    dependency with an origin is a local file, with no version to look up.
+    """
+    return (
+        not dep.origin
+        and dep.source.rsplit("/", 1)[-1] == "pom.xml"
+        and (not dep.version_constraint or "${" in dep.version_constraint)
+    )
+
+
+def _with_parent_chain_version(
+    dep: Dependency,
+    project_path: Path,
+    workspace_local_poms: dict[str, Path],
+    client: httpx.Client,
+    pom_fetcher: Fetcher,
+) -> Dependency:
+    """``dep`` at the version its POM's parent chain supplies, when its own POM states none.
+
+    Two patterns need a walk up the parent chain that discovery's local-only
+    expansion can't do:
+
+    (A) Empty ``version_constraint`` — the BOM-consumer pattern: child POM
+        declares the dep without ``<version>``, and the version is supplied
+        by a ``<parent>``'s ``<dependencyManagement>`` (or by a BOM imported
+        into that DM via ``<scope>import</scope>``). Resolved by
+        :func:`_resolve_managed_version`.
+    (B) Literal ``${…}`` token in ``version_constraint`` — the shared-
+        version-property / CI-friendly versioning pattern: child POM declares
+        ``<version>${some.version}</version>`` but ``some.version`` is
+        defined in a parent POM's ``<properties>`` block, not the child's.
+        Resolved by :func:`_resolve_property_in_version`.
+
+    Without these, every BOM-consuming or property-referencing dep surfaces
+    as UNKNOWN. Any other dependency is returned as it is (see
+    :func:`_leaves_version_to_parent_chain`), and so is one the parent chain
+    supplies no version for.
+    """
+    if not _leaves_version_to_parent_chain(dep):
+        return dep
+    source_pom = project_path / dep.source
+    if dep.version_constraint:
+        version = _resolve_property_in_version(
+            dep.version_constraint, source_pom, workspace_local_poms, client, pom_fetcher
+        )
+    else:
+        version = _resolve_managed_version(
+            dep.name, source_pom, workspace_local_poms, client, pom_fetcher
+        )
+    return replace(dep, version_constraint=version) if version else dep
+
+
+@with_scan_exclusions
+def resolve_declared_versions(
+    direct_deps: list[Dependency],
+    project_path: Path,
+    *,
+    client: httpx.Client,
+    pom_fetcher: Fetcher = fetch_registry_text,
+    exclude_paths: frozenset[Path] = frozenset(),
+) -> list[Dependency]:
+    """The direct deps of a scan without the transitive stage, at their declared versions.
+
+    A ``pom.xml`` dependency whose version comes from its parent chain (a
+    ``<dependencyManagement>`` entry, an imported BOM, a ``${…}`` property a
+    parent defines) gets the version :func:`resolve_transitive` gives it,
+    through the same lookup (:func:`_with_parent_chain_version`), so both
+    scans report one version for one declaration. Every other dependency is
+    returned as it is, in the order given.
+
+    The parent and BOM POMs that lookup reads are the only requests made
+    here. No dependency graph is fetched and no row is added. The tree is
+    not walked for POMs unless a dependency needs the lookup.
+    """
+    if not any(_leaves_version_to_parent_chain(d) for d in direct_deps):
+        return direct_deps
+    workspace_local_poms = _discover_workspace_local_pom_paths(
+        project_path, exclude_paths=exclude_paths
+    )
+    return [
+        _with_parent_chain_version(d, project_path, workspace_local_poms, client, pom_fetcher)
+        for d in direct_deps
+    ]
+
+
 def _resolve_java_transitive(
     *,
     direct_java_deps: list[Dependency],
@@ -1890,26 +1979,10 @@ def _resolve_java_transitive(
     _record_missing_lockfiles(project_path, direct_uncovered)
 
     # ---- Parent-chain version resolution ----
-    # Two patterns are handled here, both requiring a walk up the parent
-    # chain that discovery's local-only expansion can't do:
-    #
-    # (A) Empty ``version_constraint`` — the BOM-consumer pattern: child
-    #     POM declares the dep without ``<version>``, and the version is
-    #     supplied by a ``<parent>``'s ``<dependencyManagement>`` (or by
-    #     a BOM imported into that DM via ``<scope>import</scope>``).
-    #     Resolved by :func:`_resolve_managed_version`.
-    # (B) Literal ``${…}`` token in ``version_constraint`` — the shared-
-    #     version-property / CI-friendly versioning pattern: child POM
-    #     declares ``<version>${some.version}</version>`` but
-    #     ``some.version`` is defined in a parent POM's ``<properties>``
-    #     block, not the child's. Resolved by
-    #     :func:`_resolve_property_in_version`.
-    #
-    # Without these, every BOM-consuming or property-referencing dep
-    # surfaces as UNKNOWN. Resolution is grouped by source POM: deps
-    # from the same POM share the same parent chain, and the
-    # ``RegistryCache`` further dedupes the actual Maven Central
-    # fetches across sibling poms.
+    # A ``pom.xml`` dependency whose version its parent chain supplies gets
+    # that version (:func:`_with_parent_chain_version`). Deps from the same
+    # POM share the same parent chain, and the ``RegistryCache`` dedupes the
+    # Maven Central fetches across sibling poms.
     #
     # A Gradle coordinate declared with no version (the build leaves it to a
     # BOM or a dependency-management plugin) has no POM to walk. It is given
@@ -1919,43 +1992,12 @@ def _resolve_java_transitive(
     gradle_estimates = map_with_context(
         lambda d: estimate_gradle_version(d, client, pom_fetcher), direct_uncovered, max_workers
     )
-    dm_resolved: list[Dependency] = []
-    for d, estimate in zip(direct_uncovered, gradle_estimates, strict=True):
-        # Both parent-chain lookups read ``d.source`` as a POM. A dependency
-        # declared anywhere else keeps its version as declared, unless it is
-        # a Gradle coordinate estimated above.
-        if d.source.rsplit("/", 1)[-1] != "pom.xml":
-            dm_resolved.append(
-                replace(d, version_constraint=estimate, version_estimated=True) if estimate else d
-            )
-            continue
-        if not d.version_constraint:
-            managed_version = _resolve_managed_version(
-                d.name,
-                project_path / d.source,
-                workspace_local_poms,
-                client,
-                pom_fetcher,
-            )
-            if managed_version:
-                dm_resolved.append(replace(d, version_constraint=managed_version))
-            else:
-                dm_resolved.append(d)
-        elif "${" in d.version_constraint:
-            resolved = _resolve_property_in_version(
-                d.version_constraint,
-                project_path / d.source,
-                workspace_local_poms,
-                client,
-                pom_fetcher,
-            )
-            if resolved:
-                dm_resolved.append(replace(d, version_constraint=resolved))
-            else:
-                dm_resolved.append(d)
-        else:
-            dm_resolved.append(d)
-    direct_uncovered = dm_resolved
+    direct_uncovered = [
+        replace(d, version_constraint=estimate, version_estimated=True)
+        if estimate
+        else _with_parent_chain_version(d, project_path, workspace_local_poms, client, pom_fetcher)
+        for d, estimate in zip(direct_uncovered, gradle_estimates, strict=True)
+    ]
 
     # Direct deps whose version parses to a concrete Maven pin can be
     # walked; ones that don't (range syntax, unresolved ``${…}``) still
