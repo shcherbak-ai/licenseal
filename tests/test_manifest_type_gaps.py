@@ -333,6 +333,19 @@ _PYPROJECT_CASES = [
         {"an entry of tool.poetry.group"},
         id="poetry-group-dependencies-is-a-list",
     ),
+    pytest.param(
+        """\
+        [project]
+        dependencies = ["flask==3.0.0"]
+
+        [tool.uv.workspace]
+        members = "packages/*"
+        exclude = ["packages/old", 3]
+        """,
+        {("flask", "==3.0.0")},
+        {"tool.uv.workspace.members", "an entry of tool.uv.workspace.exclude"},
+        id="uv-workspace-globs-are-not-arrays-of-strings",
+    ),
 ]
 
 

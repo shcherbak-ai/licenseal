@@ -558,6 +558,116 @@ class TestPythonMonorepoDiscovery:
             assert walk_project_files(tmp_path, "pyproject.toml") == []
 
 
+class TestUvWorkspaceMembers:
+    """Which projects below a uv workspace root take the root's ``[tool.uv.sources]``."""
+
+    @staticmethod
+    def _origins(tmp_path: Path, workspace: str, *directories: str) -> dict[str, str]:
+        """Origin of the ``forked`` requirement of a project in each of ``directories``.
+
+        The root's workspace table is ``workspace``, and its sources take
+        ``forked`` from a git repository.
+        """
+        (tmp_path / "pyproject.toml").write_text(
+            '[project]\nname = "root"\n\n'
+            f"[tool.uv.workspace]\n{workspace}\n\n"
+            '[tool.uv.sources]\nforked = { git = "https://example.org/forked.git" }\n',
+            encoding="utf-8",
+        )
+        for index, directory in enumerate(directories):
+            (tmp_path / directory).mkdir(parents=True, exist_ok=True)
+            (tmp_path / directory / "pyproject.toml").write_text(
+                f'[project]\nname = "project-{index}"\ndependencies = ["forked"]\n',
+                encoding="utf-8",
+            )
+        deps, _ = discover_pyproject_dependencies(tmp_path)
+        return {dep.source.removesuffix("/pyproject.toml"): dep.origin for dep in deps}
+
+    def test_star_matches_one_directory_level(self, tmp_path):
+        origins = self._origins(tmp_path, 'members = ["packages/*"]', "packages/a", "packages/a/b")
+        assert origins == {"packages/a": "git+https://example.org/forked.git", "packages/a/b": ""}
+
+    def test_double_star_matches_any_depth(self, tmp_path):
+        origins = self._origins(
+            tmp_path,
+            'members = ["libs/**", "**/core"]',
+            "libs",
+            "libs/a/b",
+            "apps/x/core",
+            "apps/x",
+        )
+        fork = "git+https://example.org/forked.git"
+        assert origins == {"libs": fork, "libs/a/b": fork, "apps/x/core": fork, "apps/x": ""}
+
+    def test_literal_path_question_mark_and_character_class(self, tmp_path):
+        origins = self._origins(
+            tmp_path,
+            'members = ["tools/cli", "pkg-?", "svc-[ab]"]',
+            "tools/cli",
+            "tools/other",
+            "pkg-1",
+            "pkg-10",
+            "svc-a",
+            "svc-c",
+        )
+        fork = "git+https://example.org/forked.git"
+        assert {name for name, origin in origins.items() if origin == fork} == {
+            "tools/cli",
+            "pkg-1",
+            "svc-a",
+        }
+
+    def test_glob_written_with_a_dot_a_trailing_slash_or_backslashes(self, tmp_path):
+        origins = self._origins(
+            tmp_path,
+            "members = [\"./packages/*/\", 'win\\*']",
+            "packages/a",
+            "win/b",
+        )
+        assert set(origins.values()) == {"git+https://example.org/forked.git"}
+
+    def test_exclude_takes_a_member_out(self, tmp_path):
+        origins = self._origins(
+            tmp_path,
+            'members = ["packages/*"]\nexclude = ["packages/seed-*"]',
+            "packages/app",
+            "packages/seed-data",
+        )
+        assert origins == {
+            "packages/app": "git+https://example.org/forked.git",
+            "packages/seed-data": "",
+        }
+
+    def test_workspace_that_lists_no_members_has_only_its_root(self, tmp_path):
+        assert self._origins(tmp_path, "", "packages/a") == {"packages/a": ""}
+
+    def test_nearest_workspace_root_decides(self, tmp_path):
+        # A project below two workspace roots belongs to the nearer one, or
+        # to none: the outer root's globs are not consulted for it.
+        (tmp_path / "pyproject.toml").write_text(
+            '[tool.uv.workspace]\nmembers = ["**"]\n\n'
+            '[tool.uv.sources]\nforked = { git = "https://example.org/outer.git" }\n',
+            encoding="utf-8",
+        )
+        inner = tmp_path / "inner"
+        (inner / "in").mkdir(parents=True)
+        (inner / "out").mkdir()
+        (inner / "pyproject.toml").write_text(
+            '[tool.uv.workspace]\nmembers = ["in"]\n\n'
+            '[tool.uv.sources]\nforked = { git = "https://example.org/inner.git" }\n',
+            encoding="utf-8",
+        )
+        for name in ("in", "out"):
+            (inner / name / "pyproject.toml").write_text(
+                f'[project]\nname = "{name}"\ndependencies = ["forked"]\n', encoding="utf-8"
+            )
+        deps, _ = discover_pyproject_dependencies(tmp_path)
+        assert {dep.source: dep.origin for dep in deps} == {
+            "inner/in/pyproject.toml": "git+https://example.org/inner.git",
+            "inner/out/pyproject.toml": "",
+        }
+
+
 class TestSetupCfgLicenseDetection:
     def test_bare_license_field(self, tmp_path):
         (tmp_path / "setup.cfg").write_text(

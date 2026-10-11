@@ -2065,6 +2065,71 @@ class TestPythonSourceTables:
         assert _requests_mentioning("indexed") and _requests_mentioning("overridden")
 
     @respx.mock
+    def test_uv_workspace_sources_reach_the_workspace_members_only(self, tmp_path):
+        project = tmp_path / "project"
+        fork = "https://git.example.org/team"
+        _write(
+            project / "pyproject.toml",
+            f"""\
+            [project]
+            name = "root"
+            license = "MIT"
+            dependencies = ["root-fork"]
+
+            [tool.uv.workspace]
+            members = ["packages/*", "services/**"]
+            exclude = ["packages/left-out", "services/**/draft-*"]
+
+            [tool.uv.sources]
+            root-fork = {{ git = "{fork}/root-fork.git" }}
+            member-fork = {{ git = "{fork}/member-fork.git" }}
+            deep-fork = {{ git = "{fork}/deep-fork.git" }}
+            left-out-dep = {{ git = "{fork}/left-out-dep.git" }}
+            draft-dep = {{ git = "{fork}/draft-dep.git" }}
+            nested-dep = {{ git = "{fork}/nested-dep.git" }}
+            outsider-dep = {{ git = "{fork}/outsider-dep.git" }}
+            """,
+        )
+        # Where each project lies below the root, and what it depends on.
+        projects = {
+            "packages/member": "member-fork",
+            "services/billing/api": "deep-fork",
+            "packages/left-out": "left-out-dep",
+            "services/billing/draft-v2": "draft-dep",
+            "packages/member/nested": "nested-dep",
+            "tools/outsider": "outsider-dep",
+        }
+        for directory, dependency in projects.items():
+            name = directory.rsplit("/", 1)[-1]
+            _write(
+                project / directory / "pyproject.toml",
+                f'[project]\nname = "{name}"\ndependencies = ["{dependency}"]\n',
+            )
+        forks = ("root-fork", "member-fork", "deep-fork")
+        registry = ("left-out-dep", "draft-dep", "nested-dep", "outsider-dep")
+        # PyPI owns the fork names too, under another license.
+        for name in forks:
+            _mock_pypi_release(name, "9.9.9", "GPL-3.0-only")
+        for name in registry:
+            _mock_pypi_release(name, "1.0.0")
+        _refuse_everything_else()
+        result, data = _check_json(project, "--no-strict")
+        assert result.exit_code == 0
+        rows = _rows(data)
+        # The root and the projects its ``members`` globs match take the
+        # root's sources. A project a glob leaves out, one ``exclude`` names,
+        # one nested in a member, and one elsewhere below the root do not:
+        # their requirements are registry requirements.
+        assert {name: (row["origin"], row["license"]) for name, row in rows.items()} == {
+            **{name: (f"git+{fork}/{name}.git", "UNKNOWN") for name in forks},
+            **{name: ("", "MIT") for name in registry},
+        }
+        assert rows["deep-fork"]["source"] == "services/billing/api/pyproject.toml"
+        assert rows["outsider-dep"]["source"] == "tools/outsider/pyproject.toml"
+        assert _requests_mentioning(*forks) == []
+        assert all(_requests_mentioning(name) for name in registry)
+
+    @respx.mock
     def test_pipfile_git_path_and_file_entries(self, tmp_path):
         project = tmp_path / "project"
         _write(

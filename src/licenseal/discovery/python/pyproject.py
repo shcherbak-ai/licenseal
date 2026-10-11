@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import replace
+from fnmatch import fnmatchcase
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, NamedTuple, cast
 
 from licenseal.discovery._read import load_toml, record_unexpected_type, typed_field
 from licenseal.discovery._walk import walk_project_files
@@ -139,11 +141,74 @@ def _uv_sources(filepath: Path, data: dict) -> dict[str, object]:
     return {_pep503_normalize(name): spec for name, spec in sources.items()}
 
 
-def _is_uv_workspace_root(filepath: Path, data: dict) -> bool:
-    """Whether this pyproject.toml declares a uv workspace."""
+class _UvWorkspace(NamedTuple):
+    """What a uv workspace root says about the projects below it."""
+
+    # The ``members`` and ``exclude`` globs of ``[tool.uv.workspace]``, each
+    # split into its path components.
+    members: list[list[str]]
+    exclude: list[list[str]]
+    # The root's ``[tool.uv.sources]`` table, keyed by PEP 503 name.
+    sources: dict[str, object]
+
+
+def _glob_components(filepath: Path, value: object, section: str) -> list[list[str]]:
+    """The globs of a ``[tool.uv.workspace]`` array, each as path components."""
+    return [
+        [part for part in glob.replace("\\", "/").split("/") if part not in {"", "."}]
+        for glob in _string_list(filepath, value, section)
+    ]
+
+
+def _uv_workspace(filepath: Path, data: dict) -> _UvWorkspace | None:
+    """The uv workspace this pyproject.toml is the root of; ``None`` when it declares none."""
     tool = typed_field(filepath, data, "tool", dict) or {}
     uv = typed_field(filepath, tool, "uv", dict, "tool.uv") or {}
-    return isinstance(uv.get("workspace"), dict)
+    workspace = uv.get("workspace")
+    if not isinstance(workspace, dict):
+        return None
+    return _UvWorkspace(
+        members=_glob_components(filepath, workspace.get("members"), "tool.uv.workspace.members"),
+        exclude=_glob_components(filepath, workspace.get("exclude"), "tool.uv.workspace.exclude"),
+        sources=_uv_sources(filepath, data),
+    )
+
+
+def _matches_glob(parts: Sequence[str], glob: Sequence[str]) -> bool:
+    """Whether a relative path matches a glob, both given as path components.
+
+    ``*``, ``?``, and ``[…]`` stay inside one component, as they do when uv
+    expands a ``members`` glob. A ``**`` component stands for any number of
+    directories, none included.
+    """
+    if not glob:
+        return not parts
+    if glob[0] == "**":
+        return any(_matches_glob(parts[skip:], glob[1:]) for skip in range(len(parts) + 1))
+    return bool(parts) and fnmatchcase(parts[0], glob[0]) and _matches_glob(parts[1:], glob[1:])
+
+
+def _workspace_sources(
+    project_dir: Path, workspaces: dict[Path, _UvWorkspace]
+) -> dict[str, object] | None:
+    """The ``[tool.uv.sources]`` a project inherits from its uv workspace root.
+
+    The root is the nearest directory above ``project_dir`` that declares a
+    workspace. The project is a member of it when its directory matches one
+    of the root's ``members`` globs and none of its ``exclude`` globs. Any
+    other project below the root is a project of its own and inherits
+    nothing.
+    """
+    root = next((d for d in project_dir.parents if d in workspaces), None)
+    if root is None:
+        return None
+    workspace = workspaces[root]
+    parts = project_dir.relative_to(root).parts
+    if not any(_matches_glob(parts, glob) for glob in workspace.members):
+        return None
+    if any(_matches_glob(parts, glob) for glob in workspace.exclude):
+        return None
+    return workspace.sources
 
 
 def _parse_pyproject_deps(
@@ -162,7 +227,8 @@ def _parse_pyproject_deps(
     Returns ``(deps, own)``. ``own`` names the dependencies that are the
     project's own code: a path that the scan reads, or a uv workspace
     member. ``inherited_sources`` is the ``[tool.uv.sources]`` table of the
-    uv workspace root above this file; this file's own entries override it.
+    uv workspace root this file's project is a member of; this file's own
+    entries override it.
     """
     deps: list[Dependency] = []
     own: list[str] = []
@@ -314,8 +380,10 @@ def discover_pyproject_dependencies(
 
     parsed = [(pj, data) for pj in pyprojects if (data := load_toml(pj)) is not None]
     # A uv workspace root's ``[tool.uv.sources]`` applies to its members.
-    workspace_sources = {
-        pj.parent: _uv_sources(pj, data) for pj, data in parsed if _is_uv_workspace_root(pj, data)
+    workspaces = {
+        pj.parent: workspace
+        for pj, data in parsed
+        if (workspace := _uv_workspace(pj, data)) is not None
     }
 
     deps: list[Dependency] = []
@@ -325,9 +393,7 @@ def discover_pyproject_dependencies(
         # Paths come from the walker rooted at project_path, so relative_to
         # is safe. ``as_posix`` keeps the JSON output cross-platform.
         source = pj.relative_to(project_path).as_posix()
-        inherited = next(
-            (workspace_sources[d] for d in pj.parent.parents if d in workspace_sources), None
-        )
+        inherited = _workspace_sources(pj.parent, workspaces)
         pj_deps, pj_own = _parse_pyproject_deps(pj, data, source, project_path, inherited)
         owner = _pyproject_owner_name(pj, data)
         deps.extend(pj_deps)
