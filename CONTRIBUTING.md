@@ -14,7 +14,7 @@ git clone https://github.com/shcherbak-ai/licenseal.git
 cd licenseal
 git checkout dev
 uv sync
-uv run pre-commit install
+uv run pre-commit install --hook-type pre-commit --hook-type commit-msg
 ```
 
 ## Pre-commit Hooks
@@ -27,16 +27,38 @@ Runs automatically on every commit:
 - **bandit** — security analysis
 - **markdownlint** — Markdown linting
 - **interrogate** — docstring coverage on `src/`
-- **vulture** — dead-code detection on `src/` (min confidence 60)
-- **validate-spdx-ids** — verify SPDX IDs referenced in `src/licenseal/analysis/` exist in the vendored canonical list (gated by changes to `spdx.py`, `risk.py`, or the vendored JSON)
+- **vulture** — dead-code detection on `src/`
+- **validate-spdx-ids** — verify SPDX IDs referenced in `src/licenseal/analysis/` exist in the vendored canonical list
 - **file hygiene** — `trailing-whitespace`, `end-of-file-fixer`, `check-yaml`, `check-toml`
-- **commitizen** — commit message format check (commit-msg stage)
+- **commitizen** — commit messages follow Conventional Commits (`fix: …`, `feat: …`)
 
 Manual run:
 
 ```bash
 uv run pre-commit run --all-files
 ```
+
+## Tests
+
+```bash
+uv run pytest -n 8 --cov=licenseal --cov-report=term-missing
+```
+
+100% test coverage is required. All new code must include tests.
+
+## Code Style
+
+- ruff format, line length 100
+- ty (default rules; scoped to `src/` via `[tool.ty.src]`)
+- `from __future__ import annotations` in every Python file
+- The rules a change must keep are in [AGENTS.md](AGENTS.md).
+
+## Pull Requests
+
+1. Fork and branch from `dev`
+2. All tests pass with 100% coverage
+3. Pre-commit hooks pass
+4. Submit PR to `dev`
 
 ## README links and images
 
@@ -48,22 +70,11 @@ Use relative paths for repository files in `README.md`, and keep images under `a
 ![Description of the image](assets/example.svg)
 ```
 
-For HTML images, use `src="assets/example.png"`. These paths work in local previews
-and follow the branch being viewed on GitHub. External links, badges, and GitHub
-service pages such as Actions, issues, and security advisories keep absolute URLs.
+For HTML images, use `src="assets/example.png"`. These paths work in local previews and follow the branch being viewed on GitHub. External links, badges, and GitHub service pages such as Actions, issues, and security advisories keep absolute URLs.
 
-Give images descriptive alt text and check them at their README display size on light
-and dark backgrounds. Label fictional examples as illustrative. Render CLI excerpts
-with licenseal, and keep diagrams and captions consistent with the current verdicts,
-strict-mode behavior, and transitive-dependency attribution.
+Give images descriptive alt text and check them at their README display size on light and dark backgrounds. Label fictional examples as illustrative. Render CLI excerpts with licenseal, and keep diagrams and captions consistent with the current verdicts, strict-mode behavior, and transitive-dependency attribution.
 
-The package description comes from [PYPI.md](PYPI.md), selected by `project.readme`
-in `pyproject.toml`. Keep it short, with absolute HTTPS links to the current public
-documentation. The full README remains the home for screenshots and detailed guidance.
-
-Local builds and the [publish workflow](.github/workflows/publish.yml) both use plain
-`uv build`. There is no link conversion or generated README. Update `PYPI.md` when its
-brief product description, supported ecosystems, or installation instructions change.
+The package description is [PYPI.md](PYPI.md) (`project.readme` in `pyproject.toml`). Keep it short, use absolute HTTPS links, and update it when the summary, the ecosystems, or the install commands change. Screenshots and the overview stay in the README.
 
 ## Vendored SPDX license list
 
@@ -76,27 +87,5 @@ uv run python scripts/update_spdx_list.py     # re-vendor the JSON from upstream
 uv run python scripts/validate_spdx_ids.py    # confirm licenseal's alias / override targets still resolve
 ```
 
-If `validate_spdx_ids.py` reports a missing ID, an identifier licenseal references was renamed or removed upstream — update the corresponding entry in `analysis/spdx.py` or `analysis/risk.py` to a canonical ID.
-
-## Tests
-
-```bash
-uv run pytest
-uv run pytest --cov=licenseal --cov-report=term-missing
-```
-
-100% test coverage is required. All new code must include tests.
-
-## Code Style
-
-- ruff format, line length 100
-- ty (default rules; scoped to `src/` via `[tool.ty.src]`)
-- `from __future__ import annotations` in every Python file
-- Target: Python 3.10
-
-## Pull Requests
-
-1. Fork and branch from `dev`
-2. All tests pass with 100% coverage
-3. Pre-commit hooks pass
-4. Submit PR to `dev`
+- If `validate_spdx_ids.py` reports a missing ID, an identifier licenseal references was renamed or removed upstream: update the corresponding entry in `analysis/spdx.py` or `analysis/risk.py` to a canonical ID.
+- An ID that became deprecated goes into `DEPRECATED_SPDX_IDS` in `analysis/risk.py`, or a review entry that names it is rejected.
