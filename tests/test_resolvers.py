@@ -428,19 +428,35 @@ class TestVersionSelection:
 
     def test_select_npm_version_accepts_space_after_operator(self):
         # Real npm accepts whitespace between comparison operators and the
-        # version (`">= 1.0.0"`); the underlying NpmSpec parser does not.
-        # Surfaced in real registry data by transitives that
-        # declare `">= 2.1.2 < 3.0.0"`.
+        # version (`">= 1.0.0"`). Surfaced in real registry data by
+        # transitives that declare `">= 2.1.2 < 3.0.0"`.
         assert select_npm_version(">= 1.0.0", ["0.9.0", "1.2.0"]) == "1.2.0"
         assert select_npm_version("~ 1.2.3", ["1.2.4", "1.3.0"]) == "1.2.4"
         assert select_npm_version("^ 1.0.0", ["0.9.0", "1.5.0", "2.0.0"]) == "1.5.0"
 
     def test_select_npm_version_accepts_space_separated_range(self):
         # `">= 2.1.2 < 3.0.0"` — operators followed by space, terms separated
-        # by space. Both must round-trip into NpmSpec.
+        # by space. Both are read as one set of two comparators.
         assert (
             select_npm_version(">= 2.1.2 < 3.0.0", ["2.1.1", "2.1.2", "2.5.0", "3.0.0"]) == "2.5.0"
         )
+
+    def test_select_npm_version_holds_the_upper_bound_of_a_prerelease_range(self):
+        published = ["1.9.0", "2.0.0-rc.1", "2.0.0-rc.2", "2.0.0", "2.1.0"]
+        assert select_npm_version(">=2.0.0-rc.1 <2.0.0", published) == "2.0.0-rc.2"
+        assert select_npm_version(">=2.0.0-rc.1 <=2.0.0", published) == "2.0.0"
+        assert select_npm_version(">=2.0.0-rc.1 <2.0.0", ["1.9.0", "2.0.0", "2.1.0"]) is None
+
+    def test_select_npm_version_leaves_out_a_prerelease_the_range_does_not_name(self):
+        assert select_npm_version("<2.0.0", ["1.9.0", "2.0.0-rc.1"]) == "1.9.0"
+        assert select_npm_version("<2.0.0", ["2.0.0-rc.1"]) is None
+
+    def test_select_npm_version_reads_a_version_with_build_metadata(self):
+        assert select_npm_version("1.2.3", ["1.2.2", "v1.2.3+build.5"]) == "v1.2.3+build.5"
+
+    @pytest.mark.parametrize("spec", ["one - two", "v1.0.0 - v2.0.0", ">=1.0.0 - 2.0.0"])
+    def test_select_npm_version_malformed_hyphen_range_returns_none(self, spec):
+        assert select_npm_version(spec, ["1.0.0", "1.5.0"]) is None
 
     def test_select_npm_version_collapses_run_of_whitespace(self):
         # Multiple spaces between range terms (rare but seen) must still parse.

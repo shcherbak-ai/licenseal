@@ -1,6 +1,6 @@
 """A declared version range resolves to a version inside it.
 
-A Rust, Ruby, Hex, PHP, or .NET manifest with no lockfile declares each
+A Rust, Ruby, Hex, PHP, .NET, or npm manifest with no lockfile declares each
 dependency with a range. The scan reports the version the range selects among
 those the registry publishes, with that version's license. It never reports
 the registry's latest release when the range excludes it. A range that no
@@ -682,3 +682,67 @@ class TestNuGet:
             ]
         assert picks == ["1.1.0", "1.5.0", "1.1.0"]
         assert index.call_count == 1
+
+
+class TestPrereleaseLowerBound:
+    """A range from a release candidate up to its release stops short of the release.
+
+    ``>=2.0.0-rc.1 <2.0.0`` resolves to the newest candidate published, in
+    npm and in Cargo. Each registry lists the candidates, the release, and a
+    version on either side.
+    """
+
+    _LICENSES = {
+        "1.9.0": "ISC",
+        "2.0.0-rc.1": "MIT",
+        "2.0.0-rc.2": "BSD-3-Clause",
+        "2.0.0": "Apache-2.0",
+        "2.1.0": "Zlib",
+    }
+
+    @pytest.mark.parametrize("mode", _MODES)
+    @pytest.mark.parametrize(
+        ("declared", "version"),
+        [
+            (">=2.0.0-rc.1 <2.0.0", "2.0.0-rc.2"),
+            (">=2.0.0-rc.1 <=2.0.0", "2.0.0"),
+            # The candidates of 2.0.0 are not below it for a range that names none.
+            ("<2.0.0", "1.9.0"),
+        ],
+    )
+    @respx.mock
+    def test_npm(self, tmp_path: Path, mode: str, declared: str, version: str):
+        (tmp_path / "package.json").write_text(json.dumps({"dependencies": {"lib": declared}}))
+        metadata = {
+            number: {"version": number, "license": license_id}
+            for number, license_id in self._LICENSES.items()
+        }
+        _json("https://registry.npmjs.org/lib", {"versions": metadata})
+        for number, entry in metadata.items():
+            _json(f"https://registry.npmjs.org/lib/{number}", entry)
+        assert _row(tmp_path, mode) == (version, self._LICENSES[version], _ESTIMATED)
+
+    @pytest.mark.parametrize("mode", _MODES)
+    @pytest.mark.parametrize(
+        ("requirement", "version"),
+        [
+            (">=2.0.0-rc.1, <2.0.0", "2.0.0-rc.2"),
+            (">=2.0.0-rc.1, <=2.0.0", "2.0.0"),
+            ("<2.0.0", "1.9.0"),
+        ],
+    )
+    @respx.mock
+    def test_cargo(self, tmp_path: Path, mode: str, requirement: str, version: str):
+        TestCargo._project(tmp_path, requirement)
+        crate = "https://crates.io/api/v1/crates/lib"
+        for number, license_id in self._LICENSES.items():
+            _json(f"{crate}/{number}", {"version": {"num": number, "license": license_id}})
+            _json(f"{crate}/{number}/dependencies", {"dependencies": []})
+        _json(
+            crate,
+            {
+                "crate": {"max_stable_version": "2.1.0", "newest_version": "2.1.0"},
+                "versions": [{"num": number, "yanked": False} for number in self._LICENSES],
+            },
+        )
+        assert _row(tmp_path, mode) == (version, self._LICENSES[version], _ESTIMATED)

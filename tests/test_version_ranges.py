@@ -63,13 +63,89 @@ _NPM = [
     ("1.0.0-rc.2", "^1.0.0-rc.1", True),
     ("1.1.0-rc.2", "^1.0.0-rc.1", False),
     ("1.0.0-rc.1", "*", False),
+    # Every comparator of a set holds, whichever of them names a prerelease:
+    # the release a prerelease lower bound leads to is not below itself.
+    ("2.0.0", ">=2.0.0-rc.1 <2.0.0", False),
+    ("2.0.0-rc.2", ">=2.0.0-rc.1 <2.0.0", True),
+    ("2.0.0-rc.1", ">2.0.0-rc.1 <2.0.0", False),
+    ("2.0.0", ">=2.0.0-rc.1 <=2.0.0", True),
+    ("2.0.0", "^2.0.0-rc.1 <2.0.0", False),
+    ("2.0.0", ">=2.0.0-rc.1 <2.0.0 || 3.x", False),
+    ("3.1.0", ">=2.0.0-rc.1 <2.0.0 || 3.x", True),
+    ("2.0.0-rc.2", ">=2.0.0-rc.1 <2.0.0-rc.5", True),
+    ("2.0.0-rc.5", ">=2.0.0-rc.1 <2.0.0-rc.5", False),
+    ("2.0.0", "<=2.0.0-rc.5", False),
+    ("2.0.0-rc.5", "<=2.0.0-rc.5", True),
+    ("2.0.0-rc.6", "<2.0.0-rc.5", False),
+    ("2.0.0-rc.4", "<2.0.0-rc.5", True),
+    ("1.9.0", "<2.0.0-rc.5", True),
+    ("2.0.0", "1.2.3 - 2.0.0-rc.3", False),
+    ("2.0.0-rc.2", "1.2.3 - 2.0.0-rc.3", True),
+    ("1.2.3", "1.2.3-rc.1", False),
+    ("1.2.3-rc.1", "1.2.3-rc.1", True),
+    ("1.2.3-rc.1", "=1.2.3-rc.1", True),
+    # A bound on a release names none of its prereleases, and the release
+    # that ends ``^``, ``~``, or a version that stops early shuts its own out.
+    ("2.0.0-rc.1", "<2.0.0", False),
+    ("2.0.0-rc.1", "<=2.0.0", False),
+    ("2.0.0-rc.1", ">=2.0.0-rc.1 <2", False),
+    ("2.0.0-rc.1", ">=2.0.0-rc.1 <=1.x", False),
+    ("2.0.0-rc.1", "^1.2.3-rc.1 <2.0.0-rc.5", False),
+    ("1.2.0", "~1.2.0-beta", True),
+    ("1.2.5", "~1.2.0-beta", True),
+    ("1.3.0", "~1.2.0-beta", False),
+    # A version that stops early covers what it prefixes.
+    ("1.2.9", "=1.2", True),
+    ("1.3.0", "=1.2", False),
+    ("1.3.0", ">1.2", True),
+    ("1.2.9", ">1.2", False),
+    ("2.0.0", ">1", True),
+    ("1.2.0", ">=1.2", True),
+    ("1.1.9", ">=1.2", False),
+    ("1.1.9", "<1.2", True),
+    ("1.2.0", "<1.2", False),
+    ("1.2.9", "<=1.2", True),
+    ("1.3.0", "<=1.2", False),
+    ("1.9.0", "~1", True),
+    ("2.0.0", "~1", False),
+    ("1.2.9", "~1.2", True),
+    ("2.9.9", "1.2.3 - 2", True),
+    ("3.0.0", "1.2.3 - 2", False),
+    ("1.2.0", "1.2 - 2.0.0", True),
+    # ``^`` fixes the first segment that is not zero.
+    ("0.2.9", "^0.2.3", True),
+    ("0.3.0", "^0.2.3", False),
+    ("0.0.3", "^0.0.3", True),
+    ("0.0.4", "^0.0.3", False),
+    ("0.0.9", "^0.0", True),
+    ("0.1.0", "^0.0", False),
+    ("0.9.0", "^0", True),
+    ("1.0.0", "^0", False),
+    ("0.0.0", "^0.0.0", True),
+    ("0.0.1", "^0.0.0", False),
+    ("9.9.9", ">=*", True),
+    ("9.9.9", "1.2.3 ||", True),
     ("1.2.3+build.5", "1.2.3", True),
     ("1.2.3+build.5", "<=1.2.3", True),
+    ("1.2.3", "1.2.3+build.5", True),
+    ("1.2.3+other", "=1.2.3+build.5", True),
     ("1.2.3", "latest", None),
     ("1.2.3", "workspace:*", None),
     ("1.2.3", "npm:other@^1", None),
     ("1.2.3", "https://example.invalid/pkg.tgz", None),
     ("1.2", "^1.0", None),
+    # Not comparators: an operator on ``*``, a prerelease on a version that
+    # stops early, a malformed prerelease, a hyphen range without two versions.
+    ("1.2.3", "<*", None),
+    ("1.2.3", "^x", None),
+    ("1.2.3", "1.2-rc.1", None),
+    ("1.2.3", "1.2.3-01", None),
+    ("1.2.3", "1.2.3-", None),
+    ("1.2.3", "01.2.3", None),
+    ("1.2.3", "one - two", None),
+    ("1.2.3", ">=1.0.0 - 2.0.0", None),
+    ("1.2.3", "1.0.0 - 2.0.0 - 3.0.0", None),
+    ("1.2.3", "^1.0.0 || nonsense", None),
 ]
 
 _RUST = [
@@ -96,6 +172,25 @@ _RUST = [
     ("1.0.0-beta.1", "1.0", False),
     ("1.0.0-beta.2", "1.0.0-beta.1", True),
     ("1.0.0", "1.0.0-beta.1", True),
+    # Every comparator holds, whichever of them names a prerelease.
+    ("2.0.0", ">=2.0.0-rc.1, <2.0.0", False),
+    ("2.0.0-rc.2", ">=2.0.0-rc.1, <2.0.0", True),
+    ("2.0.0", ">=2.0.0-rc.1, <=2.0.0", True),
+    ("2.0.0-rc.2", ">=2.0.0-rc.1, <2.0.0-rc.5", True),
+    ("2.0.0-rc.5", ">=2.0.0-rc.1, <2.0.0-rc.5", False),
+    ("2.0.0", "<=2.0.0-rc.5", False),
+    ("1.0.0", "=1.0.0-beta.1", False),
+    ("1.0.0-beta.1", "=1.0.0-beta.1", True),
+    # A bound on a release names none of its prereleases.
+    ("2.0.0-rc.1", "<2.0.0", False),
+    ("2.0.0-rc.1", ">=2.0.0-rc.1, <2", False),
+    ("2.0.0-rc.1", "1.2.3-rc.1, <2.0.0-rc.5", False),
+    ("1.2.5", "~1.2.0-beta", True),
+    # A wildcard covers what it prefixes, whichever character writes it.
+    ("1.2.9", "1.2.x", True),
+    ("1.3.0", "1.2.x", False),
+    ("1.9.0", "1.X", True),
+    ("2.0.0", "1.X", False),
     ("1.2.3+meta", "^1.2", True),
     # Cargo has no OR, no hyphen range, and no empty comparator.
     ("1.0.0", "^1 || ^2", None),
@@ -451,6 +546,88 @@ class TestSatisfies:
     def test_lockfile_entry_form_is_that_exact_version(self, ecosystem, version):
         # ``==X`` is how every lockfile parser writes a pinned version.
         assert satisfies(ecosystem, version, f"=={version}") is True
+
+
+_SEMVER_PUBLISHED = ["1.9.0", "2.0.0-rc.1", "2.0.0-rc.2", "2.0.0", "2.1.0"]
+_DOTTED_PUBLISHED = ["1.9.0", "2.0.0.rc1", "2.0.0.rc2", "2.0.0", "2.1.0"]
+_MAVEN_PUBLISHED = ["1.9.0", "2.0.0-rc1", "2.0.0-rc2", "2.0.0", "2.1.0"]
+_COMPOSER_PUBLISHED = ["1.9.0", "2.0.0-RC1", "2.0.0-RC2", "2.0.0", "2.1.0"]
+_PYTHON_PUBLISHED = ["1.9", "2.0rc1", "2.0rc2", "2.0", "2.1"]
+
+# A range from a release candidate of 2.0.0 up to 2.0.0, in every grammar
+# that joins bounds: the constraint, what is published, the versions in
+# range, and the one the constraint resolves to.
+_PRERELEASE_LOWER_BOUND = [
+    # npm and Cargo: every comparator holds by precedence, and the candidates
+    # of 2.0.0 are in range because a comparator on 2.0.0 names one.
+    (Ecosystem.NPM, ">=2.0.0-rc.1 <2.0.0", _SEMVER_PUBLISHED, ["2.0.0-rc.1", "2.0.0-rc.2"]),
+    (Ecosystem.NPM, ">2.0.0-rc.1 <2.0.0", _SEMVER_PUBLISHED, ["2.0.0-rc.2"]),
+    (Ecosystem.NPM, "2.0.0-rc.1 - 2.0.0-rc.2", _SEMVER_PUBLISHED, ["2.0.0-rc.1", "2.0.0-rc.2"]),
+    (Ecosystem.RUST, ">=2.0.0-rc.1, <2.0.0", _SEMVER_PUBLISHED, ["2.0.0-rc.1", "2.0.0-rc.2"]),
+    (Ecosystem.RUST, ">2.0.0-rc.1, <2.0.0", _SEMVER_PUBLISHED, ["2.0.0-rc.2"]),
+    # Elixir, RubyGems, NuGet, Maven, and Gradle compare a prerelease as
+    # below its release, and take one because the range names one.
+    (
+        Ecosystem.HEX,
+        ">= 2.0.0-rc.1 and < 2.0.0",
+        _SEMVER_PUBLISHED,
+        ["2.0.0-rc.1", "2.0.0-rc.2"],
+    ),
+    (Ecosystem.RUBY, ">= 2.0.0.rc1, < 2.0.0", _DOTTED_PUBLISHED, ["2.0.0.rc1", "2.0.0.rc2"]),
+    (Ecosystem.DOTNET, "[2.0.0-rc.1,2.0.0)", _SEMVER_PUBLISHED, ["2.0.0-rc.1", "2.0.0-rc.2"]),
+    (Ecosystem.DOTNET, "(2.0.0-rc.1,2.0.0)", _SEMVER_PUBLISHED, ["2.0.0-rc.2"]),
+    (Ecosystem.JAVA, "[2.0.0-rc1,2.0.0)", _MAVEN_PUBLISHED, ["2.0.0-rc1", "2.0.0-rc2"]),
+    (Ecosystem.JAVA, "(,1.0],[2.0.0-rc1,2.0.0)", _MAVEN_PUBLISHED, ["2.0.0-rc1", "2.0.0-rc2"]),
+    # Composer reads ``<2.0.0`` as below ``2.0.0-dev``, and PEP 440 keeps the
+    # prereleases of an exclusive bound out: the range holds nothing.
+    (Ecosystem.PHP, ">=2.0.0-RC1 <2.0.0", _COMPOSER_PUBLISHED, []),
+    (Ecosystem.PHP, ">=2.0.0-RC1,<2.0.0", _COMPOSER_PUBLISHED, []),
+    (Ecosystem.PYTHON, ">=2.0rc1,<2.0", _PYTHON_PUBLISHED, []),
+    # An upper bound that is a prerelease itself keeps the ones below it.
+    (Ecosystem.PHP, ">=2.0.0-RC1 <2.0.0-RC2", _COMPOSER_PUBLISHED, ["2.0.0-RC1"]),
+    (Ecosystem.PYTHON, ">=2.0rc1,<2.0rc2", _PYTHON_PUBLISHED, ["2.0rc1"]),
+]
+
+# The same lower bound with 2.0.0 inside the range: the release is in range
+# beside its candidates, and is the version picked.
+_PRERELEASE_LOWER_BOUND_THROUGH_THE_RELEASE = [
+    (Ecosystem.NPM, ">=2.0.0-rc.1 <=2.0.0", _SEMVER_PUBLISHED),
+    (Ecosystem.NPM, ">=2.0.0-rc.1 <2.0.1", _SEMVER_PUBLISHED),
+    (Ecosystem.RUST, ">=2.0.0-rc.1, <=2.0.0", _SEMVER_PUBLISHED),
+    (Ecosystem.HEX, ">= 2.0.0-rc.1 and <= 2.0.0", _SEMVER_PUBLISHED),
+    (Ecosystem.RUBY, ">= 2.0.0.rc1, <= 2.0.0", _DOTTED_PUBLISHED),
+    (Ecosystem.DOTNET, "[2.0.0-rc.1,2.0.0]", _SEMVER_PUBLISHED),
+    (Ecosystem.JAVA, "[2.0.0-rc1,2.0.0]", _MAVEN_PUBLISHED),
+    (Ecosystem.PHP, ">=2.0.0-RC1 <=2.0.0", _COMPOSER_PUBLISHED),
+    (Ecosystem.PYTHON, ">=2.0rc1,<=2.0", _PYTHON_PUBLISHED),
+]
+
+
+def _range_id(case: tuple) -> str:
+    return f"{case[0].value}:{case[1]}"
+
+
+class TestPrereleaseLowerBound:
+    @pytest.mark.parametrize("case", _PRERELEASE_LOWER_BOUND, ids=_range_id)
+    def test_upper_bound_holds(self, case):
+        ecosystem, constraint, published, in_range = case
+        verdicts = {version: satisfies(ecosystem, version, constraint) for version in published}
+        assert [version for version in published if verdicts[version]] == in_range
+        assert None not in verdicts.values()
+        assert select_version(ecosystem, constraint, published) == (in_range or [None])[-1]
+
+    @pytest.mark.parametrize("case", _PRERELEASE_LOWER_BOUND_THROUGH_THE_RELEASE, ids=_range_id)
+    def test_release_is_picked_before_its_candidates(self, case):
+        ecosystem, constraint, published = case
+        assert [v for v in published if satisfies(ecosystem, v, constraint)] == published[1:4]
+        assert select_version(ecosystem, constraint, published) == published[3]
+
+    def test_lowest_match_is_the_bound_itself(self):
+        # NuGet restores the lowest version in range.
+        picked = select_version(
+            Ecosystem.DOTNET, "[2.0.0-rc.1,2.0.0)", _SEMVER_PUBLISHED, lowest=True
+        )
+        assert picked == "2.0.0-rc.1"
 
 
 class TestSelectVersion:

@@ -20,7 +20,6 @@ from typing import Any
 
 from packaging.specifiers import SpecifierSet
 from packaging.version import Version as PackagingVersion
-from semantic_version import NpmSpec
 from semantic_version import Version as SemVer
 
 from licenseal.models import Ecosystem
@@ -39,11 +38,21 @@ _UNSUPPORTED_PYTHON_MARKERS = (" @ ", "://", "git+")
 
 # Real npm semver accepts whitespace between comparison operators and version
 # numbers (`">= 1.0.0 < 2.0.0"`), and multiple spaces between AND-combined
-# range terms; the `semantic_version` library's NpmSpec accepts neither.
-# Tighten operators against their version and collapse runs of whitespace to
-# a single space so we accept what registries publish.
+# range terms. Tighten operators against their version and collapse runs of
+# whitespace to a single space, so that a space separates comparators only.
 _NPM_OPERATOR_SPACE_RE = re.compile(r"(<=|>=|<|>|=|~|\^)\s+(?=\d|[xX*])")
 _NPM_RUN_OF_WHITESPACE_RE = re.compile(r"\s+")
+
+# One comparator: an operator and a version that may stop early (``1.2``) or
+# at a wildcard (``1.x``, ``*``). Build metadata is read and dropped.
+_SEMVER_PART = r"(x|X|\*|0|[1-9]\d*)"
+_SEMVER_COMPARATOR_RE = re.compile(
+    rf"v?(<=|>=|<|>|=|\^|~)?{_SEMVER_PART}(?:\.{_SEMVER_PART}(?:\.{_SEMVER_PART})?)?"
+    r"(-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?"
+)
+
+# A comparison operator and the version it compares with.
+_SemverBound = tuple[str, SemVer]
 
 
 def select_python_version(version_constraint: str, published_versions: list[str]) -> str | None:
@@ -74,14 +83,98 @@ def select_python_version(version_constraint: str, published_versions: list[str]
     return candidates[max(allowed)]
 
 
-def _npm_spec(spec: str) -> NpmSpec | None:
-    """Parse an npm range, or None when it is not one."""
+def _semver_floor(major: int, minor: int, patch: int) -> SemVer:
+    """The lowest version a release has: no prerelease of it sorts below this one."""
+    return SemVer(major=major, minor=minor, patch=patch, prerelease=("0",))
+
+
+def _semver_bounds(comparator: str) -> list[_SemverBound] | None:
+    """Read one npm or Cargo comparator as the plain comparisons it stands for.
+
+    ``^``, ``~``, and a version that stops early each stand for a lower bound
+    and for the release that ends them, whose prereleases are outside too:
+    ``^1.2.3`` is ``>=1.2.3 <2.0.0-0``, ``1.2`` is ``>=1.2.0 <1.3.0-0``,
+    ``>1.2`` is ``>=1.3.0``. None when the text is not a comparator.
+    """
+    match = _SEMVER_COMPARATOR_RE.fullmatch(comparator)
+    if match is None:
+        return None
+    op = match.group(1) or "="
+    numbers: list[int] = []
+    for part in match.group(2, 3, 4):
+        if part is None or not part.isdigit():
+            break
+        numbers.append(int(part))
+    stated = len(numbers)
+    major, minor, patch = (*numbers, 0, 0, 0)[:3]
+    prerelease = match.group(5) or ""
+    if stated < 3 and prerelease:
+        return None
+    try:
+        low = SemVer(f"{major}.{minor}.{patch}{prerelease}")
+    except ValueError:
+        # A prerelease identifier that is empty or a number with a leading zero.
+        return None
+    if not stated:
+        # ``*`` is every release; no other operator takes it.
+        return [(">=", low)] if op in ("=", ">=") else None
+    # The release that follows every version sharing the first one, two, or
+    # three segments.
+    bumps = ((major + 1, 0, 0), (major, minor + 1, 0), (major, minor, patch + 1))
+    if op == "^":
+        # The first non-zero segment may not change.
+        fixed = next((index for index, number in enumerate(numbers) if number), stated - 1)
+        return [(">=", low), ("<", _semver_floor(*bumps[fixed]))]
+    if op == "~":
+        # The minor may not change, or the major when no minor is stated.
+        return [(">=", low), ("<", _semver_floor(*bumps[min(stated, 2) - 1]))]
+    if op == ">=":
+        return [(op, low)]
+    if stated == 3:
+        return [("==" if op == "=" else op, low)]
+    # A version that stops early covers everything it prefixes.
+    if op == "<":
+        return [(op, _semver_floor(major, minor, patch))]
+    bump = bumps[stated - 1]
+    if op == ">":
+        return [(">=", SemVer(major=bump[0], minor=bump[1], patch=bump[2]))]
+    upper = ("<", _semver_floor(*bump))
+    return [(">=", low), upper] if op == "=" else [upper]
+
+
+def _in_semver_set(version: SemVer, bounds: list[_SemverBound]) -> bool:
+    """Whether a version is in a comparator set, as node-semver and Cargo read one.
+
+    Every comparator holds by precedence. A prerelease is in the set only
+    when a comparator on its own ``major.minor.patch`` names a prerelease.
+    """
+    if not all(_COMPARISONS[op](version, bound) for op, bound in bounds):
+        return False
+    return not version.prerelease or any(
+        bound.prerelease and bound.truncate() == version.truncate() for _, bound in bounds
+    )
+
+
+def _npm_range(spec: str) -> Callable[[SemVer], bool] | None:
+    """Parse an npm range into a predicate, or None when it is not one.
+
+    Comparator sets are joined by ``||``, the comparators of a set by a
+    space; ``A - B`` is the set ``>=A <=B``. The predicate takes a version
+    without build metadata.
+    """
     spec = _NPM_OPERATOR_SPACE_RE.sub(r"\1", spec)
     spec = _NPM_RUN_OF_WHITESPACE_RE.sub(" ", spec)
-    try:
-        return NpmSpec(spec)
-    except ValueError:
-        return None
+    sets: list[list[_SemverBound]] = []
+    for alternative in spec.split("||"):
+        low, hyphen, high = (alternative.strip() or "*").partition(" - ")
+        bounds: list[_SemverBound] = []
+        for comparator in [f">={low}", f"<={high}"] if hyphen else low.split(" "):
+            read = _semver_bounds(comparator)
+            if read is None:
+                return None
+            bounds.extend(read)
+        sets.append(bounds)
+    return lambda version: any(_in_semver_set(version, bounds) for bounds in sets)
 
 
 def select_npm_version(version_constraint: str, published_versions: list[str]) -> str | None:
@@ -90,17 +183,14 @@ def select_npm_version(version_constraint: str, published_versions: list[str]) -
     if not spec or spec.startswith(_UNSUPPORTED_NPM_PREFIXES):
         return None
 
-    npm_spec = _npm_spec(spec)
-    if npm_spec is None:
+    in_range = _npm_range(spec)
+    if in_range is None:
         return None
 
     candidates: list[tuple[SemVer, str]] = []
     for raw_version in published_versions:
-        try:
-            parsed = SemVer(raw_version.lstrip("v"))
-        except ValueError:
-            continue
-        if npm_spec.match(parsed):
+        parsed = _npm_version(raw_version)
+        if parsed is not None and in_range(parsed):
             candidates.append((parsed, raw_version))
 
     if not candidates:
@@ -234,25 +324,26 @@ def _npm_matcher(constraint: str) -> _Matcher | None:
     if spec.startswith(_UNSUPPORTED_NPM_PREFIXES):
         return None
     # ``==1.2.3`` is how a lockfile entry is written here: an exact version.
-    npm_spec = _npm_spec(spec.removeprefix("=="))
-    return None if npm_spec is None else npm_spec.match
+    return _npm_range(spec.removeprefix("=="))
+
+
+_CARGO_BARE_VERSION_RE = re.compile(r"\d+(?:\.\d+){0,2}(?:[-+].*)?")
 
 
 def _cargo_matcher(constraint: str) -> _Matcher | None:
     """Cargo requirements: comma-separated comparators, a bare version is a caret."""
     spec = constraint.strip().removeprefix("==")
-    if "||" in spec:
-        return None
-    comparators: list[str] = []
+    bounds: list[_SemverBound] = []
     for raw in spec.split(","):
         comparator = _NPM_OPERATOR_SPACE_RE.sub(r"\1", raw.strip())
-        if len(comparator.split()) != 1:
-            return None
-        if comparator[0].isdigit() and "*" not in comparator:
+        # A wildcard (``1.*``, ``1.2.x``) covers what it prefixes; it is no caret.
+        if _CARGO_BARE_VERSION_RE.fullmatch(comparator):
             comparator = f"^{comparator}"
-        comparators.append(comparator)
-    npm_spec = _npm_spec(" ".join(comparators))
-    return None if npm_spec is None else npm_spec.match
+        read = _semver_bounds(comparator)
+        if read is None:
+            return None
+        bounds.extend(read)
+    return lambda version: _in_semver_set(version, bounds)
 
 
 _HEX_COMPARATOR_RE = re.compile(
@@ -867,8 +958,11 @@ def satisfies(ecosystem: Ecosystem, version: str, constraint: str) -> bool | Non
 
     Prereleases follow each ecosystem's resolver: ``2.0.0-rc.1`` satisfies
     ``^1.0`` nowhere, and satisfies a range that would include it by order
-    only when the range itself names a prerelease (in Composer, when the
-    constraint's stability reaches it). Maven ranges, and Go and R
+    only when the range itself names a prerelease (in npm and Cargo, one of
+    the same ``major.minor.patch``; in Composer, when the constraint's
+    stability reaches it). Every bound of a range holds whichever of them
+    names a prerelease: ``>=2.0.0-rc.1 <2.0.0`` holds ``2.0.0-rc.2`` and
+    never ``2.0.0``. Maven ranges, and Go and R
     requirements, are plain comparisons, so ``[1.0,2.0)`` holds ``2.0-rc1``.
     Build metadata never changes the answer.
 
