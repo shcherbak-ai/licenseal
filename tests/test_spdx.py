@@ -28,6 +28,7 @@ from licenseal.analysis.spdx import (
     read_license_array,
     spdx_from_license_url,
     unresolved_list_readings,
+    unresolved_operand_expression,
 )
 
 
@@ -625,6 +626,11 @@ class TestMalformedExpressionConjunction:
             ("MIT AND UNKNOWN AND", "MIT AND UNKNOWN"),
             # Whitespace does not matter.
             ("  MIT\tAND   GPL-3.0-only  AND ", "GPL-3.0-only AND MIT AND UNKNOWN"),
+            # License IDs with no operator between them: each one is named.
+            ("MIT GPL-3.0-only", "GPL-3.0-only AND MIT AND UNKNOWN"),
+            ("GPL-3.0-only MIT", "GPL-3.0-only AND MIT AND UNKNOWN"),
+            ("GPL-2.0 MIT  Zlib", "GPL-2.0-only AND MIT AND UNKNOWN AND Zlib"),
+            ("GPL-2.0+ MIT", "GPL-2.0-or-later AND MIT AND UNKNOWN"),
         ],
     )
     def test_malformed_expression_becomes_a_conjunction(self, raw, expected):
@@ -660,6 +666,15 @@ class TestMalformedExpressionConjunction:
             "MIT WITH Foo Bar AND",
             "MIT or GPL-3.0-only or",
             "(MIT) (Apache-2.0",
+            # No operator, and a word that is not a listed license ID.
+            "Dual GPL-3.0-only",
+            "GPL-3.0-only license",
+            "GPL-3.0-only CustomLicense",
+            "GPL-3.0-only; MIT",
+            "GPL-3.0-only & MIT",
+            "GPL-3.0-only + MIT",
+            "gpl-3.0-only mit",
+            "MIT (GPL-3.0-only)",
             # Malformed, but no license is named.
             "AND",
             "OR AND",
@@ -680,6 +695,121 @@ class TestMalformedExpressionConjunction:
         assert malformed_expression_conjunction(raw) == ""
         shorter = " AND ".join(["MIT"] * 5) + " AND"
         assert malformed_expression_conjunction(shorter) == "MIT AND UNKNOWN"
+
+
+class TestUnresolvedOperandExpression:
+    """A string that splits at its operators into operands, not all of them
+    licenses, is judged as the expression those operands form, with
+    ``UNKNOWN`` for each one that is not a license."""
+
+    @pytest.mark.parametrize(
+        "raw, expected",
+        [
+            # An operand of several words is one unresolved operand.
+            ("AGPL-3.0-only AND Some Custom Terms", "AGPL-3.0-only AND UNKNOWN"),
+            ("Some Custom Terms AND AGPL-3.0-only", "AGPL-3.0-only AND UNKNOWN"),
+            ("MIT AND Some Custom Terms AND GPL-3.0-only", "GPL-3.0-only AND MIT AND UNKNOWN"),
+            # So is a pointer to a bundled file, at either end.
+            ("GPL-3.0-only AND SEE LICENSE IN LICENSE.txt", "GPL-3.0-only AND UNKNOWN"),
+            ("SEE LICENSE IN LICENSE.txt AND GPL-3.0-only", "GPL-3.0-only AND UNKNOWN"),
+            ("GPL-3.0-only AND see COPYING", "GPL-3.0-only AND UNKNOWN"),
+            # And a wording that says proprietary.
+            ("GPL-3.0-only AND Commercial License", "GPL-3.0-only AND UNKNOWN"),
+            ("GPL-3.0-only AND Proprietary EULA", "GPL-3.0-only AND UNKNOWN"),
+            ("Internal use only AND GPL-3.0-only", "GPL-3.0-only AND UNKNOWN"),
+            # An operand that resolves as a whole is the license it resolves to.
+            ("GPL-3.0-only AND MIT license", "GPL-3.0-only AND MIT"),
+            ("GPL-3.0-only AND Apache License 2.0", "Apache-2.0 AND GPL-3.0-only"),
+            (
+                "Some Custom Terms AND cddl+gpl",
+                "(CDDL-1.0 OR GPL-2.0-with-classpath-exception) AND UNKNOWN",
+            ),
+            (
+                "Some Custom Terms AND https://www.gnu.org/licenses/gpl-3.0.html",
+                "GPL-3.0-only AND UNKNOWN",
+            ),
+            # A URL nobody recognizes is an operand like any other text.
+            ("GPL-3.0-only AND https://example.com/terms", "GPL-3.0-only AND UNKNOWN"),
+            # Lowercase operators are operators.
+            ("GPL-3.0-only and see the LICENSE file", "GPL-3.0-only AND UNKNOWN"),
+            ("see license in LICENSE.txt and GPL-3.0-only", "GPL-3.0-only AND UNKNOWN"),
+            ("GPL-3.0-only and Commercial License", "GPL-3.0-only AND UNKNOWN"),
+            ("GPLv3 or later", "GPL-3.0-only OR UNKNOWN"),
+            ("GPL-3.0-only And Some Custom Terms", "GPL-3.0-only AND UNKNOWN"),
+            # ``OR`` splits first, and a group keeps its operands together.
+            ("GPL-3.0-only OR Some Custom Terms", "GPL-3.0-only OR UNKNOWN"),
+            ("MIT OR GPL-3.0-only AND Some Custom Terms", "GPL-3.0-only AND UNKNOWN OR MIT"),
+            ("GPL-3.0-only AND (MIT OR Some Custom Terms)", "(MIT OR UNKNOWN) AND GPL-3.0-only"),
+            ("(GPL-3.0-only AND Some Custom Terms) OR MIT", "GPL-3.0-only AND UNKNOWN OR MIT"),
+            ("( GPL-3.0-only AND Some Custom Terms )", "GPL-3.0-only AND UNKNOWN"),
+            # An operand that is an ID nobody recognizes stays as written.
+            ("CustomLicense AND Some Custom Terms", "CustomLicense AND UNKNOWN"),
+            # A dangling operator leaves an operand that is not a license.
+            ("GPL-3.0-only AND Some Custom Terms AND", "GPL-3.0-only AND UNKNOWN"),
+        ],
+    )
+    def test_operands_form_an_expression(self, raw, expected):
+        assert normalize_license(raw) in ("UNKNOWN", "Proprietary")
+        assert unresolved_operand_expression(raw) == expected
+        # The result is a well-formed, canonical expression.
+        assert normalize_license(expected) == expected
+        assert unresolved_operand_expression(expected) == ""
+
+    @pytest.mark.parametrize(
+        "raw",
+        [
+            # Well-formed expressions, recognized or not.
+            "MIT",
+            "GPL-3.0-only AND CustomLicense",
+            "GPL-3.0-only OR MIT",
+            "UNKNOWN",
+            # Nothing declared.
+            "",
+            "   ",
+            # No operator: the string is one operand, whatever it names.
+            "Some Custom Terms",
+            "GPL-3.0-only license terms",
+            "Dual GPL-3.0-only",
+            "MIT GPL-3.0-only",
+            "Commercial License",
+            "SEE LICENSE IN LICENSE.txt",
+            "GPL-3.0-only; MIT",
+            "GPL-3.0-only & MIT",
+            "GPL-3.0-only + MIT",
+            "you can redistribute it and/or modify it under the GPL-3.0-only",
+            # Operands, of which none resolves: a license inside one is not
+            # looked for.
+            "Some Custom Terms AND Other Custom Terms",
+            "Free for personal and commercial use",
+            "See the LICENSE and NOTICE files",
+            "This software is licensed under the GPL and may be redistributed",
+            "Licensed under the GPL-3.0-only or any later version",
+            "Proprietary and confidential",
+            "AND",
+            # A list separator beside an operator: which of the two binds
+            # tighter is not known, so the string has no reading.
+            "Some Custom Terms AND MIT/GPL-3.0-only",
+            "Some Custom Terms AND MIT, GPL-3.0-only",
+            "MIT/Apache-2.0 and GPL-3.0-only",
+            "MIT, Apache-2.0 or GPL-3.0-only",
+            "GPL-3.0-only AND (MIT OR Apache-2.0, see NOTICE)",
+            # A group left open hides the operator inside it.
+            "(GPL-3.0-only AND Some Custom Terms",
+        ],
+    )
+    def test_anything_else_has_no_expression(self, raw):
+        assert unresolved_operand_expression(raw) == ""
+
+    def test_string_over_the_length_limit_has_no_expression(self):
+        raw = "GPL-3.0-only AND " + "Some Custom Terms " * 12
+        assert len(raw) > 200
+        assert unresolved_operand_expression(raw) == ""
+        assert unresolved_operand_expression(raw[:60]) == "GPL-3.0-only AND UNKNOWN"
+
+    def test_whitespace_and_line_breaks_do_not_matter(self):
+        assert unresolved_operand_expression(" GPL-3.0-only\tAND\n Some  Custom Terms ") == (
+            "GPL-3.0-only AND UNKNOWN"
+        )
 
 
 class TestOversizedLicenseString:

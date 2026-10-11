@@ -1517,7 +1517,8 @@ def malformed_expression_conjunction(raw: str) -> str:
     ``UNKNOWN`` for it. This returns what it is judged as instead — every
     license it names applying together, plus one ``UNKNOWN`` operand for the
     part that could not be read — so it can be a violation and is never
-    compatible.
+    compatible. A string that is nothing but listed license IDs, with no
+    operator between them (``MIT GPL-3.0-only``), is read the same way.
 
     The result is in canonical form. It is ``""`` when ``raw`` is a
     well-formed expression, is not made of expression tokens (prose is never
@@ -1527,6 +1528,12 @@ def malformed_expression_conjunction(raw: str) -> str:
     text = _INNER_PAREN_SPACE_RE.sub("", " ".join(raw.split()))
     if len(text) > _MAX_EXPRESSION_LENGTH or _looks_like_spdx(text):
         return ""
+    words = text.split()
+    if len(words) > 1 and all(
+        canonical_license_id(word).rstrip("+") in KNOWN_SPDX_IDS for word in words
+    ):
+        # Any other word beside the licenses, and the string is prose.
+        return _canon(" AND ".join([*words, "UNKNOWN"]))
     operands: list[str] = []
     tokens = text.replace("(", " ").replace(")", " ").split()
     # Operands sit between ``AND`` / ``OR``; within one, ``WITH`` separates
@@ -1558,6 +1565,87 @@ def _split_tokens(tokens: list[str], separators: frozenset[str]) -> list[list[st
             runs.append([])
         else:
             runs[-1].append(token)
+    return runs
+
+
+def unresolved_operand_expression(raw: str) -> str:
+    """Expression that stands in for a license string with an operand that is not a license.
+
+    A string that splits at its ``AND`` / ``OR`` operators into operands, of
+    which one is several words, a pointer to a bundled file, or a wording
+    that says proprietary, is not an expression :func:`normalize_license`
+    returns: it reads ``UNKNOWN``, or ``Proprietary`` when a rule for the
+    whole string matched first. The operands that are licenses still bind.
+    This returns the expression the operands form, with ``UNKNOWN`` for each
+    one that is not a license, so that the rules for unresolved operands
+    apply to it: in an ``AND`` a violating operand makes it a violation, and
+    in an ``OR`` a choice that did not resolve is never the one taken.
+
+    The operators are read in either case, at paren depth 0, ``OR`` before
+    ``AND``. An operand is the whole text between two of them, normalized as
+    one value: it resolves or it does not, and no text is searched for
+    license names.
+
+    The result is in canonical form. It is ``""`` when ``raw`` is a
+    well-formed expression, is longer than an expression gets, has no
+    operator, or has no operand that resolves. It is ``""`` as well when an
+    operand that does not resolve holds a comma or a slash: whether such a
+    list separator binds tighter than the operator is anyone's guess.
+    """
+    text = _INNER_PAREN_SPACE_RE.sub("", " ".join(raw.split()))
+    if len(text) > _MAX_EXPRESSION_LENGTH or _looks_like_spdx(text):
+        return ""
+    operands: list[str] = []
+    expression = _operand_expression(text, operands)
+    if expression is None or len(operands) < 2 or all(operand == "UNKNOWN" for operand in operands):
+        return ""
+    return _canon(expression)
+
+
+def _operand_expression(text: str, operands: list[str]) -> str | None:
+    """Expression for ``text``, split into operands where it does not resolve whole.
+
+    Each operand is appended to ``operands`` as the license it resolves to,
+    or as ``UNKNOWN``. A value that reads as ``Proprietary`` on its own names
+    no license among other operands, and is unresolved like any other text.
+    ``None`` when an unresolved operand is a list, which has no single
+    reading beside an operator; a URL's slashes separate nothing.
+    """
+    text = _strip_outer_parens(text)
+    resolved = _normalize_part(text)
+    if resolved in ("UNKNOWN", "Proprietary"):
+        tokens = text.split()
+        for operator, join in (("OR", " OR ".join), ("AND", and_join_licenses)):
+            runs = _operator_runs(tokens, operator)
+            if len(runs) > 1:
+                parts: list[str] = []
+                for run in runs:
+                    part = _operand_expression(" ".join(run), operands)
+                    if part is None:
+                        return None
+                    parts.append(part)
+                return join(parts)
+        if ("," in text or "/" in text) and "://" not in text:
+            return None
+        resolved = "UNKNOWN"
+    operands.append(resolved)
+    return resolved
+
+
+def _operator_runs(tokens: list[str], operator: str) -> list[list[str]]:
+    """Split ``tokens`` into the runs between ``operator`` tokens outside parentheses.
+
+    The operator is matched in either case, and an empty run is kept: it is
+    the operand a dangling operator lacks.
+    """
+    runs: list[list[str]] = [[]]
+    depth = 0
+    for token in tokens:
+        if depth == 0 and token.upper() == operator:
+            runs.append([])
+        else:
+            runs[-1].append(token)
+            depth += token.count("(") - token.count(")")
     return runs
 
 

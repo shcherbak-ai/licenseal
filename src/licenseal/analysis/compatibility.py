@@ -18,6 +18,7 @@ from licenseal.analysis.spdx import (
     malformed_expression_conjunction,
     normalize_license,
     unresolved_list_readings,
+    unresolved_operand_expression,
 )
 from licenseal.models import (
     AnalysisReport,
@@ -531,6 +532,26 @@ def _check_compat(
                     reason=_unresolved_list_reason(license_info, judged.reason),
                 )
 
+    # A declared string that splits at its operators into operands, one of
+    # which is not a license, did not normalize either: it reads UNKNOWN, or
+    # Proprietary when a rule for the whole string matched first. The
+    # operands that are licenses still bind, so it is judged as the
+    # expression its operands form. Only a violation replaces the result the
+    # string has below, so this reading never lowers a verdict.
+    if not license_info.reviewed and (license_info.is_unknown or dep_license == "Proprietary"):
+        expression = unresolved_operand_expression(license_info.license_raw or "")
+        if expression:
+            judged = _check_compat(
+                project_spdx, project_risk, replace(license_info, license_id=expression)
+            )
+            if judged.verdict == CompatibilityVerdict.INCOMPATIBLE:
+                return CompatibilityResult(
+                    license_info=license_info,
+                    risk_level=judged.risk_level,
+                    verdict=judged.verdict,
+                    reason=_unresolved_operand_reason(license_info, judged.reason),
+                )
+
     # Proprietary deps short-circuit the matrix: every proprietary license
     # carries custom commercial terms (paid use, no-redistribution, royalties,
     # field-of-use limits) that licenseal cannot reason about. A human must
@@ -754,6 +775,20 @@ def _malformed_expression_reason(license_info: LicenseInfo, judged_reason: str) 
         f"{name} declares '{_shown_raw(license_info)}', which is not a well-formed license "
         f"expression and is judged as every license it names applying together — "
         f"{judged_reason}"
+    )
+
+
+def _unresolved_operand_reason(license_info: LicenseInfo, judged_reason: str) -> str:
+    """Reason for a violation found among the operands of a string that did not normalize.
+
+    ``judged_reason`` is the reason for the expression the operands form,
+    which names that expression and the conflict.
+    """
+    name = license_info.dependency.name
+    return (
+        f"{name} declares '{_shown_raw(license_info)}', which is not a well-formed license "
+        f"expression and is judged by its operands, with UNKNOWN for each one that is not a "
+        f"license — {judged_reason}"
     )
 
 
