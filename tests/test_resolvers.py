@@ -880,6 +880,49 @@ class TestNpmRegistryResolver:
         assert extract_npm_pinned_version("^18.0.0") is None
         assert extract_npm_pinned_version("workspace:*") is None
 
+    @pytest.mark.parametrize(
+        ("spec", "version"),
+        [
+            ("18.2.0", "18.2.0"),
+            ("v18.2.0", "18.2.0"),
+            # npm's equality operator, with or without a space after it.
+            ("=18.2.0", "18.2.0"),
+            ("= 18.2.0", "18.2.0"),
+            ("=v18.2.0", "18.2.0"),
+            (" =18.2.0 ", "18.2.0"),
+            ("=18.2.0-rc.1", "18.2.0-rc.1"),
+            ("=18.2.0+build.5", "18.2.0+build.5"),
+            # How a lockfile entry is written here.
+            ("==18.2.0", "18.2.0"),
+        ],
+    )
+    def test_one_exact_version_is_pinned(self, spec, version):
+        assert extract_npm_pinned_version(spec) == version
+
+    @pytest.mark.parametrize(
+        "spec",
+        [
+            "",
+            "=",
+            # A partial version covers a range of versions.
+            "=18.2",
+            "=18",
+            "=18.x",
+            ">=18.2.0",
+            "<=18.2.0",
+            "~18.2.0",
+            "=18.2.0 || =19.0.0",
+            "=18.2.0 <19.0.0",
+            "18.2.0 - 19.0.0",
+            "=^18.2.0",
+            "= =18.2.0",
+            "===18.2.0",
+            "=latest",
+        ],
+    )
+    def test_anything_but_one_exact_version_is_not_pinned(self, spec):
+        assert extract_npm_pinned_version(spec) is None
+
     def test_normalize_repository_url_variants(self):
         assert normalize_npm_repository_url("git+https://github.com/org/repo.git#main") == (
             "https://github.com/org/repo"

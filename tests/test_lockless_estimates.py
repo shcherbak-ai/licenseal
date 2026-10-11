@@ -94,6 +94,10 @@ class TestExactVersion:
             (Ecosystem.PYTHON, "===2.28.1"),
             (Ecosystem.NPM, "18.2.0"),
             (Ecosystem.NPM, "==18.2.0"),
+            (Ecosystem.NPM, "=18.2.0"),
+            (Ecosystem.NPM, "= 18.2.0"),
+            (Ecosystem.NPM, "v18.2.0"),
+            (Ecosystem.NPM, "=v18.2.0"),
             (Ecosystem.RUST, "=1.0.193"),
             (Ecosystem.RUST, "==1.0.193"),
             (Ecosystem.JAVA, "1.0.0"),
@@ -124,6 +128,9 @@ class TestExactVersion:
             (Ecosystem.PYTHON, "==2.*"),
             (Ecosystem.PYTHON, ""),
             (Ecosystem.NPM, "^18.2.0"),
+            (Ecosystem.NPM, "=18.2"),
+            (Ecosystem.NPM, ">=18.2.0"),
+            (Ecosystem.NPM, "=18.2.0 || =19.0.0"),
             (Ecosystem.NPM, "latest"),
             (Ecosystem.NPM, ""),
             (Ecosystem.RUST, "1.0"),
@@ -272,6 +279,26 @@ class TestRegistryWalkPerEcosystem:
             # Pinned exactly by its parent, but the parent's version is a pick.
             "child": ("==1.0.0", True),
         }
+        assert missing == ["package.json"]
+
+    @pytest.mark.parametrize("spec", ["2.0.0", "=2.0.0", "= 2.0.0", "v2.0.0", "=v2.0.0"])
+    @respx.mock
+    def test_npm_exact_version_in_any_spelling(self, tmp_path: Path, spec: str):
+        # One exact version, bare or behind ``=`` or ``v``: the registry is
+        # asked for that version (the package's version list is not served
+        # here), and the row is not an estimate. Its child is: the walk
+        # picked it, which is also why the manifest is still recorded as
+        # having no lockfile, exactly as for the bare spelling.
+        (tmp_path / "package.json").write_text(json.dumps({"dependencies": {"pinned": spec}}))
+        _json(
+            "https://registry.npmjs.org/pinned/2.0.0",
+            {"version": "2.0.0", "dependencies": {"child": "^1.0.0"}},
+        )
+        _json("https://registry.npmjs.org/child", {"versions": {"1.2.0": {"version": "1.2.0"}}})
+        _json("https://registry.npmjs.org/child/1.2.0", {"version": "1.2.0"})
+
+        rows, missing = _scan(tmp_path)
+        assert rows == {"pinned": ("==2.0.0", False), "child": ("==1.2.0", True)}
         assert missing == ["package.json"]
 
     @respx.mock
@@ -794,6 +821,28 @@ class TestCheckCommand:
         _, data = _check_json(tmp_path, "--no-strict")
         rows = {d["name"]: (d["resolved_version"], d["estimated"]) for d in data["dependencies"]}
         assert rows == {"gone": ("", []), "found": ("1.0.0", ["version"])}
+
+    @pytest.mark.parametrize("mode", ["--transitive", "--no-transitive"])
+    @pytest.mark.parametrize("spec", ["=1.0.0", "= 1.0.0", "v1.0.0"])
+    @respx.mock
+    def test_npm_version_behind_an_equals_sign_is_not_marked(
+        self, tmp_path: Path, mode: str, spec: str
+    ):
+        # ``=1.0.0`` names one version, as ``1.0.0`` does. Only that version
+        # is served: the package's version list is never asked for.
+        (tmp_path / "package.json").write_text(
+            json.dumps({"name": "app", "license": "MIT", "dependencies": {"pinned": spec}})
+        )
+        _json("https://registry.npmjs.org/pinned/1.0.0", {"version": "1.0.0", "license": "MIT"})
+        result, data = _check_json(tmp_path, mode, "--no-require-lockfile")
+        assert result.exit_code == 0, result.output
+        (row,) = data["dependencies"]
+        assert (row["name"], row["resolved_version"], row["license"], row["estimated"]) == (
+            "pinned",
+            "1.0.0",
+            "MIT",
+            [],
+        )
 
     @respx.mock
     def test_pinned_release_missing_from_pypi_is_reported_at_an_estimated_version(

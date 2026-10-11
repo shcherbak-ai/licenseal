@@ -43,23 +43,22 @@ def _unpack_npm_alias(name: str, spec: str) -> tuple[str, str]:
 def _extract_pinned_version(version_constraint: str) -> str | None:
     """Return the exact npm version when the spec is pinned.
 
-    Accepts both npm-native bare versions (``1.2.3``) and licenseal's
-    internal lockfile-output form (``==1.2.3``), which the npm lockfile
-    parsers emit for resolved deps.
+    A spec pins when it is one complete version and nothing else: bare
+    (``1.2.3``), behind npm's equality operator (``=1.2.3``, ``= 1.2.3``),
+    or in licenseal's internal lockfile-output form (``==1.2.3``), which the
+    npm lockfile parsers emit for resolved deps. A ``v`` prefix is allowed
+    in each (``v1.2.3``, ``=v1.2.3``) and is not part of the version.
+
+    Anything else is a range and returns None: another operator, a partial
+    version (``=1.2`` covers every ``1.2.x``), several comparators, ``||``.
     """
     spec = version_constraint.strip()
-    if not spec or " " in spec or "||" in spec:
-        return None
     if spec.startswith("=="):
-        candidate = spec[2:].strip()
-        match = _PINNED_VERSION_RE.fullmatch(candidate)
-        return match.group(1) if match else None
-    if spec[0] in "^~<>*=":
-        return None
+        spec = spec[2:].strip()
+    elif spec.startswith("="):
+        spec = spec[1:].strip()
     match = _PINNED_VERSION_RE.fullmatch(spec)
-    if not match:
-        return None
-    return match.group(1)
+    return match.group(1) if match else None
 
 
 def _normalize_repository_url(url: str) -> str:
