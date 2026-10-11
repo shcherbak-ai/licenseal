@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import json
 import sys
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, cast
@@ -28,6 +29,7 @@ import click
 
 from licenseal.analysis.spdx import normalize_license
 from licenseal.models import CompatibilityResult, CompatibilityVerdict, Ecosystem, LicenseInfo
+from licenseal.report import _printable  # noqa: PLC2701
 
 if sys.version_info >= (3, 11):
     import tomllib  # pragma: no cover - Python 3.10 takes the other arm
@@ -120,6 +122,15 @@ def info_review_key(info: LicenseInfo) -> str:
     return review_key(dep.ecosystem, dep.effective_registry_name, info.resolved_version)
 
 
+def _shown_keys(keys: Iterable[str]) -> str:
+    """Review keys for an error message: sorted, comma-separated, and escaped.
+
+    A key holds a package, a version, or a source taken from the review file,
+    so it is printed the way the reports print such strings.
+    """
+    return ", ".join(_printable(key) for key in sorted(keys))
+
+
 def _normalize_reviewed_license(raw_license: str) -> str:
     normalized = normalize_license(raw_license)
     if normalized == "UNKNOWN":
@@ -145,8 +156,9 @@ def load_review_file(project_path: Path) -> ReviewFileContents:
             f"Invalid {REVIEW_FILE_NAME}: the file must be UTF-8 ({exc})."
         ) from exc
     except (tomllib.TOMLDecodeError, RecursionError) as exc:
-        # RecursionError: tables or arrays nested too deeply to parse.
-        raise click.ClickException(f"Invalid {REVIEW_FILE_NAME}: {exc}.") from exc
+        # RecursionError: tables or arrays nested too deeply to parse. A parse
+        # error can quote what it found in the file.
+        raise click.ClickException(f"Invalid {REVIEW_FILE_NAME}: {_printable(str(exc))}.") from exc
 
     entries = data.get("review", [])
     if not isinstance(entries, list):
@@ -209,7 +221,7 @@ def load_review_file(project_path: Path) -> ReviewFileContents:
             label = f"off-registry {ecosystem}:{package} from {source}"
         if key in seen:
             raise click.ClickException(
-                f"Invalid {REVIEW_FILE_NAME}: duplicate review entry for {label}."
+                f"Invalid {REVIEW_FILE_NAME}: duplicate review entry for {_printable(label)}."
             )
         seen.add(key)
         if source is not None and version_text.strip():
@@ -249,7 +261,7 @@ def apply_reviewed_licenses(
     if note_only:
         raise click.ClickException(
             "Review notes require matching reviewed license entries: "
-            + ", ".join(sorted(note_only))
+            + _shown_keys(note_only)
             + "."
         )
 
@@ -272,14 +284,13 @@ def apply_reviewed_licenses(
     if ineligible:
         raise click.ClickException(
             "Review entries can only override flagged dependencies; these match "
-            "already-compatible dependencies and should be removed: "
-            + ", ".join(sorted(ineligible))
+            "already-compatible dependencies and should be removed: " + _shown_keys(ineligible)
         )
-    unmatched = sorted(set(contents.licenses) - matched)
+    unmatched = set(contents.licenses) - matched
     if unmatched:
         raise click.ClickException(
             "Reviewed licenses did not match any resolved package versions: "
-            + ", ".join(unmatched)
+            + _shown_keys(unmatched)
             + "\nHint: a dependency upgrade likely moved past the pin. Open "
             "`licenseal.review.toml` and update the `version` field on the "
             "stale stanza(s) above to the new resolved version — but ONLY if "

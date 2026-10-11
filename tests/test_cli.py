@@ -971,6 +971,16 @@ class TestCheckCommand:
         ):
             apply_reviewed_licenses([], contents, set())
 
+    def test_apply_reviewed_licenses_names_a_note_only_entry_escaped(self):
+        # No review file loads into this state, so the message is checked here.
+        contents = ReviewFileContents(notes={"npm:evil\x1b[2J\u202epkg@1.0.0": "confirmed"})
+        with pytest.raises(click.ClickException) as raised:
+            apply_reviewed_licenses([], contents, set())
+        assert raised.value.message == (
+            "Review notes require matching reviewed license entries: "
+            "npm:evil\\x1b[2J\\u202epkg@1.0.0."
+        )
+
     def test_apply_reviewed_licenses_rejects_non_flagged_override(self):
         license_info = LicenseInfo(
             dependency=Dependency(

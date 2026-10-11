@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import io
 import json
 import re
@@ -471,6 +472,346 @@ class TestUntrustedStrings:
             )
             assert "bad\\ud800name" in result.stderr
             assert out_file.read_text(encoding="utf-8")
+
+
+def _mock_npm_registry_with_misses(packages: dict[str, dict[str, object]]) -> None:
+    """Like :func:`_mock_npm_registry`, with a 404 for every package not in ``packages``.
+
+    The deps.dev lookup the npm resolver falls back to answers 404 as well,
+    so a missing package stays unresolved.
+    """
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        known = [name for name in packages if path.startswith(f"/{name}")]
+        if not known:
+            return httpx.Response(404)
+        name = max(known, key=len)
+        document = {"name": name, "version": "1.0.0", **packages[name]}
+        body = {"versions": {"1.0.0": document}} if path == f"/{name}" else document
+        return httpx.Response(200, json=body)
+
+    respx.route(method="GET", host="registry.npmjs.org").mock(side_effect=respond)
+    respx.route(method="GET", host="api.deps.dev").mock(return_value=httpx.Response(404))
+
+
+class TestUntrustedStringsOnStderr:
+    """The lines ``check`` and ``init-review-file`` write to stderr show a
+    control character, a bidirectional control or a lone surrogate from a
+    manifest, a registry or the review file escaped, as the report body does.
+    Every assertion is on the bytes the stream received."""
+
+    # Each name with the form it is shown in.
+    HOSTILE = {
+        "osc\x1b]0;title\x07x": b"osc\\x1b]0;title\\x07x",
+        "bell\x07name": b"bell\\x07name",
+        "c1\x9b31mname": b"c1\\x9b31mname",
+        "rtl\u202ename": b"rtl\\u202ename",
+        "iso\u2066late": b"iso\\u2066late",
+    }
+    # What must not reach the terminal: ESC, BEL, the C1 control sequence
+    # introducer, and the two bidirectional controls, as UTF-8.
+    RAW = (b"\x1b", b"\x07", b"\xc2\x9b", b"\xe2\x80\xae", b"\xe2\x81\xa6")
+
+    @staticmethod
+    def _run(*args: str) -> tuple[int, bytes, bytes]:
+        result = CliRunner().invoke(main, list(args))
+        return result.exit_code, result.stdout_bytes, result.stderr_bytes
+
+    def _assert_no_raw_bytes(self, stream: bytes) -> None:
+        for raw in self.RAW:
+            assert raw not in stream, raw
+
+    def _project(self, project: Path, declared_in: str, spec: str = "1.0.0") -> None:
+        # The names are dependency keys of the manifest, or the dependencies
+        # a registry answer declares for a package. No registry has them.
+        hostile = dict.fromkeys(self.HOSTILE, spec)
+        direct = {"parent": "1.0.0", **(hostile if declared_in == "manifest" else {})}
+        (project / "package.json").write_text(
+            json.dumps({"name": "app", "license": "MIT", "dependencies": direct}),
+            encoding="ascii",
+        )
+        _mock_npm_registry_with_misses(
+            {
+                "parent": {
+                    "license": "MIT",
+                    "dependencies": hostile if declared_in == "registry" else {},
+                }
+            }
+        )
+
+    @pytest.mark.parametrize("declared_in", ["manifest", "registry"])
+    @respx.mock
+    def test_diagnostics_show_names_escaped(self, tmp_path, declared_in):
+        self._project(tmp_path, declared_in)
+        exit_code, _, stderr = self._run(
+            "check", "--path", str(tmp_path), "--no-require-lockfile", "--no-strict", "-f", "json"
+        )
+        assert exit_code == 0
+        for shown in self.HOSTILE.values():
+            assert (
+                b"Warning: package.json: the dependencies of " + shown + b" 1.0.0 could not be "
+                b"read from the registry; its transitive dependencies may be missing"
+            ) in stderr.splitlines()
+        self._assert_no_raw_bytes(stderr)
+
+    @pytest.mark.parametrize("declared_in", ["manifest", "registry"])
+    @pytest.mark.parametrize("output_format", ["table", "markdown", "json"])
+    @respx.mock
+    def test_failure_message_shows_names_escaped(self, tmp_path, declared_in, output_format):
+        self._project(tmp_path, declared_in)
+        out_file = tmp_path / f"report.{output_format}"
+        exit_code, _, stderr = self._run(
+            "check",
+            "--path",
+            str(tmp_path),
+            "--no-require-lockfile",
+            "-f",
+            output_format,
+            "-o",
+            str(out_file),
+        )
+        assert exit_code == 1
+        lines = stderr.splitlines()
+        assert b"License check failed: 0 violations, 0 warnings, 5 unknown, 1 ok" in lines
+        for shown in self.HOSTILE.values():
+            reason = "has no license information — manual review required".encode()
+            assert b"  ? " + shown + b" " + reason in lines
+        self._assert_no_raw_bytes(stderr)
+        saved = out_file.read_bytes()
+        if output_format == "json":
+            # The report keeps the names as they are; JSON writes them as
+            # ASCII escapes of its own.
+            names = {dep["name"] for dep in json.loads(saved)["dependencies"]}
+            assert names == {"parent", *self.HOSTILE}
+        self._assert_no_raw_bytes(saved)
+
+    @pytest.mark.parametrize("declared_in", ["manifest", "registry"])
+    @respx.mock
+    def test_init_review_file_note_shows_names_escaped(self, tmp_path, declared_in):
+        # A range no registry answers for leaves a dependency with no
+        # version to key a review on, and the note names it.
+        self._project(tmp_path, declared_in, spec="^1.0.0")
+        exit_code, _, stderr = self._run("init-review-file", "--path", str(tmp_path))
+        assert exit_code == 0
+        assert (
+            b"Note: 5 flagged dependencies could not be scaffolded (no resolved version, "
+            b"usually a manifest typo / yanked release / registry miss): "
+            + b", ".join(b"npm:" + shown for shown in sorted(self.HOSTILE.values()))
+            + b"."
+        ) in stderr.splitlines()
+        self._assert_no_raw_bytes(stderr)
+
+    @pytest.mark.parametrize("declared_in", ["manifest", "registry"])
+    @respx.mock
+    def test_init_review_file_diagnostics_show_names_escaped(self, tmp_path, declared_in):
+        self._project(tmp_path, declared_in)
+        exit_code, stdout, stderr = self._run("init-review-file", "--path", str(tmp_path))
+        assert exit_code == 0
+        assert stdout.splitlines() == [b"Wrote licenseal.review.toml with 5 review entries."]
+        for shown in self.HOSTILE.values():
+            assert (
+                b"Warning: package.json: the dependencies of " + shown + b" 1.0.0 could not be "
+                b"read from the registry; its transitive dependencies may be missing"
+            ) in stderr.splitlines()
+        self._assert_no_raw_bytes(stderr)
+
+    @staticmethod
+    def _reviewed_project(project: Path, review: str) -> None:
+        (project / "package.json").write_text(
+            json.dumps(
+                {
+                    "name": "app",
+                    "license": "MIT",
+                    "dependencies": {"parent": "1.0.0", "rtl\u202ename": "1.0.0"},
+                }
+            ),
+            encoding="ascii",
+        )
+        _mock_npm_registry_with_misses(
+            {"parent": {"license": "MIT"}, "rtl\u202ename": {"license": "MIT"}}
+        )
+        (project / "licenseal.review.toml").write_text(review, encoding="utf-8")
+
+    # A review entry whose package holds an escape sequence and a
+    # bidirectional override, written as TOML escapes.
+    _STANZA = (
+        '[[review]]\necosystem = "npm"\npackage = "evil\\u001B[2J\\u202Epkg"\n'
+        'version = "1.0.0"\nlicense = "{}"\n'
+    )
+    _SHOWN_KEY = b"npm:evil\\x1b[2J\\u202epkg@1.0.0"
+
+    @pytest.mark.parametrize(
+        "review, exit_code, message",
+        [
+            (
+                _STANZA.format(""),
+                0,
+                b"Warning: incomplete review entries were not applied: " + _SHOWN_KEY,
+            ),
+            (
+                _STANZA.format("MIT") * 2,
+                1,
+                b"Error: Invalid licenseal.review.toml: duplicate review entry for "
+                + _SHOWN_KEY
+                + b".",
+            ),
+            (
+                _STANZA.format("MIT"),
+                1,
+                b"Error: Reviewed licenses did not match any resolved package versions: "
+                + _SHOWN_KEY,
+            ),
+            (
+                '[[review]]\necosystem = "npm"\npackage = "rtl\\u202Ename"\n'
+                'version = "1.0.0"\nlicense = "MIT"\n',
+                1,
+                b"Error: Review entries can only override flagged dependencies; these match "
+                b"already-compatible dependencies and should be removed: "
+                b"npm:rtl\\u202ename@1.0.0",
+            ),
+            (
+                _STANZA.format("evil\\u001B[2J\\u202E terms"),
+                1,
+                b"Error: Invalid reviewed license 'evil\\x1b[2J\\u202e terms'. Use a valid SPDX "
+                b"ID or SPDX expression.",
+            ),
+        ],
+        ids=["incomplete", "duplicate", "unmatched", "not-flagged", "invalid-license"],
+    )
+    @respx.mock
+    def test_review_file_messages_show_entries_escaped(self, tmp_path, review, exit_code, message):
+        self._reviewed_project(tmp_path, review)
+        code, _, stderr = self._run(
+            "check", "--path", str(tmp_path), "--no-require-lockfile", "-f", "json"
+        )
+        assert code == exit_code
+        assert message in stderr.splitlines()
+        self._assert_no_raw_bytes(stderr)
+
+    @respx.mock
+    def test_review_file_that_does_not_parse_is_reported_escaped(self, tmp_path):
+        self._reviewed_project(tmp_path, '[[review]]\npackage = "evil\x1b[2J\u202epkg"\n')
+        code, _, stderr = self._run(
+            "check", "--path", str(tmp_path), "--no-require-lockfile", "-f", "json"
+        )
+        assert code == 1
+        assert b"Error: Invalid licenseal.review.toml: " in stderr
+        self._assert_no_raw_bytes(stderr)
+
+    @respx.mock
+    def test_project_license_lines_show_the_declared_value_escaped(self, tmp_path):
+        (tmp_path / "package.json").write_text(
+            json.dumps({"name": "app", "license": "MIT\u202e\x1b[2J"}), encoding="ascii"
+        )
+        exit_code, _, stderr = self._run("check", "--path", str(tmp_path), "-f", "json")
+        assert exit_code == 0
+        assert (
+            b"Warning: package.json declares the license 'MIT\\u202e\\x1b[2J', which is not a "
+            b"recognised license; dependencies are checked against Proprietary."
+        ) in stderr.splitlines()
+        self._assert_no_raw_bytes(stderr)
+
+    @staticmethod
+    def _installed_skill(project: Path, body: str, stamped_version: str) -> Path:
+        skill = project / ".claude" / "skills" / "licenseal-review" / "SKILL.md"
+        skill.parent.mkdir(parents=True)
+        digest = hashlib.sha256(body.encode("utf-8")).hexdigest()
+        skill.write_text(
+            f"{body}\n<!-- licenseal-skill-version: {stamped_version} -->\n"
+            f"<!-- licenseal-skill-body-sha256: {digest} -->\n",
+            encoding="utf-8",
+            newline="\n",
+        )
+        return skill
+
+    def test_skill_version_of_an_installed_skill_is_shown_escaped(self, tmp_path):
+        # The version is read back from a file of the scanned project.
+        self._installed_skill(tmp_path, "an older skill", "0.0.1\x1b[2J\u202e")
+        exit_code, _, stderr = self._run("check", "--path", str(tmp_path), "-f", "json")
+        assert exit_code == 0
+        assert b"Installed Claude skill (from licenseal 0.0.1\\x1b[2J\\u202e) is out of date" in (
+            stderr
+        )
+        self._assert_no_raw_bytes(stderr)
+
+        exit_code, stdout, stderr = self._run("install-skill", "--path", str(tmp_path))
+        assert exit_code == 0
+        assert b"Refreshed licenseal skill 0.0.1\\x1b[2J\\u202e " in stdout
+        self._assert_no_raw_bytes(stdout + stderr)
+
+
+class TestBidirectionalControlsAndEmphasis:
+    """The table and Markdown reports show a bidirectional control escaped,
+    and Markdown shows ``*`` as a character."""
+
+    @staticmethod
+    def _project(project: Path) -> None:
+        (project / "package.json").write_text(
+            json.dumps(
+                {
+                    "name": "app",
+                    "license": "MIT",
+                    "dependencies": {
+                        "rtl\u202ename": "1.0.0",
+                        "snake_case_name": "1.0.0",
+                        "star*name": "1.0.0",
+                    },
+                }
+            ),
+            encoding="ascii",
+        )
+        _mock_npm_registry(
+            {
+                "rtl\u202ename": {"license": "MIT"},
+                "snake_case_name": {"license": "MIT"},
+                "star*name": {"license": "**Custom** terms\u2067"},
+            }
+        )
+
+    @respx.mock
+    def test_table_shows_bidirectional_controls_escaped(self, tmp_path):
+        self._project(tmp_path)
+        exit_code, stdout = _check(tmp_path, "--no-strict")
+        file_exit_code, saved = _check_to_file(tmp_path, "table", "--no-strict")
+        assert exit_code == file_exit_code == 0
+        for table in (stdout, saved):
+            assert "rtl\\u202ename (1.0.0)" in table
+            assert "star*name declares '**Custom** terms\\u2067' which did not resolve" in (
+                " ".join(table.split())
+            )
+            assert not re.search("[\u202a-\u202e\u2066-\u2069]", table)
+
+    @respx.mock
+    def test_markdown_escapes_bidirectional_controls_and_asterisks(self, tmp_path):
+        self._project(tmp_path)
+        exit_code, stdout = _check(tmp_path, "-f", "markdown", "--no-strict")
+        file_exit_code, saved = _check_to_file(tmp_path, "markdown", "--no-strict")
+        assert exit_code == file_exit_code == 0
+        assert saved == stdout
+        assert _markdown_rows(saved) == [
+            "|[rtl\\\\u202ename (1.0.0)](https://www.npmjs.com/package/rtl%E2%80%AEname)|npm|prod|"
+            "[package.json](package.json)|[MIT](https://spdx.org/licenses/MIT.html)|permissive|✓|",
+            # An underscore inside a word starts no emphasis: left as it is.
+            "|[snake_case_name (1.0.0)](https://www.npmjs.com/package/snake_case_name)|npm|prod|"
+            "[package.json](package.json)|[MIT](https://spdx.org/licenses/MIT.html)|permissive|✓|",
+            "|[star\\*name (1.0.0)](https://www.npmjs.com/package/star%2Aname)|npm|prod|"
+            "[package.json](package.json)|UNKNOWN|unknown|?|",
+        ]
+        assert (
+            "- ? star\\*name declares '\\*\\*Custom\\*\\* terms\\\\u2067' which did not resolve "
+            "to a recognized license — manual review required"
+        ) in saved.splitlines()
+        assert not re.search("[\u202a-\u202e\u2066-\u2069]", saved)
+
+    @respx.mock
+    def test_json_reports_the_original_strings(self, tmp_path):
+        self._project(tmp_path)
+        _, raw_json = _check_to_file(tmp_path, "json", "--no-strict")
+        deps = {dep["name"]: dep for dep in json.loads(raw_json)["dependencies"]}
+        assert set(deps) == {"rtl\u202ename", "snake_case_name", "star*name"}
+        assert deps["star*name"]["license_raw"] == "**Custom** terms\u2067"
+        assert "declares '**Custom** terms\u2067' which" in deps["star*name"]["reason"]
 
 
 class TestAnalysisGaps:

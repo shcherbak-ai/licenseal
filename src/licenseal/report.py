@@ -36,9 +36,10 @@ _SPDX_OPERATORS = {"AND", "OR", "WITH"}
 _LINE_BREAKS_AND_TABS = re.compile(r"\r\n|[\n\r\t]")
 _CONTROL_CHARS = re.compile(r"[\x00-\x1f\x7f-\x9f]")
 # A surrogate in a ``str`` is always a lone one: a decoded pair is a single
-# character.
-_LONE_SURROGATES = re.compile(r"[\ud800-\udfff]")
-_MARKDOWN_SPECIALS = re.compile(r"[\\`\[\]<>|]")
+# character. The other two ranges are the bidirectional embedding, override
+# and isolate controls.
+_SURROGATES_AND_BIDI_CONTROLS = re.compile(r"[\ud800-\udfff\u202a-\u202e\u2066-\u2069]")
+_MARKDOWN_SPECIALS = re.compile(r"[\\`\[\]<>|*]")
 
 
 def _printable(value: str) -> str:
@@ -53,13 +54,15 @@ def _printable(value: str) -> str:
     A lone surrogate (an unpaired ``\\uD800``-style JSON escape) cannot be
     written to a terminal or a file in any encoding; it is shown as a
     ``\\uNNNN`` escape, so a report never fails to print or save over one.
+    A bidirectional control is shown the same way: it reorders the text
+    around it on screen, so a name could be displayed as another one.
 
     Presentation only: the data model and the JSON report keep the original
     string, so a dependency's identity is never rewritten.
     """
     value = _LINE_BREAKS_AND_TABS.sub(" ", value)
     value = _CONTROL_CHARS.sub(lambda match: f"\\x{ord(match.group()):02x}", value)
-    return _LONE_SURROGATES.sub(lambda match: f"\\u{ord(match.group()):04x}", value)
+    return _SURROGATES_AND_BIDI_CONTROLS.sub(lambda match: f"\\u{ord(match.group()):04x}", value)
 
 
 def _escape_md(value: str) -> str:
@@ -67,9 +70,11 @@ def _escape_md(value: str) -> str:
 
     Backslash-escapes what would end the cell (``|``) or start markup the
     string must not introduce: a link or an image (``[``, ``]``), a code span
-    (a backtick), raw HTML or an autolink (``<``, ``>``), and the backslash
-    itself. Parentheses only act as link syntax directly after a closing
-    bracket, which is escaped, so they are left alone.
+    (a backtick), raw HTML or an autolink (``<``, ``>``), emphasis (``*``),
+    and the backslash itself. Parentheses only act as link syntax directly
+    after a closing bracket, which is escaped, so they are left alone. So is
+    an underscore: it is common in package names, and inside a word it
+    starts no emphasis.
     """
     return _MARKDOWN_SPECIALS.sub(r"\\\g<0>", _printable(value))
 

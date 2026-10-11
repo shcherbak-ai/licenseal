@@ -1905,6 +1905,17 @@ class TestUntrustedStrings:
         # A character outside the BMP is one code point, not a surrogate pair.
         assert _printable("a\U0001f600b") == "a\U0001f600b"
 
+    def test_printable_shows_bidirectional_controls(self):
+        # The embedding and override controls, and the isolates.
+        assert _printable("a\u202ab\u202bc\u202cd\u202de\u202ef") == (
+            "a\\u202ab\\u202bc\\u202cd\\u202de\\u202ef"
+        )
+        assert _printable("a\u2066b\u2067c\u2068d\u2069e") == "a\\u2066b\\u2067c\\u2068d\\u2069e"
+        # The characters on either side of the two ranges are left as they are.
+        assert _printable("\u2029\u202f\u2065\u206a") == "\u2029\u202f\u2065\u206a"
+        # Right-to-left text needs no control character and is not rewritten.
+        assert _printable("\u05e9\u05dc\u05d5\u05dd") == "\u05e9\u05dc\u05d5\u05dd"
+
     def test_table_with_lone_surrogates_can_be_written(self):
         for console, buf in (
             _make_console(width=300),
@@ -2104,9 +2115,34 @@ class TestUntrustedStrings:
             if "|npm|" in line:
                 assert len(re.sub(r"\\.", "", line).split("|")) == 9
 
+    def test_markdown_shows_asterisks_as_characters(self):
+        report = AnalysisReport(
+            project_license="MIT",
+            results=[
+                _make_result(
+                    "star*name",
+                    "UNKNOWN",
+                    RiskLevel.UNKNOWN,
+                    CompatibilityVerdict.UNKNOWN,
+                    ecosystem=Ecosystem.NPM,
+                    reason="star*name declares '**Custom** *terms*' which did not resolve",
+                    resolved_version="1.0.0",
+                    source="pkgs/*/package.json",
+                    reviewed_license_id="MIT",
+                    review_note="see **notes**",
+                ),
+            ],
+        )
+        md = render_markdown(report)
+        assert "*" not in re.sub(r"\\\*|^\*\*(Project license|Summary):\*\*", "", md, flags=re.M)
+        assert "|[star\\*name (1.0.0)](https://www.npmjs.com/package/star%2Aname)|npm|" in md
+        assert "[pkgs/\\*/package.json](pkgs/%2A/package.json)" in md
+        assert "- ? star\\*name declares '\\*\\*Custom\\*\\* \\*terms\\*' which did not" in md
+        assert "|see \\*\\*notes\\*\\*|" in md
+
     def test_markdown_of_well_formed_strings_is_not_escaped(self):
-        # Parentheses, underscores, asterisks and ampersands are common in
-        # names, versions and notes and need no escaping.
+        # Parentheses, underscores and ampersands are common in names,
+        # versions and notes and need no escaping.
         report = AnalysisReport(
             project_license="Apache-2.0",
             results=[
@@ -2116,7 +2152,7 @@ class TestUntrustedStrings:
                     RiskLevel.WEAK_COPYLEFT,
                     CompatibilityVerdict.WARNING,
                     ecosystem=Ecosystem.NPM,
-                    reason="uses MPL-2.0 (weak copyleft) — review *this* & that; ok?",
+                    reason="uses MPL-2.0 (weak copyleft) — review this & that; ok?",
                     resolved_version="1.0.0+build.5",
                     source="packages/@scope/web_app/package.json",
                     reviewed_license_id="MIT",
@@ -2132,7 +2168,7 @@ class TestUntrustedStrings:
             "(https://www.npmjs.com/package/@scope/typing_extensions)|npm|prod|"
             "[packages/@scope/web_app/package.json](packages/@scope/web_app/package.json)|"
         ) in md
-        assert "- ⚠ uses MPL-2.0 (weak copyleft) — review *this* & that; ok?" in md
+        assert "- ⚠ uses MPL-2.0 (weak copyleft) — review this & that; ok?" in md
 
     def test_package_url_percent_encodes_names_and_versions(self):
         def url(name: str, ecosystem: Ecosystem, version: str = "", registry_name: str = "") -> str:

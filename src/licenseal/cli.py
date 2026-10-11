@@ -423,10 +423,13 @@ def _echo_read_diagnostics(view: list[ReportDiagnostic]) -> int:
     fallback, a lockfile in an unknown version read on a best-effort basis)
     and accepted *estimates* — the caller folds this into the ``--strict``
     exit decision and a one-line summary.
+
+    A path is a name on disk and a reason quotes names from manifests and
+    registries, so both are printed escaped, as the reports print them.
     """
     gap_paths: set[str] = set()
     for diag in view:
-        click.echo(f"Warning: {diag.path}: {diag.reason}", err=True)
+        click.echo(f"Warning: {_printable(diag.path)}: {_printable(diag.reason)}", err=True)
         if diag.severity == "gap":
             gap_paths.add(diag.path)
     return len(gap_paths)
@@ -1243,7 +1246,7 @@ def check(
     if contents.incomplete:
         click.echo(
             "Warning: incomplete review entries were not applied: "
-            + ", ".join(contents.incomplete),
+            + ", ".join(_printable(key) for key in contents.incomplete),
             err=True,
         )
 
@@ -1578,8 +1581,9 @@ def _project_skill_staleness_hint(project_path: Path) -> str | None:
     except (OSError, UnicodeDecodeError):
         # Unreadable, or not UTF-8: not a file licenseal wrote.
         return None
+    # The version is read back from a file of the scanned project.
     return (
-        f"Installed Claude skill (from licenseal {stamped_version}) is out of date; "
+        f"Installed Claude skill (from licenseal {_printable(stamped_version)}) is out of date; "
         f"run `licenseal install-skill` to refresh it for licenseal {_package_version()}."
     )
 
@@ -1635,8 +1639,8 @@ def install_skill(path: Path, force: bool) -> None:
             target_file.write_text(rendered, encoding="utf-8", newline="\n")
             if stamped_version and stamped_version != current_version:
                 click.echo(
-                    f"Refreshed licenseal skill {stamped_version} → {current_version} "
-                    f"at {target_file}"
+                    f"Refreshed licenseal skill {_printable(stamped_version)} → "
+                    f"{current_version} at {target_file}"
                 )
             else:
                 click.echo(f"Updated licenseal skill at {target_file}")
