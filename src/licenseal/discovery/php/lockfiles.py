@@ -37,7 +37,7 @@ from pathlib import Path
 from typing import Any, cast
 
 from licenseal._graph import compute_direct_ancestors
-from licenseal.discovery._origin import UNRECORDED, path_origin
+from licenseal.discovery._origin import UNRECORDED, path_origin, repository_key
 from licenseal.discovery._read import (
     load_json,
     record_unexpected_type,
@@ -52,7 +52,6 @@ from licenseal.discovery.php.composer_json import (
     composer_repositories,
     inline_package_origins,
     package_origin,
-    repository_key,
 )
 from licenseal.models import Dependency, DependencyGroup, Ecosystem
 

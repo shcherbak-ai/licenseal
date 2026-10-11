@@ -3870,7 +3870,10 @@ class TestNpmLockfilesOffRegistry:
 
     @respx.mock
     def test_bun_lock(self, tmp_path):
-        project = self._project(tmp_path, **{"@scope/git-scoped": "github:team/git-scoped"})
+        project = self._project(
+            tmp_path,
+            **{"@scope/git-scoped": "git+ssh://git@git.example.org/team/git-scoped.git"},
+        )
         packages = {
             "regular": ["regular@1.0.0", "", {}, "sha512-reg"],
             "mirrored": ["mirrored@2.0.0", "https://npm.internal.example.org/", {}, "sha512-mir"],

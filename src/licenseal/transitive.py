@@ -29,6 +29,7 @@ Notes on registry-recursion fallback:
 from __future__ import annotations
 
 import contextvars
+import posixpath
 from collections.abc import Callable, Container, Iterable, Iterator, Mapping
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
@@ -39,7 +40,7 @@ import httpx
 
 from licenseal._concurrency import map_with_context
 from licenseal._graph import compute_direct_ancestors
-from licenseal.discovery._origin import UNRECORDED
+from licenseal.discovery._origin import UNRECORDED, same_source
 from licenseal.discovery._read import (
     decode_text,
     read_xml_bytes,
@@ -282,21 +283,18 @@ def _declarations(direct_deps: list[Dependency]) -> _Declarations:
 
 
 def _meets(row: Dependency, declared: Dependency) -> bool | None:
-    """Whether the version a resolved row holds satisfies a declaration of its package.
+    """Whether the version a resolved row holds satisfies a registry requirement on its package.
 
     ``declared`` is a direct dep, or an unresolved requirement on the
     package. None when the two cannot be compared: the constraint is not one
     the ecosystem's grammar reads (a branch, a dist-tag, an unresolved
-    property), the row holds no version, or the declaration has an origin
-    and so takes its version from that source, not from a constraint.
+    property), or the row holds no version.
 
     A prerelease that fails the constraint is not told apart either. Whether
     a resolver takes one depends on settings the constraint does not show (a
     minimum stability, a prerelease flag), and a lockfile that holds it is
     the evidence that the resolver did.
     """
-    if declared.origin:
-        return None
     version = row.version_constraint.removeprefix("==").strip()
     verdict = satisfies(row.ecosystem, version, declared.version_constraint)
     if verdict is False and is_prerelease(row.ecosystem, version):
@@ -304,25 +302,74 @@ def _meets(row: Dependency, declared: Dependency) -> bool | None:
     return verdict
 
 
+def _same_source(
+    row: Dependency, declared: Dependency, declarations: list[Dependency]
+) -> bool | None:
+    """Whether a row's origin and a declaration's origin are one source (:func:`same_source`).
+
+    A path is compared from the directory of the file that writes it. A
+    row's path is written from the directory of the declaration, among
+    ``declarations``, that words it the same way, when there is one: a
+    lockfile beside its manifest repeats the manifest's path, and a row
+    whose lockfile records no location (a Cargo.lock path crate) has the
+    origin a manifest declares.
+    """
+    written_in = next((d for d in declarations if d.origin == row.origin), None)
+    return same_source(
+        row.origin,
+        declared.origin,
+        posixpath.dirname(declared.source),
+        None if written_in is None else posixpath.dirname(written_in.source),
+    )
+
+
+def _covers(row: Dependency, declared: Dependency, declarations: list[Dependency]) -> bool | None:
+    """Whether a lockfile's row is the package a declaration of its name asks for.
+
+    ``declarations`` are all the direct deps that declare the package,
+    ``declared`` among them. None when the two cannot be told apart.
+
+    * A registry row and a registry declaration are compared by version
+      (:func:`_meets`).
+    * A row with an origin and a declaration with an origin are compared by
+      source (:func:`_same_source`): one repository, URL, or path, whatever
+      commit or hash each names.
+    * A registry row is a registry declaration's when the package has one.
+      When it has none, the lockfile is stale or does not say where the
+      package came from, and the row stands for the first source declared
+      (:func:`_keep_declared_origins`), never for another one.
+    * A row with an origin is the declaration's that names its source when
+      the package has one. When it has none, the lockfile says where a
+      registry declaration's package came from, and the two are compared by
+      version.
+    """
+    if row.origin and declared.origin:
+        return _same_source(row, declared, declarations)
+    sourced = [d for d in declarations if d.origin]
+    if declared.origin:
+        if len(sourced) < len(declarations):
+            return False
+        return False if _same_source(sourced[0], declared, declarations) is False else None
+    if row.origin and any(_same_source(row, d, declarations) is not False for d in sourced):
+        return False
+    return _meets(row, declared)
+
+
 def _declaration_for(row: Dependency, declarations: _Declarations) -> Dependency | None:
     """The direct dep under whose manifest a lockfile's row for its package is reported.
 
     A lockfile parser builds its rows from scratch and does not know which
     manifest declares a package, and several manifests can declare one. The
-    row belongs to the first declaration its version satisfies; failing
-    that, to the first it cannot be compared with (:func:`_meets`). An
-    off-registry row is matched among the declarations that have an origin,
-    a registry row among those that have none, when the package has a
-    declaration of that kind.
+    row belongs to the first declaration it covers; failing that, to the
+    first it cannot be told apart from (:func:`_covers`).
 
-    None when no declaration admits the row's version: no manifest declares
-    the package, or every one that does asks for another version.
+    None when the row is no declaration's: no manifest declares the package,
+    or every one that does asks for another version or another source.
     """
     declared = declarations.get((row.ecosystem, row.identity), [])
-    candidates = [d for d in declared if bool(d.origin) == bool(row.origin)] or declared
-    verdicts = [_meets(row, d) for d in candidates]
+    verdicts = [_covers(row, d, declared) for d in declared]
     for wanted in (True, None):
-        for verdict, candidate in zip(verdicts, candidates, strict=True):
+        for verdict, candidate in zip(verdicts, declared, strict=True):
             if verdict is wanted:
                 return candidate
     return None
@@ -339,9 +386,10 @@ def _with_declared_source(row: Dependency, declarations: _Declarations) -> Depen
     """Settle whether a lockfile's depth-0 row is the direct dep a manifest declares.
 
     An edge-aware lockfile parser makes every version of a package a direct
-    dep when some manifest declares the package. Only a version that a
-    declaration admits is that direct dep, and it takes the declaring
-    manifest as its source. Any other version of a declared package is a
+    dep when some manifest declares the package. Only a row that covers a
+    declaration (:func:`_covers`) is that direct dep, and it takes the
+    declaring manifest as its source. Any other version of a declared
+    package, and a row from a source no manifest declares it from, is a
     transitive: depth 1, with no source and no ancestors of its own, like a
     ``go.sum`` row for another version of a required module. The declaration
     it does not satisfy is not covered by it (:func:`_uncovered_by`).
@@ -371,19 +419,21 @@ def _uncovered_by(
     root lockfile whose ``shared`` is 1.0, and a manifest is not covered by
     a lockfile it has moved ahead of.
 
-    A declaration with an origin has no version to compare, and a registry
-    row of its package covers it only when no manifest declares the package
-    as a registry requirement: the row then takes the declared origin
-    (:func:`_keep_declared_origins`). When one does, the registry row is
-    that requirement's, and only a row with an origin covers the
-    off-registry declaration. Uncovered, it is reported as it is declared.
+    Holding the package from another source is not coverage either
+    (:func:`_covers`). A registry row does not cover a declaration from a
+    repository when a manifest requires the registry package, a row from a
+    repository does not cover a registry requirement when a manifest
+    declares that repository, and a row from one repository does not cover
+    a declaration from another. An uncovered registry requirement is
+    resolved through the registry; an uncovered declaration with an origin
+    is reported as it is declared.
 
     ``also_named`` holds the identity keys of the packages a lockfile lists
     without a row, such as the project's own path packages. Those are
     covered by name: there is no version to compare.
     """
     direct_deps = list(direct_deps)
-    registry_declared = {(d.ecosystem, d.identity) for d in direct_deps if not d.origin}
+    declarations = _declarations(direct_deps)
     held: dict[tuple[Ecosystem, str], list[Dependency]] = {}
     for row in locked:
         held.setdefault((row.ecosystem, row.identity), []).append(row)
@@ -393,10 +443,8 @@ def _uncovered_by(
         rows = held.get(key)
         if rows is None:
             covered = dep.identity in also_named
-        elif dep.origin and key in registry_declared:
-            covered = any(row.origin for row in rows)
         else:
-            covered = any(_meets(row, dep) is not False for row in rows)
+            covered = any(_covers(row, dep, declarations[key]) is not False for row in rows)
         if not covered:
             uncovered.append(dep)
     return uncovered
@@ -857,11 +905,13 @@ def _keep_declared_origins(
     or a path is not a registry package, whatever a lockfile records under
     its name. A lockfile that is stale, or that does not say where a package
     came from, must not turn the UNKNOWN row the manifest calls for into a
-    registry lookup: a direct row without an origin takes the declared one.
+    registry lookup: a direct row without an origin takes the declared one,
+    the first when manifests declare several sources.
     A name that some manifest also declares as a registry requirement is
     left as the lockfile has it: that row is the registry requirement's, and
     the off-registry declaration is reported beside it
-    (:func:`_uncovered_by`). A row that takes an origin is not a version
+    (:func:`_uncovered_by`), as is a declaration from another source than
+    the one the row takes. A row that takes an origin is not a version
     estimate: no registry is asked about it.
     """
     declared: dict[tuple[Ecosystem, str], str] = {}
@@ -1187,18 +1237,22 @@ def _declared_r_rows(row: Dependency, declarations: list[Dependency]) -> list[De
     ``row`` is the package's depth-0 row from the CRAN index closure, at the
     version the index holds. A declaration that pins a version (``== x``) is
     a row at that version, which is not an estimate; any other declaration is
-    the index's row. Declarations that come to one version are one row, with
+    the index's row. The closure holds one node per package, so a
+    declaration with an origin is that node's row with its own origin.
+    Declarations that come to one version from one origin are one row, with
     the manifest of the first of them.
     """
-    rows: dict[str, Dependency] = {}
+    rows: dict[tuple[str, str], Dependency] = {}
     for declaration in declarations:
         pinned = _extract_r_pinned_version(declaration.version_constraint)
-        at_version = (
+        declared = (
             replace(row, version_constraint=f"=={pinned}", version_estimated=False)
             if pinned
-            else row
+            else replace(row, origin=declaration.origin)
         )
-        rows.setdefault(at_version.version_constraint, _stamped(at_version, declaration))
+        rows.setdefault(
+            (declared.version_constraint, declared.origin), _stamped(declared, declaration)
+        )
     return list(rows.values())
 
 

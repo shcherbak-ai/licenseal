@@ -26,6 +26,7 @@ exist.
 
 from __future__ import annotations
 
+import posixpath
 import re
 from pathlib import Path
 
@@ -42,8 +43,13 @@ _USERINFO_RE = re.compile(r"^(?P<scheme>[A-Za-z][A-Za-z0-9+.-]*://)[^/?#]*@")
 _SCP_USER_RE = re.compile(r"^[^/@:\s]+@(?=[^/:\s]+:)")
 _QUERY_RE = re.compile(r"\?[^#]*")
 _VCS_PREFIX_RE = re.compile(r"^(?P<vcs>git|hg|svn|bzr)\+")
+# The prefix of a repository origin, whatever version-control system it names.
+_ANY_VCS_PREFIX_RE = re.compile(r"^[a-z][a-z0-9]*\+")
 # A drive-qualified path (``C:\dir``, ``C:dir``).
 _DRIVE_RE = re.compile(r"^[A-Za-z]:")
+# What a repository URL starts with besides its host and path.
+_URL_SCHEME_RE = re.compile(r"^[a-z][a-z0-9+.-]*://")
+_URL_USER_RE = re.compile(r"^[^/@]+@")
 
 
 def strip_credentials(url: str) -> str:
@@ -92,6 +98,110 @@ def hosted_git_origin(host: str, repository: str, revision: str = "") -> str:
     return git_origin(f"https://{host}/{repository.strip().strip('/')}", revision)
 
 
+def _is_rooted(path: str) -> bool:
+    """Whether a path, written with forward slashes, is taken from no directory."""
+    return path.startswith(("/", "~")) or bool(_DRIVE_RE.match(path))
+
+
+def repository_key(url: str) -> str:
+    """A repository URL in a form two spellings of one repository share.
+
+    Host and path, lowercased, without scheme, user, ``.git``, or a trailing
+    slash; ``git@host:path`` reads as ``host/path``.
+    """
+    key = url.strip().lower()
+    if "://" in key:
+        key = _URL_USER_RE.sub("", _URL_SCHEME_RE.sub("", key))
+    else:
+        key = _URL_USER_RE.sub("", key).replace(":", "/", 1)
+    return key.rstrip("/").removesuffix(".git")
+
+
+def _location(origin: str) -> tuple[str, str] | None:
+    """The kind of place an origin names and the place itself, or ``None``.
+
+    A repository and a URL are returned as their :func:`repository_key`,
+    without the revision or the hash; a path as written, with forward
+    slashes. ``None`` for an origin that names no place: an unrecorded
+    source, or a lockfile's source label (``Bioconductor``).
+    """
+    if origin == UNRECORDED or origin.isalpha():
+        return None
+    repository = _ANY_VCS_PREFIX_RE.match(origin)
+    if repository:
+        # The revision follows the first ``@`` after the scheme: an origin
+        # holds no user-info, and a tag can itself hold an ``@``.
+        location = origin[repository.end() :]
+        revision_at = location.find("@", location.find("://") + 1)
+        return "repository", repository_key(location if revision_at < 0 else location[:revision_at])
+    if "://" in origin:
+        return "url", repository_key(origin.partition("#")[0])
+    return "path", origin.replace("\\", "/")
+
+
+def _is_archive_of(url: str, repository: str) -> bool:
+    """Whether a URL is served by a repository's host from under that repository's path.
+
+    Both are :func:`repository_key` forms. A lockfile can record a commit of
+    ``host/user/repo`` as the archive the host builds for it
+    (``codeload.host/user/repo/tar.gz/<commit>``).
+    """
+    url_host, _, url_path = url.partition("/")
+    host, _, path = repository.partition("/")
+    return (url_host == host or url_host.endswith(f".{host}")) and f"/{path}/" in f"/{url_path}/"
+
+
+def _same_path(locked: str, declared: str, declared_dir: str, locked_dir: str | None) -> bool:
+    """Whether a lockfile's path and a manifest's path name one place.
+
+    Each is relative to the directory of the file that writes it. When
+    ``locked_dir`` is not known, the lockfile is taken to sit beside the
+    manifest it locks or in a directory above it (a workspace root): the two
+    are one place when the lockfile's path, taken from the manifest's
+    directory or from one above it, is the manifest's. A rooted,
+    drive-qualified, or home-relative path is taken from no directory: it is
+    one place only with itself.
+    """
+    if _is_rooted(locked) or _is_rooted(declared):
+        return posixpath.normpath(locked) == posixpath.normpath(declared)
+    target = posixpath.normpath(posixpath.join(declared_dir, declared))
+    if locked_dir is not None:
+        return posixpath.normpath(posixpath.join(locked_dir, locked)) == target
+    directory = declared_dir
+    while posixpath.normpath(posixpath.join(directory, locked)) != target:
+        if not directory:
+            return False
+        directory = posixpath.dirname(directory)
+    return True
+
+
+def same_source(
+    locked: str, declared: str, declared_dir: str = "", locked_dir: str | None = None
+) -> bool | None:
+    """Whether the origin a lockfile records and the origin a manifest declares are one source.
+
+    One source is one repository, whatever commit, tag, or branch each origin
+    names; one URL, whatever hash; or one path. ``declared_dir`` is the
+    directory of the declaring manifest, relative to the scanned directory,
+    and ``locked_dir`` the directory the lockfile's path is written from,
+    when that is known. ``None`` when either origin names no place that can
+    be compared.
+    """
+    first, second = _location(locked), _location(declared)
+    if first is None or second is None:
+        return None
+    (locked_kind, locked_place), (declared_kind, declared_place) = first, second
+    if locked_kind == declared_kind == "path":
+        return _same_path(locked_place, declared_place, declared_dir, locked_dir)
+    if locked_kind == declared_kind:
+        return locked_place == declared_place
+    places = {locked_kind: locked_place, declared_kind: declared_place}
+    if places.keys() == {"repository", "url"}:
+        return _is_archive_of(places["url"], places["repository"])
+    # A path is never a repository or a URL.
+    return False
+
+
 def path_origin(path: str, base_dir: Path, scan_root: Path) -> str | None:
     """Origin of a path dependency, or ``None`` when it is the project's own code.
 
@@ -117,7 +227,7 @@ def path_origin(path: str, base_dir: Path, scan_root: Path) -> str | None:
             written = "/" + written[2:].partition("/")[2]
     written = written or "."
     normalized = written.replace("\\", "/")
-    if normalized.startswith(("/", "~")) or _DRIVE_RE.match(normalized):
+    if _is_rooted(normalized):
         return written
     try:
         resolved = (base_dir / normalized).resolve()

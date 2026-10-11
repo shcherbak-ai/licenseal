@@ -968,10 +968,6 @@ class TestCoverageRule:
         row = self._locked(locked, ecosystem)
         assert _meets(row, self._declared(constraint, ecosystem)) is expected
 
-    def test_off_registry_declaration_is_not_compared(self):
-        declared = self._declared(">=9", origin="git+https://git.example.org/shared.git")
-        assert _meets(self._locked("==1.0.0"), declared) is None
-
     def test_is_prerelease(self):
         assert is_prerelease(Ecosystem.PYTHON, "2.0.0rc1") is True
         assert is_prerelease(Ecosystem.PYTHON, "2.0.0") is False

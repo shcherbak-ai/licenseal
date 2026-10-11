@@ -40,7 +40,6 @@ Packagist by name.
 from __future__ import annotations
 
 import os
-import re
 from fnmatch import fnmatchcase
 from pathlib import Path
 from typing import Any, cast
@@ -114,9 +113,6 @@ VCS_REPOSITORY_TYPES = frozenset(
 # The ``source.type`` values that are not git.
 _OTHER_VCS = frozenset({"hg", "svn", "fossil"})
 
-_URL_SCHEME_RE = re.compile(r"^[a-z][a-z0-9+.-]*://")
-_URL_USER_RE = re.compile(r"^[^/@]+@")
-
 
 def composer_repositories(data: dict[str, Any]) -> list[dict[str, Any]]:
     """The repository tables of a composer.json, in its list or its map form."""
@@ -126,20 +122,6 @@ def composer_repositories(data: dict[str, Any]) -> list[dict[str, Any]]:
     if not isinstance(repositories, list):
         return []
     return [cast("dict[str, Any]", repo) for repo in repositories if isinstance(repo, dict)]
-
-
-def repository_key(url: str) -> str:
-    """A repository URL in a form two spellings of one repository share.
-
-    Host and path, lowercased, without scheme, user, ``.git``, or a trailing
-    slash; ``git@host:path`` reads as ``host/path``.
-    """
-    key = url.strip().lower()
-    if "://" in key:
-        key = _URL_USER_RE.sub("", _URL_SCHEME_RE.sub("", key))
-    else:
-        key = _URL_USER_RE.sub("", key).replace(":", "/", 1)
-    return key.rstrip("/").removesuffix(".git")
 
 
 def package_origin(package: dict[str, Any], base_dir: Path, scan_root: Path) -> str | None:
