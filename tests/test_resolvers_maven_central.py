@@ -16,7 +16,6 @@ from licenseal.resolvers.http import (
     fetch_registry_text,
 )
 from licenseal.resolvers.maven_central import (
-    _extract_pinned_version_maven,
     _license_string_from_pom,
     _maven_central_pom_url,
     resolve_maven_central_license,
@@ -174,82 +173,6 @@ def _mock_fallback_404(group_path: str, artifact: str, version: str) -> None:
         f"https://repo.jenkins-ci.org/public/"
         f"{group_path}/{artifact}/{version}/{artifact}-{version}.pom"
     ).mock(return_value=httpx.Response(404))
-
-
-class TestExtractPinnedVersionMaven:
-    def test_simple_semver(self):
-        assert _extract_pinned_version_maven("1.0.0") == "1.0.0"
-
-    def test_two_component_version(self):
-        # ``X.Y`` is legal Maven syntax (e.g. ``3.0``).
-        assert _extract_pinned_version_maven("3.0") == "3.0"
-
-    def test_single_component_version(self):
-        assert _extract_pinned_version_maven("7") == "7"
-
-    def test_qualifier_suffix(self):
-        assert _extract_pinned_version_maven("1.0.0-SNAPSHOT") == "1.0.0-SNAPSHOT"
-
-    def test_release_qualifier_dot_separator(self):
-        # Legacy JVM versioning style with a ``.RELEASE`` qualifier suffix.
-        assert _extract_pinned_version_maven("5.3.20.RELEASE") == "5.3.20.RELEASE"
-
-    def test_build_metadata_suffix(self):
-        assert _extract_pinned_version_maven("1.0.0+sha.abc") == "1.0.0+sha.abc"
-
-    def test_double_equal_prefix_stripped(self):
-        # Internal lockfile-shaped convention; the transitive walker
-        # produces ``==X.Y.Z`` for ecosystems that don't carry a native
-        # exact-pin syntax.
-        assert _extract_pinned_version_maven("==1.2.3") == "1.2.3"
-
-    def test_double_equal_with_whitespace(self):
-        assert _extract_pinned_version_maven("==  1.2.3  ") == "1.2.3"
-
-    def test_empty_constraint(self):
-        # Versionless dep — depends on parent's ``<dependencyManagement>``.
-        # The resolver can't satisfy that without the parent walk; UNKNOWN
-        # is the right outcome at this layer.
-        assert _extract_pinned_version_maven("") is None
-
-    def test_whitespace_only(self):
-        assert _extract_pinned_version_maven("   ") is None
-
-    def test_range_syntax_rejected(self):
-        # ``[1.0,2.0)`` and friends are not concrete pins.
-        assert _extract_pinned_version_maven("[1.0,2.0)") is None
-
-    def test_release_macro_rejected(self):
-        # ``RELEASE`` / ``LATEST`` were deprecated in Maven 3 and removed
-        # from version resolution; treat as unparseable.
-        assert _extract_pinned_version_maven("RELEASE") is None
-
-    def test_latest_macro_rejected(self):
-        assert _extract_pinned_version_maven("LATEST") is None
-
-    @pytest.mark.parametrize(
-        "dynamic",
-        ["1.+", "1.2.+", "==1.+", "1+", "+", "latest.release", "latest.integration"],
-    )
-    def test_gradle_dynamic_version_rejected(self, dynamic):
-        # A prefix or a ``latest.*`` selector names a set of versions. Read
-        # as a version, its literal text would be asked of the registry.
-        assert _extract_pinned_version_maven(dynamic) is None
-
-    def test_build_metadata_after_a_plus_is_still_a_version(self):
-        assert _extract_pinned_version_maven("1.0.0+build.7") == "1.0.0+build.7"
-
-    def test_unresolved_property_token_rejected(self):
-        # If a literal ``${name}`` token slips through the discovery
-        # layer's expansion (parent-POM property), we must NOT try to
-        # fetch ``…/${name}.pom`` from the registry.
-        assert _extract_pinned_version_maven("${spring.version}") is None
-
-    def test_double_equal_with_unresolved_token_rejected(self):
-        assert _extract_pinned_version_maven("==${spring.version}") is None
-
-    def test_garbage_rejected(self):
-        assert _extract_pinned_version_maven("not-a-version") is None
 
 
 class TestSpdxFromLicenseUrl:

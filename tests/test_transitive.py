@@ -4550,9 +4550,9 @@ class TestJavaTransitiveResolution:
         assert deps_no_dev == []
 
     def test_unparseable_version_passes_through_unchanged(self, tmp_path):
-        # A direct dep with a version expression that ``_extract_pinned_version_maven``
-        # can't parse (range syntax) gets emitted as-is so the license
-        # resolver still sees it. No deps.dev walk attempted.
+        # A direct dep whose version expression names no single version
+        # (range syntax) gets emitted as-is so the license resolver still
+        # sees it. No deps.dev walk attempted.
         with httpx.Client() as client:
             deps = _resolve_java_transitive(
                 direct_java_deps=[_java_dep("g:a", "[1.0,2.0)")],

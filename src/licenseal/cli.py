@@ -60,13 +60,9 @@ from licenseal.resolvers.crates_io import (
 )
 from licenseal.resolvers.crates_io import resolve_rust_license
 from licenseal.resolvers.deps_dev import (
-    _extract_maven_pinned_version,  # noqa: PLC2701
-    bulk_resolve_licenses,
-    resolve_go_license,
-)
-from licenseal.resolvers.deps_dev import (
     _extract_pinned_version as _extract_go_pinned_version,  # noqa: PLC2701
 )
+from licenseal.resolvers.deps_dev import bulk_resolve_licenses, resolve_go_license
 from licenseal.resolvers.hex import resolve_hex_license
 from licenseal.resolvers.http import RegistryCache
 from licenseal.resolvers.maven_central import resolve_maven_central_license
@@ -87,6 +83,7 @@ from licenseal.resolvers.rubygems import (
     _extract_pinned_version as _extract_ruby_pinned_version,  # noqa: PLC2701
 )
 from licenseal.resolvers.rubygems import resolve_ruby_license
+from licenseal.resolvers.version_selection import concrete_maven_version
 from licenseal.review import (
     REVIEW_FILE_NAME,
     apply_reviewed_licenses,
@@ -799,7 +796,7 @@ def _resolve_license_infos(
                     cached = _from_advisory_cache(
                         java_batch_cache,
                         dep,
-                        _extract_maven_pinned_version(dep.version_constraint),
+                        concrete_maven_version(dep.version_constraint),
                     )
                     if cached is not None:
                         return cached

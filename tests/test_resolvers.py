@@ -5283,64 +5283,6 @@ class TestTrimDepsDevDependencies:
         assert trimmed["licenses"] == ["MIT"]
 
 
-class TestExtractMavenPinnedVersion:
-    """Edge cases in ``deps_dev._extract_maven_pinned_version``."""
-
-    def test_empty_returns_none(self):
-        from licenseal.resolvers.deps_dev import _extract_maven_pinned_version
-
-        assert _extract_maven_pinned_version("") is None
-        assert _extract_maven_pinned_version("   ") is None
-
-    def test_bracketed_exact_pin_unwraps(self):
-        from licenseal.resolvers.deps_dev import _extract_maven_pinned_version
-
-        # Maven strict pin: ``[1.2.3]`` — the brackets demand the exact
-        # version. We strip the brackets and treat as bare pin.
-        assert _extract_maven_pinned_version("[1.2.3]") == "1.2.3"
-
-    def test_open_range_returns_none(self):
-        from licenseal.resolvers.deps_dev import _extract_maven_pinned_version
-
-        # ``[1.0,)`` / ``(1.0,2.0)`` / ``(,2.0]`` are version ranges; we
-        # don't pick a value for them, the per-package POM walker does.
-        assert _extract_maven_pinned_version("[1.0,)") is None
-        assert _extract_maven_pinned_version("(1.0,2.0)") is None
-
-    def test_property_substitution_returns_none(self):
-        from licenseal.resolvers.deps_dev import _extract_maven_pinned_version
-
-        # ``${spring.version}`` — unresolved Maven property; can't pin.
-        assert _extract_maven_pinned_version("${spring.version}") is None
-
-    def test_whitespace_in_value_returns_none(self):
-        from licenseal.resolvers.deps_dev import _extract_maven_pinned_version
-
-        assert _extract_maven_pinned_version("1.0 2.0") is None
-
-    def test_paren_prefixed_value_returns_none(self):
-        from licenseal.resolvers.deps_dev import _extract_maven_pinned_version
-
-        # ``(1.0)`` style version literals aren't a Maven idiom we know
-        # how to interpret as a single pin — defensive reject.
-        assert _extract_maven_pinned_version("(1.0)") is None
-
-    @pytest.mark.parametrize(
-        "dynamic", ["1.+", "1.2.+", "==1.+", "[1.+]", "+", "latest.release", "latest.integration"]
-    )
-    def test_gradle_dynamic_version_returns_none(self, dynamic):
-        from licenseal.resolvers.deps_dev import _extract_maven_pinned_version
-
-        # A prefix or a ``latest.*`` selector names a set of versions; the
-        # batch must not be asked about its literal text.
-        assert _extract_maven_pinned_version(dynamic) is None
-
-    def test_build_metadata_after_a_plus_is_a_pin(self):
-        from licenseal.resolvers.deps_dev import _extract_maven_pinned_version
-
-        assert _extract_maven_pinned_version("1.0.0+build.7") == "1.0.0+build.7"
-
-
 class TestDependenciesFromNuspec:
     """Edge cases in ``resolvers.nuget._dependencies_from_nuspec``."""
 

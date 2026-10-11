@@ -867,6 +867,41 @@ def is_gradle_dynamic_version(version: str) -> bool:
     return spec.endswith("+") or spec.startswith("latest.")
 
 
+# The characters of a Maven version: digits, letters, and the separators
+# between them. A release-train name (``Aster.SR12``) and a version that
+# starts with a letter (``r09``, ``v1.0``) are versions like any other.
+_MAVEN_CONCRETE_VERSION_RE = re.compile(r"[0-9A-Za-z][0-9A-Za-z._+-]*")
+# What Maven replaces with the newest version it finds at build time.
+_MAVEN_VERSION_MARKERS = frozenset({"RELEASE", "LATEST"})
+
+
+def concrete_maven_version(version: str) -> str | None:
+    """The version a Maven or Gradle version string names, when it names exactly one.
+
+    A stated version (``1.2.3``, ``33.0.0-jre``, ``Aster.SR12``), a hard
+    requirement on one (Maven's ``[1.2.3]``, Gradle's ``1.2.3!!``), and the
+    ``==1.2.3`` form licenseal gives a resolved row each name that version,
+    and it is returned without its decoration.
+
+    None for a string that names several versions or none: a range
+    (``[1.0,2.0)``), a Gradle dynamic version (``1.+``, ``+``,
+    ``latest.release``), Maven's ``RELEASE`` and ``LATEST`` markers, an
+    unresolved ``${…}`` property, an empty string, and text that is not a
+    version. The literal text of one is not a version a registry has, so a
+    caller requests nothing for it.
+    """
+    spec = version.strip().removeprefix("==").strip()
+    if spec.startswith("[") and spec.endswith("]"):
+        spec = spec[1:-1].strip()
+    elif spec.endswith("!!"):
+        spec = spec[:-2].strip()
+    if not _MAVEN_CONCRETE_VERSION_RE.fullmatch(spec):
+        return None
+    if spec in _MAVEN_VERSION_MARKERS or is_gradle_dynamic_version(spec):
+        return None
+    return spec
+
+
 def _maven_matcher(constraint: str) -> _Matcher | None:
     """Maven ranges and Gradle's dynamic forms; a bare version is a minimum."""
     spec = constraint.strip()

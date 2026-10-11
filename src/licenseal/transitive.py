@@ -145,7 +145,6 @@ from licenseal.resolvers.http import (
 )
 from licenseal.resolvers.maven_central import (
     _MAX_PARENT_DEPTH,  # noqa: PLC2701
-    _extract_pinned_version_maven,  # noqa: PLC2701
     _fetch_pom,  # noqa: PLC2701
     estimate_gradle_version,
 )
@@ -188,6 +187,7 @@ from licenseal.resolvers.rubygems import (
     _select_version as _select_ruby_version,  # noqa: PLC2701
 )
 from licenseal.resolvers.version_selection import (
+    concrete_maven_version,
     is_prerelease,
     resolve_npm_spec,
     satisfies,
@@ -202,7 +202,7 @@ _EXACT_VERSION_CHECKS: dict[Ecosystem, Callable[[str], str | bool | None]] = {
     Ecosystem.PYTHON: _extract_python_pinned_version,
     Ecosystem.NPM: _extract_npm_pinned_version,
     Ecosystem.RUST: _extract_rust_pinned_version,
-    Ecosystem.JAVA: _extract_pinned_version_maven,
+    Ecosystem.JAVA: concrete_maven_version,
     Ecosystem.DOTNET: _declares_exact_version_nuget,
     Ecosystem.PHP: _declares_exact_php_version,
     Ecosystem.RUBY: _extract_ruby_pinned_version,
@@ -1966,7 +1966,7 @@ def _resolve_java_transitive(
     walkable: list[tuple[Dependency, str]] = []
     first_direct = len(out)
     for d in direct_uncovered:
-        pinned = _extract_pinned_version_maven(d.version_constraint)
+        pinned = concrete_maven_version(d.version_constraint)
         if pinned is None:
             out.append(replace(d, version_estimated=True))
             continue

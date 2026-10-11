@@ -54,7 +54,7 @@ from licenseal.resolvers.http import (
     has_utf8_encoding,
     quote_coordinate,
 )
-from licenseal.resolvers.version_selection import is_gradle_dynamic_version
+from licenseal.resolvers.version_selection import concrete_maven_version
 
 _DEPS_DEV_BATCH_URL = "https://api.deps.dev/v3alpha/versionbatch"
 _DEPS_DEV_V3_VERSION_URL = "https://api.deps.dev/v3/systems/GO/packages/{name}/versions/{version}"
@@ -505,7 +505,9 @@ def _version_extractor_for(system: str) -> Callable[[str], str | None]:
 
     * ``GO`` — versions are always pinned; plausible semver passes through.
     * ``MAVEN`` — ``group:artifact`` is already the deps.dev ``name`` form,
-      so only the ``version_constraint`` side needs normalizing. The per-dep
+      so only the ``version_constraint`` side needs normalizing, through
+      the one reading the POM resolver and the walk use
+      (``version_selection.concrete_maven_version``). The per-dep
       ``resolve_maven_central_license`` path remains canonical for artifacts
       whose license lives in a parent POM that deps.dev's ``licensecheck``
       over the artifact's own LICENSE file doesn't see.
@@ -521,7 +523,7 @@ def _version_extractor_for(system: str) -> Callable[[str], str | None]:
     if system == "GO":
         return _extract_pinned_version
     if system == "MAVEN":
-        return _extract_maven_pinned_version
+        return concrete_maven_version
     if system == "NUGET":
         from licenseal.resolvers.nuget import _extract_pinned_version_nuget
 
@@ -607,31 +609,6 @@ def bulk_resolve_licenses(
     ):
         caches[system].update(chunk_result)
     return caches
-
-
-def _extract_maven_pinned_version(version_constraint: str) -> str | None:
-    """Return a concrete Maven version when the constraint is a single pin.
-
-    Maven coordinates that the discovery layer surfaces are typically the
-    POM ``<version>`` text. Lockfile-style pin (``[1.2.3]`` Maven-strict
-    notation, ``==1.2.3`` licenseal-internal) and bare ``1.2.3`` are
-    accepted; everything else (open ranges ``[1.0,)``, version-set
-    expressions, property substitutions like ``${spring.version}``, Gradle
-    dynamic versions like ``1.+`` and ``latest.release``) is rejected so the
-    per-package POM walker handles it.
-    """
-    spec = version_constraint.strip()
-    if not spec:
-        return None
-    if spec.startswith("=="):
-        spec = spec[2:].strip()
-    if spec.startswith("[") and spec.endswith("]") and "," not in spec:
-        spec = spec[1:-1].strip()
-    if not spec or "," in spec or "$" in spec or " " in spec:
-        return None
-    if spec[0] in "([" or is_gradle_dynamic_version(spec):
-        return None
-    return spec
 
 
 def _fetch_deps_dev_dependencies(
