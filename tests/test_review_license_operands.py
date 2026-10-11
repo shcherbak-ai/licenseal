@@ -1,8 +1,9 @@
-"""The ``license`` of a review entry has to name licenses.
+"""The ``license`` of a review entry has to be an expression that names licenses.
 
 A reviewed dependency does not fail the check, so an entry whose license
-names something that is no license (a typo) must be an error rather than a
-review. Every scan here has one flagged dependency and a review entry for it.
+names something that is no license (a typo), or is a list that does not say
+whether its licenses are alternatives, must be an error rather than a review.
+Every scan here has one flagged dependency and a review entry for it.
 """
 
 from __future__ import annotations
@@ -25,6 +26,11 @@ _NOT_A_LICENSE = (
     "Error: Invalid licenseal.review.toml: the license of the review entry for {} names '{}', "
     "which is not a license licenseal recognises. Use SPDX license IDs, `Proprietary`, or a "
     "`LicenseRef-` reference."
+)
+_IS_A_LIST = (
+    "Error: Invalid licenseal.review.toml: the license of the review entry for {} holds a comma "
+    "or a slash, so it is not a license expression. A list does not say whether its licenses "
+    "are alternatives: write the expression with `OR` or `AND`."
 )
 
 
@@ -66,7 +72,6 @@ class TestOperandThatIsNotALicense:
             ("(MIT OR MTI) AND Apache-2.0", "MTI"),
             ("Apache-2.0 AND (MIT OR (ISC AND MTI))", "MTI"),
             ("MTI WITH Classpath-exception-2.0", "MTI"),
-            ("MIT, MTI", "MTI"),
             # Placeholders are not licenses.
             ("MIT AND UNKNOWN", "UNKNOWN"),
             ("NOASSERTION", "NOASSERTION"),
@@ -127,9 +132,10 @@ class TestOperandThatIsNotALicense:
         assert result.exit_code == 1
         assert f"Error: Invalid reviewed license {license_value!r}." in result.stderr
 
+    @pytest.mark.parametrize("license_value", ["", "   "])
     @respx.mock
-    def test_empty_license_is_a_warning_not_an_error(self, tmp_path):
-        _project(tmp_path, _stanza(""))
+    def test_empty_license_is_a_warning_not_an_error(self, tmp_path, license_value):
+        _project(tmp_path, _stanza(license_value))
         result = _check(tmp_path)
         # The dependency stays flagged, which is what fails the scan.
         assert result.exit_code == 1
@@ -138,6 +144,7 @@ class TestOperandThatIsNotALicense:
             in result.stderr.splitlines()
         )
         assert "not a license" not in result.stderr
+        assert "Invalid licenseal.review.toml" not in result.stderr
         dependency = json.loads(result.stdout)["dependencies"][0]
         assert (dependency["reviewed"], dependency["verdict"]) == (False, "unknown")
 
@@ -246,4 +253,81 @@ class TestOperandThatIsALicense:
         result = CliRunner().invoke(main, ["init-review-file", "--path", str(tmp_path), "--merge"])
         assert result.exit_code == 0
         assert "No new flagged dependencies to add." in result.stderr
+        assert (tmp_path / "licenseal.review.toml").read_text(encoding="utf-8") == review
+
+
+class TestLicenseList:
+    """A comma- or slash-separated list is not an expression.
+
+    A registry's list is judged under both readings, as a choice and with
+    every entry applying. A review entry is judged as written, so its author
+    has to say which reading holds.
+    """
+
+    @pytest.mark.parametrize(
+        "license_value",
+        [
+            "MIT, GPL-3.0-only",
+            "MIT,GPL-3.0-only",
+            "MIT/Apache-2.0",
+            "GPL-3.0-only / MIT",
+            # Inside parentheses, alone and beside an operator.
+            "(MIT, GPL-3.0-only)",
+            "(MIT/Apache-2.0)",
+            "(MIT, GPL-3.0-only) AND BSD-3-Clause",
+            "BSD-3-Clause AND (MIT/Apache-2.0)",
+            # The list is the error, whatever its entries are.
+            "MIT, MTI",
+            "not, a license",
+            # A long-form name and a URL hold a separator as well; an entry
+            # names its licenses by their IDs.
+            "Apache License, Version 2.0",
+            "https://opensource.org/licenses/MIT",
+        ],
+    )
+    @respx.mock
+    def test_check_rejects_the_entry_and_names_it(self, tmp_path, license_value):
+        _project(tmp_path, _stanza(license_value))
+        result = _check(tmp_path)
+        assert result.exit_code == 1
+        assert _IS_A_LIST.format(_ENTRY) in result.stderr.splitlines()
+        # No report is written for a scan whose review file is invalid.
+        assert result.stdout == ""
+
+    @respx.mock
+    def test_entry_keyed_on_a_source_is_named_by_it(self, tmp_path):
+        source = "git+https://git.example.org/team/custom-lib.git@0123abcd"
+        _project(tmp_path, _stanza("MIT, GPL-3.0-only", key=f'source = "{source}"'))
+        result = _check(tmp_path)
+        assert result.exit_code == 1
+        entry = f"off-registry npm:custom-lib from {source}"
+        assert _IS_A_LIST.format(entry) in result.stderr.splitlines()
+
+    @pytest.mark.parametrize(
+        "license_value, reviewed_as, verdict",
+        [
+            # The two readings of ``MIT, GPL-3.0-only``, each written out.
+            ("MIT OR GPL-3.0-only", "GPL-3.0-only OR MIT", "compatible"),
+            ("MIT AND GPL-3.0-only", "GPL-3.0-only AND MIT", "incompatible"),
+        ],
+    )
+    @respx.mock
+    def test_expression_for_either_reading_loads(
+        self, tmp_path, license_value, reviewed_as, verdict
+    ):
+        _project(tmp_path, _stanza(license_value))
+        result = _check(tmp_path)
+        assert result.exit_code == 0
+        dependency = json.loads(result.stdout)["dependencies"][0]
+        assert dependency["reviewed"] is True
+        assert dependency["reviewed_license"] == reviewed_as
+        assert dependency["verdict"] == verdict
+
+    @respx.mock
+    def test_merge_reads_the_existing_file_under_the_same_rule(self, tmp_path):
+        review = _stanza("MIT/Apache-2.0")
+        _project(tmp_path, review)
+        result = CliRunner().invoke(main, ["init-review-file", "--path", str(tmp_path), "--merge"])
+        assert result.exit_code == 1
+        assert _IS_A_LIST.format(_ENTRY) in result.stderr.splitlines()
         assert (tmp_path / "licenseal.review.toml").read_text(encoding="utf-8") == review

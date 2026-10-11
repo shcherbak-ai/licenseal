@@ -183,13 +183,31 @@ def _operand_that_is_no_license(expression: str) -> str:
     return ""
 
 
+# What separates the entries of a license list. No SPDX license or exception
+# ID holds either character, and neither does a ``LicenseRef-``.
+_LIST_SEPARATORS = (",", "/")
+
+
 def _normalize_reviewed_license(raw_license: str, label: str) -> str:
     """Normalize the ``license`` of the review entry that ``label`` names, or reject it.
 
     A reviewed dependency does not fail the check, so an entry whose license
     is no expression, or names something that is no license, is an error
     instead of a review.
+
+    A comma- or slash-separated list is no expression: it does not say
+    whether its licenses are alternatives. The normalizer reads one as a
+    choice, and a registry's list is then judged under both readings. A
+    reviewed license is judged as written, under the one reading its author
+    gave, so a list is rejected before it is normalized.
     """
+    if any(separator in raw_license for separator in _LIST_SEPARATORS):
+        raise click.ClickException(
+            f"Invalid {REVIEW_FILE_NAME}: the license of the review entry for "
+            f"{_printable(label)} holds a comma or a slash, so it is not a license expression. "
+            "A list does not say whether its licenses are alternatives: write the expression "
+            "with `OR` or `AND`."
+        )
     normalized = normalize_license(raw_license)
     if normalized == "UNKNOWN":
         raise click.ClickException(
