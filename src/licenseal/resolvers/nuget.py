@@ -21,8 +21,8 @@ in one of two shapes:
   consulted.
 
 **Two-tier per-dep resolution** (the deps.dev batch is a separate
-pre-pass at scan startup; see ``cli.check`` and the Mode-C pattern in
-``AGENTS.md``. By the time ``resolve_nuget_license`` is called the
+pre-pass at scan startup; see ``cli.check`` and *Batch-first license
+resolution* in ``AGENTS.md``. By the time ``resolve_nuget_license`` is called the
 caller has already missed the batch cache):
 
 1. **NuGet flatcontainer ``.nuspec``** — fetch the XML, parse the
