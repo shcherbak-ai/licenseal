@@ -3,13 +3,16 @@
 Three endpoints carry the load:
 
 * ``GET /api/v2/rubygems/{name}/versions/{version}.json`` — primary, used
-  whenever the lockfile pinned a specific version (the typical scan path).
+  for the version a lockfile pins (the typical scan path) and for the one a
+  requirement resolves to.
   Returns ``{"licenses": ["MIT"], "source_code_uri": "...", "dependencies":
   {"runtime": [...], "development": [...]}}``.
 * ``GET /api/v1/gems/{name}.json`` — for a gem with no pinned version (a
   manifest-only scan). Returns the latest version's metadata in the same
   shape (top-level ``licenses`` array etc.). The latest release is the one
-  reported when it satisfies the declared requirement.
+  reported when it satisfies the declared requirement. Its response is that
+  release's own metadata: it answers for a gem declared with no requirement,
+  and for the latest release when the per-version endpoint answers 404.
 * ``GET /api/v1/versions/{name}.json`` — the gem's version list, requested
   only when the latest release is outside the declared requirement, to find
   the highest release inside it, and when an exact pin is not published
@@ -29,12 +32,14 @@ from __future__ import annotations
 
 import json
 import re
+from collections.abc import Callable
 
 import httpx
 
 from licenseal.analysis.spdx import read_license_array
 from licenseal.models import Dependency, DependencyGroup, Ecosystem, LicenseInfo
 from licenseal.resolvers.http import (
+    NO_KNOWN_404,
     Fetcher,
     fetch_registry_json,
     fetch_registry_text,
@@ -258,22 +263,31 @@ def resolve_ruby_license(
     lockfile_license_map: None = None,  # noqa: ARG001 — kept for cross-eco dispatch parity
     fetcher: Fetcher = fetch_registry_json,
     text_fetcher: Fetcher = fetch_registry_text,
+    not_found: Callable[[str], bool] = NO_KNOWN_404,
 ) -> LicenseInfo:
     """Resolve license for a Ruby gem via rubygems.org.
 
-    A pinned dep (``==X.Y.Z``, ``= X.Y.Z``, a bare version) hits the v2
-    per-version endpoint, under the spelling the gem was published with
-    (:func:`_resolve_pin`). An unpinned one is resolved to a version first
-    (:func:`_select_version`): the latest release's own response answers
-    when that release is the one selected, the per-version endpoint
-    otherwise. A requirement that selects no version is UNKNOWN with no
-    version.
+    A pinned dep (``==X.Y.Z``, ``= X.Y.Z``, a bare version) is the version
+    the gem was published under (:func:`_resolve_pin`); an unpinned one is
+    resolved to a version first (:func:`_select_version`). A requirement that
+    selects no version is UNKNOWN with no version. No requirement at all is
+    the latest release, read from the latest-release response.
+
+    Any other version, pinned or selected by a range, is looked up at the v2
+    per-version endpoint. ``not_found`` tells whether the registry answered a
+    URL that ``fetcher`` returned nothing for with HTTP 404
+    (``RegistryCache.not_found`` beside that cache's ``fetch``). A 404 means
+    the registry has no document at that endpoint: the latest-release
+    response then answers when it describes this very version. Any other
+    miss is a lookup that failed. The default knows of no 404, so with it
+    every miss is a failed lookup.
 
     ``text_fetcher`` fetches the gem's version list, which is a JSON array.
     """
     name = dep.name
     version = _resolve_pin(name, dep.version_constraint, client, fetcher, text_fetcher)
 
+    latest: dict | None = None
     if version is None:
         latest = fetcher(_rubygems_gem_url(name), client)
         if not isinstance(latest, dict):
@@ -281,10 +295,16 @@ def resolve_ruby_license(
         version = _select_version(name, dep.version_constraint, latest, client, text_fetcher)
         if version is None:
             return _unknown(dep, from_registry=False)
-        if version == _resolved_version_from_entry(latest):
+        if not dep.version_constraint.strip():
             return _license_info(dep, latest, version)
 
-    data = fetcher(_rubygems_version_url(name, version), client)
+    url = _rubygems_version_url(name, version)
+    data = fetcher(url, client)
+    if not isinstance(data, dict) and not_found(url):
+        if latest is None:
+            latest = fetcher(_rubygems_gem_url(name), client)
+        if isinstance(latest, dict) and _resolved_version_from_entry(latest) == version:
+            data = latest
     if not isinstance(data, dict):
         return _unknown(dep, from_registry=False)
     return _license_info(dep, data, version)

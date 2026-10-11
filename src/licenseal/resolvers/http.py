@@ -476,6 +476,12 @@ def fetch_registry_json(
     return None
 
 
+# Default ``not_found`` of a resolver that treats a 404 differently from a
+# failed lookup: no URL is known to have been answered with HTTP 404, so every
+# miss is a failed lookup. ``RegistryCache.not_found`` is the one that knows.
+NO_KNOWN_404: Callable[[str], bool] = frozenset[str]().__contains__
+
+
 def fetch_registry_json_post(url: str, body: dict, client: httpx.Client) -> dict | None:
     """Fetch JSON via POST with the same retry semantics as :func:`fetch_registry_json`.
 

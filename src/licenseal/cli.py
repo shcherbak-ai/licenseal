@@ -848,6 +848,7 @@ def _resolve_license_infos(
                         client,
                         fetcher=registry_cache.fetch,
                         text_fetcher=registry_cache.fetch_text,
+                        not_found=registry_cache.not_found,
                     )
                 if dep.ecosystem == Ecosystem.PHP:
                     # Lockfile-first PHP path: when composer.lock carried
@@ -897,7 +898,15 @@ def _resolve_license_infos(
                 )
                 if cached is not None:
                     return cached
-                return resolve_npm_license(dep, client, fetcher=registry_cache.fetch)
+                # A version whose own endpoint answers 404 is read from the
+                # package document's entry for it; one whose lookup failed
+                # is not.
+                return resolve_npm_license(
+                    dep,
+                    client,
+                    fetcher=registry_cache.fetch,
+                    not_found=registry_cache.not_found,
+                )
 
             # tethered.scope() stores its stack in a ContextVar; per PEP 567,
             # ContextVars do not cross the thread boundary, so worker threads

@@ -19,6 +19,7 @@ from licenseal.discovery.python import REQUIREMENT_PARSE_ERRORS
 from licenseal.models import Dependency, DependencyGroup, Ecosystem, LicenseInfo
 from licenseal.resolvers.deps_dev import resolve_via_deps_dev_stable_get
 from licenseal.resolvers.http import (
+    NO_KNOWN_404,
     Fetcher,
     fetch_pep658_metadata,
     fetch_registry_json,
@@ -393,18 +394,13 @@ def _resolve_version(
     return select_python_version(spec, listed) or "", project_data
 
 
-# Default ``not_found`` of :func:`resolve_python_license`: no URL is known to
-# have been answered with HTTP 404.
-_NO_KNOWN_404: Callable[[str], bool] = frozenset[str]().__contains__
-
-
 def resolve_python_license(
     dep: Dependency,
     client: httpx.Client,
     *,
     fetcher: Fetcher = fetch_registry_json,
     pep658_fetcher: Callable[[str, httpx.Client], dict[str, str] | None] = fetch_pep658_metadata,
-    not_found: Callable[[str], bool] = _NO_KNOWN_404,
+    not_found: Callable[[str], bool] = NO_KNOWN_404,
 ) -> LicenseInfo:
     """Resolve license for a Python package from PyPI.
 

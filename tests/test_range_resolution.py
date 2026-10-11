@@ -260,6 +260,45 @@ class TestRubyGems:
         assert not listing.called
 
     @pytest.mark.parametrize("mode", _MODES)
+    @respx.mock
+    def test_selected_release_with_no_document_of_its_own_is_read_from_the_latest_response(
+        self, tmp_path: Path, mode: str
+    ):
+        # The range selects the latest release, whose own endpoint answers
+        # 404. The latest-release response describes that very release.
+        self._project(tmp_path, '">= 1.0"')
+        self._registry()
+        respx.get(f"{self._API}/v2/rubygems/lib/versions/2.0.0.json").mock(
+            return_value=httpx.Response(404)
+        )
+        assert _row(tmp_path, mode) == ("2.0.0", "Apache-2.0", _ESTIMATED)
+
+    @pytest.mark.parametrize("mode", _MODES)
+    @pytest.mark.parametrize("status", [500, 503, 429])
+    @respx.mock
+    def test_failed_lookup_of_the_selected_release_is_unknown(
+        self, tmp_path: Path, mode: str, status: int, fake_registry_clock
+    ):
+        self._project(tmp_path, '">= 1.0"')
+        self._registry()
+        respx.get(f"{self._API}/v2/rubygems/lib/versions/2.0.0.json").mock(
+            return_value=httpx.Response(status)
+        )
+        assert _row(tmp_path, mode) == _UNRESOLVED
+
+    @pytest.mark.parametrize("mode", _MODES)
+    @respx.mock
+    def test_older_release_with_no_document_of_its_own_is_unknown(self, tmp_path: Path, mode: str):
+        # The latest-release response describes 2.0.0, not the selected 1.4.0:
+        # nothing the registry served is that release's metadata.
+        self._project(tmp_path, '"~> 1.2"')
+        self._registry()
+        respx.get(f"{self._API}/v2/rubygems/lib/versions/1.4.0.json").mock(
+            return_value=httpx.Response(404)
+        )
+        assert _row(tmp_path, mode) == _UNRESOLVED
+
+    @pytest.mark.parametrize("mode", _MODES)
     @pytest.mark.parametrize("requirement", ['"1.2.0"', '"= 1.2.0"'])
     @respx.mock
     def test_exact_requirement_is_not_an_estimate(
@@ -714,6 +753,89 @@ class TestNuGet:
             ]
         assert picks == ["1.1.0", "1.5.0", "1.1.0"]
         assert index.call_count == 1
+
+
+class TestNpm:
+    """The version a range selects is looked up at its own endpoint, with the
+    walk and without it. The package document the range was resolved on lists
+    that version with its metadata, and answers when the endpoint has no
+    document.
+    """
+
+    _PACKAGE = "https://registry.npmjs.org/lib"
+    _LICENSES = {"2.0.0": "Apache-2.0", "1.5.0": "MIT", "1.2.0": "ISC"}
+
+    @staticmethod
+    def _project(tmp_path: Path, declared: str) -> None:
+        (tmp_path / "package.json").write_text(json.dumps({"dependencies": {"lib": declared}}))
+
+    def _registry(self, *, own_endpoint: httpx.Response | None = None) -> respx.Route:
+        """Serve the package, latest release 2.0.0; return the package-document route.
+
+        ``own_endpoint`` is what the endpoint of 1.5.0 answers in place of
+        that version's document.
+        """
+        metadata = {
+            number: {"version": number, "license": license_id}
+            for number, license_id in self._LICENSES.items()
+        }
+        for number, entry in metadata.items():
+            answer = httpx.Response(200, json=entry)
+            if number == "1.5.0" and own_endpoint is not None:
+                answer = own_endpoint
+            respx.get(f"{self._PACKAGE}/{number}").mock(return_value=answer)
+        return _json(
+            self._PACKAGE,
+            {"dist-tags": {"latest": "2.0.0", "stable": "1.2.0"}, "versions": metadata},
+        )
+
+    @pytest.mark.parametrize("mode", _MODES)
+    @pytest.mark.parametrize(
+        ("declared", "version"),
+        [("^1.0.0", "1.5.0"), ("~1.2.0", "1.2.0"), ("*", "2.0.0"), ("stable", "1.2.0")],
+    )
+    @respx.mock
+    def test_range_selects_the_highest_version_inside_it(
+        self, tmp_path: Path, mode: str, declared: str, version: str
+    ):
+        self._project(tmp_path, declared)
+        package = self._registry()
+        assert _row(tmp_path, mode) == (version, self._LICENSES[version], _ESTIMATED)
+        assert package.call_count == 1
+
+    @pytest.mark.parametrize("mode", _MODES)
+    @respx.mock
+    def test_version_with_no_document_of_its_own_is_read_from_the_package_document(
+        self, tmp_path: Path, mode: str
+    ):
+        self._project(tmp_path, "^1.0.0")
+        package = self._registry(own_endpoint=httpx.Response(404))
+        # The entry is that version's own metadata: the license is no estimate.
+        assert _row(tmp_path, mode) == ("1.5.0", "MIT", _ESTIMATED)
+        assert package.call_count == 1
+
+    @pytest.mark.parametrize("mode", _MODES)
+    @pytest.mark.parametrize("status", [500, 503, 429])
+    @respx.mock
+    def test_failed_lookup_of_the_selected_version_is_unknown(
+        self, tmp_path: Path, mode: str, status: int, fake_registry_clock
+    ):
+        self._project(tmp_path, "^1.0.0")
+        self._registry(own_endpoint=httpx.Response(status))
+        exact = respx.get("https://api.deps.dev/v3/systems/NPM/packages/lib/versions/1.5.0").mock(
+            return_value=httpx.Response(404)
+        )
+        # Not the license of the latest release, and not the package
+        # document's either: the lookup of this version failed.
+        assert _row(tmp_path, mode) == ("1.5.0", "UNKNOWN", _ESTIMATED)
+        assert exact.called
+
+    @pytest.mark.parametrize("mode", _MODES)
+    @respx.mock
+    def test_range_no_published_version_satisfies_is_unknown(self, tmp_path: Path, mode: str):
+        self._project(tmp_path, "^3.0.0")
+        self._registry()
+        assert _row(tmp_path, mode) == _UNRESOLVED
 
 
 class TestPrereleaseLowerBound:

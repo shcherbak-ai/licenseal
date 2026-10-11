@@ -80,6 +80,19 @@ class TestRubyGems:
             return_value=httpx.Response(404)
         )
 
+    def _latest(self, gem: str, number: str) -> respx.Route:
+        """Serve the latest-release response: release ``number``, under ISC.
+
+        It is asked for a pin whose own endpoint answered 404, and answers
+        only when it describes that pin.
+        """
+        return respx.get(f"{self._API}/v1/gems/{gem}.json").mock(
+            return_value=httpx.Response(
+                200,
+                json={"version": number, "licenses": ["ISC"], "dependencies": {"runtime": []}},
+            )
+        )
+
     def _listing(self, gem: str, *numbers: str) -> respx.Route:
         return respx.get(f"{self._API}/v1/versions/{gem}.json").mock(
             return_value=httpx.Response(200, json=[{"number": number} for number in numbers])
@@ -136,6 +149,7 @@ class TestRubyGems:
     def test_pin_no_published_version_equals_is_unknown(self, tmp_path: Path, mode: str):
         self._gemfile(tmp_path, "1.5")
         self._unlisted("lib", "1.5")
+        self._latest("lib", "1.50.0")
         listing = self._listing("lib", "1.4.0", "1.5.1", "1.50.0")
         rows = _rows(_scan(tmp_path, mode))
         assert rows["lib"][1:] == ("UNKNOWN", [])
@@ -160,6 +174,7 @@ class TestRubyGems:
             gemfile.write('gem "other", "1.0.0"\n')
         self._version("other", "1.0.0", "MIT")
         self._unlisted("lib", "1.2")
+        self._latest("lib", "2.0.0")
         respx.get(f"{self._API}/v1/versions/lib.json").mock(return_value=listing)
         rows = _rows(_scan(tmp_path, mode))
         assert rows["lib"][1:] == ("UNKNOWN", [])
@@ -178,6 +193,7 @@ class TestRubyGems:
         with (tmp_path / "Gemfile").open("a", encoding="utf-8") as gemfile:
             gemfile.write('gem "other"\n')
         self._unlisted("lib", "9.9")
+        self._latest("lib", "9.9.1")
         self._version("other", "1.0.0", "MIT")
         rows = _rows(_scan(tmp_path, "--transitive"))
         assert rows["lib"][1:] == ("UNKNOWN", [])

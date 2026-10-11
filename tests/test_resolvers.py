@@ -1011,6 +1011,10 @@ class TestNpmRegistryResolver:
                 },
             )
         )
+        # The version the tag names is then looked up at its own endpoint.
+        respx.get("https://registry.npmjs.org/foo/2.4.1").mock(
+            return_value=httpx.Response(200, json={"license": "Apache-2.0", "version": "2.4.1"})
+        )
         dep = _npm_dep(name="foo", version="latest")
         with httpx.Client() as client:
             li = resolve_npm_license(dep, client)
@@ -1031,6 +1035,9 @@ class TestNpmRegistryResolver:
                     },
                 },
             )
+        )
+        respx.get("https://registry.npmjs.org/foo/2.0.0-canary.5").mock(
+            return_value=httpx.Response(200, json={"license": "MIT", "version": "2.0.0-canary.5"})
         )
         dep = _npm_dep(name="foo", version="canary")
         with httpx.Client() as client:
@@ -1069,12 +1076,138 @@ class TestNpmRegistryResolver:
                 },
             )
         )
+        respx.get("https://registry.npmjs.org/react/18.2.0").mock(
+            return_value=httpx.Response(200, json={"license": "MIT", "version": "18.2.0"})
+        )
         dep = _npm_dep(version="^18.0.0")
         with httpx.Client() as client:
             li = resolve_npm_license(dep, client)
         assert li.license_id == "MIT"
         assert li.resolved_version == "18.2.0"
         assert li.from_registry is True
+
+    @respx.mock
+    def test_version_with_no_document_of_its_own_is_read_from_the_package_document(self):
+        # A lockfile pin and a range end at the same lookup. The registry
+        # answers 404 at the version's endpoint and lists the version in the
+        # package document: that entry is the release's own metadata.
+        package = respx.get("https://registry.npmjs.org/react").mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "versions": {
+                        "18.2.0": {
+                            "license": "MIT",
+                            "version": "18.2.0",
+                            "homepage": "https://example.test/react",
+                        }
+                    }
+                },
+            )
+        )
+        respx.get("https://registry.npmjs.org/react/18.2.0").mock(return_value=httpx.Response(404))
+        for spec in ("==18.2.0", "^18.0.0"):
+            cache = RegistryCache()
+            with httpx.Client() as client:
+                li = resolve_npm_license(
+                    _npm_dep(version=spec), client, fetcher=cache.fetch, not_found=cache.not_found
+                )
+            assert (li.license_id, li.resolved_version) == ("MIT", "18.2.0"), spec
+            assert li.from_registry is True
+            assert li.license_estimated is False
+            # Read through the cache trim, which keeps what an entry declares.
+            assert li.homepage_url == "https://example.test/react"
+        assert package.call_count == 2
+
+    @pytest.mark.parametrize(
+        "package",
+        [
+            pytest.param(httpx.Response(404), id="no-package-document"),
+            pytest.param(httpx.Response(200, json={"versions": {}}), id="version-not-listed"),
+            pytest.param(httpx.Response(200, json={"versions": ["18.2.0"]}), id="not-a-map"),
+        ],
+    )
+    @respx.mock
+    def test_version_the_registry_has_no_metadata_for_ends_at_the_fallback(self, package):
+        respx.get("https://registry.npmjs.org/react/18.2.0").mock(return_value=httpx.Response(404))
+        respx.get("https://registry.npmjs.org/react").mock(return_value=package)
+        exact = respx.get(
+            "https://api.deps.dev/v3/systems/NPM/packages/react/versions/18.2.0"
+        ).mock(return_value=httpx.Response(404))
+        cache = RegistryCache()
+        with httpx.Client() as client:
+            li = resolve_npm_license(
+                _npm_dep(version="==18.2.0"),
+                client,
+                fetcher=cache.fetch,
+                not_found=cache.not_found,
+            )
+        assert (li.license_id, li.resolved_version, li.from_registry) == (
+            "UNKNOWN",
+            "18.2.0",
+            False,
+        )
+        assert exact.called
+
+    @pytest.mark.parametrize(
+        "failure",
+        [
+            pytest.param(httpx.Response(500), id="500"),
+            pytest.param(httpx.Response(503), id="503"),
+            pytest.param(httpx.Response(429), id="429"),
+            pytest.param(httpx.Response(403), id="403"),
+            pytest.param(httpx.Response(200, text="<html>maintenance</html>"), id="not-json"),
+            pytest.param(httpx.ConnectError("connection refused"), id="connection-error"),
+            pytest.param(httpx.ReadTimeout("timed out"), id="read-timeout"),
+        ],
+    )
+    @respx.mock
+    def test_failed_lookup_of_a_version_is_not_answered_from_the_package_document(
+        self, failure, fake_registry_clock
+    ):
+        route = respx.get("https://registry.npmjs.org/react/18.2.0")
+        if isinstance(failure, Exception):
+            route.mock(side_effect=failure)
+        else:
+            route.mock(return_value=failure)
+        package = respx.get("https://registry.npmjs.org/react").mock(
+            return_value=httpx.Response(
+                200, json={"versions": {"18.2.0": {"license": "MIT", "version": "18.2.0"}}}
+            )
+        )
+        respx.get("https://api.deps.dev/v3/systems/NPM/packages/react/versions/18.2.0").mock(
+            return_value=httpx.Response(404)
+        )
+        cache = RegistryCache()
+        with httpx.Client() as client:
+            li = resolve_npm_license(
+                _npm_dep(version="==18.2.0"),
+                client,
+                fetcher=cache.fetch,
+                not_found=cache.not_found,
+            )
+        assert (li.license_id, li.resolved_version, li.from_registry) == (
+            "UNKNOWN",
+            "18.2.0",
+            False,
+        )
+        assert not package.called
+
+    @respx.mock
+    def test_plain_fetcher_knows_no_404_and_reads_no_package_document(self):
+        respx.get("https://registry.npmjs.org/react/18.2.0").mock(return_value=httpx.Response(404))
+        package = respx.get("https://registry.npmjs.org/react").mock(
+            return_value=httpx.Response(
+                200, json={"versions": {"18.2.0": {"license": "MIT", "version": "18.2.0"}}}
+            )
+        )
+        respx.get("https://api.deps.dev/v3/systems/NPM/packages/react/versions/18.2.0").mock(
+            return_value=httpx.Response(404)
+        )
+        with httpx.Client() as client:
+            li = resolve_npm_license(_npm_dep(version="==18.2.0"), client)
+        assert (li.license_id, li.from_registry) == ("UNKNOWN", False)
+        assert not package.called
 
     @respx.mock
     def test_resolve_range_with_no_match_returns_unknown(self):

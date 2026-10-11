@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from collections.abc import Callable
 from typing import Any, cast
 
 import httpx
@@ -10,7 +11,12 @@ import httpx
 from licenseal.analysis.spdx import all_apply_reading, normalize_license
 from licenseal.models import Dependency, DependencyGroup, Ecosystem, LicenseInfo
 from licenseal.resolvers.deps_dev import resolve_via_deps_dev_stable_get
-from licenseal.resolvers.http import Fetcher, fetch_registry_json, quote_coordinate
+from licenseal.resolvers.http import (
+    NO_KNOWN_404,
+    Fetcher,
+    fetch_registry_json,
+    quote_coordinate,
+)
 from licenseal.resolvers.version_selection import resolve_npm_spec
 
 _NPM_REGISTRY_URL = "https://registry.npmjs.org"
@@ -164,49 +170,89 @@ def _extract_legacy_licenses(raw: object) -> str:
     return "(" + " OR ".join(ids) + ")"
 
 
+def _resolve_version(
+    name: str, spec: str, client: httpx.Client, fetcher: Fetcher
+) -> tuple[str, dict | None]:
+    """Resolve ``spec`` to a version of ``name``: ``(version, response read for it)``.
+
+    A pinned spec is returned as written, with no request. No spec at all is
+    the version the ``latest`` dist-tag names, read from that version's
+    document. Anything else is a dist-tag or a range, resolved on the package
+    document (:func:`resolve_npm_spec`). The response that was read is
+    returned beside the version for the caller to go on reading.
+
+    The version is ``""`` when there is none to report: the lookup failed,
+    the spec cannot be read, or no listed version satisfies it. The walker
+    and the license resolver both resolve through here.
+    """
+    pinned = _extract_pinned_version(spec)
+    if pinned:
+        return pinned, None
+    if not spec.strip():
+        latest = fetcher(_version_url(name, "latest"), client)
+        version = latest.get("version") if latest is not None else None
+        return (version if isinstance(version, str) else ""), latest
+    package_data = fetcher(_package_url(name), client)
+    if package_data is None:
+        return "", None
+    return resolve_npm_spec(package_data, spec), package_data
+
+
+def _version_entry(package_data: dict | None, version: str) -> dict | None:
+    """The entry a package document has for ``version``: that version's own metadata."""
+    versions = package_data.get("versions") if package_data is not None else None
+    entry = versions.get(version) if isinstance(versions, dict) else None
+    return entry if isinstance(entry, dict) else None
+
+
 def resolve_npm_license(
     dep: Dependency,
     client: httpx.Client,
     *,
     fetcher: Fetcher = fetch_registry_json,
+    not_found: Callable[[str], bool] = NO_KNOWN_404,
 ) -> LicenseInfo:
     """Resolve license for an npm package from the registry.
 
     ``fetcher`` defaults to a direct HTTP fetch but can be the ``fetch``
     method of a :class:`~licenseal.resolvers.http.RegistryCache` to dedupe
     URLs already fetched by the transitive walker.
+
+    The version the declaration resolves to, pinned or selected by a range,
+    is looked up at its own endpoint. ``not_found`` tells whether the
+    registry answered a URL that ``fetcher`` returned nothing for with HTTP
+    404 (``RegistryCache.not_found`` beside that cache's ``fetch``). A 404
+    means the registry has no document at that endpoint: the package
+    document's entry for the version, which is the same release's metadata,
+    then answers. Any other miss is a lookup that failed, and is not answered
+    from the package document. The default knows of no 404, so with it every
+    miss is a failed lookup.
     """
     name = dep.name
     spec = dep.version_constraint.strip()
 
-    pinned_version = _extract_pinned_version(spec)
-    if pinned_version:
-        data = fetcher(_version_url(name, pinned_version), client)
-    elif not spec:
-        data = fetcher(_version_url(name, "latest"), client)
-    else:
-        package_data = fetcher(_package_url(name), client)
-        if package_data is None:
-            data = None
-        else:
-            selected_version = resolve_npm_spec(package_data, spec)
-            if not selected_version:
-                data = None
-            else:
-                versions = package_data.get("versions", {})
-                version_map = versions if isinstance(versions, dict) else {}
-                selected_data = version_map.get(selected_version)
-                data = selected_data if isinstance(selected_data, dict) else None
+    version, fetched = _resolve_version(name, spec, client, fetcher)
+    data: dict | None = None
+    if not spec:
+        # No spec is the version ``latest`` names, which that response
+        # describes.
+        data = fetched
+    elif version:
+        url = _version_url(name, version)
+        data = fetcher(url, client)
+        if data is None and not_found(url):
+            package_data = fetched if fetched is not None else fetcher(_package_url(name), client)
+            data = _version_entry(package_data, version)
     if data is None:
         # Resilience fallback: npm registry's HTTP retries exhausted
         # (5xx storm, partial outage). deps.dev runs on independent
         # infrastructure so a correlated outage is unlikely. Only fires
-        # when we have a concrete pinned version — range specs that
-        # never resolved have no version to look up.
-        if pinned_version:
+        # when we have a concrete version — a spec that resolved to none
+        # has no version to look up.
+        if version:
             return resolve_via_deps_dev_stable_get(
                 dep,
-                pinned_version,
+                version,
                 system="NPM",
                 client=client,
                 fetcher=fetcher,
@@ -218,10 +264,9 @@ def resolve_npm_license(
             from_registry=False,
         )
 
-    # /latest returns version-level metadata directly
     raw_license = ""
-    version = data.get("version")
-    resolved_version = version if isinstance(version, str) else ""
+    described = data.get("version")
+    resolved_version = described if isinstance(described, str) else ""
     repository_url = _extract_repository_url(data)
     homepage_url = _extract_homepage_url(data)
 

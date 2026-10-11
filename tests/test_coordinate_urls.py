@@ -525,13 +525,18 @@ class TestScan:
             "%72ealpkg": ("UNKNOWN", "unknown"),
         }
         assert not any(route.called for route in hijacked)
+        # Each is asked for under its own name: the version, the package
+        # document that might list it, then the fallback.
         assert sorted(_requested(misses)) == sorted(
             [
                 "registry.npmjs.org/realpkg%3Fy/2.0.0",
+                "registry.npmjs.org/realpkg%3Fy",
                 "api.deps.dev/v3/systems/NPM/packages/realpkg%3Fy/versions/2.0.0",
                 "registry.npmjs.org/realpkg%23x/3.0.0",
+                "registry.npmjs.org/realpkg%23x",
                 "api.deps.dev/v3/systems/NPM/packages/realpkg%23x/versions/3.0.0",
                 "registry.npmjs.org/%2572ealpkg/4.0.0",
+                "registry.npmjs.org/%2572ealpkg",
                 "api.deps.dev/v3/systems/NPM/packages/%2572ealpkg/versions/4.0.0",
             ]
         )

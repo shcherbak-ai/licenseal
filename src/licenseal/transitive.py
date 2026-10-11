@@ -154,10 +154,7 @@ from licenseal.resolvers.npm_registry import (
     _extract_pinned_version as _extract_npm_pinned_version,  # noqa: PLC2701
 )
 from licenseal.resolvers.npm_registry import (
-    _package_url as _npm_package_url,  # noqa: PLC2701
-)
-from licenseal.resolvers.npm_registry import (
-    _version_url as _npm_version_url,  # noqa: PLC2701
+    _resolve_version as _resolve_npm_version,  # noqa: PLC2701
 )
 from licenseal.resolvers.npm_registry import (
     fetch_npm_dependencies,
@@ -203,7 +200,6 @@ from licenseal.resolvers.rubygems import (
 from licenseal.resolvers.version_selection import (
     concrete_maven_version,
     is_prerelease,
-    resolve_npm_spec,
     satisfies,
 )
 
@@ -2663,9 +2659,9 @@ def _resolve_version(
     not answer with a JSON object, the RubyGems version list.
     """
     spec = dep.version_constraint.strip()
-    # Python, Rust, PHP, Ruby, and Hex resolve through the function their
-    # license resolver uses, so a walk and a ``--no-transitive`` scan report
-    # the same version for the same declaration.
+    # Every ecosystem resolves through the function its license resolver
+    # uses, so a walk and a ``--no-transitive`` scan report the same version
+    # for the same declaration.
     if ecosystem == Ecosystem.PYTHON:
         return _resolve_python_version(dep.name, spec, client, fetcher)[0]
 
@@ -2698,19 +2694,7 @@ def _resolve_version(
             return ""
         return _select_hex_version(spec, data)
 
-    pinned = _extract_npm_pinned_version(spec)
-    if pinned:
-        return pinned
-    if not spec:
-        data = fetcher(_npm_version_url(dep.name, "latest"), client)
-        if data is None:
-            return ""
-        v = data.get("version", "")
-        return v if isinstance(v, str) else ""
-    data = fetcher(_npm_package_url(dep.name), client)
-    if data is None:
-        return ""
-    return resolve_npm_spec(data, spec)
+    return _resolve_npm_version(dep.name, spec, client, fetcher)[0]
 
 
 def _dedupe(deps: list[Dependency]) -> list[Dependency]:
