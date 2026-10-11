@@ -4791,3 +4791,99 @@ class TestExcludedDirectoryInTheLockfilePass:
         assert _versions(data)["forked"] == ("generated/forked", "0.3.0")
         assert _rows(data)["via-fork"]["direct_ancestors"] == ["forked"]
         assert _requests_mentioning("forked") == []
+
+
+# ---------------------------------------- .NET: wildcard project references
+
+_EMPTY_PROJECT = '<Project Sdk="Microsoft.NET.Sdk" />\n'
+
+
+def _traversal_project(*includes: str) -> str:
+    """A project file whose only content is ``<ProjectReference>`` items."""
+    items = "".join(f'    <ProjectReference Include="{include}" />\n' for include in includes)
+    opening = '<Project Sdk="Microsoft.Build.Traversal">\n  <ItemGroup>\n'
+    return f"{opening}{items}  </ItemGroup>\n</Project>\n"
+
+
+class TestDotnetWildcardProjectReferences:
+    """An ``Include`` with wildcards is judged by the directory its literal part names."""
+
+    @staticmethod
+    def _project(tmp_path: Path) -> Path:
+        project = tmp_path / "project"
+        for relative in (
+            "LibCore/LibCore.csproj",
+            "tests/Unit/Unit.csproj",
+            "benchmarks/Bench/Bench.csproj",
+            "src/LibA/LibA.csproj",
+            # Under a directory the scan skips: no project file of the scan.
+            "vendor/Kept/Kept.csproj",
+        ):
+            _write(project / relative, _EMPTY_PROJECT)
+        return project
+
+    @respx.mock
+    def test_pattern_over_directories_the_scan_reads_is_the_projects_own_code(self, tmp_path):
+        project = self._project(tmp_path)
+        _write(
+            project / "Build.csproj",
+            _traversal_project(
+                "Lib*/*.csproj",
+                "tests/**/*.csproj",
+                "benchmarks\\**\\*.csproj",
+                "src/Lib?/Lib?.csproj; tests/Unit/*.csproj",
+                # Not located, but the scan has project files the name matches.
+                "$(RepoRoot)src\\**\\*.csproj",
+            ),
+        )
+        _refuse_everything_else()
+        result, data = _check_json(project, "--no-require-lockfile")
+        assert result.exit_code == 0
+        assert data["dependencies"] == []
+        assert respx.calls.call_count == 0
+
+    @respx.mock
+    def test_pattern_the_scan_does_not_read_is_one_row_named_by_the_pattern(self, tmp_path):
+        project = self._project(tmp_path)
+        patterns = (
+            "../shared/**/*.csproj",  # leaves the scanned directory
+            "vendor/**/*.csproj",  # a directory the scan skips
+            "missing/Lib?.csproj",  # not there
+            "$(RepoRoot)tools\\*.vbproj",  # not located, and no project file matches
+        )
+        # One list holds a pattern the scan reads, the four it does not, and
+        # a plain path: each item is judged by itself.
+        include = "; ".join(("src/Lib?/*.csproj", *patterns, "..\\One\\One.csproj"))
+        _write(project / "Build.csproj", _traversal_project(include))
+        _refuse_everything_else()
+        result, data = _check_json(project, "--no-strict", "--no-require-lockfile")
+        assert result.exit_code == 0
+        assert _origins(data) == {
+            **{pattern: pattern for pattern in patterns},
+            "One": "..\\One\\One.csproj",
+        }
+        assert all(row["license"] == "UNKNOWN" for row in data["dependencies"])
+        assert respx.calls.call_count == 0
+
+
+# -------------------------- Python: a path whose last segment names nothing
+
+
+class TestPythonLocationNames:
+    @respx.mock
+    def test_path_whose_last_segment_names_nothing_is_named_by_the_path(self, tmp_path):
+        project = tmp_path / "project"
+        lines = ("../wheels/*.whl", "../..", "wheelhouse/.whl", "-e ../")
+        _write(project / "requirements.txt", "\n".join(lines) + "\n")
+        _refuse_everything_else()
+        result, data = _check_json(project, "--no-strict", "--no-require-lockfile")
+        assert result.exit_code == 0
+        # Each is a row: none is dropped for want of a name, none is called
+        # ``*`` or ``..``.
+        assert _origins(data) == {
+            "../wheels/*.whl": "../wheels/*.whl",
+            "../..": "../..",
+            "wheelhouse/.whl": "wheelhouse/.whl",
+            "../": "../",
+        }
+        assert respx.calls.call_count == 0

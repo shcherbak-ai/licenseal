@@ -128,21 +128,24 @@ def _location_name(location: str) -> str:
     The ``#egg=`` fragment names it when there is one. Otherwise the name is
     read off the last path segment: the distribution name of a wheel or
     sdist file name, the repository name of a VCS URL, the directory name of
-    a path.
+    a path. A segment that leaves no letter or digit (``..``, ``*.whl``, a
+    bare ``.whl``, the root) names nothing: the location as written is the
+    name then, so the requirement is neither dropped nor called ``*``.
     """
     main, _, fragment = location.partition("#")
     egg = _EGG_RE.search(fragment)
     if egg:
         return egg.group("name")
-    segment = main.partition("?")[0].replace("\\", "/").rstrip("/").rsplit("/", 1)[-1]
+    name = main.partition("?")[0].replace("\\", "/").rstrip("/").rsplit("/", 1)[-1]
     if _VCS_URL_RE.match(location):
-        segment = segment.partition("@")[0].removesuffix(".git")
+        name = name.partition("@")[0].removesuffix(".git")
     for suffix in _ARCHIVE_SUFFIXES:
-        if segment.lower().endswith(suffix):
-            stem = segment[: -len(suffix)]
+        if name.lower().endswith(suffix):
+            stem = name[: -len(suffix)]
             archive = _ARCHIVE_NAME_RE.match(stem)
-            return archive.group("name") if archive else stem
-    return segment
+            name = archive.group("name") if archive else stem
+            break
+    return name if any(char.isalnum() for char in name) else main.strip()
 
 
 def direct_reference_origin(

@@ -77,7 +77,9 @@ after the referenced project file, with the path as written as its origin.
 A path that cannot be
 located, because it holds a ``$(Property)`` the project file does not
 define, is the project's own code when the scanned tree has a project file
-of that name.
+of that name. An ``Include`` with wildcards (``tests/**/*.csproj``) is
+judged by the directory its literal part names, and a row for it is named
+by the pattern, never by a file stem cut out of it.
 
 MSBuild property expansion (``$(PropertyName)``) is performed in a single
 locally-resolvable pass against the project's own ``<PropertyGroup>``
@@ -95,6 +97,7 @@ from __future__ import annotations
 import re
 from collections import deque
 from dataclasses import dataclass, field
+from itertools import takewhile
 from pathlib import Path, PureWindowsPath
 from xml.etree.ElementTree import Element  # nosec B405
 
@@ -409,6 +412,24 @@ _PROJECT_DIR_PROPERTIES = {
     "MSBuildProjectDirectory": ".",
 }
 
+# The wildcard characters of an item ``Include`` (``**`` is two of the first).
+_WILDCARDS = frozenset("*?")
+
+
+def _literal_prefix(pattern: str) -> str:
+    """The directory a wildcard ``Include`` names before its first wildcard segment.
+
+    ``tests/**/*.csproj`` → ``tests``; ``Lib*/*.csproj`` → the empty path,
+    which is the directory of the project file itself.
+    """
+    segments = pattern.replace("\\", "/").split("/")
+    return "/".join(takewhile(_WILDCARDS.isdisjoint, segments))
+
+
+def _file_name_matcher(file_name: str) -> re.Pattern[str]:
+    """Matcher for a referenced file name, in which ``*`` and ``?`` are wildcards."""
+    return re.compile(re.escape(file_name).replace(r"\*", ".*").replace(r"\?", "."))
+
 
 def _project_reference_dependencies(
     data: _CsprojData,
@@ -421,32 +442,44 @@ def _project_reference_dependencies(
 
     A referenced project file in a directory of ``scan_root`` that the scan
     walks is the project's own code and is skipped. The path is read with
-    the project's own ``$(Property)`` values filled in. One that still
-    holds a ``$(…)`` token cannot be
-    located: it is the project's own code when ``local_file_names`` (the
-    lowercased names of the project files of the scanned tree) has the
-    referenced file's name, and is reported otherwise. An ``Include`` can
-    list several paths, separated by ``;``. The dependency is named after
-    the referenced project file and carries the path as written as its
-    origin.
+    the project's own ``$(Property)`` values filled in. An ``Include`` can
+    list several paths, separated by ``;``; each is judged by itself.
+
+    A path with wildcards (``tests/**/*.csproj``) names many project files.
+    It is judged by the directory its literal part names, the part before
+    the first segment that holds a wildcard: when the scan walks that
+    directory, the projects the pattern matches are ones it reads.
+
+    A path that still holds a ``$(…)`` token cannot be located: it is the
+    project's own code when ``local_file_names`` (the lowercased names of the
+    project files of the scanned tree) has a name the referenced file name
+    matches, and is reported otherwise.
+
+    The dependency is named after the referenced project file, or is named
+    by the pattern as written when the path has wildcards, and carries the
+    path as written as its origin.
     """
     properties = {**_PROJECT_DIR_PROPERTIES, **data.properties}
     out: list[Dependency] = []
     for include in data.project_refs:
         for written in filter(None, (part.strip() for part in include.split(";"))):
             expanded = _expand_properties(written, properties)
+            wildcard = not _WILDCARDS.isdisjoint(expanded)
             if "$(" in expanded:
-                inside = PureWindowsPath(expanded).name.lower() in local_file_names
+                matcher = _file_name_matcher(PureWindowsPath(expanded).name.lower())
+                inside = any(matcher.fullmatch(name) for name in local_file_names)
             else:
-                # The scan reads the referenced project when it walks the
-                # directory that holds it.
-                directory = str(PureWindowsPath(expanded).parent)
+                # The scan reads the referenced projects when it walks the
+                # directory that holds them.
+                directory = (
+                    _literal_prefix(expanded) if wildcard else str(PureWindowsPath(expanded).parent)
+                )
                 inside = path_origin(directory, project_file.parent, scan_root) is None
             if inside:
                 continue
             out.append(
                 Dependency(
-                    name=PureWindowsPath(expanded).stem or written,
+                    name=written if wildcard else PureWindowsPath(expanded).stem or written,
                     version_constraint="",
                     ecosystem=Ecosystem.DOTNET,
                     group=DependencyGroup.PROD,
