@@ -12,13 +12,17 @@ import respx
 from click.testing import CliRunner
 
 from licenseal.analysis.compatibility import (
+    _check_compat,
+    _project_compat_risk,
     analyze,
     check_compatibility,
     is_recognised_project_license,
 )
-from licenseal.analysis.risk import _ADDED_PERMISSION_EXCEPTIONS
+from licenseal.analysis.risk import _ADDED_PERMISSION_EXCEPTIONS, classify_risk
 from licenseal.analysis.spdx import (
+    KNOWN_SPDX_IDS,
     and_join_licenses,
+    canonical_license_id,
     collapse_bundled_license_pairs,
     normalize_license,
 )
@@ -1527,6 +1531,54 @@ class TestWithExceptionDrivesTheExitCode:
         assert dependency["risk"] == risk
 
 
+class TestDeprecatedIdBeforeWithInTheReport:
+    """A deprecated GNU ID before ``WITH`` is reported as its current ID."""
+
+    @respx.mock
+    def test_dependency_review_and_project_license_show_the_current_id(self, tmp_path):
+        (tmp_path / "package.json").write_text(
+            json.dumps(
+                {
+                    "name": "app",
+                    "license": "GPL-3.0+ WITH GCC-exception-3.1",
+                    "dependencies": {"classpath-lib": "1.0.0", "custom-lib": "2.0.0"},
+                }
+            )
+        )
+        respx.get("https://registry.npmjs.org/classpath-lib/1.0.0").mock(
+            return_value=httpx.Response(
+                200, json={"version": "1.0.0", "license": "GPL-2.0 WITH Classpath-exception-2.0"}
+            )
+        )
+        respx.get("https://registry.npmjs.org/custom-lib/2.0.0").mock(
+            return_value=httpx.Response(
+                200, json={"version": "2.0.0", "license": "SEE LICENSE IN terms.txt"}
+            )
+        )
+        (tmp_path / "licenseal.review.toml").write_text(
+            '[[review]]\necosystem = "npm"\npackage = "custom-lib"\nversion = "2.0.0"\n'
+            'license = "LGPL-2.1+ WITH OCaml-LGPL-linking-exception"\n',
+            encoding="utf-8",
+        )
+        result = CliRunner().invoke(
+            main, ["check", "--path", str(tmp_path), "-f", "json", "--no-require-lockfile"]
+        )
+        assert result.exit_code == 0
+        data = json.loads(result.output[result.output.index("{") :])
+        assert data["project_license"] == "GPL-3.0-or-later WITH GCC-exception-3.1"
+        rows = {dep["name"]: dep for dep in data["dependencies"]}
+        declared = rows["classpath-lib"]
+        assert declared["license"] == "GPL-2.0-only WITH Classpath-exception-2.0"
+        # The declared string stays on record, and the row has a license page.
+        assert declared["license_raw"] == "GPL-2.0 WITH Classpath-exception-2.0"
+        assert declared["license_url"] == "https://spdx.org/licenses/GPL-2.0-only.html"
+        assert (declared["verdict"], declared["risk"]) == ("compatible", "weak-copyleft")
+        reviewed = rows["custom-lib"]
+        assert reviewed["reviewed_license"] == "LGPL-2.1-or-later WITH OCaml-LGPL-linking-exception"
+        assert reviewed["license_url"] == "https://spdx.org/licenses/LGPL-2.1-or-later.html"
+        assert (reviewed["verdict"], reviewed["risk"]) == ("compatible", "weak-copyleft")
+
+
 class TestDeprecatedIdPairConflicts:
     """Deprecated GNU spellings reach the pair-level rules as their current
     IDs — the bare ID as ``-only``, ``+`` as ``-or-later`` — on the
@@ -1609,6 +1661,77 @@ class TestDeprecatedIdPairConflicts:
     def test_report_names_the_project_license_by_its_current_id(self):
         assert analyze("GPL-2.0", []).project_license == "GPL-2.0-only"
         assert analyze("GPL-2.0+ OR MIT", []).project_license == "GPL-2.0-or-later OR MIT"
+        assert analyze("GPL-2.0 WITH Classpath-exception-2.0", []).project_license == (
+            "GPL-2.0-only WITH Classpath-exception-2.0"
+        )
+
+    # Every spelling the rewrite touches: a bare ID whose ``-only`` form is a
+    # listed license, and a ``+`` ID whose ``-or-later`` form is.
+    _DEPRECATED_SPELLINGS = sorted(
+        {i.removesuffix("-only") for i in KNOWN_SPDX_IDS if i.endswith("-only")}
+        | {i.removesuffix("-or-later") + "+" for i in KNOWN_SPDX_IDS if i.endswith("-or-later")}
+    )
+
+    @pytest.mark.parametrize(
+        "exception",
+        ["GCC-exception-3.1", "Made-Up-exception", "Classpath-exception-2.0"],
+        ids=["added-permission", "unrecognized", "classpath"],
+    )
+    @pytest.mark.parametrize("project", ["MIT", "GPL-2.0-only", "GPL-3.0-only"])
+    def test_deprecated_id_before_with_is_judged_like_its_current_id(self, project, exception):
+        # The term is shown with the current ID. Its verdict and risk class
+        # are those of the deprecated spelling judged as declared.
+        assert {"GPL-2.0", "GPL-2.0+", "GPL-3.0", "LGPL-2.1+", "AGPL-3.0", "GFDL-1.3"} <= set(
+            self._DEPRECATED_SPELLINGS
+        )
+        verdicts = set()
+        for deprecated in self._DEPRECATED_SPELLINGS:
+            declared = f"{deprecated} WITH {exception}"
+            current = f"{canonical_license_id(deprecated)} WITH {exception}"
+            assert current != declared
+            assert normalize_license(declared) == current
+            as_declared = check_compatibility(project, _make_license_info(declared))
+            as_shown = check_compatibility(project, _make_license_info(current))
+            assert (as_shown.verdict, as_shown.risk_level) == (
+                as_declared.verdict,
+                as_declared.risk_level,
+            ), declared
+            verdicts.add(as_shown.verdict)
+        # The licenses differ in class, so the comparison is not of one
+        # verdict with itself throughout.
+        assert len(verdicts) > 1
+
+    @pytest.mark.parametrize(
+        "project",
+        [
+            "GPL-2.0 WITH Classpath-exception-2.0",
+            "GPL-3.0+ WITH GCC-exception-3.1",
+            "GPL-2.0 WITH Made-Up-exception",
+        ],
+    )
+    def test_deprecated_project_id_before_with_is_judged_like_its_current_id(self, project):
+        # ``check_compatibility`` judges against the normalized project
+        # license; the declared spelling is handed to the matrix directly for
+        # the comparison.
+        assert normalize_license(project) != project
+        declared_risk = _project_compat_risk(project, classify_risk(project))
+        verdicts = set()
+        for dep in (
+            "MIT",
+            "Apache-2.0",
+            "GPL-2.0-only",
+            "GPL-3.0-only",
+            "AGPL-3.0-only",
+            "EPL-1.0",
+        ):
+            as_declared = _check_compat(project, declared_risk, _make_license_info(dep))
+            as_shown = check_compatibility(project, _make_license_info(dep))
+            assert (as_shown.verdict, as_shown.risk_level) == (
+                as_declared.verdict,
+                as_declared.risk_level,
+            ), dep
+            verdicts.add(as_shown.verdict)
+        assert len(verdicts) > 1
 
     def test_survivor_of_a_collapsed_pair_conflicts_like_its_current_id(self):
         # In a deps.dev array, ``LGPL-3.0`` beside ``GPL-3.0`` collapses to

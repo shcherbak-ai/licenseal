@@ -1036,11 +1036,13 @@ def _canonical_leaf(leaf: str) -> str:
     A leaf is a license ID, optionally followed by ``WITH`` and an
     exception. A custom ``LicenseRef-*`` leaf becomes ``Proprietary``; a
     deprecated GNU-family ID becomes its current ``-only`` / ``-or-later``
-    form. A ``WITH`` leaf that is not a custom reference is left as written.
+    form, before ``WITH`` too. What follows ``WITH`` is kept as written: an
+    exception is recognized by its exact text, so it is never rewritten.
     """
     if _LICENSE_REF_RE.match(leaf):
         return "Proprietary"
-    return canonical_license_id(leaf)
+    license_id, with_keyword, exception = leaf.partition(" WITH ")
+    return canonical_license_id(license_id) + with_keyword + exception
 
 
 def and_join_licenses(expressions: Iterable[str]) -> str:

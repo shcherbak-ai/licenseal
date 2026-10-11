@@ -6,6 +6,7 @@ import time
 
 import pytest
 
+from licenseal.analysis.risk import unrecognized_exception
 from licenseal.analysis.spdx import (
     _ALTERNATIVES_BY_OWN_TERMS,
     _CLASSIFIER_MAP,
@@ -821,7 +822,8 @@ class TestCanonicalLicenseIds:
             # ``+`` on a license that has no ``-or-later`` ID.
             "MPL-2.0+",
             "Apache-2.0+",
-            # The deprecated compound ID and ``WITH`` leaves are not rewritten.
+            # The deprecated compound ID has no current ID, and a whole
+            # ``WITH`` term is not one license ID.
             "GPL-2.0-with-classpath-exception",
             "GPL-2.0 WITH Classpath-exception-2.0",
             "GPL-2.0+ WITH GCC-exception-2.0",
@@ -861,13 +863,66 @@ class TestCanonicalLicenseIds:
         assert normalize_license("GPL-2.0-only AND MIT") == "GPL-2.0-only AND MIT"
         assert normalize_license("GPL-3.0-or-later AND MIT") == "GPL-3.0-or-later AND MIT"
 
-    def test_with_leaf_is_left_as_written(self):
-        for expr in ("GPL-2.0 WITH Classpath-exception-2.0", "GPL-3.0+ WITH GCC-exception-3.1"):
+    @pytest.mark.parametrize(
+        "raw, expected",
+        [
+            (
+                "GPL-2.0 WITH Classpath-exception-2.0",
+                "GPL-2.0-only WITH Classpath-exception-2.0",
+            ),
+            ("GPL-3.0+ WITH GCC-exception-3.1", "GPL-3.0-or-later WITH GCC-exception-3.1"),
+            (
+                "LGPL-2.1 WITH OCaml-LGPL-linking-exception",
+                "LGPL-2.1-only WITH OCaml-LGPL-linking-exception",
+            ),
+            ("AGPL-3.0+ WITH Made-Up-exception", "AGPL-3.0-or-later WITH Made-Up-exception"),
+            (
+                "GPL-2.0 OR GPL-2.0 WITH Classpath-exception-2.0",
+                "GPL-2.0-only OR GPL-2.0-only WITH Classpath-exception-2.0",
+            ),
+            (
+                "MIT AND (GPL-2.0+ WITH Bison-exception-2.2 OR LGPL-3.0)",
+                "(GPL-2.0-or-later WITH Bison-exception-2.2 OR LGPL-3.0-only) AND MIT",
+            ),
+            # The two spellings of one term are one operand.
+            (
+                "GPL-2.0 WITH Bison-exception-2.2 AND GPL-2.0-only WITH Bison-exception-2.2",
+                "GPL-2.0-only WITH Bison-exception-2.2",
+            ),
+        ],
+    )
+    def test_license_id_before_with_is_rewritten(self, raw, expected):
+        assert normalize_license(raw) == expected
+        assert normalize_license(expected) == expected
+
+    @pytest.mark.parametrize(
+        "raw, expected",
+        [
+            # A deprecated license ID in the exception's place is not a license.
+            ("GPL-2.0 WITH GPL-3.0", "GPL-2.0-only WITH GPL-3.0"),
+            ("MIT WITH GPL-2.0+", "MIT WITH GPL-2.0+"),
+            # Another case of a recognized exception is another text.
+            (
+                "GPL-2.0 WITH classpath-exception-2.0",
+                "GPL-2.0-only WITH classpath-exception-2.0",
+            ),
+            ("GPL-2.0 WITH CLASSPATH-EXCEPTION-2.0", "GPL-2.0-only WITH CLASSPATH-EXCEPTION-2.0"),
+        ],
+    )
+    def test_exception_after_with_is_kept_as_written(self, raw, expected):
+        assert normalize_license(raw) == expected
+        # Still not one of the exceptions the rules recognize.
+        assert unrecognized_exception(expected) == expected.partition(" WITH ")[2]
+
+    def test_current_and_compound_ids_before_with_are_the_control(self):
+        for expr in (
+            "GPL-2.0-only WITH Classpath-exception-2.0",
+            "GPL-3.0-or-later WITH GCC-exception-3.1",
+            "Apache-2.0 WITH LLVM-exception",
+            # No ``-or-later`` ID to rewrite to.
+            "MPL-2.0+ WITH Made-Up-exception",
+        ):
             assert normalize_license(expr) == expr
-        assert (
-            normalize_license("GPL-2.0 OR GPL-2.0 WITH Classpath-exception-2.0")
-            == "GPL-2.0 WITH Classpath-exception-2.0 OR GPL-2.0-only"
-        )
         assert (
             normalize_license("GPL-2.0-with-classpath-exception AND GPL-2.0")
             == "GPL-2.0-only AND GPL-2.0-with-classpath-exception"
