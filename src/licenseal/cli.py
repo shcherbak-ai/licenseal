@@ -1055,9 +1055,18 @@ def check(
             err=True,
         )
 
-    failed = sum(1 for li in license_infos if not li.from_registry)
+    # A dependency with an origin was never looked up: it is counted on a
+    # line of its own, not among the lookups that failed.
+    off_registry = sum(1 for li in license_infos if li.dependency.origin)
+    failed = sum(1 for li in license_infos if not li.from_registry and not li.dependency.origin)
     if failed:
         click.echo(f"Warning: {failed} package(s) could not be resolved from registries.", err=True)
+    if off_registry:
+        click.echo(
+            f"Warning: {off_registry} package(s) come from an off-registry source and were not "
+            "looked up.",
+            err=True,
+        )
 
     contents = load_review_file(project_path)
     if contents.incomplete:

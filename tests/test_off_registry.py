@@ -4662,3 +4662,102 @@ class TestGoLocalReplacements:
         row = _rows(data)["example.org/gen"]
         assert (row["origin"], row["group"], row["license"]) == ("../gen", "dev", "UNKNOWN")
         assert respx.calls.call_count == 0
+
+
+# ------------------------------------------- the stderr counts of a check
+
+
+class TestUnresolvedAndOffRegistryCounts:
+    """Off-registry rows were never looked up: they are not failed lookups."""
+
+    _FAILED = "package(s) could not be resolved from registries."
+    _OFF_REGISTRY = "package(s) come from an off-registry source and were not looked up."
+
+    @respx.mock
+    def test_each_kind_is_counted_on_its_own_line(self, tmp_path):
+        _npm_manifest(
+            tmp_path,
+            {
+                "regular": "^1.0.0",
+                "unpublished": "^1.0.0",
+                "git-fork": "github:team/git-fork#v1",
+                "tarball-fork": "https://dl.example.org/tarball-fork-1.0.0.tgz",
+            },
+        )
+        _mock_npm_package("regular", "1.0.0")
+        _refuse_everything_else()
+        result, data = _check_json(tmp_path, "--no-strict")
+        assert result.exit_code == 0
+        assert data["summary"]["unknown"] == 3
+        # The registry had no ``unpublished``; the two forks were not asked for.
+        assert f"Warning: 1 {self._FAILED}" in result.output
+        assert f"Warning: 2 {self._OFF_REGISTRY}" in result.output
+
+    @respx.mock
+    def test_off_registry_rows_alone_are_not_failed_lookups(self, tmp_path):
+        _npm_manifest(tmp_path, {"regular": "^1.0.0", "git-fork": "github:team/git-fork#v1"})
+        _mock_npm_package("regular", "1.0.0")
+        _refuse_everything_else()
+        result, _ = _check_json(tmp_path, "--no-strict")
+        assert result.exit_code == 0
+        assert self._FAILED not in result.output
+        assert f"Warning: 1 {self._OFF_REGISTRY}" in result.output
+
+    @respx.mock
+    def test_failed_lookups_alone_say_nothing_of_off_registry_sources(self, tmp_path):
+        _npm_manifest(tmp_path, {"regular": "^1.0.0", "unpublished": "^1.0.0"})
+        _mock_npm_package("regular", "1.0.0")
+        _refuse_everything_else()
+        result, _ = _check_json(tmp_path, "--no-strict")
+        assert result.exit_code == 0
+        assert f"Warning: 1 {self._FAILED}" in result.output
+        assert self._OFF_REGISTRY not in result.output
+
+
+# ------------------------------------- exclusions reach the lockfile pass
+
+
+class TestExcludedDirectoryInTheLockfilePass:
+    @respx.mock
+    def test_path_crate_in_an_excluded_directory_is_a_row_at_its_locked_version(self, tmp_path):
+        project = tmp_path / "project"
+        _dirs(project, "generated/forked")
+        _write(
+            project / "Cargo.toml",
+            """\
+            [package]
+            name = "app"
+            version = "0.1.0"
+            license = "MIT"
+
+            [dependencies]
+            regular = "1.0"
+            forked = { path = "generated/forked" }
+            """,
+        )
+        (project / "Cargo.lock").write_text(
+            _cargo_lock(
+                ("app", "0.1.0", "", ("regular", "forked")),
+                ("regular", "1.0.3", _CRATES_IO_INDEX, ()),
+                ("forked", "0.3.0", "", ("via-fork",)),
+                ("via-fork", "2.0.0", _CRATES_IO_INDEX, ()),
+            ),
+            encoding="utf-8",
+        )
+        _mock_crate("regular", "1.0.3")
+        _mock_crate("via-fork", "2.0.0")
+        _mock_crate("forked", "0.3.0", "GPL-3.0-only")
+        _refuse_everything_else()
+
+        # Walked: the project's own crate. No row, and it is still named by
+        # the registry crate it pulls in.
+        _, data = _check_json(project, "--no-strict")
+        assert "forked" not in _rows(data)
+        assert _rows(data)["via-fork"]["direct_ancestors"] == ["forked"]
+
+        # Excluded: nothing scans it, so it is a row, at the version the
+        # lockfile records for it.
+        _, data = _check_json(project, "--no-strict", "--exclude-dirs", "generated")
+        assert _versions(data)["forked"] == ("generated/forked", "0.3.0")
+        assert _rows(data)["via-fork"]["direct_ancestors"] == ["forked"]
+        assert _requests_mentioning("forked") == []

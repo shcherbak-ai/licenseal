@@ -2895,10 +2895,11 @@ class TestCheckCommand:
     @respx.mock
     def test_warns_on_unsupported_npm_spec(self, tmp_path):
         # ``git+`` URL: not a registry package, so it surfaces as an UNKNOWN
-        # with the "could not be resolved" warning. Distinct from
-        # workspace-local specs (``workspace:`` / ``file:`` / ``link:``) which
-        # are filtered at discovery as the user's own workspace, not a third-
-        # party dep to license-check.
+        # that is counted as an off-registry source, not as a failed lookup.
+        # Distinct from workspace-local specs (``workspace:``, and ``file:`` /
+        # ``link:`` to a directory the scan walks), which are filtered at
+        # discovery as the user's own workspace, not a third-party dep to
+        # license-check.
         (tmp_path / "package.json").write_text(
             json.dumps(
                 {
@@ -2918,7 +2919,8 @@ class TestCheckCommand:
         runner = CliRunner()
         result = runner.invoke(main, ["check", "--path", str(tmp_path), "--no-strict"])
         assert result.exit_code == 0
-        assert "could not be resolved" in result.output
+        assert "1 package(s) come from an off-registry source" in result.output
+        assert "could not be resolved" not in result.output
 
 
 class TestCheckWithUnusableRegistryAnswers:
