@@ -4745,6 +4745,20 @@ class TestEncodeModuleProxyPath:
     def test_mixed_case_partially_encoded(self):
         assert encode_module_proxy_path("github.com/Foo/barBaz") == "github.com/!foo/bar!baz"
 
+    @pytest.mark.parametrize(
+        ("version", "encoded"),
+        [
+            ("v1.0.0-RC1", "v1.0.0-!r!c1"),
+            ("v2.0.0-Beta.2", "v2.0.0-!beta.2"),
+            ("v0.0.0-20240101000000-ABCDEF123456", "v0.0.0-20240101000000-!a!b!c!d!e!f123456"),
+            # Nothing to encode in the usual version, or in its suffix.
+            ("v1.2.3", "v1.2.3"),
+            ("v2.0.0+incompatible", "v2.0.0+incompatible"),
+        ],
+    )
+    def test_version_is_encoded_like_a_module_path(self, version, encoded):
+        assert encode_module_proxy_path(version) == encoded
+
 
 class TestFetchGoModText:
     @respx.mock

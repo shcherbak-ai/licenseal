@@ -929,9 +929,6 @@ def _resolve_go_transitive(
     # Every direct requirement is part of the universe, whatever go.sum holds:
     # a nested module can have no go.sum of its own, a go.sum can list a
     # requirement only as a ``/go.mod`` row, or pin another version of it.
-    # Added after the go.sum rows, so that where go.sum has another version
-    # of a required module, the required version's go.mod supplies the
-    # module's edges (see :func:`_fetch_go_edge_graph`).
     for d in direct_go_deps:
         if d.name in workspace_local:
             continue
@@ -946,9 +943,12 @@ def _resolve_go_transitive(
     # ---- 2. fetch each module's go.mod, extract edges ----
     # Edges only attribute modules to direct deps. With none (a go.sum whose
     # go.mod is missing or requires nothing), every module is an orphan
-    # whatever the graph says, so nothing is fetched.
+    # whatever the graph says, so nothing is fetched. A module listed at
+    # several versions takes its edges from the go.mod of the required ones.
     edges = (
-        _fetch_go_edge_graph(entries, client, max_workers, go_mod_fetcher) if direct_go_deps else {}
+        _fetch_go_edge_graph(entries, direct_sources, client, max_workers, go_mod_fetcher)
+        if direct_go_deps
+        else {}
     )
 
     # ---- 3. attribute group + direct_ancestors ----
@@ -2051,6 +2051,7 @@ def _resolve_java_transitive(
 
 def _fetch_go_edge_graph(
     entries: list[tuple[str, str]],
+    required: Container[tuple[str, str]],
     client: httpx.Client,
     max_workers: int,
     go_mod_fetcher: _GoModFetcher,
@@ -2065,31 +2066,49 @@ def _fetch_go_edge_graph(
     from the JSON-API ``fetcher`` because proxy.golang.org serves plain
     text, not JSON — the default ``fetch_go_mod_text`` wraps the body as
     ``{"text": "..."}`` for shape uniformity with the registry-cache layer.
-    """
-    edges: dict[str, set[str]] = {}
 
-    def _one(mod_ver: tuple[str, str]) -> tuple[str, set[str]]:
+    The graph is keyed by module path, and ``entries`` can list one path at
+    several versions. ``required`` holds the ``(module, version)`` pairs the
+    scanned ``go.mod`` files require. A path takes its edges from the
+    versions that are required, from all of them when several ``go.mod``
+    files require different ones, wherever ``go.sum`` lists them; a path
+    with no required version takes them from the version listed last.
+
+    Module path and version are both case-encoded in the URL, as the proxy
+    protocol asks: ``v1.0.0-RC1`` is requested as ``v1.0.0-!r!c1``.
+    """
+
+    def _one(mod_ver: tuple[str, str]) -> set[str]:
         module_path, version = mod_ver
-        url = f"{_GO_PROXY_URL}/{encode_module_proxy_path(module_path)}/@v/{version}.mod"
+        url = (
+            f"{_GO_PROXY_URL}/{encode_module_proxy_path(module_path)}"
+            f"/@v/{encode_module_proxy_path(version)}.mod"
+        )
         data = go_mod_fetcher(url, client)
         if not isinstance(data, dict):
-            return (_go_key(module_path), set())
+            return set()
         text = data.get("text", "")
         if not isinstance(text, str) or not text:
-            return (_go_key(module_path), set())
+            return set()
         # The ``replace`` directives of this go.mod are not applied: Go honours
         # them only in the main module, so the module's requirements are its
         # edges as written.
         requires, _replaces, _tools = _parse_go_mod(text)
-        return (_go_key(module_path), {_go_key(req_path) for req_path, _ in requires})
+        return {_go_key(req_path) for req_path, _ in requires}
 
     # Propagate the active tethered scope into the go.mod-fetch workers — a bare
     # pool fetches in an empty context and bypasses the egress policy.
-    # Results come back in ``entries`` order: when a module path is listed at
-    # several versions, the last one's requirements are its edges.
-    for name, children in map_with_context(_one, entries, max_workers):
-        edges[name] = children
-    return edges
+    # Results come back in ``entries`` order.
+    listed_last: dict[str, set[str]] = {}
+    of_required: dict[str, set[str]] = {}
+    fetched = map_with_context(_one, entries, max_workers)
+    for mod_ver, children in zip(entries, fetched, strict=True):
+        name = _go_key(mod_ver[0])
+        if mod_ver in required:
+            of_required.setdefault(name, set()).update(children)
+        else:
+            listed_last[name] = children
+    return {**listed_last, **of_required}
 
 
 def _walk_registry(

@@ -4273,6 +4273,118 @@ class TestGoDirectRequirementsBesideGoSum:
         }
 
     @respx.mock
+    @pytest.mark.parametrize("other", ["v1.9.0", "v2.5.0"], ids=["listed-before", "listed-after"])
+    def test_required_version_supplies_the_edges_when_go_sum_holds_two(self, tmp_path, other):
+        # go.sum holds the required v2.0.0 and one more version of the module,
+        # on either side of it. Each version's go.mod requires another child.
+        (tmp_path / "go.mod").write_text(
+            "module example.com/app\n\ngo 1.22\n\nrequire example.org/needed v2.0.0\n",
+            encoding="utf-8",
+        )
+        versions = sorted(["v2.0.0", other])
+        (tmp_path / "go.sum").write_text(
+            _go_sum(
+                *(("example.org/needed", version) for version in versions),
+                ("example.org/other-child", "v1.0.0"),
+                ("example.org/required-child", "v1.0.0"),
+            ),
+            encoding="utf-8",
+        )
+        _mock_go_proxy(
+            {
+                ("example.org/needed", "v2.0.0"): "require example.org/required-child v1.0.0\n",
+                ("example.org/needed", other): "require example.org/other-child v1.0.0\n",
+                ("example.org/other-child", "v1.0.0"): "",
+                ("example.org/required-child", "v1.0.0"): "",
+            }
+        )
+
+        needed = "example.org/needed"
+        assert _go_rows(_resolve_tree(tmp_path, include_dev=False)) == {
+            (needed, "v2.0.0", self.PROD, 0, (), "go.mod"),
+            # The other row stays, as a transitive, whichever side it is on.
+            (needed, other, self.PROD, 1, (), ""),
+            # What the required version requires is attributed to the module.
+            ("example.org/required-child", "v1.0.0", self.PROD, 1, (needed,), ""),
+            # What only the other version requires is reached by no requirement.
+            ("example.org/other-child", "v1.0.0", self.PROD, 1, (), ""),
+        }
+
+    @respx.mock
+    def test_child_of_the_other_version_is_not_given_the_requirement_s_group(self, tmp_path):
+        # The module is a ``tool`` requirement (dev) at v2.0.0. go.sum also
+        # lists v2.5.0 after it, whose go.mod requires a module the required
+        # version does not. That module is no tool dependency: it is kept as
+        # production, with no ancestor, and stays in a scan without ``--dev``.
+        (tmp_path / "go.mod").write_text(
+            "module example.com/app\n\n"
+            "go 1.24\n\n"
+            "require example.org/gen-tool v2.0.0\n\n"
+            "tool example.org/gen-tool/cmd/gen\n",
+            encoding="utf-8",
+        )
+        (tmp_path / "go.sum").write_text(
+            _go_sum(
+                ("example.org/gen-tool", "v2.0.0"),
+                ("example.org/gen-tool", "v2.5.0"),
+                ("example.org/other-child", "v1.0.0"),
+                ("example.org/tool-child", "v1.0.0"),
+            ),
+            encoding="utf-8",
+        )
+        _mock_go_proxy(
+            {
+                ("example.org/gen-tool", "v2.0.0"): "require example.org/tool-child v1.0.0\n",
+                ("example.org/gen-tool", "v2.5.0"): "require example.org/other-child v1.0.0\n",
+                ("example.org/other-child", "v1.0.0"): "",
+                ("example.org/tool-child", "v1.0.0"): "",
+            }
+        )
+
+        tool = "example.org/gen-tool"
+        orphan = ("example.org/other-child", "v1.0.0", self.PROD, 1, (), "")
+        assert _go_rows(_resolve_tree(tmp_path, include_dev=False)) == {orphan}
+        assert _go_rows(_resolve_tree(tmp_path, include_dev=True)) == {
+            orphan,
+            (tool, "v2.0.0", self.DEV, 0, (), "go.mod"),
+            (tool, "v2.5.0", self.DEV, 1, (), ""),
+            ("example.org/tool-child", "v1.0.0", self.DEV, 1, (tool,), ""),
+        }
+
+    @respx.mock
+    def test_two_modules_requiring_two_versions_each_supply_edges(self, tmp_path):
+        # Two go.mod files of one tree require different versions of a module,
+        # and each has its own go.sum. Both versions are requirements, so the
+        # children of both are attributed to the module.
+        for directory, version, child in (("a", "v1.0.0", "child-a"), ("b", "v2.0.0", "child-b")):
+            (tmp_path / directory).mkdir()
+            (tmp_path / directory / "go.mod").write_text(
+                f"module example.com/{directory}\n\ngo 1.22\n\n"
+                f"require example.org/shared {version}\n",
+                encoding="utf-8",
+            )
+            (tmp_path / directory / "go.sum").write_text(
+                _go_sum(("example.org/shared", version), (f"example.org/{child}", "v1.0.0")),
+                encoding="utf-8",
+            )
+        _mock_go_proxy(
+            {
+                ("example.org/shared", "v1.0.0"): "require example.org/child-a v1.0.0\n",
+                ("example.org/shared", "v2.0.0"): "require example.org/child-b v1.0.0\n",
+                ("example.org/child-a", "v1.0.0"): "",
+                ("example.org/child-b", "v1.0.0"): "",
+            }
+        )
+
+        shared = "example.org/shared"
+        assert _go_rows(_resolve_tree(tmp_path, include_dev=False)) == {
+            (shared, "v1.0.0", self.PROD, 0, (), "a/go.mod"),
+            (shared, "v2.0.0", self.PROD, 0, (), "b/go.mod"),
+            ("example.org/child-a", "v1.0.0", self.PROD, 1, (shared,), ""),
+            ("example.org/child-b", "v1.0.0", self.PROD, 1, (shared,), ""),
+        }
+
+    @respx.mock
     @pytest.mark.parametrize(
         "go_sum_modules",
         [

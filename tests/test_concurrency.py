@@ -114,7 +114,9 @@ class TestEgressScopeReachesFetchPools:
         entries = [("github.com/a/b", "v1.0.0"), ("github.com/c/d", "v2.0.0")]
         tethered.deactivate()
         with httpx.Client() as client, tethered.scope(allow=[_ALLOWED_RULE], label="probe"):
-            _fetch_go_edge_graph(entries, client, max_workers=4, go_mod_fetcher=probe_fetcher)
+            _fetch_go_edge_graph(
+                entries, frozenset(), client, max_workers=4, go_mod_fetcher=probe_fetcher
+            )
 
         assert observed, "edge pool never invoked the (patched) fetcher"
         assert all(v == "enforced" for v in observed), observed

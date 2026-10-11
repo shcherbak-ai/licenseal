@@ -7476,6 +7476,95 @@ class TestGoDirectRequirementsBesideGoSum:
         assert exit_code == 1
         assert rows == {**production, ("example.org/gen-gpl", "v1.0.0"): ("dev", "warning")}
 
+    @respx.mock
+    def test_proxy_request_case_encodes_the_version(self, tmp_path):
+        # The module proxy case-encodes the version like the module path. Only
+        # the encoded URL is served here: a request for ``v1.0.0-RC1.mod``
+        # would fail the test, and the child would have no ancestor.
+        _mit_project(tmp_path)
+        (tmp_path / "go.mod").write_text(
+            "module example.com/app\n\ngo 1.22\n\nrequire example.org/Lib v1.0.0-RC1\n",
+            encoding="utf-8",
+        )
+        (tmp_path / "go.sum").write_text(
+            _go_sum(("example.org/Lib", "v1.0.0-RC1"), ("example.org/child", "v1.0.0")),
+            encoding="utf-8",
+        )
+        _mock_deps_dev_licenses(
+            {("example.org/Lib", "v1.0.0-RC1"): "MIT", ("example.org/child", "v1.0.0"): "MIT"}
+        )
+        encoded = respx.get("https://proxy.golang.org/example.org/!lib/@v/v1.0.0-!r!c1.mod").mock(
+            return_value=httpx.Response(
+                200, text="module example.org/Lib\nrequire example.org/child v1.0.0\n"
+            )
+        )
+        respx.get("https://proxy.golang.org/example.org/child/@v/v1.0.0.mod").mock(
+            return_value=httpx.Response(200, text="module example.org/child\n")
+        )
+
+        out = tmp_path / "report.json"
+        result = CliRunner().invoke(
+            main, ["check", "--path", str(tmp_path), "-f", "json", "-o", str(out)]
+        )
+        assert result.exit_code == 0, result.output
+        ancestors = {
+            (d["name"], d["resolved_version"]): d["direct_ancestors"]
+            for d in json.loads(out.read_text(encoding="utf-8"))["dependencies"]
+        }
+        assert ancestors == {
+            ("example.org/Lib", "v1.0.0-RC1"): [],
+            ("example.org/child", "v1.0.0"): ["example.org/Lib"],
+        }
+        assert encoded.call_count == 1
+
+    @respx.mock
+    def test_child_of_the_required_version_is_attributed_to_it(self, tmp_path):
+        # go.sum holds the required v2.0.0 and, after it, v2.5.0. Only the
+        # required version's go.mod requires the GPL module, so the report
+        # names the requirement as the module that pulls it in.
+        _mit_project(tmp_path)
+        (tmp_path / "go.mod").write_text(self._GO_MOD, encoding="utf-8")
+        (tmp_path / "go.sum").write_text(
+            _go_sum(
+                self._NEEDED,
+                ("example.org/needed-gpl", "v2.5.0"),
+                ("example.org/later-child", "v1.0.0"),
+                ("example.org/required-child", "v1.0.0"),
+            ),
+            encoding="utf-8",
+        )
+        _mock_go_modules(
+            {
+                self._NEEDED: ("MIT", "require example.org/required-child v1.0.0\n"),
+                ("example.org/needed-gpl", "v2.5.0"): (
+                    "MIT",
+                    "require example.org/later-child v1.0.0\n",
+                ),
+                ("example.org/later-child", "v1.0.0"): ("MIT", ""),
+                ("example.org/required-child", "v1.0.0"): ("GPL-3.0-only", ""),
+            }
+        )
+
+        out = tmp_path / "report.json"
+        result = CliRunner().invoke(
+            main, ["check", "--path", str(tmp_path), "-f", "json", "-o", str(out)]
+        )
+        assert result.exit_code == 1
+        rows = {
+            (d["name"], d["resolved_version"]): (d["depth"], d["direct_ancestors"], d["verdict"])
+            for d in json.loads(out.read_text(encoding="utf-8"))["dependencies"]
+        }
+        assert rows == {
+            self._NEEDED: (0, [], "compatible"),
+            ("example.org/needed-gpl", "v2.5.0"): (1, [], "compatible"),
+            ("example.org/required-child", "v1.0.0"): (
+                1,
+                ["example.org/needed-gpl"],
+                "incompatible",
+            ),
+            ("example.org/later-child", "v1.0.0"): (1, [], "compatible"),
+        }
+
 
 _GO_UNLISTED = (
     "lists only direct requirements (its go directive is below 1.17 or absent) and a go.sum "

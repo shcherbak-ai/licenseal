@@ -602,14 +602,16 @@ def _parse_pep658_headers(text: str) -> dict[str, str]:
 # Cargo, Maven, and PyPI (not Go). proxy.golang.org is the canonical source
 # the ``go`` toolchain itself consults.
 # Path encoding (per the Go modules reference): uppercase letters in the
-# module path are replaced with ``!<lowercase>`` to avoid case-insensitive
-# filesystem collisions on the proxy side.
+# module path and in the version are replaced with ``!<lowercase>`` to avoid
+# case-insensitive filesystem collisions on the proxy side.
 
 
 def encode_module_proxy_path(module_path: str) -> str:
-    """Case-encode a Go module path for use in proxy.golang.org URLs.
+    """Case-encode a Go module path, or a version, for use in proxy.golang.org URLs.
 
-    ``github.com/MyOrg/MyMod`` → ``github.com/!my!org/!my!mod``.
+    ``github.com/MyOrg/MyMod`` → ``github.com/!my!org/!my!mod``, and
+    ``v1.0.0-RC1`` → ``v1.0.0-!r!c1``: the proxy protocol encodes both
+    elements of a request the same way.
     """
     out: list[str] = []
     for ch in module_path:
