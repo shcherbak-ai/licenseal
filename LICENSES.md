@@ -1,6 +1,6 @@
 # License Analysis Report
 
-**Project license:** Apache-2.0
+**Project license:** Apache-2.0 (from [pyproject.toml](pyproject.toml))
 
 |Package|Ecosystem|Group|Source|License|Risk|Status|
 |---------|-----------|-------|--------|---------|------|--------|
