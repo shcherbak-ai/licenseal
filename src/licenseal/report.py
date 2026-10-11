@@ -738,7 +738,11 @@ def render_table(
     )
     if report.project_license_source:
         project_license.append(f" (from {_printable(report.project_license_source)})")
-    console.print(project_license)
+    elif report.project_license_assumption:
+        project_license.append(f" (assumed: {_printable(report.project_license_assumption)})")
+    # One logical line, like the legend below: a saved report or a CI log
+    # keeps the phrase whole, and a terminal wraps it itself.
+    console.print(project_license, soft_wrap=True)
     console.print()
 
     # Every column folds rather than truncates. The fixed-vocabulary columns
@@ -925,6 +929,8 @@ def render_markdown(report: AnalysisReport, *, encoding: str = "utf-8") -> str:
             report.project_license_source, _url_quote(report.project_license_source)
         )
         project_license += f" (from {source})"
+    elif report.project_license_assumption:
+        project_license += f" (assumed: {_escape_md(report.project_license_assumption)})"
     lines.append(project_license)
     lines.append("")
 

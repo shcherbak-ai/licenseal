@@ -61,7 +61,7 @@ Every verdict compares a dependency's license with the project's own. licenseal 
 - A declared value that is not a recognised license (`"license": "-"`, a sentence, a name with no SPDX mapping) is not used. A `Warning:` names the file and the value, and the project is checked as `Proprietary`.
 - In `setup.cfg`, `[metadata]` `license` is read first and the `classifiers` after it, with `%` interpolation, as setuptools reads them. A value that cannot be interpolated (a stray `%`, as in `license = 100% free`, or a `%(name)s` reference to an option that is not there) declares no license: the file is passed over like a manifest with no license field, without a warning of its own. Write a literal percent sign as `%%`.
 - When manifests in the scanned directory declare different licenses, the first in the order above decides and a `Warning:` names each file and its value.
-- The JSON report carries the file as `project_license_source` (`""` when `Proprietary` is assumed). The table and Markdown reports show it beside the project license.
+- The JSON report carries the file as `project_license_source` (`""` when `Proprietary` is assumed). The table and Markdown reports show it beside the project license (`Project license: MIT (from pyproject.toml)`), and when `Proprietary` is assumed they say so with the reason from the stderr line (`Project license: Proprietary (assumed: no manifest in the scanned directory declares a license)`), so a saved report can be read without the scan's stderr.
 
 ## Output & the CI gate
 

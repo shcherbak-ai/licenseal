@@ -327,6 +327,19 @@ def _shown_license(declared: str) -> str:
     return f"'{text}'"
 
 
+def _project_license_assumption(detected: ProjectLicense) -> str:
+    """Say why ``Proprietary`` is assumed, or return ``""`` when a manifest decides.
+
+    One phrase for the stderr line and for the table and Markdown reports, so
+    that a saved report says what the scan said.
+    """
+    if detected.source:
+        return ""
+    if detected.declared:
+        return f"{detected.declared[0][0]} declares no recognised license"
+    return "no manifest in the scanned directory declares a license"
+
+
 def _detect_project_license(project_path: Path, exclude_paths: frozenset[Path]) -> ProjectLicense:
     """Detect the project's own license and say on stderr where it came from.
 
@@ -360,19 +373,12 @@ def _detect_project_license(project_path: Path, exclude_paths: frozenset[Path]) 
             f"(from {_printable(detected.source)}).",
             err=True,
         )
-    elif declared:
-        click.echo(
-            f"Project license: Proprietary (assumed: {declared[0][0]} declares no recognised "
-            "license).",
-            err=True,
-        )
     else:
-        click.echo(
-            "Project license: Proprietary (assumed: no manifest in the scanned directory "
-            "declares a license). Scanning a subproject with --path uses that subproject's "
-            "license.",
-            err=True,
-        )
+        assumption = _printable(_project_license_assumption(detected))
+        assumed = f"Project license: Proprietary (assumed: {assumption})."
+        if not declared:
+            assumed += " Scanning a subproject with --path uses that subproject's license."
+        click.echo(assumed, err=True)
     return detected
 
 
@@ -1247,6 +1253,7 @@ def check(
     report.elapsed_seconds = time.perf_counter() - started_at
     report.read_diagnostics = diag_view
     report.project_license_source = project_license.source
+    report.project_license_assumption = _project_license_assumption(project_license)
 
     if output_file is not None:
         rendered = _render_report_to_string(report, output_format, project_path)

@@ -18,9 +18,11 @@ import pytest
 import respx
 from click.testing import CliRunner
 
+from licenseal.analysis.compatibility import analyze
 from licenseal.cli import main
 from licenseal.discovery import ProjectLicense, detect_project_license
 from licenseal.discovery._read import collect_read_diagnostics
+from licenseal.report import render_markdown
 from tests._helpers import _check_json, _file_diagnostics, _mock_npm, _mock_pypi
 
 _MIX_EXS = """\
@@ -364,17 +366,73 @@ class TestCheckProjectLicense:
             in markdown.stdout.splitlines()
         )
 
+    @pytest.mark.parametrize(
+        ("root_license", "assumption"),
+        [
+            (None, "no manifest in the scanned directory declares a license"),
+            ("<our terms>", "package.json declares no recognised license"),
+        ],
+        ids=["nothing-declared", "value-not-a-license"],
+    )
     @respx.mock
-    def test_assumed_license_shows_no_source_in_the_reports(self, tmp_path: Path):
+    def test_assumed_license_says_so_in_the_table_and_markdown_reports(
+        self, tmp_path: Path, root_license: str | None, assumption: str
+    ):
+        # A saved report is read without the scan's stderr. It says that
+        # Proprietary was assumed, and why, in the words of the stderr line.
+        if root_license is not None:
+            _package_json(tmp_path / "package.json", root_license)
         _package_json(tmp_path / "web" / "package.json", "MIT", **{"left-pad": "1.0.0"})
         _mock_npm("left-pad", "MIT")
 
         table = CliRunner().invoke(main, ["check", "--path", str(tmp_path), _NO_LOCKFILE])
-        assert "Project license: Proprietary\n" in table.stdout
+        assert table.exit_code == 0
+        assert f"Project license: Proprietary (assumed: {assumption})\n" in table.stdout
+        assert f"Project license: Proprietary (assumed: {assumption})." in table.stderr
+
         markdown = CliRunner().invoke(
             main, ["check", "--path", str(tmp_path), "-f", "markdown", _NO_LOCKFILE]
         )
-        assert "**Project license:** Proprietary" in markdown.stdout.splitlines()
+        assert markdown.exit_code == 0
+        assert (
+            f"**Project license:** Proprietary (assumed: {assumption})"
+            in markdown.stdout.splitlines()
+        )
+
+        saved = tmp_path / "out" / "LICENSES.md"
+        CliRunner().invoke(
+            main,
+            ["check", "--path", str(tmp_path), "-f", "markdown", "-o", str(saved), _NO_LOCKFILE],
+        )
+        assert (
+            f"**Project license:** Proprietary (assumed: {assumption})"
+            in saved.read_text(encoding="utf-8").splitlines()
+        )
+
+    @respx.mock
+    def test_declared_proprietary_is_not_called_assumed(self, tmp_path: Path):
+        _package_json(tmp_path / "package.json", "Proprietary", **{"left-pad": "1.0.0"})
+        _mock_npm("left-pad", "MIT")
+
+        table = CliRunner().invoke(main, ["check", "--path", str(tmp_path), _NO_LOCKFILE])
+        assert "Project license: Proprietary (from package.json)\n" in table.stdout
+        assert "assumed" not in table.stdout
+        markdown = CliRunner().invoke(
+            main, ["check", "--path", str(tmp_path), "-f", "markdown", _NO_LOCKFILE]
+        )
+        assert (
+            "**Project license:** Proprietary (from [package.json](package.json))"
+            in markdown.stdout.splitlines()
+        )
+        assert "assumed" not in markdown.stdout
+
+    def test_report_built_without_the_cli_says_nothing_about_the_source(self):
+        # Neither field is set unless the scan sets it: a report rendered from
+        # a hand-built analysis names no file and claims no assumption.
+        report = analyze("Proprietary", [])
+        assert report.project_license_source == ""
+        assert report.project_license_assumption == ""
+        assert "**Project license:** Proprietary" in render_markdown(report).splitlines()
 
     @respx.mock
     def test_declared_value_is_shown_on_one_line_and_capped(self, tmp_path: Path):

@@ -43,7 +43,7 @@ Three of them reach almost every project: a project without a lockfile fails str
 - **An unrecognised declared value is judged as `Proprietary`**, with a warning that names the file and the value. It used to make every dependency UNKNOWN.
 - **An unrecognised arm of a dual license is a `Proprietary` arm.** Project `AGPL-3.0-only OR Commercial` used to drop the unrecognised arm, so copyleft dependencies passed. They are violations now, as under `AGPL-3.0-only OR Proprietary`.
 - **A `Directory.Build.props` in the scanned directory can declare it.** Its `PackageLicenseExpression`, or `PackageLicenseUrl`, is read after the project files in that directory. A .NET solution that declares its license only there was checked as `Proprietary`.
-- `check` and `init-review-file` print the file the project license came from, and warn when manifests in the scanned directory declare different licenses. JSON has a new top-level `project_license_source`, and the table and Markdown reports show the file beside the project license, so the header of a checked-in `LICENSES.md` changes once.
+- `check` and `init-review-file` print the file the project license came from, and warn when manifests in the scanned directory declare different licenses. JSON has a new top-level `project_license_source`, and the table and Markdown reports show the file beside the project license, or say that `Proprietary` is assumed and why, so the header of a checked-in `LICENSES.md` changes once.
 
 #### Dependencies that do not come from a registry
 

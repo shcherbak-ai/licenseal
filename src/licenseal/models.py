@@ -287,6 +287,10 @@ class AnalysisReport:
     # ``project_license`` (set by the CLI, like ``elapsed_seconds``). Empty
     # when none declares a recognised license and ``Proprietary`` is assumed.
     project_license_source: str = ""
+    # Why ``Proprietary`` is assumed, as a phrase the table and Markdown
+    # reports show beside it (set by the CLI, like ``project_license_source``).
+    # Empty when a manifest supplied ``project_license``.
+    project_license_assumption: str = ""
 
     @property
     def violations(self) -> list[CompatibilityResult]:
