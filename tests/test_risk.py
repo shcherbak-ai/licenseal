@@ -8,12 +8,59 @@ from licenseal.analysis.risk import (
     _ADDED_PERMISSION_EXCEPTIONS,
     _DEPRECATED_WITH_IDS,
     _LINKING_EXCEPTIONS,
+    DEPRECATED_SPDX_IDS,
     KNOWN_SPDX_IDS,
     classify_risk,
     split_exception,
     unrecognized_exception,
 )
+from licenseal.analysis.spdx import _DEPRECATED_SPDX_URL_IDS, canonical_license_id
 from licenseal.models import RiskLevel
+
+
+class TestDeprecatedSpdxIds:
+    """The deprecated SPDX license IDs are one list, kept apart from the
+    vendored list of current ones."""
+
+    def test_no_deprecated_id_is_on_the_current_list(self):
+        assert len(DEPRECATED_SPDX_IDS) == 32
+        assert not DEPRECATED_SPDX_IDS & KNOWN_SPDX_IDS
+
+    def test_ids_with_an_exception_in_them_are_the_ones_judged_as_an_expression(self):
+        assert set(_DEPRECATED_WITH_IDS) == {
+            license_id for license_id in DEPRECATED_SPDX_IDS if "-with-" in license_id
+        }
+
+    def test_ids_recognized_in_a_license_url_are_deprecated_ids(self):
+        assert _DEPRECATED_SPDX_URL_IDS <= DEPRECATED_SPDX_IDS
+
+    def test_gnu_spellings_read_as_a_current_id_and_the_rest_are_kept(self):
+        rewritten = {
+            license_id
+            for license_id in DEPRECATED_SPDX_IDS
+            if canonical_license_id(license_id) != license_id
+        }
+        assert all(canonical_license_id(i) in KNOWN_SPDX_IDS for i in rewritten)
+        assert DEPRECATED_SPDX_IDS - rewritten == {
+            *_DEPRECATED_WITH_IDS,
+            "BSD-2-Clause-FreeBSD",
+            "BSD-2-Clause-NetBSD",
+            "Net-SNMP",
+            "Nunit",
+            "StandardML-NJ",
+            "bzip2-1.0.5",
+            "eCos-2.0",
+            "wxWindows",
+        }
+
+    def test_list_is_the_one_the_spdx_table_in_packaging_marks_deprecated(self):
+        # A second copy of the SPDX license list, when the installed
+        # ``packaging`` ships the same version of it.
+        spdx = pytest.importorskip("packaging.licenses._spdx")
+        if getattr(spdx, "VERSION", None) != "3.27.0":
+            pytest.skip("packaging ships another version of the SPDX license list")
+        deprecated = {entry["id"] for entry in spdx.LICENSES.values() if entry["deprecated"]}
+        assert deprecated == DEPRECATED_SPDX_IDS
 
 
 class TestClassifyRisk:

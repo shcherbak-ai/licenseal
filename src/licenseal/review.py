@@ -27,6 +27,10 @@ from typing import Any, cast
 
 import click
 
+from licenseal.analysis.compatibility import (
+    _SOURCE_AVAILABLE_PROJECT_PREFIXES,  # noqa: PLC2701
+)
+from licenseal.analysis.risk import DEPRECATED_SPDX_IDS, KNOWN_SPDX_IDS
 from licenseal.analysis.spdx import normalize_license
 from licenseal.models import CompatibilityResult, CompatibilityVerdict, Ecosystem, LicenseInfo
 from licenseal.report import _printable  # noqa: PLC2701
@@ -131,11 +135,62 @@ def _shown_keys(keys: Iterable[str]) -> str:
     return ", ".join(_printable(key) for key in sorted(keys))
 
 
-def _normalize_reviewed_license(raw_license: str) -> str:
+def _is_license(operand: str) -> bool:
+    """Whether an operand of a normalized expression names a license.
+
+    A current or deprecated SPDX license ID, ``Proprietary``, a
+    ``LicenseRef-`` reference, or an ID in one of the source-available
+    families the compatibility check recognises by prefix: whatever
+    licenseal itself reports as a license. Anything else is a string that is
+    no license at all, such as a mistyped ID.
+    """
+    license_id = operand.rstrip("+")
+    return (
+        license_id in KNOWN_SPDX_IDS
+        or license_id in DEPRECATED_SPDX_IDS
+        or license_id == "Proprietary"
+        or license_id.startswith("LicenseRef-")
+        or license_id.startswith(_SOURCE_AVAILABLE_PROJECT_PREFIXES)
+    )
+
+
+def _operand_that_is_no_license(expression: str) -> str:
+    """The first operand of a normalized expression that is not a license, or ``""``.
+
+    What follows ``WITH`` is an exception, which is not checked against a
+    list: a reviewer records an exception licenseal does not recognise once
+    they have read it.
+    """
+    after_with = False
+    for word in expression.replace("(", " ").replace(")", " ").split():
+        if word in ("AND", "OR", "WITH"):
+            after_with = word == "WITH"
+        elif after_with:
+            after_with = False
+        elif not _is_license(word):
+            return word
+    return ""
+
+
+def _normalize_reviewed_license(raw_license: str, label: str) -> str:
+    """Normalize the ``license`` of the review entry that ``label`` names, or reject it.
+
+    A reviewed dependency does not fail the check, so an entry whose license
+    is no expression, or names something that is no license, is an error
+    instead of a review.
+    """
     normalized = normalize_license(raw_license)
     if normalized == "UNKNOWN":
         raise click.ClickException(
             f"Invalid reviewed license {raw_license!r}. Use a valid SPDX ID or SPDX expression."
+        )
+    operand = _operand_that_is_no_license(normalized)
+    if operand:
+        raise click.ClickException(
+            f"Invalid {REVIEW_FILE_NAME}: the license of the review entry for "
+            f"{_printable(label)} names '{_printable(operand)}', which is not a license "
+            "licenseal recognises. Use SPDX license IDs, `Proprietary`, or a `LicenseRef-` "
+            "reference."
         )
     return normalized
 
@@ -230,7 +285,7 @@ def load_review_file(project_path: Path) -> ReviewFileContents:
         if not license_value.strip():
             incomplete.append(key)
             continue
-        licenses[key] = _normalize_reviewed_license(license_value.strip())
+        licenses[key] = _normalize_reviewed_license(license_value.strip(), label)
         if note.strip():
             notes[key] = note.strip()
 

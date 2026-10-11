@@ -42,6 +42,47 @@ KNOWN_SPDX_IDS: frozenset[str] = frozenset(
     json.loads((files("licenseal.data") / "spdx-license-ids.json").read_text(encoding="utf-8"))
 )
 
+# The license IDs the SPDX license list marks deprecated (license list
+# 3.27.0). The vendored list holds current IDs only. A deprecated ID is
+# still the name of a license: package metadata declares it, and a review
+# entry may record it. Being listed here says nothing about its risk class.
+DEPRECATED_SPDX_IDS: frozenset[str] = frozenset(
+    {
+        "AGPL-1.0",
+        "AGPL-3.0",
+        "BSD-2-Clause-FreeBSD",
+        "BSD-2-Clause-NetBSD",
+        "bzip2-1.0.5",
+        "eCos-2.0",
+        "GFDL-1.1",
+        "GFDL-1.2",
+        "GFDL-1.3",
+        "GPL-1.0",
+        "GPL-1.0+",
+        "GPL-2.0",
+        "GPL-2.0+",
+        "GPL-2.0-with-autoconf-exception",
+        "GPL-2.0-with-bison-exception",
+        "GPL-2.0-with-classpath-exception",
+        "GPL-2.0-with-font-exception",
+        "GPL-2.0-with-GCC-exception",
+        "GPL-3.0",
+        "GPL-3.0+",
+        "GPL-3.0-with-autoconf-exception",
+        "GPL-3.0-with-GCC-exception",
+        "LGPL-2.0",
+        "LGPL-2.0+",
+        "LGPL-2.1",
+        "LGPL-2.1+",
+        "LGPL-3.0",
+        "LGPL-3.0+",
+        "Net-SNMP",
+        "Nunit",
+        "StandardML-NJ",
+        "wxWindows",
+    }
+)
+
 
 # Family patterns: tried in declaration order; first match wins. Each pattern
 # matches a *simple* SPDX ID (no spaces, parens, or `+`). The simple-ID
@@ -288,11 +329,11 @@ _ADDED_PERMISSION_EXCEPTIONS: frozenset[str] = frozenset(
 )
 
 
-# Deprecated SPDX IDs that name a GNU license and an exception in one token,
-# each with the expression SPDX replaced it with (SPDX license list 3.27.0).
-# Such an ID is judged as that expression, so it has the risk class and the
-# pair-level rules of ``<license>-only WITH <exception>``. Reports show the ID
-# as it was declared.
+# The IDs of ``DEPRECATED_SPDX_IDS`` that name a GNU license and an exception
+# in one token, each with the expression SPDX replaced it with. Such an ID is
+# judged as that expression, so it has the risk class and the pair-level
+# rules of ``<license>-only WITH <exception>``. Reports show the ID as it was
+# declared.
 _DEPRECATED_WITH_IDS: dict[str, str] = {
     "GPL-2.0-with-autoconf-exception": "GPL-2.0-only WITH Autoconf-exception-2.0",
     "GPL-2.0-with-bison-exception": "GPL-2.0-only WITH Bison-exception-2.2",
