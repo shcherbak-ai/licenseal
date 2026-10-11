@@ -142,7 +142,6 @@ from licenseal.resolvers.http import (
     fetch_go_mod_text,
     fetch_registry_json,
     fetch_registry_text,
-    object_field,
     quote_coordinate,
 )
 from licenseal.resolvers.maven_central import (
@@ -182,7 +181,7 @@ from licenseal.resolvers.pypi import (
     _extract_pinned_version as _extract_python_pinned_version,  # noqa: PLC2701
 )
 from licenseal.resolvers.pypi import (
-    _project_url as _pypi_project_url,  # noqa: PLC2701
+    _resolve_version as _resolve_python_version,  # noqa: PLC2701
 )
 from licenseal.resolvers.pypi import (
     fetch_python_dependencies,
@@ -205,7 +204,6 @@ from licenseal.resolvers.version_selection import (
     is_prerelease,
     resolve_npm_spec,
     satisfies,
-    select_python_version,
 )
 
 # What tells an exact version from a range, per ecosystem: each returns
@@ -2557,34 +2555,12 @@ def _resolve_version(
     not answer with a JSON object, the RubyGems version list.
     """
     spec = dep.version_constraint.strip()
+    # Python, Rust, PHP, Ruby, and Hex resolve through the function their
+    # license resolver uses, so a walk and a ``--no-transitive`` scan report
+    # the same version for the same declaration.
     if ecosystem == Ecosystem.PYTHON:
-        pinned = _extract_python_pinned_version(spec)
-        if pinned:
-            return pinned
-        if not spec:
-            data = fetcher(_pypi_project_url(dep.name), client)
-            if data is None:
-                return ""
-            v = object_field(data, "info").get("version", "")
-            return v if isinstance(v, str) else ""
-        # range — query project metadata, pick highest matching. `releases`
-        # comes as a list[str] when served through `RegistryCache` (trimmed
-        # for memory) and as a dict[str, ...] when fetched directly; iterate
-        # either shape uniformly.
-        data = fetcher(_pypi_project_url(dep.name), client)
-        if data is None:
-            return ""
-        releases = data.get("releases", [])
-        keys = (
-            [k for k in releases if isinstance(k, str)]
-            if isinstance(releases, (dict, list))
-            else []
-        )
-        return select_python_version(spec, keys) or ""
+        return _resolve_python_version(dep.name, spec, client, fetcher)[0]
 
-    # Rust, PHP, Ruby, and Hex resolve through the function their license
-    # resolver uses, so a walk and a ``--no-transitive`` scan report the same
-    # version for the same declaration.
     if ecosystem == Ecosystem.RUST:
         return _resolve_rust_version(dep.name, spec, client, fetcher) or ""
 

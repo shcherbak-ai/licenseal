@@ -6,6 +6,9 @@ for its license, which is reported as an estimate under the pinned version.
 A lookup that failed says nothing about the release, so nothing is borrowed
 and the dependency is UNKNOWN unless deps.dev has that exact version.
 
+A release that a range selects from the project's release list is answered the
+same way as a pinned one, with the dependency walk and without it.
+
 The same holds one step on, for a release whose own JSON declares no license.
 Its wheel metadata is read next. A 404 says the wheel has no metadata sidecar,
 and the license of the latest release is then borrowed as an estimate; a
@@ -241,6 +244,80 @@ class TestFailedLookup:
         )
         _serve(f"{_PYPI}/pkg-a/json", 200, _release("2.0.0", "MIT"))
         assert _summary(_resolve("==1.0.0")) == ("MIT", "1.0.0", True, True)
+
+
+def _releases(latest: str, license_expression: str, *older: str) -> dict:
+    """The project-level JSON: the ``latest`` release's metadata and every release listed."""
+    return {
+        **_release(latest, license_expression),
+        "releases": {version: [] for version in (*older, latest)},
+    }
+
+
+class TestReleaseARangeSelects:
+    """A range resolves to a release the project-level response lists. What
+    that release gets when its own endpoint gives no metadata is what a
+    pinned release gets.
+    """
+
+    @respx.mock
+    def test_release_pypi_does_not_have_takes_the_latest_license_as_an_estimate(self):
+        _serve(f"{_PYPI}/pkg-a/json", 200, _releases("2.0.0", "MIT", "1.5.0"))
+        _serve(f"{_PYPI}/pkg-a/1.5.0/json")
+        assert _summary(_resolve(">=1.0,<2.0")) == ("MIT", "1.5.0", True, True)
+
+    @respx.mock
+    def test_latest_release_standing_in_for_itself_is_no_estimate(self):
+        # The range selects the latest release, whose endpoint answers 404
+        # while the project-level response describes that very release.
+        _serve(f"{_PYPI}/pkg-a/json", 200, _releases("1.0", "MIT"))
+        _serve(f"{_PYPI}/pkg-a/1.0/json")
+        assert _summary(_resolve(">=1.0")) == ("MIT", "1.0", False, True)
+
+    @pytest.mark.parametrize("failure", _FAILURES)
+    @respx.mock
+    def test_failed_lookup_borrows_nothing(self, failure, fake_registry_clock):
+        _serve(f"{_PYPI}/pkg-a/json", 200, _releases("2.0.0", "MIT", "1.5.0"))
+        _fail(f"{_PYPI}/pkg-a/1.5.0/json", failure)
+        exact = _serve(f"{_DEPS_DEV}/pkg-a/versions/1.5.0")
+        assert _summary(_resolve(">=1.0,<2.0")) == ("UNKNOWN", "1.5.0", False, False)
+        assert exact.called
+
+    @respx.mock
+    def test_deps_dev_answer_for_the_selected_version_is_not_an_estimate(self, fake_registry_clock):
+        _serve(f"{_PYPI}/pkg-a/json", 200, _releases("2.0.0", "MIT", "1.5.0"))
+        _fail(f"{_PYPI}/pkg-a/1.5.0/json", "503")
+        _serve(
+            f"{_DEPS_DEV}/pkg-a/versions/1.5.0",
+            200,
+            {
+                "versionKey": {"system": "PYPI", "name": "pkg-a", "version": "1.5.0"},
+                "licenses": ["GPL-3.0-only"],
+                "links": [],
+            },
+        )
+        assert _summary(_resolve(">=1.0,<2.0")) == ("GPL-3.0-only", "1.5.0", False, True)
+
+    @respx.mock
+    def test_release_with_metadata_of_its_own_is_the_control(self):
+        _serve(f"{_PYPI}/pkg-a/json", 200, _releases("2.0.0", "MIT", "1.5.0"))
+        _serve(f"{_PYPI}/pkg-a/1.5.0/json", 200, _release("1.5.0", "Apache-2.0"))
+        assert _summary(_resolve(">=1.0,<2.0")) == ("Apache-2.0", "1.5.0", False, True)
+
+    @respx.mock
+    def test_range_no_release_satisfies_is_unknown_with_no_version(self):
+        _serve(f"{_PYPI}/pkg-a/json", 200, _releases("2.0.0", "MIT", "1.5.0"))
+        assert _summary(_resolve(">=3.0")) == ("UNKNOWN", "", False, False)
+
+    @respx.mock
+    def test_plain_fetcher_borrows_nothing_for_a_404(self):
+        _serve(f"{_PYPI}/pkg-a/json", 200, _releases("2.0.0", "MIT", "1.5.0"))
+        _serve(f"{_PYPI}/pkg-a/1.5.0/json")
+        _serve(f"{_DEPS_DEV}/pkg-a/versions/1.5.0")
+        dep = Dependency(name="pkg-a", version_constraint=">=1.0,<2.0", ecosystem=Ecosystem.PYTHON)
+        with httpx.Client() as client:
+            info = resolve_python_license(dep, client)
+        assert _summary(info) == ("UNKNOWN", "1.5.0", False, False)
 
 
 class TestWheelMetadataLookup:
@@ -484,6 +561,74 @@ def _rows(data: dict) -> dict[str, tuple[str, str, list[str]]]:
         dep["name"]: (dep["resolved_version"], dep["license"], dep["estimated"])
         for dep in data["dependencies"]
     }
+
+
+_MODES = ("--transitive", "--no-transitive")
+
+
+def _ranged_project(tmp_path: Path, requirement: str) -> Path:
+    """A project with no lockfile: ``pkg-a`` under ``requirement``, beside ``steady`` 3.0.0."""
+    _write(
+        tmp_path / "pyproject.toml",
+        """\
+        [project]
+        name = "app"
+        version = "0.1.0"
+        license = "MIT"
+        """,
+    )
+    _write(tmp_path / "requirements.txt", f"pkg-a{requirement}\nsteady==3.0.0\n")
+    _serve(f"{_PYPI}/steady/3.0.0/json", 200, _release("3.0.0", "MIT"))
+    return tmp_path
+
+
+def _scan_row(project: Path, mode: str) -> tuple[str, str, list[str]]:
+    """Scan ``project`` in ``mode``; return ``pkg-a``'s ``(version, license, estimated)``."""
+    _, data = _check_json(project, mode, "--no-require-lockfile", "--no-strict")
+    rows = _rows(data)
+    assert rows["steady"] == ("3.0.0", "MIT", [])
+    return rows["pkg-a"]
+
+
+class TestScanOfARange:
+    """A direct dependency declared with a range is the same row with and
+    without the dependency walk: one function resolves the declaration for
+    both, and the release it selects is looked up the same way.
+    """
+
+    @pytest.mark.parametrize("mode", _MODES)
+    @respx.mock
+    def test_selected_release_pypi_does_not_have_is_an_estimate_in_both_modes(self, tmp_path, mode):
+        _serve(f"{_PYPI}/pkg-a/json", 200, _releases("2.0.0", "MIT", "1.5.0"))
+        _serve(f"{_PYPI}/pkg-a/1.5.0/json")
+        row = _scan_row(_ranged_project(tmp_path, ">=1.0,<2.0"), mode)
+        assert row == ("1.5.0", "MIT", ["license", "version"])
+
+    @pytest.mark.parametrize("mode", _MODES)
+    @respx.mock
+    def test_selected_release_that_is_the_latest_one_keeps_its_own_license(self, tmp_path, mode):
+        _serve(f"{_PYPI}/pkg-a/json", 200, _releases("1.0", "MIT"))
+        _serve(f"{_PYPI}/pkg-a/1.0/json")
+        assert _scan_row(_ranged_project(tmp_path, ">=1.0"), mode) == ("1.0", "MIT", ["version"])
+
+    @pytest.mark.parametrize("mode", _MODES)
+    @respx.mock
+    def test_failed_lookup_of_the_selected_release_is_unknown_in_both_modes(
+        self, tmp_path, mode, fake_registry_clock
+    ):
+        _serve(f"{_PYPI}/pkg-a/json", 200, _releases("2.0.0", "MIT", "1.5.0"))
+        _fail(f"{_PYPI}/pkg-a/1.5.0/json", "503")
+        _serve(f"{_DEPS_DEV}/pkg-a/versions/1.5.0")
+        row = _scan_row(_ranged_project(tmp_path, ">=1.0,<2.0"), mode)
+        assert row == ("1.5.0", "UNKNOWN", ["version"])
+
+    @pytest.mark.parametrize("mode", _MODES)
+    @respx.mock
+    def test_selected_release_with_metadata_of_its_own_is_the_control(self, tmp_path, mode):
+        _serve(f"{_PYPI}/pkg-a/json", 200, _releases("2.0.0", "MIT", "1.5.0"))
+        _serve(f"{_PYPI}/pkg-a/1.5.0/json", 200, _release("1.5.0", "Apache-2.0"))
+        row = _scan_row(_ranged_project(tmp_path, ">=1.0,<2.0"), mode)
+        assert row == ("1.5.0", "Apache-2.0", ["version"])
 
 
 class TestScan:

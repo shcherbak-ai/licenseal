@@ -359,6 +359,40 @@ def _license_from_pep658(
     return ""
 
 
+def _resolve_version(
+    name: str, spec: str, client: httpx.Client, fetcher: Fetcher
+) -> tuple[str, dict | None]:
+    """Resolve ``spec`` to a version of ``name``: ``(version, project-level response)``.
+
+    A pinned spec is returned as written, with no request. Anything else is
+    read from the project-level response, which is returned beside the
+    version for the caller to go on reading: no spec at all is the release
+    that response describes, PyPI's latest, and a range is the highest
+    release satisfying it among those the response lists.
+
+    The version is ``""`` when there is none to report: the lookup failed,
+    the requirement cannot be read, or no listed release satisfies it. It is
+    never the latest release in place of one the range excludes. The walker
+    and the license resolver both resolve through here.
+    """
+    pinned = _extract_pinned_version(spec)
+    if pinned:
+        return pinned, None
+    project_data = fetcher(_project_url(name), client)
+    if project_data is None:
+        return "", None
+    if not spec.strip():
+        latest = object_field(project_data, "info").get("version")
+        return (latest if isinstance(latest, str) else ""), project_data
+    # ``releases`` is a list from the ``RegistryCache`` and a dict from a
+    # direct fetch; both iterate their version strings.
+    releases = project_data.get("releases", [])
+    listed = (
+        [k for k in releases if isinstance(k, str)] if isinstance(releases, (dict, list)) else []
+    )
+    return select_python_version(spec, listed) or "", project_data
+
+
 # Default ``not_found`` of :func:`resolve_python_license`: no URL is known to
 # have been answered with HTTP 404.
 _NO_KNOWN_404: Callable[[str], bool] = frozenset[str]().__contains__
@@ -383,73 +417,60 @@ def resolve_python_license(
     ``pep658_fetcher`` returned nothing for with HTTP 404
     (``RegistryCache.not_found`` beside that cache's ``fetch`` and
     ``fetch_pep658``). It decides when another release answers for this one.
-    A 404 for a pinned release means PyPI does not have it: another release
-    then stands in for its license, reported as an estimate under the pinned
-    version. A 404 for a wheel's metadata sidecar means the wheel has none: a
-    release that declares no license in its JSON either takes the license of
-    the latest release, as an estimate. Any other miss is a lookup that
-    failed, and nothing is borrowed for it. The default knows of no 404, so
-    with it every miss is a failed lookup.
+    A 404 for the release the declaration resolves to, pinned or selected by
+    a range, means PyPI does not have it: another release then stands in for
+    its license, reported as an estimate under that version. A 404 for a
+    wheel's metadata sidecar means the wheel has none: a release that
+    declares no license in its JSON either takes the license of the latest
+    release, as an estimate. Any other miss is a lookup that failed, and
+    nothing is borrowed for it. The default knows of no 404, so with it every
+    miss is a failed lookup.
     """
     name = dep.name
     spec = dep.version_constraint.strip()
 
-    pinned_version = _extract_pinned_version(spec)
-    project_data: dict | None = None
-    # The pinned version, once ``data`` is another release standing in for it.
+    version, project_data = _resolve_version(name, spec, client, fetcher)
+    # The resolved version, once ``data`` is another release standing in for it.
     stood_in_for = ""
-    if pinned_version:
-        url = _release_url(name, pinned_version)
+    data: dict | None = None
+    if not spec:
+        # No constraint is the latest release, which the project-level
+        # response describes.
+        data = project_data
+    elif version:
+        url = _release_url(name, version)
         data = fetcher(url, client)
         # A release PyPI does not have is a build published on another index
         # (an internal mirror, an accelerator-specific wheel index, a PEP 440
-        # ``+local`` version), pinned in the project's lockfile. The project
-        # itself is on PyPI, so the closest release PyPI does have stands in
-        # for the license rather than leaving the dep UNKNOWN: the public
-        # release a ``+local`` build was made from, then the latest release.
-        # A lookup that failed is not a missing release and gets neither.
-        pinned = Version(pinned_version)
-        if data is None and not_found(url) and pinned.local is not None:
-            stood_in_for = pinned_version
-            url = _release_url(name, pinned.public)
+        # ``+local`` version) that the project's lockfile pins, or a release
+        # a range selected from the project's list whose own endpoint is
+        # gone. The project itself is on PyPI, so the closest release PyPI
+        # does have stands in for the license rather than leaving the dep
+        # UNKNOWN: the public release a ``+local`` build was made from, then
+        # the latest release. A lookup that failed is not a missing release
+        # and gets neither.
+        release = Version(version)
+        if data is None and not_found(url) and release.local is not None:
+            stood_in_for = version
+            url = _release_url(name, release.public)
             data = fetcher(url, client)
         if data is None and not_found(url):
-            stood_in_for = pinned_version
-            project_data = fetcher(_project_url(name), client)
+            stood_in_for = version
+            if project_data is None:
+                project_data = fetcher(_project_url(name), client)
             data = project_data
-    elif not spec:
-        data = fetcher(_project_url(name), client)
-        project_data = data
-    else:
-        project_data = fetcher(_project_url(name), client)
-        if project_data is None:
-            data = None
-        else:
-            # `releases` is list[str] from the RegistryCache and dict[str,...]
-            # from a direct fetch — both iterate the same way.
-            releases = project_data.get("releases", [])
-            release_keys = (
-                [k for k in releases if isinstance(k, str)]
-                if isinstance(releases, (dict, list))
-                else []
-            )
-            selected_version = select_python_version(spec, release_keys)
-            if not selected_version:
-                data = None
-            else:
-                data = fetcher(_release_url(name, selected_version), client)
     if data is None:
         # Resilience fallback: PyPI's HTTP retries exhausted (5xx storm,
         # partial outage). deps.dev runs on independent infrastructure
         # (Google API gateway vs PyPI's Fastly + PSF infra), so a
         # correlated outage is unlikely. Only fires when we know a
-        # concrete version to query — unpinned specs whose range
-        # resolution failed have no version to look up. Its answer is for
-        # that exact version: nothing is borrowed from another release.
-        if pinned_version:
+        # concrete version to query — a declaration that resolved to no
+        # version has none to look up. Its answer is for that exact
+        # version: nothing is borrowed from another release.
+        if version:
             return resolve_via_deps_dev_stable_get(
                 dep,
-                pinned_version,
+                version,
                 system="PYPI",
                 client=client,
                 fetcher=fetcher,
@@ -461,13 +482,13 @@ def resolve_python_license(
             from_registry=False,
         )
     info = object_field(data, "info")
-    version = info.get("version")
+    described = info.get("version")
     # The release the license is read for: the one ``data`` describes, until
     # another answers below.
-    license_version: object = version if isinstance(version, str) else ""
-    # A stand-in is read in place of the pinned release, which stays the
+    license_version: object = described if isinstance(described, str) else ""
+    # A stand-in is read in place of the resolved release, which stays the
     # version reported.
-    resolved_version = stood_in_for or (version if isinstance(version, str) else "")
+    resolved_version = stood_in_for or (described if isinstance(described, str) else "")
     repository_url = _extract_repository_url(info)
     homepage_url = _extract_homepage_url(info)
 
@@ -499,7 +520,7 @@ def resolve_python_license(
             # release is read in its place.
             return resolve_via_deps_dev_stable_get(
                 dep,
-                pinned_version or resolved_version,
+                version,
                 system="PYPI",
                 client=client,
                 fetcher=fetcher,
