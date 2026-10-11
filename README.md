@@ -51,7 +51,7 @@
 <br>
 <!-- markdownlint-enable MD033 -->
 
-**licenseal is a fast license compatibility checker for dependency trees across language ecosystems.** It makes that compliance check cheap enough to run in CI: scan manifests, lockfiles, and public registry metadata, then tell you whether your dependency licenses are compatible with the license you ship under. It does not install dependencies, run package-manager commands, execute build scripts, or download package archives.
+**licenseal is a fast license compatibility checker for dependency trees across language ecosystems.** It reads manifests, lockfiles, and public registry metadata and tells you whether your dependency licenses are compatible with the license you ship under, fast enough to run in CI. It does not install dependencies, run package-manager commands, execute build scripts, or download package archives.
 
 ```bash
 uvx licenseal check
@@ -65,7 +65,7 @@ uvx licenseal check
 
 ## 🧭 Why This Matters
 
-License non-compliance is a quiet delivery risk: it usually does not break the build, but it can block a shipment, customer approval, funding round, or acquisition when discovered late. The problem usually surfaces when a customer, investor, legal reviewer, or procurement team asks what is inside your dependency tree:
+License non-compliance is a quiet delivery risk: it usually does not break the build, but it can block a shipment, customer approval, funding round, or acquisition when discovered late.
 
 | Blocker | What can happen |
 | --- | --- |
@@ -76,7 +76,7 @@ License non-compliance is a quiet delivery risk: it usually does not break the b
 | Product obligations | GPL, AGPL, SSPL, BUSL, Elastic, non-commercial Creative Commons, and similar terms may be incompatible with how you distribute or host the product. |
 | Audit trail | Review decisions need to be explicit and checked in, not buried in a spreadsheet or chat thread. |
 
-licenseal turns that hidden risk into fast CI feedback: it scans the transitive dependency tree, flags compatibility issues, and records reviewed decisions for cases that need human judgment. It is designed for PR gates, using manifests, lockfiles, and registries without install or build steps.
+licenseal turns that hidden risk into fast CI feedback: it scans the transitive dependency tree, flags compatibility issues, and records reviewed decisions for cases that need human judgment.
 
 ![Illustrative dependency tree: an Apache-2.0 app depends on MIT client, which pulls in MIT transport and then MPL-2.0 certs. The path to certs is highlighted because it receives a warning; unreviewed warnings fail strict checks](assets/licenseal-transitive-path.svg)
 
@@ -122,7 +122,18 @@ uv add --dev licenseal
 pip install licenseal
 ```
 
-The exit code is non-zero when there are unreviewed violations, warnings, unknown licenses, or analysis gaps. A manifest with no lockfile, or with a lockfile that does not hold the versions it declares, is an analysis gap: commit an up-to-date lockfile, or pass `--no-require-lockfile` to accept versions estimated from the registry. See [USAGE.md](USAGE.md) for every flag and report format.
+The exit code is non-zero when there are unreviewed violations, warnings, unknown licenses, or analysis gaps (something the scan could not read, such as a manifest without an up-to-date lockfile). Commit the lockfile, or pass `--no-require-lockfile` to accept versions estimated from the registry. See [USAGE.md](USAGE.md) for every flag and report format.
+
+## 🧰 Important Defaults
+
+| Default | Meaning |
+| --- | --- |
+| `--transitive` | Scans the transitive dependency tree by default. Use `--no-transitive` for direct dependencies only. |
+| `--no-dev` | Dev dependencies are excluded unless `--dev` is set. |
+| `--strict` | Warnings, unknown licenses, and analysis gaps fail CI in addition to violations. |
+| `--require-lockfile` | A manifest without an up-to-date lockfile is an analysis gap. `--no-require-lockfile` accepts versions estimated from the registry, marked `~1.2.3`, and the manifest does not fail the check. |
+| Violations always fail | `--no-strict` demotes warnings, unknown licenses, and analysis gaps only; definite incompatibilities still fail. |
+| Project license from the scanned directory, else `Proprietary` | Read from a manifest in the scanned directory, never from a nested package. If none declares a license, or the first that does declares a value that is not a recognised license, the project is checked as `Proprietary`: permissive dependencies pass, copyleft ones are flagged. See [USAGE.md](USAGE.md#project-license). |
 
 ## 🤖 Claude Code Review Skill
 
@@ -132,7 +143,7 @@ CI can tell you which dependency licenses need attention; the bundled [Claude Co
 licenseal install-skill
 ```
 
-The skill runs `licenseal check`, walks through warnings, violations, unknown licenses, and analysis gaps, and asks verdict-aware questions based on how your project is distributed, hosted, modified, or shipped. It fills `licenseal.review.toml` only when there is a concrete reviewable rationale, keeps genuine incompatibilities flagged, and re-runs the strict scan so the remaining compliance gaps are explicit.
+The skill runs `licenseal check`, walks through warnings, violations, unknown licenses, and analysis gaps, and asks how your project is distributed, hosted, modified, or shipped. It fills `licenseal.review.toml` only when there is a concrete reviewable rationale, keeps genuine incompatibilities flagged, and re-runs the check so what is still flagged is explicit.
 
 [![Claude Code licenseal review skill asking whether MPL dependencies were modified before marking them reviewed](assets/claude_skill_qa.png)](assets/claude_skill_qa.png)
 
@@ -188,27 +199,15 @@ Comparison last reviewed: June 2026. Tool capabilities change; check each projec
 
 No tool clears every row. The discovery rows are about source-tree analysis: manifests, lockfiles, and registry metadata before a successful package-manager install is assumed. Some tools can produce broader inventories after installation or hosted analysis; licenseal is optimized for transitive dependency coverage in CI without that prerequisite. `~` means the capability exists, but with a different workflow, hosted service, package-manager prerequisite, or policy model. The speed row reflects benchmark runs on public repositories, not a vendor guarantee. Pair licenseal with an SBOM generator, hosted compliance platform, or installed-metadata scanner when those are the artifacts or workflows you need.
 
-## 🧰 Important Defaults
-
-| Default | Meaning |
-| --- | --- |
-| `--transitive` | Scans the transitive dependency tree by default. Use `--no-transitive` for direct deps only. |
-| `--no-dev` | Dev dependencies are excluded unless `--dev` is set. |
-| `--strict` | Warnings, unknowns, and analysis gaps fail CI in addition to violations. |
-| `--require-lockfile` | A manifest whose dependencies no lockfile covers is an analysis gap: it is scanned from the registry and its versions are marked as estimates (`~1.2.3`). `--no-require-lockfile` accepts that estimate: the manifest is still reported, and does not fail the check. |
-| Violations always fail | `--no-strict` demotes warnings, unknowns, and gaps only; definite incompatibilities still fail. |
-| Project license from the scanned directory, else `Proprietary` | The project's own license is read from a manifest in the scanned directory itself, never from a nested package, and the scan prints which file supplied it. If none declares a license, or the first one that does declares a value that is not a recognised license, licenseal labels the project `Proprietary` and checks dependencies as if it were permissively licensed — copyleft dependencies are still flagged, so the default errs strict, not lenient. See [USAGE.md](USAGE.md#project-license). |
-| Registry-only resolution | No installs, builds, package archive downloads, or source-prose license extraction. |
-
 ## 🎯 Scope
 
 licenseal is intentionally narrow:
 
 - It is a **license compatibility checker**, not a legal approval workflow or policy-exception manager.
 - It checks **published dependency license metadata**, not vulnerability status, provenance, or SBOM completeness.
-- It reads **manifests, lockfiles, and public registry metadata endpoints** only. It does not honor private registry declarations from scanned manifests, because that would expand the network trust boundary.
-- A dependency installed from a **git repository, a direct URL, or a path the scan does not read** (outside the scanned directory, an archive, a vendored or excluded directory) has no registry record. It is reported as `UNKNOWN` with its source, nothing is requested or downloaded for it, and a review keyed on that source records its license (see [USAGE.md](USAGE.md#off-registry-dependencies)).
-- It does not infer dependency licenses by pattern-matching local `LICENSE` files or source comments. Free-form license text is easy to misread, spoof, or partially match; missing structured metadata is reported as `UNKNOWN` and routed to manual review instead.
+- It reads **manifests, lockfiles, and public registry metadata endpoints** only. A package pinned to a private registry is looked up on the public one by name (see [SECURITY.md](SECURITY.md#what-leaves-the-process)).
+- An **off-registry dependency**, installed from a git repository, a direct URL, or a path the scan does not read (outside the scanned directory, an archive, a vendored or excluded directory), has no registry record. It is reported as `UNKNOWN` with its source, nothing is requested or downloaded for it, and a review keyed on that source records its license (see [USAGE.md](USAGE.md#off-registry-dependencies)).
+- It does not infer dependency licenses by pattern-matching local `LICENSE` files or source comments; missing structured metadata is reported as `UNKNOWN` and routed to manual review.
 - It produces Markdown/JSON dependency license reports, but not standards-compliant CycloneDX or SPDX SBOMs; use a dedicated SBOM tool when you need that artifact.
 - Manual review can override flagged findings when a maintainer has better information, but the review file is an audit record, not hidden legal sign-off.
 
@@ -241,9 +240,7 @@ Preview:
 
 ![License compatibility badge preview](https://img.shields.io/badge/license%20compatibility-CI%20status-informational)
 
-Use the workflow status badge as the primary signal: it shows that license compatibility is checked in CI and that the latest run passed.
-
-For a PR comment or audit artifact, write Markdown or JSON. The file is saved before the gate runs, so CI can publish it even on a failing check, and a failing check still prints the findings that failed it to stderr:
+For a PR comment or audit artifact, write Markdown or JSON. The file is written even when the check fails, so CI can publish it; the findings that failed the check are also printed to stderr:
 
 ```bash
 licenseal check -f markdown -o LICENSES.md   # PR-comment-friendly audit
@@ -276,11 +273,7 @@ licenseal init-review-file --from-report report.json         # 2. scaffold blank
 licenseal check                                              # 4. overrides apply
 ```
 
-Run without `--from-report`, `licenseal init-review-file` scans the project itself, the way `check` does by default (lockfile-first, transitive dependencies included), and scaffolds the same flagged dependencies under the same keys.
-
-Reviews can only override flagged dependencies, never compatible ones. A reviewed dependency passes strict mode and stays visible with both the detected and reviewed licenses shown. A dependency that does not come from a registry is reviewed by its source instead of its version: the scaffolded entry carries a `source` line.
-
-licenseal also ships a [Claude Code](https://claude.com/claude-code) skill (`licenseal install-skill`, then `/licenseal-review`) that walks through unknowns, warnings, and violations interactively. It can inspect package links, license links, and project context, then ask the questions that matter for how your software is distributed, hosted, or modified. Full review rules are in [USAGE.md](USAGE.md#manual-review-file).
+Reviews can only override flagged dependencies, never compatible ones. A reviewed dependency passes strict mode and stays visible with both the detected and reviewed licenses shown. An off-registry dependency is reviewed by its source instead of its version: the scaffolded entry carries a `source` line. Full review rules are in [USAGE.md](USAGE.md#manual-review-file).
 
 ## 🧩 How Licenseal Decides
 
@@ -293,18 +286,18 @@ licenseal classifies each dependency license into a risk level and compares that
 | **Strong Copyleft** | OK | OK | OK | Warning |
 | **Network Copyleft** | OK | OK | OK | OK |
 
-**Pair-level overrides** strengthen the matrix where two licenses share a cell but are documented as legally incompatible: GPL-family version conflicts (a GPLv3-family dependency — `GPL-3.0-*`, `LGPL-3.0-*`, `AGPL-3.0-*` — in a `GPL-2.0-only` project, or a `GPL-2.0-only` dependency in a `GPL-3.0-*` / `AGPL-3.0-*` project), `Apache-2.0` in a `GPL-2.0-only` project, and FSF-documented GPL-incompatible weak copyleft (`EPL-1.0`, `CDDL-*`, `MPL-1.1`) in any GPL-family project (`GPL-2.0-*`, `GPL-3.0-*`, `AGPL-3.0-*`) are all violations; `EPL-2.0` in a GPL-family project is a warning, because its GPL compatibility depends on a secondary-license designation that package metadata cannot reveal. `-or-later` forms are exempt where the upgrade clause resolves the conflict. A deprecated GNU identifier is read by its SPDX meaning: a bare `GPL-2.0` is `GPL-2.0-only`, and `GPL-2.0+` is `GPL-2.0-or-later`.
+**Pair-level overrides** strengthen the matrix where two licenses are documented as legally incompatible:
 
-How compound and ambiguous license strings are read (the full rules are in [USAGE.md](USAGE.md#license-expressions)):
+- Violation: a GPLv3-family dependency (`GPL-3.0-*`, `LGPL-3.0-*`, `AGPL-3.0-*`) in a `GPL-2.0-only` project, or a `GPL-2.0-only` dependency in a `GPL-3.0-*` / `AGPL-3.0-*` project.
+- Violation: `Apache-2.0` in a `GPL-2.0-only` project.
+- Violation: `EPL-1.0`, `CDDL-*`, or `MPL-1.1` in any GPL-family project (`GPL-2.0-*`, `GPL-3.0-*`, `AGPL-3.0-*`).
+- Warning: `EPL-2.0` in a GPL-family project, because its GPL compatibility depends on a secondary-license designation that package metadata cannot reveal.
 
-- An **`OR` expression** gets the verdict of the single choice that suits the project best, each choice checked as a whole: `GPL-3.0-only OR MIT` in a `GPL-2.0-only` project is OK through its MIT choice. The Risk column shows the dependency's least restrictive choice.
-- In an **`AND` expression** an operand that is a violation decides the verdict; an operand that did not resolve makes it Unknown only when no operand is a violation.
-- A **`WITH` exception** is matched against a fixed list. The Classpath exception on a GPL license makes the dependency weak copyleft, and an exception that only adds a permission leaves it judged as its bare license (except that `Apache-2.0 WITH LLVM-exception` is OK in a `GPL-2.0-only` project). Any other text after `WITH` is terms licenseal did not read: the dependency is a violation when the bare license is one and Unknown otherwise.
-- A **license list whose source does not say what it means** (a RubyGems or Hex array, several PyPI license classifiers, `MIT, GPL-3.0-only` in one string) is judged twice: as a choice, and with every entry applying. When the readings differ the dependency is Unknown until you confirm the reading and record it in `licenseal.review.toml`.
+`-or-later` forms are exempt where the upgrade clause resolves the conflict. A deprecated GNU identifier is read by its SPDX meaning: a bare `GPL-2.0` is `GPL-2.0-only`, and `GPL-2.0+` is `GPL-2.0-or-later`.
 
-A **dual-licensed project** (e.g. `AGPL-3.0-only OR Proprietary`) is checked against the strictest of its arms: dependencies must be compatible with every license the project distributes under, so the commercial arm of an open-core project still flags copyleft dependencies. An arm licenseal does not recognize is judged as a `Proprietary` arm.
+An **`OR` expression** gets the verdict of the single choice that suits the project best, each choice checked as a whole: `GPL-3.0-only OR MIT` in a `GPL-2.0-only` project is OK through its MIT choice. The report's Risk column shows the dependency's least restrictive choice. How `AND`, `WITH` exceptions, license lists, and a dual-licensed project are read is in [USAGE.md](USAGE.md#license-expressions).
 
-When `--dev` is set, violations on dev dependencies are downgraded to warnings — licenseal treats dev deps as lower risk because they usually do not ship with the project. A dev dependency whose license did not resolve cleanly is Unknown instead.
+With `--dev`, a violation on a dev dependency is downgraded to a warning, because dev dependencies usually do not ship with the project. A dev dependency whose license did not fully resolve is Unknown instead.
 
 | Risk level | Examples | Meaning |
 | --- | --- | --- |
@@ -312,9 +305,7 @@ When `--dev` is set, violations on dev dependencies are downgraded to warnings �
 | Weak Copyleft | LGPL, MPL-2.0, EPL, CDDL, GPL with Classpath exception | File-scope reciprocity; linking from other files is usually allowed |
 | Strong Copyleft | GPL, OSL, EUPL, CC-BY-SA | Share-alike obligations can extend to the derivative work |
 | Network Copyleft | AGPL-3.0-only | Strong copyleft with network-use source-offer obligations |
-| Unknown | SSPL, BUSL, Elastic, CC-BY-NC; missing or unrecognized licenses; an unrecognized `WITH` exception on a license that is not strong or network copyleft | Cannot be auto-classified; routed to manual review |
-
-A dependency is **Unknown** when the registry returns no license, a non-SPDX string, or a source-available / use-restricted license (`SSPL`, `BUSL`, `Elastic`, `FSL`, `Parity`, `PolyForm`, `CC-BY-NC*` / `CC-BY-ND*`, `BSD-3-Clause-No-Military-License` and the other use-restricted BSD variants, `Unicode-TOU`) whose custom terms are not auto-evaluated.
+| Unknown | SSPL, BUSL, Elastic, FSL, Parity, PolyForm, CC-BY-NC, CC-BY-ND, `BSD-3-Clause-No-Military-License` and the other use-restricted BSD variants, Unicode-TOU; missing or unrecognized licenses; an unrecognized `WITH` exception on a license that is not strong or network copyleft | Cannot be auto-classified; routed to manual review |
 
 ## Learn More
 
