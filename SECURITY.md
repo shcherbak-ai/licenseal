@@ -35,7 +35,7 @@ Outbound network access is restricted to fourteen hosts by [`tethered`](https://
 | `crates.io:443` | crates.io | Crate metadata, by name or by name and version | Rust crates |
 | `api.deps.dev:443` | deps.dev (Google) | Three requests, listed below | Licenses of Go, Python, npm, Rust, Java, .NET, and Ruby packages; Java dependency graphs |
 | `proxy.golang.org:443` | Go module proxy | A module version's `go.mod` | The requirements of Go modules |
-| `repo.maven.apache.org:443` | Maven Central (Apache Foundation) | POM XML and `maven-metadata.xml` version lists in the standard `/maven2/` layout | Java packages |
+| `repo.maven.apache.org:443` | Maven Central (Sonatype) | POM XML and `maven-metadata.xml` version lists in the standard `/maven2/` layout | Java packages |
 | `dl.google.com:443` | Google Android Maven (Google) | The same files under `/dl/android/maven2/` | Java packages that Maven Central has no usable answer for |
 | `repo.jenkins-ci.org:443` | Jenkins Project public repository (Continuous Delivery Foundation) | The same files under `/public/` | The same, asked after `dl.google.com` |
 | `api.nuget.org:443` | NuGet.org (.NET Foundation, Microsoft) | `/v3-flatcontainer/{id}/{version}/{id}.nuspec`; `/v3-flatcontainer/{id}/index.json` for a version list | .NET packages |
