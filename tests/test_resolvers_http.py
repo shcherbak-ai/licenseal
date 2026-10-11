@@ -608,6 +608,69 @@ class TestUrlTheClientRefusesToBuild:
         assert respx.calls.call_count == 0
 
 
+class TestUrlWithADotSegment:
+    """The client resolves a ``.`` or ``..`` path segment before it sends a
+    request, so a URL holding one asks for another resource than it spells.
+    The GET helpers send no such URL: it is a failed lookup.
+    """
+
+    @respx.mock
+    @pytest.mark.parametrize(
+        "url",
+        [
+            "https://pypi.org/pypi/pkg-a/../pkg-b/json",
+            "https://pypi.org/pypi/./pkg-b/json",
+            "https://pypi.org/pypi/pkg-a/..",
+            # A percent-encoded dot is still a dot to the server that decodes it.
+            "https://pypi.org/pypi/pkg-a/%2e%2e/pkg-b/json",
+            "https://pypi.org/pypi/pkg-a/%2E./pkg-b/json",
+            "https://pypi.org/pypi/pkg-a/.%2e/pkg-b/json",
+            "https://pypi.org/pypi/%2e/pkg-b/json",
+            # And so is a segment between percent-encoded slashes.
+            "https://hex.pm/api/packages/pkg-a%2F..%2Fpkg-b",
+            "https://hex.pm/api/packages/pkg-a%2f%2e%2e%2fpkg-b",
+            "https://pypi.org/pypi/pkg-a/../pkg-b/json?v=1",
+            "https://pypi.org/pypi/pkg-a/../pkg-b/json#top",
+        ],
+    )
+    def test_is_a_failed_lookup_with_no_request_and_no_retry(self, url, fake_registry_clock):
+        cache = registry_http.RegistryCache()
+        with httpx.Client() as client:
+            for name, fetch in _GET_FETCHERS.items():
+                assert fetch(url, client) is None, name
+            assert cache.fetch(url, client) is None
+            assert cache.fetch(url, client) is None
+        assert respx.calls.call_count == 0
+        assert fake_registry_clock.sleeps == []
+        # Cached like any other failed lookup, and never as a 404.
+        assert (cache.fetches_attempted, cache.fetches_succeeded) == (1, 0)
+        assert cache.not_found(url) is False
+
+    @respx.mock
+    @pytest.mark.parametrize(
+        "url",
+        [
+            # Dots that are part of a longer segment.
+            "https://rubygems.org/api/v1/gems/...json",
+            "https://pypi.org/pypi/pkg-a/1.0..2/json",
+            "https://example.com/.hidden/..name/name../...",
+            # An encoded percent sign followed by ``2e``, not an encoded dot.
+            "https://pypi.org/pypi/pkg-a/%252e%252e/json",
+            # Outside the path.
+            "https://pypi.org/pypi/pkg-a/json?next=../pkg-b",
+            "https://pypi.org/pypi/pkg-a/json#../pkg-b",
+        ],
+    )
+    def test_dots_that_are_not_a_segment_are_sent(self, url):
+        route = respx.get(url__regex=r"^https://.*$").mock(
+            return_value=httpx.Response(200, content=b"{}")
+        )
+        with httpx.Client() as client:
+            for name, fetch in _GET_FETCHERS.items():
+                assert fetch(url, client) is not None, name
+        assert route.call_count == len(_GET_FETCHERS)
+
+
 class TestBlockedEgressStillPropagates:
     """The fetch helpers turn failed lookups into ``None``. A blocked egress is
     not one of them: it must reach the caller so the scan aborts.

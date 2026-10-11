@@ -34,7 +34,12 @@ import httpx
 
 from licenseal.analysis.spdx import read_license_array
 from licenseal.models import Dependency, DependencyGroup, Ecosystem, LicenseInfo
-from licenseal.resolvers.http import Fetcher, fetch_registry_json, fetch_registry_text
+from licenseal.resolvers.http import (
+    Fetcher,
+    fetch_registry_json,
+    fetch_registry_text,
+    quote_coordinate,
+)
 from licenseal.resolvers.version_selection import satisfies, select_version
 
 _RUBYGEMS_REGISTRY_URL = "https://rubygems.org"
@@ -45,17 +50,20 @@ _BARE_VERSION_RE = re.compile(r"\d+(?:\.[0-9A-Za-z]+)*")
 
 def _rubygems_version_url(name: str, version: str) -> str:
     """Per-version v2 endpoint URL."""
-    return f"{_RUBYGEMS_REGISTRY_URL}/api/v2/rubygems/{name}/versions/{version}.json"
+    return (
+        f"{_RUBYGEMS_REGISTRY_URL}/api/v2/rubygems/{quote_coordinate(name)}"
+        f"/versions/{quote_coordinate(version)}.json"
+    )
 
 
 def _rubygems_gem_url(name: str) -> str:
     """Latest-version v1 endpoint URL (unpinned fallback)."""
-    return f"{_RUBYGEMS_REGISTRY_URL}/api/v1/gems/{name}.json"
+    return f"{_RUBYGEMS_REGISTRY_URL}/api/v1/gems/{quote_coordinate(name)}.json"
 
 
 def _rubygems_versions_url(name: str) -> str:
     """Version-list v1 endpoint URL (every published version of a gem)."""
-    return f"{_RUBYGEMS_REGISTRY_URL}/api/v1/versions/{name}.json"
+    return f"{_RUBYGEMS_REGISTRY_URL}/api/v1/versions/{quote_coordinate(name)}.json"
 
 
 def _extract_pinned_version(version_constraint: str) -> str | None:

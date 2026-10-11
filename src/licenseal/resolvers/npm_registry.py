@@ -10,11 +10,15 @@ import httpx
 from licenseal.analysis.spdx import all_apply_reading, normalize_license
 from licenseal.models import Dependency, DependencyGroup, Ecosystem, LicenseInfo
 from licenseal.resolvers.deps_dev import resolve_via_deps_dev_stable_get
-from licenseal.resolvers.http import Fetcher, fetch_registry_json
+from licenseal.resolvers.http import Fetcher, fetch_registry_json, quote_coordinate
 from licenseal.resolvers.version_selection import resolve_npm_spec
 
 _NPM_REGISTRY_URL = "https://registry.npmjs.org"
 _PINNED_VERSION_RE = re.compile(r"^v?(\d+\.\d+\.\d+(?:[-+][A-Za-z0-9.-]+)?)$")
+
+# Characters the names of packages published before npm's current naming rules
+# may hold; the registry is asked for them as written.
+_LEGACY_NAME_CHARACTERS = "!'()*"
 
 # npm package-alias syntax: a dep can be declared under any name with the
 # value ``npm:<target-name>@<spec>``. Common in monorepos that vendor two
@@ -25,6 +29,28 @@ _PINNED_VERSION_RE = re.compile(r"^v?(\d+\.\d+\.\d+(?:[-+][A-Za-z0-9.-]+)?)$")
 # Scoped-target form (``npm:@scope/name@spec``) is supported via the
 # ``@?`` in the group.
 _NPM_ALIAS_RE = re.compile(r"^npm:(@?[^@\s]+(?:/[^@\s]+)?)@(.+)$")
+
+
+def _package_url(name: str) -> str:
+    """Package endpoint: every published version and the dist-tags.
+
+    The ``/`` of a scoped name (``@scope/name``) separates two path segments,
+    as the registry serves it. It is the only ``/`` a name has: any other one
+    is encoded with the segment it is in.
+    """
+    scope, slash, rest = name.partition("/")
+    if slash and scope.startswith("@"):
+        scope = quote_coordinate(scope, safe="@" + _LEGACY_NAME_CHARACTERS)
+        return f"{_NPM_REGISTRY_URL}/{scope}/{quote_coordinate(rest, safe=_LEGACY_NAME_CHARACTERS)}"
+    return f"{_NPM_REGISTRY_URL}/{quote_coordinate(name, safe=_LEGACY_NAME_CHARACTERS)}"
+
+
+def _version_url(name: str, version: str) -> str:
+    """Endpoint of one version, or of the version a dist-tag (``latest``) names.
+
+    ``+`` before a version's build metadata is sent as written.
+    """
+    return f"{_package_url(name)}/{quote_coordinate(version, safe='+')}"
 
 
 def _unpack_npm_alias(name: str, spec: str) -> tuple[str, str]:
@@ -155,14 +181,11 @@ def resolve_npm_license(
 
     pinned_version = _extract_pinned_version(spec)
     if pinned_version:
-        url = f"{_NPM_REGISTRY_URL}/{name}/{pinned_version}"
-        data = fetcher(url, client)
+        data = fetcher(_version_url(name, pinned_version), client)
     elif not spec:
-        url = f"{_NPM_REGISTRY_URL}/{name}/latest"
-        data = fetcher(url, client)
+        data = fetcher(_version_url(name, "latest"), client)
     else:
-        url = f"{_NPM_REGISTRY_URL}/{name}"
-        package_data = fetcher(url, client)
+        package_data = fetcher(_package_url(name), client)
         if package_data is None:
             data = None
         else:
@@ -265,8 +288,7 @@ def fetch_npm_dependencies(
     ``fetcher`` defaults to a direct HTTP fetch; the walker passes a
     cache-backed fetcher so the response is reused for license resolution.
     """
-    url = f"{_NPM_REGISTRY_URL}/{name}/{version}"
-    data = fetcher(url, client)
+    data = fetcher(_version_url(name, version), client)
     if data is None:
         return [], False
     complete = True

@@ -143,6 +143,7 @@ from licenseal.resolvers.http import (
     fetch_registry_json,
     fetch_registry_text,
     object_field,
+    quote_coordinate,
 )
 from licenseal.resolvers.maven_central import (
     _MAX_PARENT_DEPTH,  # noqa: PLC2701
@@ -151,6 +152,12 @@ from licenseal.resolvers.maven_central import (
 )
 from licenseal.resolvers.npm_registry import (
     _extract_pinned_version as _extract_npm_pinned_version,  # noqa: PLC2701
+)
+from licenseal.resolvers.npm_registry import (
+    _package_url as _npm_package_url,  # noqa: PLC2701
+)
+from licenseal.resolvers.npm_registry import (
+    _version_url as _npm_version_url,  # noqa: PLC2701
 )
 from licenseal.resolvers.npm_registry import (
     fetch_npm_dependencies,
@@ -173,6 +180,9 @@ from licenseal.resolvers.packagist import (
 )
 from licenseal.resolvers.pypi import (
     _extract_pinned_version as _extract_python_pinned_version,  # noqa: PLC2701
+)
+from licenseal.resolvers.pypi import (
+    _project_url as _pypi_project_url,  # noqa: PLC2701
 )
 from licenseal.resolvers.pypi import (
     fetch_python_dependencies,
@@ -2183,15 +2193,16 @@ def _fetch_go_edge_graph(
     with no required version takes them from the version listed last.
 
     Module path and version are both case-encoded in the URL, as the proxy
-    protocol asks: ``v1.0.0-RC1`` is requested as ``v1.0.0-!r!c1``.
+    protocol asks: ``v1.0.0-RC1`` is requested as ``v1.0.0-!r!c1``. Both are
+    then percent-encoded, a module path one element at a time; the ``!`` of
+    the case encoding and the ``+`` of ``+incompatible`` are sent as written.
     """
 
     def _one(mod_ver: tuple[str, str]) -> set[str]:
         module_path, version = mod_ver
-        url = (
-            f"{_GO_PROXY_URL}/{encode_module_proxy_path(module_path)}"
-            f"/@v/{encode_module_proxy_path(version)}.mod"
-        )
+        encoded_path = quote_coordinate(encode_module_proxy_path(module_path), safe="/!")
+        encoded_version = quote_coordinate(encode_module_proxy_path(version), safe="+!")
+        url = f"{_GO_PROXY_URL}/{encoded_path}/@v/{encoded_version}.mod"
         data = go_mod_fetcher(url, client)
         if not isinstance(data, dict):
             return set()
@@ -2551,7 +2562,7 @@ def _resolve_version(
         if pinned:
             return pinned
         if not spec:
-            data = fetcher(f"https://pypi.org/pypi/{dep.name}/json", client)
+            data = fetcher(_pypi_project_url(dep.name), client)
             if data is None:
                 return ""
             v = object_field(data, "info").get("version", "")
@@ -2560,7 +2571,7 @@ def _resolve_version(
         # comes as a list[str] when served through `RegistryCache` (trimmed
         # for memory) and as a dict[str, ...] when fetched directly; iterate
         # either shape uniformly.
-        data = fetcher(f"https://pypi.org/pypi/{dep.name}/json", client)
+        data = fetcher(_pypi_project_url(dep.name), client)
         if data is None:
             return ""
         releases = data.get("releases", [])
@@ -2607,12 +2618,12 @@ def _resolve_version(
     if pinned:
         return pinned
     if not spec:
-        data = fetcher(f"https://registry.npmjs.org/{dep.name}/latest", client)
+        data = fetcher(_npm_version_url(dep.name, "latest"), client)
         if data is None:
             return ""
         v = data.get("version", "")
         return v if isinstance(v, str) else ""
-    data = fetcher(f"https://registry.npmjs.org/{dep.name}", client)
+    data = fetcher(_npm_package_url(dep.name), client)
     if data is None:
         return ""
     return resolve_npm_spec(data, spec)

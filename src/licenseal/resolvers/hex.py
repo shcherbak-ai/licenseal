@@ -38,7 +38,7 @@ import httpx
 
 from licenseal.analysis.spdx import read_license_array
 from licenseal.models import Dependency, DependencyGroup, Ecosystem, LicenseInfo
-from licenseal.resolvers.http import Fetcher, fetch_registry_json
+from licenseal.resolvers.http import Fetcher, fetch_registry_json, quote_coordinate
 from licenseal.resolvers.version_selection import select_version
 
 _HEX_REGISTRY_URL = "https://hex.pm"
@@ -53,12 +53,15 @@ _REPO_LINK_LABELS = ("github", "gitlab", "bitbucket")
 
 def _hex_package_url(name: str) -> str:
     """Package metadata endpoint (license + links + latest version)."""
-    return f"{_HEX_REGISTRY_URL}/api/packages/{name}"
+    return f"{_HEX_REGISTRY_URL}/api/packages/{quote_coordinate(name)}"
 
 
 def _hex_release_url(name: str, version: str) -> str:
-    """Per-version release endpoint (transitive ``requirements`` edges)."""
-    return f"{_HEX_REGISTRY_URL}/api/packages/{name}/releases/{version}"
+    """Per-version release endpoint (transitive ``requirements`` edges).
+
+    ``+`` before a version's build metadata is sent as written.
+    """
+    return f"{_hex_package_url(name)}/releases/{quote_coordinate(version, safe='+')}"
 
 
 def _extract_pinned_version(version_constraint: str) -> str | None:

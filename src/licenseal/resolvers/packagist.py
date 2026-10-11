@@ -20,7 +20,7 @@ import httpx
 from licenseal.analysis.spdx import all_apply_reading, normalize_license
 from licenseal.discovery.php.lockfiles import LockfileLicenseMap
 from licenseal.models import Dependency, DependencyGroup, Ecosystem, LicenseInfo
-from licenseal.resolvers.http import Fetcher, fetch_registry_json
+from licenseal.resolvers.http import Fetcher, fetch_registry_json, quote_coordinate
 from licenseal.resolvers.version_selection import composer_version, select_version
 
 # Key of a package name in the name sets and graphs below (see
@@ -38,8 +38,16 @@ _MINIFIED_UNSET = "__unset"
 
 
 def _packagist_url(name: str) -> str:
-    """Build the canonical Packagist v2 metadata URL for a package."""
-    return f"{_PACKAGIST_REGISTRY_URL}/{name.lower()}.json"
+    """Build the canonical Packagist v2 metadata URL for a package.
+
+    The ``/`` between vendor and package separates two path segments. It is
+    the only ``/`` a name has: any other one is encoded with the package.
+    """
+    vendor, slash, package = name.lower().partition("/")
+    return (
+        f"{_PACKAGIST_REGISTRY_URL}/{quote_coordinate(vendor)}{slash}"
+        f"{quote_coordinate(package)}.json"
+    )
 
 
 def _extract_pinned_version(version_constraint: str) -> str | None:

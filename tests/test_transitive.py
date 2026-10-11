@@ -9044,11 +9044,21 @@ class TestRegistryWalkOverUnusableResponses:
                 assert version == "", info
 
     @respx.mock
-    def test_name_no_url_can_carry_is_kept_unresolved_without_a_request(
-        self, tmp_path, walk_through_cache
+    @pytest.mark.parametrize(
+        ("name", "segment"),
+        [
+            # A control character is percent-encoded and the registry misses.
+            pytest.param("pkg\x01a", b"pkg%01a", id="control-character"),
+            # A name that would ask for another package is never sent.
+            pytest.param("pkg-a/../pkg-b", None, id="dot-segment"),
+        ],
+    )
+    def test_name_no_registry_has_is_kept_unresolved(
+        self, tmp_path, walk_through_cache, name, segment
     ):
+        misses = respx.get(url__regex=r"^https://.*$").mock(return_value=httpx.Response(404))
         seeds = [
-            Dependency(name="pkg\x01a", version_constraint=spec, ecosystem=ecosystem)
+            Dependency(name=name, version_constraint=spec, ecosystem=ecosystem)
             for ecosystem in (Ecosystem.PYTHON, Ecosystem.NPM, Ecosystem.RUST, Ecosystem.RUBY)
             for spec in ("", ">=1.0")
         ]
@@ -9056,15 +9066,20 @@ class TestRegistryWalkOverUnusableResponses:
         assert sorted((d.ecosystem.value, d.name, d.version_constraint) for d in deps) == sorted(
             (s.ecosystem.value, s.name, s.version_constraint) for s in seeds
         )
-        assert respx.calls.call_count == 0
+        if segment is None:
+            assert misses.call_count == 0
+        else:
+            assert misses.call_count >= len(seeds) // 2
+            assert all(segment in call.request.url.raw_path for call in misses.calls)
 
     @respx.mock
-    def test_registry_declared_child_no_url_can_carry_is_kept_unresolved(
+    def test_registry_declared_child_with_a_control_character_is_kept_unresolved(
         self, tmp_path, walk_through_cache
     ):
         # The parent's registry metadata names a child with a control character
-        # in it. The child is reported under that exact name; its sibling and
-        # the parent are walked as usual.
+        # in it. The registry has no package of that name: the child is
+        # reported under that exact name, and its sibling and the parent are
+        # walked as usual.
         respx.get("https://registry.npmjs.org/parent-pkg/1.0.0").mock(
             return_value=httpx.Response(
                 200,
@@ -9078,6 +9093,7 @@ class TestRegistryWalkOverUnusableResponses:
         respx.get("https://registry.npmjs.org/good-child/3.0.0").mock(
             return_value=httpx.Response(200, json=_npm_version("good-child", "3.0.0"))
         )
+        missing = respx.get(host="registry.npmjs.org").mock(return_value=httpx.Response(404))
         seed = Dependency(name="parent-pkg", version_constraint="1.0.0", ecosystem=Ecosystem.NPM)
         deps = walk_through_cache([seed], tmp_path)
         assert sorted((d.name, d.version_constraint, d.direct_ancestors) for d in deps) == [
@@ -9085,4 +9101,5 @@ class TestRegistryWalkOverUnusableResponses:
             ("good-child", "==3.0.0", ("parent-pkg",)),
             ("parent-pkg", "==1.0.0", ()),
         ]
-        assert respx.calls.call_count == 2
+        assert [call.request.url.raw_path for call in missing.calls] == [b"/evil%01child"]
+        assert respx.calls.call_count == 3

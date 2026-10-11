@@ -3275,9 +3275,10 @@ class TestCheckWithUnusableRegistryAnswers:
         )
 
     @respx.mock
-    def test_names_no_url_can_carry_keep_their_identity(self, tmp_path):
+    def test_names_with_a_control_character_keep_their_identity(self, tmp_path):
         # One name with a control character comes from the manifest, another
-        # from a registry answer. Each is reported under exactly that name.
+        # from a registry answer. Each is reported under exactly that name,
+        # and looked up under it, percent-encoded.
         (tmp_path / "package.json").write_text(
             json.dumps(
                 {
@@ -3298,6 +3299,7 @@ class TestCheckWithUnusableRegistryAnswers:
                 },
             )
         )
+        misses = respx.get(host="registry.npmjs.org").mock(return_value=httpx.Response(404))
         self._assert_one_unknown_per_mode(
             tmp_path, {"parent-pkg": "MIT", "bad\x01name": "UNKNOWN", "evil\x01child": "UNKNOWN"}
         )
@@ -3305,26 +3307,36 @@ class TestCheckWithUnusableRegistryAnswers:
         child = next(d for d in report["dependencies"] if d["name"] == "evil\x01child")
         assert child["is_transitive"] is True
         assert child["direct_ancestors"] == ["parent-pkg"]
-        # Only the well-formed coordinate was ever requested.
-        assert {call.request.url.host for call in respx.calls} <= {
-            "registry.npmjs.org",
-            "api.deps.dev",
+        assert {call.request.url.raw_path for call in misses.calls} == {
+            b"/bad%01name",
+            b"/evil%01child",
         }
-        assert not any("%01" in str(call.request.url) for call in respx.calls)
 
     @respx.mock
-    def test_only_dependency_with_such_a_name_trips_the_nothing_resolved_gate(self, tmp_path):
+    @pytest.mark.parametrize(
+        ("name", "requested"),
+        [
+            pytest.param("bad\x01name", [b"/bad%01name"], id="control-character"),
+            # A name that would ask for another resource is never sent.
+            pytest.param("..", [], id="dot-segment"),
+        ],
+    )
+    def test_only_dependency_with_such_a_name_trips_the_nothing_resolved_gate(
+        self, tmp_path, name, requested
+    ):
         # A failed lookup like any other: with no other dependency and no
         # answered request, the scan reports that nothing could be resolved.
         (tmp_path / "package.json").write_text(
-            json.dumps({"name": "app", "dependencies": {"bad\x01name": "^1.0.0"}}),
+            json.dumps({"name": "app", "dependencies": {name: "^1.0.0"}}),
             encoding="utf-8",
         )
+        misses = respx.get(host="registry.npmjs.org").mock(return_value=httpx.Response(404))
         result = CliRunner().invoke(main, ["check", "--path", str(tmp_path), "--no-strict"])
         assert isinstance(result.exception, SystemExit)
         assert result.exit_code == 1
         assert "Could not resolve any of the 1 dependencies" in result.output
-        assert respx.calls.call_count == 0
+        assert [call.request.url.raw_path for call in respx.calls] == requested
+        assert misses.call_count == len(requested)
 
     @respx.mock
     def test_names_with_a_lone_surrogate_keep_their_identity(self, tmp_path):

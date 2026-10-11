@@ -9,10 +9,26 @@ import httpx
 from licenseal.analysis.spdx import all_apply_reading, normalize_license
 from licenseal.models import Dependency, DependencyGroup, Ecosystem, LicenseInfo
 from licenseal.resolvers.deps_dev import resolve_via_deps_dev_stable_get
-from licenseal.resolvers.http import Fetcher, fetch_registry_json, object_field
+from licenseal.resolvers.http import (
+    Fetcher,
+    fetch_registry_json,
+    object_field,
+    quote_coordinate,
+)
 from licenseal.resolvers.version_selection import select_version
 
 _CRATES_IO_URL = "https://crates.io/api/v1/crates"
+
+
+def _crate_url(name: str) -> str:
+    """Crate endpoint: the crate's own fields and the versions it lists."""
+    return f"{_CRATES_IO_URL}/{quote_coordinate(name)}"
+
+
+def _version_url(name: str, version: str) -> str:
+    """Endpoint of one version; ``+`` before its build metadata is sent as written."""
+    return f"{_crate_url(name)}/{quote_coordinate(version, safe='+')}"
+
 
 # Cargo exact-pinned form: `=X.Y.Z[-pre][+build]`, with all three segments;
 # licenseal's lockfile output writes it `==X.Y.Z`. Anything else is a range,
@@ -63,7 +79,7 @@ def _resolve_version(
     pinned = _extract_pinned_version(spec)
     if pinned:
         return pinned
-    data = fetcher(f"{_CRATES_IO_URL}/{name}", client)
+    data = fetcher(_crate_url(name), client)
     if data is None:
         return None
     crate = object_field(data, "crate")
@@ -102,8 +118,7 @@ def resolve_rust_license(
             from_registry=False,
         )
 
-    url = f"{_CRATES_IO_URL}/{name}/{resolved_version}"
-    data = fetcher(url, client)
+    data = fetcher(_version_url(name, resolved_version), client)
     if data is None:
         # Resilience fallback: crates.io's HTTP retries exhausted (5xx
         # storm, partial outage). deps.dev runs on independent
@@ -124,7 +139,7 @@ def resolve_rust_license(
     # a package-author-supplied homepage (which may point anywhere).
     repository_url = ""
     homepage_url = ""
-    crate_data = fetcher(f"{_CRATES_IO_URL}/{name}", client)
+    crate_data = fetcher(_crate_url(name), client)
     if crate_data is not None:
         crate_obj = object_field(crate_data, "crate")
         repo = crate_obj.get("repository") or ""
@@ -176,8 +191,7 @@ def fetch_rust_dependencies(
     cache-backed fetcher so the dependencies endpoint is shared with any
     same-(name,version) call.
     """
-    url = f"{_CRATES_IO_URL}/{name}/{version}/dependencies"
-    data = fetcher(url, client)
+    data = fetcher(f"{_version_url(name, version)}/dependencies", client)
     if data is None:
         return [], False
     deps = data.get("dependencies")

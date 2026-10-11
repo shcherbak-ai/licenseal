@@ -358,64 +358,64 @@ class TestCratesIoFieldOfTheWrongType:
         assert result.repository_url == "https://example.com/pkg-a"
 
 
-_UNBUILDABLE = "pkg\x01a"
+_CONTROL_CHARACTER = "pkg\x01a"
 
 
-class TestCoordinateNoUrlCanCarry:
-    """A name or version with an ASCII control character. The identity stays
-    exactly as declared; the lookup fails for that dependency alone.
+class TestCoordinateWithAControlCharacter:
+    """A name or version with an ASCII control character, which no URL may
+    carry as it is. It is percent-encoded like any other character, so the
+    request is well-formed and the registry answers that it has no such
+    package. The identity stays exactly as declared; the lookup fails for that
+    dependency alone.
     """
 
     @respx.mock
     @pytest.mark.parametrize(
         ("ecosystem", "resolve", "name", "version"),
         [
-            pytest.param(Ecosystem.PYTHON, resolve_python_license, _UNBUILDABLE, "", id="python"),
-            pytest.param(Ecosystem.NPM, resolve_npm_license, _UNBUILDABLE, "", id="npm"),
-            pytest.param(Ecosystem.NPM, resolve_npm_license, _UNBUILDABLE, "^1.0", id="npm-range"),
-            pytest.param(Ecosystem.RUST, resolve_rust_license, _UNBUILDABLE, "", id="rust"),
             pytest.param(
-                Ecosystem.PHP, resolve_php_license, f"vendor/{_UNBUILDABLE}", "", id="php"
+                Ecosystem.PYTHON, resolve_python_license, _CONTROL_CHARACTER, "", id="python"
             ),
-            pytest.param(Ecosystem.RUBY, resolve_ruby_license, _UNBUILDABLE, "", id="ruby"),
+            pytest.param(Ecosystem.NPM, resolve_npm_license, _CONTROL_CHARACTER, "", id="npm"),
             pytest.param(
-                Ecosystem.RUBY, resolve_ruby_license, _UNBUILDABLE, "==1.0", id="ruby-pin"
+                Ecosystem.NPM, resolve_npm_license, _CONTROL_CHARACTER, "^1.0", id="npm-range"
+            ),
+            pytest.param(Ecosystem.RUST, resolve_rust_license, _CONTROL_CHARACTER, "", id="rust"),
+            pytest.param(
+                Ecosystem.PHP, resolve_php_license, f"vendor/{_CONTROL_CHARACTER}", "", id="php"
+            ),
+            pytest.param(Ecosystem.RUBY, resolve_ruby_license, _CONTROL_CHARACTER, "", id="ruby"),
+            pytest.param(
+                Ecosystem.RUBY, resolve_ruby_license, _CONTROL_CHARACTER, "==1.0", id="ruby-pin"
             ),
             pytest.param(Ecosystem.RUBY, resolve_ruby_license, "pkg-a", "==1.0\x01", id="ruby-ver"),
-            pytest.param(Ecosystem.HEX, resolve_hex_license, _UNBUILDABLE, "==1.0", id="hex"),
+            pytest.param(Ecosystem.HEX, resolve_hex_license, _CONTROL_CHARACTER, "==1.0", id="hex"),
+            # Pinned: the registry misses, then the fallback endpoint does.
+            pytest.param(
+                Ecosystem.PYTHON,
+                resolve_python_license,
+                _CONTROL_CHARACTER,
+                "==1.0.0",
+                id="python-pin",
+            ),
+            pytest.param(
+                Ecosystem.NPM, resolve_npm_license, _CONTROL_CHARACTER, "1.0.0", id="npm-pin"
+            ),
+            pytest.param(
+                Ecosystem.RUST, resolve_rust_license, _CONTROL_CHARACTER, "=1.0.0", id="rust-pin"
+            ),
+            pytest.param(Ecosystem.GO, resolve_go_license, _CONTROL_CHARACTER, "v1.0.0", id="go"),
         ],
     )
-    def test_lookup_fails_without_a_request(self, client, ecosystem, resolve, name, version):
+    def test_lookup_is_a_plain_miss(self, client, ecosystem, resolve, name, version):
+        misses = respx.get(url__regex=r"^https://.*$").mock(return_value=httpx.Response(404))
         dep = _dep(ecosystem, name=name, version=version)
         result = resolve(dep, client, fetcher=RegistryCache().fetch)
         assert result.license_id == "UNKNOWN"
         assert result.from_registry is False
         assert result.dependency is dep
-        assert respx.calls.call_count == 0
-
-    @respx.mock
-    @pytest.mark.parametrize(
-        ("ecosystem", "resolve", "version"),
-        [
-            pytest.param(Ecosystem.PYTHON, resolve_python_license, "==1.0.0", id="python"),
-            pytest.param(Ecosystem.NPM, resolve_npm_license, "1.0.0", id="npm"),
-            pytest.param(Ecosystem.RUST, resolve_rust_license, "=1.0.0", id="rust"),
-            pytest.param(Ecosystem.GO, resolve_go_license, "v1.0.0", id="go"),
-        ],
-    )
-    def test_pinned_lookup_ends_at_the_fallback_that_percent_encodes(
-        self, client, ecosystem, resolve, version
-    ):
-        # The pinned path ends at an endpoint whose URL percent-encodes the
-        # name, so that one request is well-formed and simply finds nothing.
-        fallback = respx.get(host="api.deps.dev").mock(return_value=httpx.Response(404))
-        dep = _dep(ecosystem, name=_UNBUILDABLE, version=version)
-        result = resolve(dep, client, fetcher=RegistryCache().fetch)
-        assert result.license_id == "UNKNOWN"
-        assert result.from_registry is False
-        assert result.dependency is dep
-        assert respx.calls.call_count == fallback.call_count == 1
-        assert b"/packages/pkg%01a/versions/" in fallback.calls.last.request.url.raw_path
+        assert misses.call_count >= 1
+        assert all(b"%01" in call.request.url.raw_path for call in misses.calls)
 
     @respx.mock
     @pytest.mark.parametrize(
@@ -424,10 +424,10 @@ class TestCoordinateNoUrlCanCarry:
             pytest.param(
                 Ecosystem.JAVA, resolve_maven_central_license, "com.example:pkg\x01a", id="java"
             ),
-            pytest.param(Ecosystem.DOTNET, resolve_nuget_license, _UNBUILDABLE, id="dotnet"),
+            pytest.param(Ecosystem.DOTNET, resolve_nuget_license, _CONTROL_CHARACTER, id="dotnet"),
         ],
     )
-    def test_resolver_that_percent_encodes_gets_a_plain_miss(
+    def test_lookup_through_the_text_fetcher_is_a_plain_miss(
         self, client, ecosystem, resolve, name
     ):
         misses = respx.get(url__regex=r"^https://.*$").mock(return_value=httpx.Response(404))
@@ -444,17 +444,18 @@ class TestCoordinateNoUrlCanCarry:
     @pytest.mark.parametrize(
         ("fetch", "name", "version_is_in_the_url"),
         [
-            pytest.param(fetch_python_dependencies, _UNBUILDABLE, True, id="python"),
-            pytest.param(fetch_npm_dependencies, _UNBUILDABLE, True, id="npm"),
-            pytest.param(fetch_rust_dependencies, _UNBUILDABLE, True, id="rust"),
-            pytest.param(fetch_packagist_dependencies, f"vendor/{_UNBUILDABLE}", False, id="php"),
-            pytest.param(fetch_rubygems_dependencies, _UNBUILDABLE, True, id="ruby"),
-            pytest.param(fetch_hex_dependencies, _UNBUILDABLE, True, id="hex"),
+            pytest.param(fetch_python_dependencies, _CONTROL_CHARACTER, True, id="python"),
+            pytest.param(fetch_npm_dependencies, _CONTROL_CHARACTER, True, id="npm"),
+            pytest.param(fetch_rust_dependencies, _CONTROL_CHARACTER, True, id="rust"),
+            pytest.param(
+                fetch_packagist_dependencies, f"vendor/{_CONTROL_CHARACTER}", False, id="php"
+            ),
+            pytest.param(fetch_rubygems_dependencies, _CONTROL_CHARACTER, True, id="ruby"),
+            pytest.param(fetch_hex_dependencies, _CONTROL_CHARACTER, True, id="hex"),
         ],
     )
-    def test_dependency_walk_finds_no_children_without_a_request(
-        self, client, fetch, name, version_is_in_the_url
-    ):
+    def test_dependency_walk_finds_no_children(self, client, fetch, name, version_is_in_the_url):
+        misses = respx.get(url__regex=r"^https://.*$").mock(return_value=httpx.Response(404))
         cache = RegistryCache()
         assert fetch(name, "1.0.0", client, parent_depth=0, fetcher=cache.fetch) == ([], False)
         if version_is_in_the_url:
@@ -462,7 +463,8 @@ class TestCoordinateNoUrlCanCarry:
                 [],
                 False,
             )
-        assert respx.calls.call_count == 0
+        assert misses.call_count == (2 if version_is_in_the_url else 1)
+        assert all(b"%01" in call.request.url.raw_path for call in misses.calls)
 
 
 # Half of a UTF-16 pair on its own: what an unpaired ``\uD800``-style escape in

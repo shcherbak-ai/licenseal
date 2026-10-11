@@ -23,6 +23,7 @@ from licenseal.resolvers.http import (
     fetch_pep658_metadata,
     fetch_registry_json,
     object_field,
+    quote_coordinate,
 )
 from licenseal.resolvers.version_selection import select_python_version
 
@@ -53,6 +54,20 @@ _PROJECT_URL_KEYS = (
     "gitlab",
     "bitbucket",
 )
+
+
+def _project_url(name: str) -> str:
+    """Project-level endpoint: the latest release's metadata and the list of releases."""
+    return f"{_PYPI_URL}/{quote_coordinate(name)}/json"
+
+
+def _release_url(name: str, version: str) -> str:
+    """Per-release endpoint.
+
+    A PEP 440 version holds ``!`` after an epoch and ``+`` before a local
+    segment; both are sent as written.
+    """
+    return f"{_PYPI_URL}/{quote_coordinate(name)}/{quote_coordinate(version, safe='!+')}/json"
 
 
 def _is_junk_license(value: str) -> bool:
@@ -375,7 +390,7 @@ def resolve_python_license(
     # The pinned version, once ``data`` is another release standing in for it.
     stood_in_for = ""
     if pinned_version:
-        url = f"{_PYPI_URL}/{name}/{pinned_version}/json"
+        url = _release_url(name, pinned_version)
         data = fetcher(url, client)
         # A release PyPI does not have is a build published on another index
         # (an internal mirror, an accelerator-specific wheel index, a PEP 440
@@ -387,19 +402,17 @@ def resolve_python_license(
         pinned = Version(pinned_version)
         if data is None and not_found(url) and pinned.local is not None:
             stood_in_for = pinned_version
-            url = f"{_PYPI_URL}/{name}/{pinned.public}/json"
+            url = _release_url(name, pinned.public)
             data = fetcher(url, client)
         if data is None and not_found(url):
             stood_in_for = pinned_version
-            project_data = fetcher(f"{_PYPI_URL}/{name}/json", client)
+            project_data = fetcher(_project_url(name), client)
             data = project_data
     elif not spec:
-        url = f"{_PYPI_URL}/{name}/json"
-        data = fetcher(url, client)
+        data = fetcher(_project_url(name), client)
         project_data = data
     else:
-        project_url = f"{_PYPI_URL}/{name}/json"
-        project_data = fetcher(project_url, client)
+        project_data = fetcher(_project_url(name), client)
         if project_data is None:
             data = None
         else:
@@ -415,8 +428,7 @@ def resolve_python_license(
             if not selected_version:
                 data = None
             else:
-                version_url = f"{_PYPI_URL}/{name}/{selected_version}/json"
-                data = fetcher(version_url, client)
+                data = fetcher(_release_url(name, selected_version), client)
     if data is None:
         # Resilience fallback: PyPI's HTTP retries exhausted (5xx storm,
         # partial outage). deps.dev runs on independent infrastructure
@@ -481,7 +493,7 @@ def resolve_python_license(
     # the latest release.
     if not raw_license:
         if project_data is None:
-            project_data = fetcher(f"{_PYPI_URL}/{name}/json", client)
+            project_data = fetcher(_project_url(name), client)
         if project_data is not None and project_data is not data:
             project_info = object_field(project_data, "info")
             raw_license, classifiers = _extract_raw_license(project_info)
@@ -623,8 +635,7 @@ def fetch_python_dependencies(
     ``fetcher`` defaults to a direct HTTP fetch; the walker passes a
     cache-backed fetcher so the response is reused for license resolution.
     """
-    url = f"{_PYPI_URL}/{name}/{version}/json"
-    data = fetcher(url, client)
+    data = fetcher(_release_url(name, version), client)
     info = data.get("info") if data is not None else None
     if not isinstance(info, dict):
         return [], False

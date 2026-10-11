@@ -9,7 +9,7 @@ import time
 from collections import Counter
 from collections.abc import Callable
 from functools import partial
-from urllib.parse import quote, urlsplit
+from urllib.parse import quote, unquote, urlsplit
 from xml.etree.ElementTree import Element  # nosec B405
 
 import httpx
@@ -363,12 +363,41 @@ def has_utf8_encoding(value: str) -> bool:
 def quote_coordinate(value: str, *, safe: str = "") -> str:
     """Percent-encode a dependency name or version for a registry URL.
 
+    The result is one path segment whatever ``value`` holds: ``/``, ``?``,
+    ``#`` and ``%`` are encoded with everything else outside letters, digits
+    and ``_.-~``. ``safe`` lists further characters to leave as written. Pass
+    ``/`` only for a coordinate whose registry spells it with one (a Maven
+    group path, a Go module path), and a character such as ``+`` only where
+    the registry's own names or versions hold it and it is sent unencoded.
+
+    One value is left for the fetch helpers to refuse (:func:`_is_sendable`):
+    a segment that is ``.`` or ``..``, which no encoding makes a name.
+
     A value with no UTF-8 encoding (see :func:`has_utf8_encoding`) cannot be
     percent-encoded. It is returned as it is, not stripped or replaced, so the
     URL built from it has no UTF-8 encoding either: the fetch helpers report a
     failed lookup for it and send nothing.
     """
     return quote(value, safe=safe) if has_utf8_encoding(value) else value
+
+
+def _is_sendable(url: str) -> bool:
+    """Whether ``url`` can be sent and asks for the resource it spells.
+
+    False for a URL with no UTF-8 encoding (see :func:`has_utf8_encoding`),
+    and for one whose path has a ``.`` or ``..`` segment. The client resolves
+    such a segment before it sends anything, so the request would be for
+    another resource: ``/pypi/pkg-a/../pkg-b/json`` asks for ``pkg-b``.
+    Percent-encoding the name or version it came from does not prevent that:
+    a server reads an encoded dot as a dot.
+
+    The path is judged the way a server reads it, percent-decoded once, so a
+    segment between encoded slashes counts too (``pkg-a%2F..%2Fpkg-b``).
+    """
+    if not has_utf8_encoding(url):
+        return False
+    path = url.partition("#")[0].partition("?")[0]
+    return not any(segment in (".", "..") for segment in unquote(path).split("/"))
 
 
 def fetch_registry_json(
@@ -391,11 +420,12 @@ def fetch_registry_json(
 
     A URL that cannot be sent is a failed lookup too, here and in the other
     GET fetchers below. One with no UTF-8 encoding (a lone surrogate in a name
-    or version, see :func:`has_utf8_encoding`) is never handed to the client.
-    One the client refuses to build raises ``httpx.InvalidURL`` before anything
-    is sent, which is not a ``RequestError``; it is what a dependency name or
-    version carrying a character no URL may hold (an ASCII control character,
-    for example) produces. Neither is retried: the same URL fails the same way.
+    or version), or with a ``.`` or ``..`` path segment, is never handed to
+    the client (:func:`_is_sendable`). One the client refuses to build raises
+    ``httpx.InvalidURL`` before anything is sent, which is not a
+    ``RequestError``; it is what a URL carrying a character no URL may hold
+    (an ASCII control character, for example) produces. None is retried: the
+    same URL fails the same way.
 
     A rate-limited response from a host with a rate-limit window (see
     :class:`_HostRateLimitWindow`) is retried once the window reopens without
@@ -403,7 +433,7 @@ def fetch_registry_json(
     ``rate_limits`` is told when such a pause starts, and counts the lookup
     when it is still rate limited after all of the waiting.
     """
-    if not has_utf8_encoding(url):
+    if not _is_sendable(url):
         return None
     delay = _INITIAL_BACKOFF_SECONDS
     attempt = 0
@@ -514,7 +544,7 @@ def fetch_pep658_metadata(url: str, client: httpx.Client) -> dict[str, str] | No
     is refused whole — per the no-prose-extraction rule, the first line of a
     body must never become the identifier.
     """
-    if not has_utf8_encoding(url):
+    if not _is_sendable(url):
         return None
     delay = _INITIAL_BACKOFF_SECONDS
     # Override the client default ``Accept: application/json`` — the sidecar
@@ -647,7 +677,7 @@ def fetch_registry_text(url: str, client: httpx.Client) -> dict[str, str] | None
     or plain text don't 406. Used for raw POM XML from Maven Central and
     raw go.mod text from the Go module proxy.
     """
-    if not has_utf8_encoding(url):
+    if not _is_sendable(url):
         return None
     delay = _INITIAL_BACKOFF_SECONDS
     headers = {"Accept": "*/*"}
