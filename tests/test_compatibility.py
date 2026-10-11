@@ -641,6 +641,174 @@ class TestMalformedExpressionVerdict:
         assert result.verdict == CompatibilityVerdict.UNKNOWN
 
 
+class TestListWithAnUnrecognizedEntry:
+    """A comma- or slash-separated list with an entry that is not a
+    recognized license reports ``UNKNOWN`` as its license, and is judged
+    under both readings with that entry as an unresolved operand: a
+    violation when both readings are one, unknown otherwise."""
+
+    _STRONG = (
+        "strong copyleft license — derivative works must be released under the same "
+        "(or a compatible) license"
+    )
+
+    @staticmethod
+    def _check(project: str, raw: str, group: DependencyGroup = DependencyGroup.PROD):
+        li = _make_license_info(normalize_license(raw), name="dep", group=group)
+        li.license_raw = raw
+        return check_compatibility(project, li)
+
+    @staticmethod
+    def _prefix(raw: str) -> str:
+        return (
+            f"dep declares '{raw}', a license list with an entry that did not resolve to a "
+            "recognized license; it is a violation whether its entries are alternatives or "
+            "all apply — "
+        )
+
+    @pytest.mark.parametrize(
+        "raw, choice",
+        [
+            ("GPL-3.0-only, acme internal license", "GPL-3.0-only OR UNKNOWN"),
+            ("acme internal license, GPL-3.0-only", "GPL-3.0-only OR UNKNOWN"),
+            ("GPL-3.0-only / acme internal license", "GPL-3.0-only OR UNKNOWN"),
+            ("GNU General Public License v3, acme internal license", "GPL-3.0-only OR UNKNOWN"),
+            ("GPL-3.0-only, acme internal license, other house terms", "GPL-3.0-only OR UNKNOWN"),
+            # Every recognized entry is a violation.
+            (
+                "GPL-3.0-only, GPL-2.0-only, acme internal license",
+                "GPL-2.0-only OR GPL-3.0-only OR UNKNOWN",
+            ),
+        ],
+    )
+    def test_list_whose_recognized_entries_are_violations_is_a_violation(self, raw, choice):
+        for project in ("MIT", "Apache-2.0", "MPL-2.0", "Proprietary"):
+            result = self._check(project, raw)
+            assert result.verdict == CompatibilityVerdict.INCOMPATIBLE, project
+            assert result.risk_level == RiskLevel.STRONG_COPYLEFT
+            assert result.reason == self._prefix(raw) + (
+                f"dep uses {choice} ({self._STRONG}), which is incompatible with your "
+                f"{project} project license"
+            )
+            # The dependency still reports the license as it was detected.
+            assert result.license_info.license_id == "UNKNOWN"
+            assert result.license_info.license_raw == raw
+            assert result.license_info.all_apply_license_id == ""
+
+    @pytest.mark.parametrize(
+        "project, raw",
+        [
+            # The readings differ: a recognized entry can be taken as a
+            # choice, and the unrecognized one binds when all apply.
+            ("MIT", "MIT, acme internal license"),
+            ("MIT", "MIT / foobar"),
+            ("MIT", "GPL-3.0-only, MIT, acme internal license"),
+            ("MIT", "LGPL-2.1-only, acme internal license"),
+            ("GPL-3.0-only", "GPL-3.0-only, acme internal license"),
+            ("GPL-3.0-only", "AGPL-3.0-only, acme internal license"),
+            # Both readings are unknown.
+            ("MIT", "SSPL-1.0, acme internal license"),
+            ("MIT", "see docs, acme internal license"),
+            # No entry is recognized.
+            ("MIT", "acme internal license, other house terms"),
+        ],
+    )
+    def test_list_without_a_violation_under_both_readings_is_unknown(self, project, raw):
+        result = self._check(project, raw)
+        assert result.verdict == CompatibilityVerdict.UNKNOWN
+        assert result.risk_level == RiskLevel.UNKNOWN
+        assert result.reason == (
+            f"dep declares '{raw}' which did not resolve to a recognized license — "
+            "manual review required"
+        )
+
+    def test_pair_level_violation_of_a_recognized_entry_is_a_violation(self):
+        raw = "Apache-2.0, acme internal license"
+        assert self._check("MIT", raw).verdict == CompatibilityVerdict.UNKNOWN
+        result = self._check("GPL-2.0-only", raw)
+        assert result.verdict == CompatibilityVerdict.INCOMPATIBLE
+        assert result.reason == self._prefix(raw) + (
+            "dep uses Apache-2.0 OR UNKNOWN — the FSF documents Apache-2.0 as "
+            "GPLv2-incompatible (patent-termination and indemnification terms), and a "
+            "GPL-2.0-only project cannot upgrade to GPLv3 to resolve it"
+        )
+        weak = self._check("GPL-3.0-only", "EPL-1.0, acme internal license")
+        assert weak.verdict == CompatibilityVerdict.INCOMPATIBLE
+        assert weak.risk_level == RiskLevel.WEAK_COPYLEFT
+
+    @pytest.mark.parametrize(
+        "raw",
+        [
+            # A list inside a list, and a separator beside a connector.
+            "MIT, Apache-2.0/GPL-3.0-only",
+            "GPL-3.0-only/acme terms, more",
+            "GPL-3.0-only, acme terms and conditions",
+            # A URL is never a list.
+            "https://example.com/GPL-3.0-only, acme terms",
+        ],
+    )
+    def test_string_that_is_not_a_list_stays_unknown(self, raw):
+        result = self._check("MIT", raw)
+        assert result.verdict == CompatibilityVerdict.UNKNOWN
+        assert "did not resolve to a recognized license" in result.reason
+
+    def test_dev_dependency_stays_unknown(self):
+        # As a choice the violation is downgraded to a warning; with every
+        # entry applying the unrecognized one sends it to review.
+        result = self._check(
+            "MIT", "GPL-3.0-only, acme internal license", group=DependencyGroup.DEV
+        )
+        assert result.verdict == CompatibilityVerdict.UNKNOWN
+        assert result.risk_level == RiskLevel.UNKNOWN
+
+    def test_reviewed_license_is_judged_as_written(self):
+        li = _make_license_info("UNKNOWN", name="dep")
+        li.license_raw = "GPL-3.0-only, acme internal license"
+        li.reviewed_license_id = "MIT"
+        assert check_compatibility("MIT", li).verdict == CompatibilityVerdict.COMPATIBLE
+
+    def test_recognized_list_is_the_control(self):
+        # With every entry recognized the list is a license, judged under
+        # both readings as before.
+        choice = self._check("MIT", "MIT, GPL-3.0-only")
+        assert choice.license_info.license_id == "GPL-3.0-only OR MIT"
+        assert choice.verdict == CompatibilityVerdict.COMPATIBLE
+
+    @pytest.mark.parametrize(
+        "declared, extra_args, exit_code, verdict, risk",
+        [
+            ("GPL-3.0-only, acme internal license", [], 1, "incompatible", "strong-copyleft"),
+            (
+                "GPL-3.0-only, acme internal license",
+                ["--no-strict"],
+                1,
+                "incompatible",
+                "strong-copyleft",
+            ),
+            ("MIT, acme internal license", [], 1, "unknown", "unknown"),
+            ("MIT, acme internal license", ["--no-strict"], 0, "unknown", "unknown"),
+        ],
+    )
+    @respx.mock
+    def test_check_exit_code(self, tmp_path, declared, extra_args, exit_code, verdict, risk):
+        (tmp_path / "package.json").write_text(
+            json.dumps({"name": "app", "license": "MIT", "dependencies": {"some-lib": "1.0.0"}})
+        )
+        respx.get("https://registry.npmjs.org/some-lib/1.0.0").mock(
+            return_value=httpx.Response(200, json={"version": "1.0.0", "license": declared})
+        )
+
+        result = CliRunner().invoke(
+            main, ["check", "--path", str(tmp_path), "-f", "json", *extra_args]
+        )
+        assert result.exit_code == exit_code
+        dependency = json.loads(result.output[result.output.index("{") :])["dependencies"][0]
+        assert dependency["license"] == "UNKNOWN"
+        assert dependency["license_raw"] == declared
+        assert dependency["verdict"] == verdict
+        assert dependency["risk"] == risk
+
+
 class TestSourceAvailableProjectLicense:
     """When the *project's own* license is source-available (BUSL-1.1,
     SSPL-1.0, Elastic-2.0, ...) it should behave like a permissive license

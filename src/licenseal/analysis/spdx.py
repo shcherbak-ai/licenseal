@@ -1177,11 +1177,13 @@ def license_list_items(raw: str, *, slash_is_choice: bool = False) -> tuple[str,
     returned, sorted. Returns ``()`` when ``raw`` is not such a list, when
     ``slash_is_choice`` is set and the separator is ``/`` (a source that
     documents ``/`` as a choice), and for a list that is one license or a
-    pair in :data:`_ALTERNATIVES_BY_OWN_TERMS`.
+    pair in :data:`_ALTERNATIVES_BY_OWN_TERMS`. A list with an entry that is
+    not a recognized license is not read as a list here; its readings come
+    from :func:`unresolved_list_readings`.
     """
     found: list[tuple[str, list[str]]] = []
     _normalize_license_inner(raw, found)
-    if not found or (found[0][0] == "/" and slash_is_choice):
+    if not found or "UNKNOWN" in found[0][1] or (found[0][0] == "/" and slash_is_choice):
         return ()
     return _unconfirmed_alternatives(found[0][1])
 
@@ -1207,6 +1209,28 @@ def all_apply_reading(raw: str, *, slash_is_choice: bool = False) -> str:
     """
     items = license_list_items(raw, slash_is_choice=slash_is_choice)
     return normalize_license(and_join_licenses(items)) if items else ""
+
+
+def unresolved_list_readings(raw: str) -> tuple[str, str]:
+    """Both readings of a license list with an entry that is not a recognized license.
+
+    :func:`normalize_license` returns ``UNKNOWN`` for such a string
+    (``GPL-3.0-only, acme internal license``): it names no license a caller
+    can report or fall back from. The entries it does recognize still bind,
+    so this returns the list as ``(choice, all_apply)`` expressions, with
+    one ``UNKNOWN`` operand standing for every entry that did not resolve.
+
+    ``("", "")`` when ``raw`` normalizes to a license, is not a comma- or
+    slash-separated list, has no recognized entry, or has an unrecognized
+    entry that is itself a list.
+    """
+    found: list[tuple[str, list[str]]] = []
+    if _normalize_license_inner(raw, found) != "UNKNOWN" or not found:
+        return "", ""
+    items = sorted(set(found[0][1]), key=str.lower)
+    if len(items) < 2:
+        return "", ""
+    return _canon(" OR ".join(items)), normalize_license(and_join_licenses(items))
 
 
 def read_license_array(entries: Iterable[str]) -> tuple[str, str]:
@@ -1268,9 +1292,13 @@ def _normalize_license_inner(
 ) -> str:
     """Source-string-to-SPDX mapping without operand canonicalization.
 
-    When ``raw`` is read as a license list, its separator and normalized
-    entries are appended to ``found``. With ``part`` set, ``raw`` is a piece
-    of a larger string and is never read as a list.
+    When ``raw`` is a comma- or slash-separated license list, its separator
+    and normalized entries are appended to ``found``. A list with an entry
+    that is not a recognized license is not read as a license — the result
+    is ``UNKNOWN``, or whatever a later rule makes of the whole string — but
+    its entries are appended all the same, with ``UNKNOWN`` for each
+    unrecognized one. With ``part`` set, ``raw`` is a piece of a larger
+    string and is never read as a list.
     """
     if not raw or len(raw) > _MAX_LICENSE_LENGTH:
         return "UNKNOWN"
@@ -1320,9 +1348,15 @@ def _normalize_license_inner(
             if _is_license_list(stripped):
                 parts = [p.strip() for p in stripped.split("/")]
                 normalized_parts = [_normalize_part(p) for p in parts]
+                # An unrecognized entry with a comma in it is a list inside
+                # this one, which has no reading at all.
+                nested = any(
+                    "," in p and n == "UNKNOWN"
+                    for p, n in zip(parts, normalized_parts, strict=True)
+                )
+                if found is not None and not nested:
+                    found.append(("/", normalized_parts))
                 if all(p != "UNKNOWN" for p in normalized_parts):
-                    if found is not None:
-                        found.append(("/", normalized_parts))
                     return " OR ".join(normalized_parts)
             stripped = _SLASH_OR_RE.sub(" OR ", stripped)
 
@@ -1365,9 +1399,9 @@ def _normalize_license_inner(
             # _LICENSE_NOISE_RE) — they still block the compound.
             parts = [p for p in parts if not _LICENSE_NOISE_RE.match(p)]
             normalized_parts = [_normalize_part(p) for p in parts]
+            if found is not None:
+                found.append((",", normalized_parts))
             if parts and all(p != "UNKNOWN" for p in normalized_parts):
-                if found is not None:
-                    found.append((",", normalized_parts))
                 return " OR ".join(normalized_parts)
 
     # Informal " -or- " separator: the publisher states the choice. Seen in

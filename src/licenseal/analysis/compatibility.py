@@ -17,6 +17,7 @@ from licenseal.analysis.spdx import (
     canonical_license_id,
     malformed_expression_conjunction,
     normalize_license,
+    unresolved_list_readings,
 )
 from licenseal.models import (
     AnalysisReport,
@@ -506,6 +507,27 @@ def _check_compat(
                     verdict=judged.verdict,
                     reason=_malformed_expression_reason(license_info, judged.reason),
                 )
+        # A comma- or slash-separated list with an entry that is not a
+        # recognized license did not normalize either. Its recognized entries
+        # still bind, so it is judged like any list with no stated meaning,
+        # with the unrecognized entry as an unresolved operand. That operand
+        # keeps the list from ever being compatible, so as above only a
+        # violation — one under both readings — replaces the plain
+        # unknown-license result below.
+        choice, all_apply = unresolved_list_readings(license_info.license_raw or "")
+        if choice:
+            judged = _check_both_readings(
+                project_spdx,
+                project_risk,
+                replace(license_info, license_id=choice, all_apply_license_id=all_apply),
+            )
+            if judged.verdict == CompatibilityVerdict.INCOMPATIBLE:
+                return CompatibilityResult(
+                    license_info=license_info,
+                    risk_level=judged.risk_level,
+                    verdict=judged.verdict,
+                    reason=_unresolved_list_reason(license_info, judged.reason),
+                )
 
     # Proprietary deps short-circuit the matrix: every proprietary license
     # carries custom commercial terms (paid use, no-redistribution, royalties,
@@ -711,6 +733,20 @@ def _malformed_expression_reason(license_info: LicenseInfo, judged_reason: str) 
         f"{name} declares '{_shown_raw(license_info)}', which is not a well-formed license "
         f"expression and is judged as every license it names applying together — "
         f"{judged_reason}"
+    )
+
+
+def _unresolved_list_reason(license_info: LicenseInfo, judged_reason: str) -> str:
+    """Reason for a violation found in a license list with an unrecognized entry.
+
+    ``judged_reason`` is the reason for the list read as a choice, which
+    names that expression and the conflict.
+    """
+    name = license_info.dependency.name
+    return (
+        f"{name} declares '{_shown_raw(license_info)}', a license list with an entry that "
+        f"did not resolve to a recognized license; it is a violation whether its entries "
+        f"are alternatives or all apply — {judged_reason}"
     )
 
 

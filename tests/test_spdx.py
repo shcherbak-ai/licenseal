@@ -24,6 +24,7 @@ from licenseal.analysis.spdx import (
     normalize_r_license,
     read_license_array,
     spdx_from_license_url,
+    unresolved_list_readings,
 )
 
 
@@ -1452,6 +1453,108 @@ class TestLicenseLists:
 
     def test_file_pointer_to_a_url_keeps_its_routing(self):
         assert normalize_license("SEE LICENSE IN https://example.com/license.txt") == "Proprietary"
+
+
+class TestUnresolvedListReadings:
+    """A list with an entry that is not a recognized license normalizes to
+    ``UNKNOWN``; ``unresolved_list_readings`` gives the two expressions it is
+    judged as, with one ``UNKNOWN`` operand for the unrecognized entries."""
+
+    @pytest.mark.parametrize(
+        "raw, choice, all_apply",
+        [
+            (
+                "GPL-3.0-only, acme internal license",
+                "GPL-3.0-only OR UNKNOWN",
+                "GPL-3.0-only AND UNKNOWN",
+            ),
+            ("acme internal license, MIT", "MIT OR UNKNOWN", "MIT AND UNKNOWN"),
+            ("MIT / foobar", "MIT OR UNKNOWN", "MIT AND UNKNOWN"),
+            # Entries are normalized like any license string, and every
+            # unrecognized one is the same operand.
+            (
+                "GNU General Public License v3, acme internal license, other house terms",
+                "GPL-3.0-only OR UNKNOWN",
+                "GPL-3.0-only AND UNKNOWN",
+            ),
+            (
+                "GPL-3.0-only, MIT, acme internal license",
+                "GPL-3.0-only OR MIT OR UNKNOWN",
+                "GPL-3.0-only AND MIT AND UNKNOWN",
+            ),
+            # A recognized note about bundled dependencies is not an entry.
+            (
+                "GPL-3.0-only, dependency licenses, acme internal license",
+                "GPL-3.0-only OR UNKNOWN",
+                "GPL-3.0-only AND UNKNOWN",
+            ),
+            # A recognized license name that contains the separator.
+            (
+                "Apache License, Version 2.0 / acme internal license",
+                "Apache-2.0 OR UNKNOWN",
+                "Apache-2.0 AND UNKNOWN",
+            ),
+            # An entry that is itself a choice stays one entry.
+            (
+                "MIT -or- Apache-2.0, acme internal license",
+                "Apache-2.0 OR MIT OR UNKNOWN",
+                "(Apache-2.0 OR MIT) AND UNKNOWN",
+            ),
+            ("MIT, UNKNOWN", "MIT OR UNKNOWN", "MIT AND UNKNOWN"),
+        ],
+    )
+    def test_list_with_an_unrecognized_entry(self, raw, choice, all_apply):
+        assert normalize_license(raw) == "UNKNOWN"
+        assert unresolved_list_readings(raw) == (choice, all_apply)
+        # It is not a list with two recognized readings.
+        assert license_list_items(raw) == ()
+        assert all_apply_reading(raw) == ""
+        # Both readings are normalized expressions.
+        for reading in (choice, all_apply):
+            assert normalize_license(reading) == reading
+            assert unresolved_list_readings(reading) == ("", "")
+
+    @pytest.mark.parametrize(
+        "raw",
+        [
+            # A license, a recognized list, or an expression.
+            "MIT",
+            "MIT, GPL-3.0-only",
+            "MIT/Apache-2.0",
+            "MIT, MIT License",
+            "MIT OR GPL-3.0-only",
+            "GPL-3.0-only AND",
+            # No entry is recognized.
+            "",
+            "UNKNOWN",
+            "acme internal license",
+            "acme internal license, other house terms",
+            "acme internal license / other house terms",
+            "dependency licenses, bundled dependencies",
+            # A list inside a list, and a separator beside a connector.
+            "MIT, Apache-2.0/GPL-3.0-only",
+            "MIT/Apache-2.0, GPL-3.0-only",
+            "GPL-3.0-only/acme terms, more",
+            "GPL-3.0-only, acme terms and conditions",
+            "GPL-3.0-only/acme terms or conditions",
+            # A URL is never a list.
+            "https://example.com/GPL-3.0-only, acme terms",
+            "x" * (_MAX_LICENSE_LENGTH + 1),
+        ],
+    )
+    def test_anything_else_has_no_such_readings(self, raw):
+        assert unresolved_list_readings(raw) == ("", "")
+
+    def test_string_a_later_rule_resolves_is_not_such_a_list(self):
+        # Its comma splits off an unrecognized piece, but the string as a
+        # whole is a choice the publisher spelled out, or a declaration.
+        for raw, normalized in (
+            ("Apache License, Version 2.0 -or- MIT", "Apache-2.0 OR MIT"),
+            ("GPL-3.0-only, proprietary license for commercial use", "Proprietary"),
+        ):
+            assert normalize_license(raw) == normalized
+            assert unresolved_list_readings(raw) == ("", "")
+            assert license_list_items(raw) == ()
 
 
 class TestLicenseFilePointer:
