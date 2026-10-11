@@ -75,6 +75,13 @@ class TestOperandThatIsNotALicense:
             ("GPL-Custom", "GPL-Custom"),
             ("MIT-NonCommercial", "MIT-NonCommercial"),
             ("mit-license", "mit-license"),
+            # A ``DocumentRef-`` qualifies a ``LicenseRef-``, and nothing else.
+            ("DocumentRef-vendor-sbom:MTI", "DocumentRef-vendor-sbom:MTI"),
+            ("DocumentRef-vendor-sbom:MIT", "DocumentRef-vendor-sbom:MIT"),
+            ("DocumentRef-vendor-sbom", "DocumentRef-vendor-sbom"),
+            ("DocumentRef-:LicenseRef-acme-terms", "DocumentRef-:LicenseRef-acme-terms"),
+            ("DocumentRef-vendor-sbom:LicenseRef-", "DocumentRef-vendor-sbom:LicenseRef-"),
+            ("DocumentRef-a:LicenseRef-b:LicenseRef-c", "DocumentRef-a:LicenseRef-b:LicenseRef-c"),
         ],
     )
     @respx.mock
@@ -172,6 +179,28 @@ class TestOperandThatIsALicense:
             ("MIT AND Proprietary", "MIT AND Proprietary", "unknown"),
             ("LicenseRef-acme-terms", "Proprietary", "unknown"),
             ("LicenseRef-Public-Domain", "LicenseRef-Public-Domain", "compatible"),
+            # A license defined in another SPDX document. It is kept as
+            # written and is no license licenseal can classify.
+            (
+                "DocumentRef-vendor-sbom:LicenseRef-acme-terms",
+                "DocumentRef-vendor-sbom:LicenseRef-acme-terms",
+                "unknown",
+            ),
+            (
+                "documentref-vendor-sbom:licenseref-acme-terms",
+                "documentref-vendor-sbom:licenseref-acme-terms",
+                "unknown",
+            ),
+            (
+                "MIT OR DocumentRef-vendor-sbom:LicenseRef-acme-terms",
+                "DocumentRef-vendor-sbom:LicenseRef-acme-terms OR MIT",
+                "compatible",
+            ),
+            (
+                "MIT AND (DocumentRef-vendor-sbom:LicenseRef-acme-terms)",
+                "DocumentRef-vendor-sbom:LicenseRef-acme-terms AND MIT",
+                "unknown",
+            ),
             # A source-available family licenseal reports, listed by SPDX or not.
             ("BUSL-1.1", "BUSL-1.1", "unknown"),
             ("FSL-1.1-Apache-2.0", "FSL-1.1-Apache-2.0", "unknown"),

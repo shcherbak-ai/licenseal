@@ -19,6 +19,7 @@ is published as on hex.pm, not on the name ``mix.exs`` gives it.
 from __future__ import annotations
 
 import json
+import re
 import sys
 from collections.abc import Iterable
 from dataclasses import dataclass, field
@@ -44,6 +45,13 @@ else:
 REVIEW_FILE_NAME = "licenseal.review.toml"
 
 _VALID_ECOSYSTEMS = frozenset(e.value for e in Ecosystem)
+
+# SPDX's form for a license that another document defines:
+# ``DocumentRef-<id>:LicenseRef-<id>``. Matched in either case, as a bare
+# ``LicenseRef-`` is when it is normalized.
+_EXTERNAL_LICENSE_REF_RE = re.compile(
+    r"DocumentRef-[A-Za-z0-9.-]+:LicenseRef-[A-Za-z0-9.-]+", re.IGNORECASE
+)
 
 
 @dataclass
@@ -141,8 +149,10 @@ def _is_license(operand: str) -> bool:
     A current or deprecated SPDX license ID, ``Proprietary``, a
     ``LicenseRef-`` reference, or an ID in one of the source-available
     families the compatibility check recognises by prefix: whatever
-    licenseal itself reports as a license. Anything else is a string that is
-    no license at all, such as a mistyped ID.
+    licenseal itself reports as a license. A ``LicenseRef-`` that a
+    ``DocumentRef-`` qualifies is a reference too, to a license another SPDX
+    document defines. Anything else is a string that is no license at all,
+    such as a mistyped ID.
     """
     license_id = operand.rstrip("+")
     return (
@@ -150,6 +160,7 @@ def _is_license(operand: str) -> bool:
         or license_id in DEPRECATED_SPDX_IDS
         or license_id == "Proprietary"
         or license_id.startswith("LicenseRef-")
+        or _EXTERNAL_LICENSE_REF_RE.fullmatch(license_id) is not None
         or license_id.startswith(_SOURCE_AVAILABLE_PROJECT_PREFIXES)
     )
 
