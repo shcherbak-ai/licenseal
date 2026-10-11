@@ -7,7 +7,7 @@ import hashlib
 import io
 import sys
 import time
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from dataclasses import replace
@@ -96,6 +96,7 @@ from licenseal.review import (
     load_review_file,
     merge_review_template,
     render_review_template,
+    writable_entries,
 )
 from licenseal.transitive import flag_version_estimate, resolve_transitive
 
@@ -1352,9 +1353,13 @@ def init_review_file(
             flagged, unscaffoldable = flagged_entries_from_results(report.results)
         _echo_read_diagnostics(_read_diagnostics_view(read_diags, project_path))
 
+    # A stanza TOML cannot hold would make the whole file unloadable: it is
+    # left out, here for a live scan and for a saved report alike.
+    flagged, unwritable = writable_entries(flagged)
+
     if not flagged:
         click.echo("No reviewable flagged dependencies found.", err=True)
-        _warn_unscaffoldable(unscaffoldable)
+        _warn_unscaffoldable(unscaffoldable, unwritable)
         return
 
     if review_file.exists() and not merge:
@@ -1371,7 +1376,7 @@ def init_review_file(
         )
         if appended == 0:
             click.echo("No new flagged dependencies to add.", err=True)
-            _warn_unscaffoldable(unscaffoldable)
+            _warn_unscaffoldable(unscaffoldable, unwritable)
             return
         review_file.write_text(merged_text, encoding="utf-8", newline="\n")
         suffix = "y" if appended == 1 else "ies"
@@ -1380,7 +1385,7 @@ def init_review_file(
         review_file.write_text(render_review_template(flagged), encoding="utf-8", newline="\n")
         suffix = "y" if len(flagged) == 1 else "ies"
         click.echo(f"Wrote {REVIEW_FILE_NAME} with {len(flagged)} review entr{suffix}.")
-    _warn_unscaffoldable(unscaffoldable)
+    _warn_unscaffoldable(unscaffoldable, unwritable)
 
 
 _SKILL_NAME = "licenseal-review"
@@ -1558,24 +1563,39 @@ def install_skill(path: Path, force: bool) -> None:
     click.echo(f"Installed licenseal skill {current_version} at {target_file}")
 
 
-def _warn_unscaffoldable(unscaffoldable: list[str]) -> None:
+_NO_VERSION_REASON = "no resolved version, usually a manifest typo / yanked release / registry miss"
+_NOT_TOML_REASON = (
+    "a lone surrogate in the name, version, or source, which a TOML file cannot hold, "
+    "so no review can be recorded for it"
+)
+
+
+def _warn_unscaffoldable(unscaffoldable: list[str], unwritable: Sequence[str] = ()) -> None:
     """Emit a stderr note for flagged deps that couldn't be scaffolded.
 
-    Fires only when the list is non-empty. The review-file format keys
-    overrides by ``(ecosystem, name, resolved_version)``, so a flagged
-    dep with no resolved version cannot be reviewed away — usually a
-    sign of a manifest typo, yanked release, or registry-side issue
-    that warrants user attention.
+    One note per reason, each only when it has dependencies to name.
+
+    ``unscaffoldable``: the review-file format keys overrides by
+    ``(ecosystem, name, resolved_version)``, so a flagged dep with no
+    resolved version cannot be reviewed away — usually a sign of a manifest
+    typo, yanked release, or registry-side issue that warrants user attention.
+
+    ``unwritable``: a dep whose name, version, or source a TOML file cannot
+    hold. Its stanza was left out so that the rest of the file loads.
+
+    The names come from manifests and reports, so they are printed escaped,
+    as the reports print them: a lone surrogate as ``\\uNNNN``, a control
+    character as ``\\xNN``.
     """
-    if not unscaffoldable:
-        return
-    sample = ", ".join(sorted(unscaffoldable)[:5])
-    if len(unscaffoldable) > 5:
-        sample += f", … (+{len(unscaffoldable) - 5} more)"
-    suffix = "y" if len(unscaffoldable) == 1 else "ies"
-    click.echo(
-        f"Note: {len(unscaffoldable)} flagged dependenc{suffix} could not be "
-        f"scaffolded (no resolved version, usually a manifest typo / yanked "
-        f"release / registry miss): {sample}.",
-        err=True,
-    )
+    for labels, reason in ((unscaffoldable, _NO_VERSION_REASON), (unwritable, _NOT_TOML_REASON)):
+        if not labels:
+            continue
+        sample = ", ".join(sorted(_printable(label) for label in labels)[:5])
+        if len(labels) > 5:
+            sample += f", … (+{len(labels) - 5} more)"
+        suffix = "y" if len(labels) == 1 else "ies"
+        click.echo(
+            f"Note: {len(labels)} flagged dependenc{suffix} could not be scaffolded "
+            f"({reason}): {sample}.",
+            err=True,
+        )

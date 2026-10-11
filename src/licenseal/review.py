@@ -455,7 +455,8 @@ def _toml_basic_string(value: str) -> str:
     Backslashes and double quotes are escaped, and every non-printable
     character (control characters and line separators included) is written as
     a ``\\uXXXX`` / ``\\UXXXXXXXX`` escape, so the value cannot close the
-    string or start a new line and parses back unchanged.
+    string or start a new line and parses back unchanged. ``value`` must be
+    one a TOML string can hold (:func:`toml_can_hold`).
     """
     parts: list[str] = []
     for ch in value:
@@ -468,6 +469,37 @@ def _toml_basic_string(value: str) -> str:
         else:
             parts.append(f"\\U{ord(ch):08X}")
     return '"' + "".join(parts) + '"'
+
+
+def toml_can_hold(value: str) -> bool:
+    """Whether ``value`` can be written as a TOML string.
+
+    False for a string holding a lone surrogate, which is what an unpaired
+    ``\\uD800``-``\\uDFFF`` escape in a JSON manifest or report decodes to. A
+    TOML string holds Unicode scalar values only: a surrogate is valid
+    neither as a character nor as a ``\\uXXXX`` escape, and a file that
+    contains one does not load.
+    """
+    return not any("\ud800" <= ch <= "\udfff" for ch in value)
+
+
+def writable_entries(entries: list[FlaggedEntry]) -> tuple[list[FlaggedEntry], list[str]]:
+    """Split ``entries`` into those a stanza can be written for and the rest.
+
+    A stanza carries the entry's package, version, and source as TOML
+    strings. An entry with a value TOML cannot hold (:func:`toml_can_hold`)
+    gets no stanza, so that one such dependency does not leave the whole file
+    unloadable. It is returned as ``"<ecosystem>:<name>"`` for the caller to
+    report: no review can be recorded for it.
+    """
+    writable: list[FlaggedEntry] = []
+    unwritable: list[str] = []
+    for entry in entries:
+        if all(toml_can_hold(value) for value in (entry.name, entry.version, entry.origin)):
+            writable.append(entry)
+        else:
+            unwritable.append(f"{entry.ecosystem}:{entry.name}")
+    return writable, unwritable
 
 
 def render_review_template(

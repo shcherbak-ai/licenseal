@@ -561,8 +561,9 @@ def _gapfill_one(name: str, timeout: int) -> str:
     scaffold = work / REVIEW_FILE
     scaffold.unlink(missing_ok=True)
     init = run(["licenseal", "init-review-file", "-p", str(work), "--from-report", str(report)])
-    note = re.search(r"Note: (\d+) flagged", init.stdout + init.stderr)
-    unscaffoldable = int(note.group(1)) if note else 0
+    # One note per reason a stanza could not be written.
+    notes = re.findall(r"Note: (\d+) flagged", init.stdout + init.stderr)
+    unscaffoldable = sum(int(count) for count in notes)
     if not scaffold.exists():
         return f"ok       nothing to scaffold (flagged={_flagged(fresh.get('summary', {}))})"
     text = scaffold.read_text(encoding="utf-8")

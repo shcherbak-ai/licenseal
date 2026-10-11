@@ -227,6 +227,11 @@ note = "LICENSE read at that commit"
 
 Each scaffolded stanza is preceded by `# detected:`, `# status:`, and (when it differs from the detected license) `# raw:` comment lines. Their values are collapsed to a single line and truncated at 200 characters; the full registry string is the `license_raw` field of the JSON report.
 
+Two kinds of flagged dependency get no stanza, from a live scan, with `--from-report`, and with `--merge` alike. Each kind is named on stderr in a `Note: N flagged dependenc(y/ies) could not be scaffolded (<reason>): <names>.` line, and the stanzas of every other dependency are still written:
+
+- A registry dependency with no resolved version (`no resolved version, usually a manifest typo / yanked release / registry miss`): there is no version to key a review on.
+- A dependency whose name, version, or source holds a lone surrogate, which is what an unpaired `\uD800`–`\uDFFF` escape in a JSON manifest or report decodes to (`a lone surrogate in the name, version, or source, which a TOML file cannot hold, so no review can be recorded for it`). A TOML string cannot contain one, so no review entry can name such a dependency; it stays flagged. The note shows the surrogate as `\uNNNN`.
+
 When new flagged dependencies appear later, run `licenseal init-review-file --merge` to **add new stanzas** to the existing file. Existing entries are preserved verbatim.
 
 Rules at a glance:
