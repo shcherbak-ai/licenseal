@@ -144,15 +144,6 @@ _RISK_OVERRIDES: dict[str, RiskLevel] = {
     # Weak copyleft with no family prefix.
     "MS-RL": RiskLevel.WEAK_COPYLEFT,  # Microsoft Reciprocal License
     "IPL-1.0": RiskLevel.WEAK_COPYLEFT,  # IBM Public License
-    # GPL-2.0 + Classpath exception (deprecated SPDX compound ID, still the
-    # canonical form for javax.*/jakarta.* APIs and OpenJDK-derived
-    # artifacts). The exception grants permission to link "independent
-    # modules ... regardless of the license terms of these independent
-    # modules" — LGPL-style linking permission, so weak copyleft, not the
-    # strong copyleft the bare ``^GPL-`` pattern would assign. The modern
-    # ``GPL-X WITH Classpath-exception-Y`` spelling gets the same treatment
-    # in the WITH branch of ``classify_risk``.
-    "GPL-2.0-with-classpath-exception": RiskLevel.WEAK_COPYLEFT,
     # Strong copyleft with no family prefix.
     "RPL-1.1": RiskLevel.STRONG_COPYLEFT,  # Reciprocal Public License
     "RPL-1.5": RiskLevel.STRONG_COPYLEFT,
@@ -297,14 +288,48 @@ _ADDED_PERMISSION_EXCEPTIONS: frozenset[str] = frozenset(
 )
 
 
+# Deprecated SPDX IDs that name a GNU license and an exception in one token,
+# each with the expression SPDX replaced it with (SPDX license list 3.27.0).
+# Such an ID is judged as that expression, so it has the risk class and the
+# pair-level rules of ``<license>-only WITH <exception>``. Reports show the ID
+# as it was declared.
+_DEPRECATED_WITH_IDS: dict[str, str] = {
+    "GPL-2.0-with-autoconf-exception": "GPL-2.0-only WITH Autoconf-exception-2.0",
+    "GPL-2.0-with-bison-exception": "GPL-2.0-only WITH Bison-exception-2.2",
+    "GPL-2.0-with-classpath-exception": "GPL-2.0-only WITH Classpath-exception-2.0",
+    "GPL-2.0-with-font-exception": "GPL-2.0-only WITH Font-exception-2.0",
+    "GPL-2.0-with-GCC-exception": "GPL-2.0-only WITH GCC-exception-2.0",
+    "GPL-3.0-with-autoconf-exception": "GPL-3.0-only WITH Autoconf-exception-3.0",
+    "GPL-3.0-with-GCC-exception": "GPL-3.0-only WITH GCC-exception-3.1",
+}
+
+
+def _with_expression(leaf: str) -> str:
+    """``leaf`` with a deprecated ``-with-`` ID written as the expression it stands for.
+
+    ``GPL-2.0-with-GCC-exception`` is ``GPL-2.0-only WITH GCC-exception-2.0``,
+    and with the ``+`` suffix its license is the ``-or-later`` one. Any other
+    leaf is returned unchanged.
+    """
+    license_id, with_keyword, rest = leaf.partition(" WITH ")
+    license_id = license_id.strip()
+    current = _DEPRECATED_WITH_IDS.get(license_id.rstrip("+"))
+    if current is None:
+        return leaf
+    if license_id.endswith("+"):
+        current = current.replace("-only WITH ", "-or-later WITH ")
+    return current + with_keyword + rest
+
+
 def split_exception(leaf: str) -> tuple[str, str]:
     """Split an expression leaf into its license and its ``WITH`` exception.
 
     The exception is ``""`` for a leaf without ``WITH``. Everything after the
     first ``WITH`` is the exception, so a leaf with a second ``WITH`` yields
-    an operand that matches no known exception.
+    an operand that matches no known exception. A deprecated ``-with-`` ID is
+    split into the license and the exception it stands for.
     """
-    base, _, exception = leaf.partition(" WITH ")
+    base, _, exception = _with_expression(leaf).partition(" WITH ")
     return base.strip(), exception.strip()
 
 
@@ -330,6 +355,8 @@ def classify_risk(spdx_id: str) -> RiskLevel:
       license to weak copyleft, one in ``_ADDED_PERMISSION_EXCEPTIONS`` leaves
       the license's own class, and any other exception makes the term its
       license ``AND`` an unknown operand
+    - a deprecated ``<license>-with-<exception>`` ID: classified as the
+      ``WITH`` expression it stands for
 
     Respects SPDX precedence (AND binds tighter than OR) and parenthesized
     grouping such as ``(MIT OR Apache-2.0) AND Unicode-DFS-2016``.
@@ -341,6 +368,11 @@ def classify_risk(spdx_id: str) -> RiskLevel:
 
     # Simple-ID fast path: no compound operators, no parens.
     if " " not in expr and "(" not in expr and ")" not in expr:
+        # A deprecated ``-with-`` ID classifies as the expression it stands
+        # for, exception included.
+        current = _with_expression(expr)
+        if current != expr:
+            return classify_risk(current)
         # SPDX `+` suffix: `MPL-2.0+` classifies as MPL-2.0. Strip before lookup.
         base = expr.rstrip("+")
         if base in _RISK_OVERRIDES:
@@ -377,8 +409,6 @@ def classify_risk(spdx_id: str) -> RiskLevel:
         base, exception = split_exception(expr)
         base_risk = classify_risk(base)
         if exception in _LINKING_EXCEPTIONS:
-            # Matches the deprecated ``GPL-2.0-with-classpath-exception``
-            # override above.
             if base_risk == RiskLevel.STRONG_COPYLEFT:
                 return RiskLevel.WEAK_COPYLEFT
             return base_risk

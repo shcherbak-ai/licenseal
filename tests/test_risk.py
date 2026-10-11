@@ -6,6 +6,7 @@ import pytest
 
 from licenseal.analysis.risk import (
     _ADDED_PERMISSION_EXCEPTIONS,
+    _DEPRECATED_WITH_IDS,
     _LINKING_EXCEPTIONS,
     KNOWN_SPDX_IDS,
     classify_risk,
@@ -423,3 +424,33 @@ class TestWithExpressionRisk:
             "LLVM-exception",
         )
         assert split_exception("A WITH B WITH C") == ("A", "B WITH C")
+
+    @pytest.mark.parametrize("deprecated, current", sorted(_DEPRECATED_WITH_IDS.items()))
+    def test_deprecated_with_id_is_the_expression_it_stands_for(self, deprecated, current):
+        license_id, _, exception = current.partition(" WITH ")
+        assert split_exception(deprecated) == (license_id, exception)
+        assert unrecognized_exception(deprecated) == ""
+        assert classify_risk(deprecated) == classify_risk(current)
+        # ``+`` is the upgrade clause of the license: the class is unchanged.
+        later = license_id.replace("-only", "-or-later")
+        assert later in KNOWN_SPDX_IDS
+        assert split_exception(f"{deprecated}+") == (later, exception)
+        assert classify_risk(f"{deprecated}+") == classify_risk(current)
+        # An exception written after the ID is a second one, which matches
+        # no recognized exception.
+        assert split_exception(f"{deprecated} WITH LLVM-exception") == (
+            license_id,
+            f"{exception} WITH LLVM-exception",
+        )
+        assert unrecognized_exception(f"{deprecated} WITH LLVM-exception")
+
+    def test_deprecated_with_ids_classify_by_their_exception(self):
+        assert classify_risk("GPL-2.0-with-classpath-exception") == RiskLevel.WEAK_COPYLEFT
+        for deprecated in sorted(set(_DEPRECATED_WITH_IDS) - {"GPL-2.0-with-classpath-exception"}):
+            assert classify_risk(deprecated) == RiskLevel.STRONG_COPYLEFT, deprecated
+        # An ID that only looks like one of them stays on the family pattern.
+        assert classify_risk("GPL-2.0-with-made-up-exception") == RiskLevel.STRONG_COPYLEFT
+        assert split_exception("GPL-2.0-with-made-up-exception") == (
+            "GPL-2.0-with-made-up-exception",
+            "",
+        )

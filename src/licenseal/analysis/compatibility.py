@@ -232,6 +232,8 @@ def _pair_conflict(project_spdx: str, dep_leaf: str) -> tuple[CompatibilityVerdi
     rewritten first: ``GPL-3.0`` is ``GPL-3.0-only`` and ``GPL-3.0+`` is
     ``GPL-3.0-or-later``. That has to happen before the ``+`` is stripped —
     stripped first, an 'or later' grant would read as the bare, 'only' ID.
+    A deprecated ``-with-`` ID (``GPL-3.0-with-GCC-exception``) is looked up
+    as the ``WITH`` leaf it stands for.
 
     A ``WITH`` leaf is looked up by its bare license: an exception that only
     adds a permission, and one the rules do not recognize, both leave that
@@ -386,19 +388,20 @@ def _project_pair_leaves(project_spdx: str) -> list[str]:
     under every arm it offers, so the dep must clear each one. A leaf with a
     recognized ``WITH`` exception is dropped — pair entries key on exact
     simple IDs, and a GPL-with-exception project doesn't match the bare-GPL
-    conflict entries. A leaf with an exception the rules do not recognize
-    keeps the entries of its bare license: terms nobody read cannot lift a
-    conflict. Each leaf is returned in its current SPDX spelling, the form
-    the pair entries key on.
+    conflict entries. A deprecated ``-with-`` ID is such a leaf. A leaf with
+    an exception the rules do not recognize keeps the entries of its bare
+    license: terms nobody read cannot lift a conflict. Each leaf is returned
+    in its current SPDX spelling, the form the pair entries key on.
     """
     expr = _strip_outer_parens(project_spdx.strip())
     for sep in (" OR ", " AND "):
         parts = _split_top_level(expr, sep)
         if len(parts) > 1:
             return [leaf for part in parts for leaf in _project_pair_leaves(part)]
-    if unrecognized_exception(expr):
-        expr = split_exception(expr)[0]
-    return [canonical_license_id(expr)] if " " not in expr else []
+    base, exception = split_exception(expr)
+    if exception and not unrecognized_exception(expr):
+        return []
+    return [canonical_license_id(base)] if " " not in base else []
 
 
 # Verdicts from most to least lenient. INCOMPATIBLE (a definite, documented

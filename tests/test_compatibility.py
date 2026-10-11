@@ -18,7 +18,12 @@ from licenseal.analysis.compatibility import (
     check_compatibility,
     is_recognised_project_license,
 )
-from licenseal.analysis.risk import _ADDED_PERMISSION_EXCEPTIONS, classify_risk
+from licenseal.analysis.risk import (
+    _ADDED_PERMISSION_EXCEPTIONS,
+    _DEPRECATED_WITH_IDS,
+    _LINKING_EXCEPTIONS,
+    classify_risk,
+)
 from licenseal.analysis.spdx import (
     KNOWN_SPDX_IDS,
     and_join_licenses,
@@ -1881,6 +1886,289 @@ class TestDeprecatedIdPairConflicts:
             for license_id in (dep, normalize_license(dep)):
                 result = check_compatibility("MIT", _make_license_info(license_id))
                 assert result.verdict == expected, license_id
+
+
+class TestDeprecatedWithIdVerdicts:
+    """A deprecated ``<license>-with-<exception>`` ID is judged as the
+    expression SPDX replaced it with: as a dependency's license, as an operand
+    of an expression, and as the project license. It is shown as declared."""
+
+    _ROWS = sorted(_DEPRECATED_WITH_IDS.items())
+
+    def test_every_deprecated_with_id_has_a_row(self):
+        assert [deprecated for deprecated, _ in self._ROWS] == [
+            "GPL-2.0-with-GCC-exception",
+            "GPL-2.0-with-autoconf-exception",
+            "GPL-2.0-with-bison-exception",
+            "GPL-2.0-with-classpath-exception",
+            "GPL-2.0-with-font-exception",
+            "GPL-3.0-with-GCC-exception",
+            "GPL-3.0-with-autoconf-exception",
+        ]
+
+    @pytest.mark.parametrize("deprecated, current", _ROWS)
+    def test_row_names_a_listed_license_and_a_recognized_exception(self, deprecated, current):
+        license_id, _, exception = current.partition(" WITH ")
+        assert deprecated not in KNOWN_SPDX_IDS
+        assert license_id in KNOWN_SPDX_IDS
+        assert exception in _LINKING_EXCEPTIONS | _ADDED_PERMISSION_EXCEPTIONS
+        # The ID spells out both halves of the expression it stands for.
+        gnu_license, _, exception_stem = deprecated.partition("-with-")
+        assert license_id == f"{gnu_license}-only"
+        assert exception.lower().startswith(exception_stem.lower())
+
+    @pytest.mark.parametrize(
+        "project",
+        [
+            "MIT",
+            "Apache-2.0",
+            "MPL-2.0",
+            "GPL-2.0-only",
+            "GPL-2.0-or-later",
+            "GPL-3.0-only",
+            "AGPL-3.0-only",
+            "Proprietary",
+            "GPL-2.0-only OR MIT",
+        ],
+    )
+    def test_dependency_is_judged_like_its_current_spelling(self, project):
+        verdicts = set()
+        for deprecated, current in self._ROWS:
+            for template in (
+                "{}",
+                "{} AND MIT",
+                "MIT OR {}",
+                "({} OR Apache-2.0) AND MIT",
+                "{} AND CustomLicense",
+            ):
+                declared = normalize_license(template.format(deprecated))
+                assert deprecated in declared
+                control = normalize_license(template.format(current))
+                got = check_compatibility(project, _make_license_info(declared))
+                want = check_compatibility(project, _make_license_info(control))
+                assert (got.verdict, got.risk_level) == (want.verdict, want.risk_level), declared
+                # Same rule, same wording: only the license shown differs.
+                assert got.reason == want.reason.replace(current, deprecated), declared
+                verdicts.add(got.verdict)
+        assert len(verdicts) > 1
+
+    @pytest.mark.parametrize(
+        "project, deprecated",
+        [
+            ("GPL-2.0-only", "GPL-3.0-with-GCC-exception"),
+            ("GPL-2.0-only", "GPL-3.0-with-autoconf-exception"),
+            ("GPL-3.0-only", "GPL-2.0-with-GCC-exception"),
+            ("GPL-3.0-only", "GPL-2.0-with-autoconf-exception"),
+            ("GPL-3.0-only", "GPL-2.0-with-bison-exception"),
+            ("GPL-3.0-only", "GPL-2.0-with-font-exception"),
+            ("AGPL-3.0-only", "GPL-2.0-with-GCC-exception"),
+        ],
+    )
+    def test_version_conflict_of_the_license_is_a_violation(self, project, deprecated):
+        for license_id in (deprecated, f"MIT AND {deprecated}", f"({deprecated})"):
+            result = check_compatibility(project, _make_license_info(license_id))
+            assert result.verdict == CompatibilityVerdict.INCOMPATIBLE, license_id
+            assert result.risk_level == RiskLevel.STRONG_COPYLEFT
+        # The conflict is that of the license the ID names.
+        bare = _DEPRECATED_WITH_IDS[deprecated].partition(" WITH ")[0]
+        assert check_compatibility(project, _make_license_info(bare)).verdict == (
+            CompatibilityVerdict.INCOMPATIBLE
+        )
+
+    def test_classpath_id_keeps_its_linking_exception(self):
+        # The one row whose exception changes the risk class and lifts the
+        # conflicts of its license.
+        for project, verdict in (
+            ("MIT", CompatibilityVerdict.WARNING),
+            ("GPL-3.0-only", CompatibilityVerdict.COMPATIBLE),
+            ("AGPL-3.0-only", CompatibilityVerdict.COMPATIBLE),
+        ):
+            result = check_compatibility(
+                project, _make_license_info("GPL-2.0-with-classpath-exception")
+            )
+            assert (result.verdict, result.risk_level) == (verdict, RiskLevel.WEAK_COPYLEFT)
+
+    def test_plus_suffix_is_the_or_later_license(self):
+        # ``+`` on the ID is the upgrade clause of its license, which a GPLv3
+        # project can use and a GPL-2.0-only project gains nothing from.
+        later = check_compatibility(
+            "GPL-3.0-only", _make_license_info("GPL-2.0-with-GCC-exception+")
+        )
+        assert later.verdict == CompatibilityVerdict.COMPATIBLE
+        only = check_compatibility("GPL-3.0-only", _make_license_info("GPL-2.0-with-GCC-exception"))
+        assert only.verdict == CompatibilityVerdict.INCOMPATIBLE
+        newer = check_compatibility(
+            "GPL-2.0-only", _make_license_info("GPL-3.0-with-GCC-exception+")
+        )
+        assert newer.verdict == CompatibilityVerdict.INCOMPATIBLE
+        assert classify_risk("GPL-2.0-with-classpath-exception+") == RiskLevel.WEAK_COPYLEFT
+
+    def test_exception_written_after_the_id_is_not_read(self):
+        # The ID already carries its exception, so a second one is text nobody
+        # evaluated: it lifts none of the license's conflicts.
+        for declared in (
+            "GPL-3.0-with-GCC-exception WITH Classpath-exception-2.0",
+            "GPL-3.0-only WITH GCC-exception-3.1 WITH Classpath-exception-2.0",
+        ):
+            result = check_compatibility("GPL-2.0-only", _make_license_info(declared))
+            assert result.verdict == CompatibilityVerdict.INCOMPATIBLE, declared
+            assert result.risk_level == RiskLevel.STRONG_COPYLEFT
+
+    @pytest.mark.parametrize("deprecated, current", _ROWS)
+    def test_project_license_is_judged_like_its_current_spelling(self, deprecated, current):
+        verdicts = set()
+        for template in ("{}", "{} OR MIT", "{} AND MIT", "({})"):
+            project, control = template.format(deprecated), template.format(current)
+            # The project license is reported as declared.
+            assert deprecated in analyze(project, []).project_license
+            assert is_recognised_project_license(project)
+            for dep in (
+                "MIT",
+                "Apache-2.0",
+                "LGPL-3.0-only",
+                "EPL-1.0",
+                "GPL-2.0-only",
+                "GPL-3.0-only",
+                "AGPL-3.0-only",
+                "MIT AND CustomLicense",
+            ):
+                got = check_compatibility(project, _make_license_info(dep))
+                want = check_compatibility(control, _make_license_info(dep))
+                assert (got.verdict, got.risk_level) == (want.verdict, want.risk_level), (
+                    project,
+                    dep,
+                )
+                assert got.reason == want.reason.replace(current, deprecated), (project, dep)
+                verdicts.add(got.verdict)
+        assert len(verdicts) > 1
+
+
+class TestDeprecatedWithIdDrivesTheExitCode:
+    """``licenseal check`` exits by the license and exception a deprecated
+    ``-with-`` ID stands for, and reports the ID as the registry declared it."""
+
+    @pytest.mark.parametrize(
+        "project, declared, extra_args, exit_code, verdict, risk",
+        [
+            (
+                "GPL-2.0-only",
+                "GPL-3.0-with-GCC-exception",
+                ["--no-strict"],
+                1,
+                "incompatible",
+                "strong-copyleft",
+            ),
+            # The current spelling is the control.
+            (
+                "GPL-2.0-only",
+                "GPL-3.0-only WITH GCC-exception-3.1",
+                ["--no-strict"],
+                1,
+                "incompatible",
+                "strong-copyleft",
+            ),
+            (
+                "GPL-2.0-only",
+                "GPL-3.0-with-autoconf-exception",
+                ["--no-strict"],
+                1,
+                "incompatible",
+                "strong-copyleft",
+            ),
+            (
+                "GPL-3.0-only",
+                "GPL-2.0-with-GCC-exception",
+                ["--no-strict"],
+                1,
+                "incompatible",
+                "strong-copyleft",
+            ),
+            (
+                "GPL-3.0-only",
+                "GPL-2.0-with-autoconf-exception",
+                ["--no-strict"],
+                1,
+                "incompatible",
+                "strong-copyleft",
+            ),
+            (
+                "GPL-3.0-only",
+                "GPL-2.0-with-bison-exception",
+                ["--no-strict"],
+                1,
+                "incompatible",
+                "strong-copyleft",
+            ),
+            (
+                "GPL-3.0-only",
+                "GPL-2.0-with-font-exception",
+                ["--no-strict"],
+                1,
+                "incompatible",
+                "strong-copyleft",
+            ),
+            # As an operand of an expression.
+            (
+                "GPL-2.0-only",
+                "GPL-3.0-with-GCC-exception AND MIT",
+                ["--no-strict"],
+                1,
+                "incompatible",
+                "strong-copyleft",
+            ),
+            # The license at the project's own version, and the one exception
+            # that lifts the conflict, pass strict mode.
+            ("GPL-2.0-only", "GPL-2.0-with-GCC-exception", [], 0, "compatible", "strong-copyleft"),
+            (
+                "GPL-3.0-only",
+                "GPL-2.0-with-classpath-exception",
+                [],
+                0,
+                "compatible",
+                "weak-copyleft",
+            ),
+            # As the project license.
+            ("GPL-3.0-with-GCC-exception", "MIT", [], 0, "compatible", "permissive"),
+            (
+                "GPL-3.0-with-GCC-exception",
+                "AGPL-3.0-only",
+                ["--no-strict"],
+                0,
+                "warning",
+                "network-copyleft",
+            ),
+            (
+                "GPL-2.0-with-classpath-exception",
+                "GPL-3.0-only",
+                ["--no-strict"],
+                1,
+                "incompatible",
+                "strong-copyleft",
+            ),
+        ],
+    )
+    @respx.mock
+    def test_check_exit_code(
+        self, tmp_path, project, declared, extra_args, exit_code, verdict, risk
+    ):
+        (tmp_path / "package.json").write_text(
+            json.dumps({"name": "app", "license": project, "dependencies": {"some-lib": "1.0.0"}})
+        )
+        respx.get("https://registry.npmjs.org/some-lib/1.0.0").mock(
+            return_value=httpx.Response(200, json={"version": "1.0.0", "license": declared})
+        )
+
+        result = CliRunner().invoke(
+            main,
+            ["check", "--path", str(tmp_path), "-f", "json", "--no-require-lockfile", *extra_args],
+        )
+        assert result.exit_code == exit_code
+        data = json.loads(result.output[result.output.index("{") :])
+        assert data["project_license"] == project
+        dependency = data["dependencies"][0]
+        assert dependency["license"] == dependency["detected_license"] == declared
+        assert dependency["verdict"] == verdict
+        assert dependency["risk"] == risk
 
 
 class TestOrArmJudgedWhole:
