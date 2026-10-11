@@ -477,6 +477,13 @@ def _label(key: tuple, dep: dict) -> str:
     return f"{_name(key)} [{dep.get('license')}/{dep.get('verdict')}]"
 
 
+def _diagnostics(data: dict) -> set[tuple[str, str, str]]:
+    return {
+        (d.get("path", ""), d.get("severity", ""), d.get("reason", ""))
+        for d in data.get("diagnostics", [])
+    }
+
+
 def _diff_one(tag: str, base: dict, fresh: dict, limit: int) -> list[str]:
     b, f = _index(base), _index(fresh)
     added, removed = sorted(set(f) - set(b)), sorted(set(b) - set(f))
@@ -487,7 +494,8 @@ def _diff_one(tag: str, base: dict, fresh: dict, limit: int) -> list[str]:
     ]
     bs, fs = base.get("summary", {}), fresh.get("summary", {})
     project = [x for x in PROJECT_FIELDS if base.get(x) != fresh.get(x)]
-    if not (added or removed or changed or project) and bs == fs:
+    bd, fd = _diagnostics(base), _diagnostics(fresh)
+    if not (added or removed or changed or project) and bs == fs and bd == fd:
         return []
     lines = [f"- {tag}: +{len(added)} -{len(removed)} ~{len(changed)}"]
     lines += [f"  - {x}: {base.get(x)!r} -> {fresh.get(x)!r}" for x in project]
@@ -501,6 +509,11 @@ def _diff_one(tag: str, base: dict, fresh: dict, limit: int) -> list[str]:
     for k, delta in changed[:limit]:
         detail = "; ".join(f"{x}: {old} -> {new}" for x, (old, new) in delta.items())
         lines.append(f"  - changed {_name(k)} {detail}")
+    for word, diagnostics in (("added  ", fd - bd), ("removed", bd - fd)):
+        lines += [
+            f"  - diagnostic {word} [{severity}] {path}: {reason}"
+            for path, severity, reason in sorted(diagnostics)[:limit]
+        ]
     return lines
 
 

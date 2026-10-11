@@ -289,7 +289,7 @@ uv run python scripts/stress/stress.py fresh   # _fresh_<repo>.json and _fresh_<
 uv run python scripts/stress/stress.py diff    # fresh vs baseline, written to _diff_summary.md
 ```
 
-`diff` compares (a) `summary` totals and the project license with its source, (b) the set of `(ecosystem, name, version, origin)` keys, and (c) per-dep `(license, detected_license, risk, verdict, group, depth, estimated)` tuples. Zero diff confirms no regression. Any diff has to be explained by the change.
+`diff` compares (a) `summary` totals and the project license with its source, (b) the set of `(ecosystem, name, version, origin)` keys, (c) per-dep `(license, detected_license, risk, verdict, group, depth, estimated)` tuples, and (d) the diagnostics as `(path, severity, reason)`. Zero diff confirms no regression. Any diff has to be explained by the change.
 
 **2. Per-ecosystem verification (polyglot repos).** Total-count parity hides per-ecosystem bugs — verify each present ecosystem actually fired its expected pipeline path (Python lockfile parsed, npm seeds planted, Rust crates resolved, etc.) by comparing the per-ecosystem counts from `stress.py report --label fresh` with `stress.py report --label baseline`. The report also notes any ecosystem whose manifests are present in a clone but contribute zero dependencies.
 
