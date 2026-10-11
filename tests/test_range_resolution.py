@@ -110,6 +110,11 @@ class TestCargo:
             (">=1.0, <1.3", "1.2.0"),
             ("<1.0", "0.9.0"),
             ("*", "2.0.0"),
+            # ``=`` before a version that stops early covers what it prefixes.
+            ("=1.2", "1.2.0"),
+            ("= 1.2", "1.2.0"),
+            ("=1", "1.4.0"),
+            ("=0", "0.9.0"),
         ],
     )
     @respx.mock
@@ -129,6 +134,33 @@ class TestCargo:
         self._project(tmp_path, "=1.2.0")
         self._registry()
         assert _row(tmp_path, mode) == ("1.2.0", "BSD-3-Clause", [])
+
+    @pytest.mark.no_default_deps_dev_mock
+    @pytest.mark.parametrize(
+        ("requirement", "batched"),
+        [
+            ("=1.2.0", ["1.2.0"]),
+            # A version that stops early is no version to ask a registry for.
+            ("=1.2", []),
+            ("=1", []),
+        ],
+    )
+    @respx.mock
+    def test_batch_lookup_carries_exact_versions_only(
+        self, tmp_path: Path, requirement: str, batched: list[str]
+    ):
+        self._project(tmp_path, requirement)
+        self._registry()
+        batch = respx.post("https://api.deps.dev/v3alpha/versionbatch").mock(
+            return_value=httpx.Response(200, json={"responses": []})
+        )
+        _row(tmp_path, "--no-transitive")
+        sent = [
+            item["versionKey"]["version"]
+            for call in batch.calls
+            for item in json.loads(call.request.content)["requests"]
+        ]
+        assert sent == batched
 
     @pytest.mark.parametrize("mode", _MODES)
     @pytest.mark.parametrize(

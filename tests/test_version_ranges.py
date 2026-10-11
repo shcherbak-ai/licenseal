@@ -169,6 +169,16 @@ _RUST = [
     ("1.2.3", "=1.2.3", True),
     ("1.2.4", "=1.2.3", False),
     ("1.2.3", "==1.2.3", True),
+    ("1.2.4", "==1.2.3", False),
+    # ``=`` before a version that stops early covers what it prefixes.
+    ("1.2.0", "=1.2", True),
+    ("1.2.9", "=1.2", True),
+    ("1.3.0", "=1.2", False),
+    ("1.1.9", "=1.2", False),
+    ("1.9.9", "=1", True),
+    ("2.0.0", "=1", False),
+    ("1.2.9", "= 1.2", True),
+    ("1.2.9-rc.1", "=1.2", False),
     ("1.0.0-beta.1", "1.0", False),
     ("1.0.0-beta.2", "1.0.0-beta.1", True),
     ("1.0.0", "1.0.0-beta.1", True),
@@ -462,6 +472,7 @@ _GO = [
     ("v1.3.0", "v1.2.3", True),
     ("v1.2.2", "v1.2.3", False),
     ("v1.2.3", "==v1.2.3", True),
+    ("v1.3.0", "==v1.2.3", False),
     ("v2.0.0+incompatible", "v1.9.0", True),
     ("v1.9.0", "v2.0.0+incompatible", False),
     ("v1.2.3-rc.1", "v1.2.3", False),
@@ -529,23 +540,26 @@ class TestSatisfies:
         assert satisfies(ecosystem, "not a version", constraint) is True
 
     @pytest.mark.parametrize(
-        ("ecosystem", "version"),
+        ("ecosystem", "version", "later"),
         [
-            (Ecosystem.PYTHON, "2.31.0"),
-            (Ecosystem.NPM, "18.2.0"),
-            (Ecosystem.RUST, "1.0.193"),
-            (Ecosystem.GO, "v1.2.3"),
-            (Ecosystem.JAVA, "33.0.0-jre"),
-            (Ecosystem.DOTNET, "13.0.1"),
-            (Ecosystem.PHP, "3.5.0"),
-            (Ecosystem.RUBY, "7.1.3"),
-            (Ecosystem.HEX, "1.7.10"),
-            (Ecosystem.R, "1.6-1"),
+            (Ecosystem.PYTHON, "2.31.0", "2.31.1"),
+            (Ecosystem.NPM, "18.2.0", "18.2.1"),
+            (Ecosystem.RUST, "1.0.193", "1.0.194"),
+            (Ecosystem.GO, "v1.2.3", "v1.2.4"),
+            (Ecosystem.JAVA, "33.0.0-jre", "33.0.1-jre"),
+            (Ecosystem.DOTNET, "13.0.1", "13.0.2"),
+            (Ecosystem.PHP, "3.5.0", "3.5.1"),
+            (Ecosystem.RUBY, "7.1.3", "7.1.4"),
+            (Ecosystem.HEX, "1.7.10", "1.7.11"),
+            (Ecosystem.R, "1.6-1", "1.6-2"),
         ],
     )
-    def test_lockfile_entry_form_is_that_exact_version(self, ecosystem, version):
-        # ``==X`` is how every lockfile parser writes a pinned version.
+    def test_lockfile_entry_form_is_that_exact_version(self, ecosystem, version, later):
+        # ``==X`` is how every lockfile parser writes a pinned version. It is
+        # exact where a bare version is a caret (Cargo) or a minimum (NuGet,
+        # Maven, Go): the next patch release does not satisfy it.
         assert satisfies(ecosystem, version, f"=={version}") is True
+        assert satisfies(ecosystem, later, f"=={version}") is False
 
 
 _SEMVER_PUBLISHED = ["1.9.0", "2.0.0-rc.1", "2.0.0-rc.2", "2.0.0", "2.1.0"]

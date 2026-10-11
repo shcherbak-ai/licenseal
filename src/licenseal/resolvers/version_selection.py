@@ -332,13 +332,16 @@ _CARGO_BARE_VERSION_RE = re.compile(r"\d+(?:\.\d+){0,2}(?:[-+].*)?")
 
 def _cargo_matcher(constraint: str) -> _Matcher | None:
     """Cargo requirements: comma-separated comparators, a bare version is a caret."""
-    spec = constraint.strip().removeprefix("==")
+    spec = constraint.strip()
+    # ``==1.2.3`` is how a lockfile entry is written here: Cargo's ``=``, where
+    # a bare version in a manifest is a caret.
+    bare = "=" if spec.startswith("==") else "^"
     bounds: list[_SemverBound] = []
-    for raw in spec.split(","):
+    for raw in spec.removeprefix("==").split(","):
         comparator = _NPM_OPERATOR_SPACE_RE.sub(r"\1", raw.strip())
         # A wildcard (``1.*``, ``1.2.x``) covers what it prefixes; it is no caret.
         if _CARGO_BARE_VERSION_RE.fullmatch(comparator):
-            comparator = f"^{comparator}"
+            comparator = f"{bare}{comparator}"
         read = _semver_bounds(comparator)
         if read is None:
             return None
@@ -385,8 +388,11 @@ def _go_version(text: str) -> SemVer | None:
 
 def _go_matcher(constraint: str) -> _Matcher | None:
     """A ``go.mod`` requirement is a minimum: minimal version selection may raise it."""
-    minimum = _go_version(constraint.strip().removeprefix("=="))
-    return None if minimum is None else _compare(">=", minimum)
+    spec = constraint.strip()
+    # ``==v1.2.3`` is how a resolved row is written: that version, not a minimum.
+    op = "==" if spec.startswith("==") else ">="
+    bound = _go_version(spec.removeprefix("=="))
+    return None if bound is None else _compare(op, bound)
 
 
 # RubyGems.

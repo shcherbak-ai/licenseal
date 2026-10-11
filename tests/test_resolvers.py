@@ -86,6 +86,7 @@ from licenseal.resolvers.pypi import _extract_pinned_version as extract_python_p
 from licenseal.resolvers.pypi import _extract_repository_url as extract_python_repository_url
 from licenseal.resolvers.pypi import _normalize_repository_url as normalize_python_repository_url
 from licenseal.resolvers.version_selection import select_npm_version, select_python_version
+from licenseal.transitive import declares_exact_version
 
 
 def _python_dep(name: str = "requests", version: str = "") -> Dependency:
@@ -1517,14 +1518,38 @@ class TestCratesIoResolver:
     def test_extract_pinned_version_accepts_eq_form(self):
         assert extract_rust_pinned_version("=1.2.3") == "1.2.3"
         assert extract_rust_pinned_version("= 1.2.3") == "1.2.3"
+        assert extract_rust_pinned_version(" =1.2.3 ") == "1.2.3"
+        assert extract_rust_pinned_version("=1.2.3-rc.1") == "1.2.3-rc.1"
+        assert extract_rust_pinned_version("=1.2.3+build.5") == "1.2.3+build.5"
 
     def test_extract_pinned_version_accepts_double_eq_form(self):
         # Internal lockfile output uses `==X.Y.Z`.
         assert extract_rust_pinned_version("==1.2.3") == "1.2.3"
+        assert extract_rust_pinned_version("== 1.2.3") == "1.2.3"
 
     def test_extract_pinned_version_rejects_ranges_and_bare(self):
         for spec in ("1.2.3", "^1.2", "~1.2", ">=1.0", "*", "", "==garbage"):
             assert extract_rust_pinned_version(spec) is None
+
+    @pytest.mark.parametrize(
+        "spec", ["=1.2", "=1", "= 1.2", "==1.2", "==1", "=1.2.*", "=1.*", "=1.2.3, <2", "=1.2-rc.1"]
+    )
+    def test_extract_pinned_version_rejects_a_version_that_stops_early(self, spec):
+        # `=1.2` is every `1.2.x` and `=1` every `1.x`: ranges, like a wildcard.
+        assert extract_rust_pinned_version(spec) is None
+
+    @pytest.mark.parametrize(
+        ("spec", "exact"),
+        [("=1.2.3", True), ("==1.2.3", True), ("=1.2", False), ("=1", False), ("1.2.3", False)],
+    )
+    def test_only_a_complete_version_behind_eq_declares_an_exact_version(self, spec, exact):
+        assert declares_exact_version(_rust_dep("serde", spec)) is exact
+
+    @pytest.mark.parametrize(
+        ("spec", "batched"), [("=1.2.3", "1.2.3"), ("=1.2", None), ("=1", None)]
+    )
+    def test_batch_extractor_takes_a_complete_version_only(self, spec, batched):
+        assert _version_extractor_for("CARGO")(spec) == batched
 
     @respx.mock
     def test_resolve_pinned_version(self):

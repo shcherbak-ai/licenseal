@@ -510,8 +510,8 @@ def _version_extractor_for(system: str) -> Callable[[str], str | None]:
       whose license lives in a parent POM that deps.dev's ``licensecheck``
       over the artifact's own LICENSE file doesn't see.
     * ``CARGO`` — only ``=X.Y.Z`` / ``==X.Y.Z`` exact pins batch; range
-      specs need crates.io's max-stable-version lookup and flow through
-      ``resolve_rust_license``'s per-crate path.
+      specs, ``=1.2`` and ``=1`` among them, need crates.io's version list
+      and flow through ``resolve_rust_license``'s per-crate path.
     * ``NPM`` — package-alias unwrapping (``"npm:<target>@<spec>"``) happens
       at discovery, so ``dep.name`` is already the target package.
     * ``RUBYGEMS`` — lockfiles emit ``==X.Y.Z`` pins for every spec;

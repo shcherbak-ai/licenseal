@@ -14,27 +14,18 @@ from licenseal.resolvers.version_selection import select_version
 
 _CRATES_IO_URL = "https://crates.io/api/v1/crates"
 
-# Cargo exact-pinned form: `=X.Y.Z[-pre][+build]`. Anything else (bare,
-# caret, tilde, range, wildcard) is a range, resolved against the versions
-# the registry lists for the crate.
-_PINNED_VERSION_RE = re.compile(r"^=\s*(\d+(?:\.\d+){0,2}(?:[-+][A-Za-z0-9.+_-]+)?)$")
+# Cargo exact-pinned form: `=X.Y.Z[-pre][+build]`, with all three segments;
+# licenseal's lockfile output writes it `==X.Y.Z`. Anything else is a range,
+# resolved against the versions the registry lists for the crate: bare,
+# caret, tilde, comparison, wildcard, and `=` before a version that stops
+# early (`=1.2` is every `1.2.x`, `=1` every `1.x`).
+_PINNED_VERSION_RE = re.compile(r"==?\s*(\d+\.\d+\.\d+(?:[-+][A-Za-z0-9.+_-]+)?)")
 
 
 def _extract_pinned_version(version_constraint: str) -> str | None:
     """Return the exact requested version when the constraint is `=X.Y.Z`."""
-    spec = version_constraint.strip()
-    if not spec:
-        return None
-    # licenseal-internal lockfile output uses `==X.Y.Z`; accept both.
-    if spec.startswith("=="):
-        candidate = spec[2:].strip()
-        if re.fullmatch(r"\d+(?:\.\d+){0,2}(?:[-+][A-Za-z0-9.+_-]+)?", candidate):
-            return candidate
-        return None
-    match = _PINNED_VERSION_RE.fullmatch(spec)
-    if not match:
-        return None
-    return match.group(1)
+    match = _PINNED_VERSION_RE.fullmatch(version_constraint.strip())
+    return match.group(1) if match else None
 
 
 def _published_versions(data: dict) -> list[str]:
@@ -60,10 +51,10 @@ def _resolve_version(
     """Resolve `spec` to a concrete version, or None when there is none to report.
 
     A pinned spec (`=X.Y.Z` or `==X.Y.Z`) is returned verbatim. No spec at
-    all is the crate's latest stable release. Any other requirement resolves
-    to the highest version satisfying it among those the crate response
-    lists. That response is the one the latest release is read from, so a
-    range costs no request of its own.
+    all is the crate's latest stable release. Any other requirement, `=1.2`
+    included, resolves to the highest version satisfying it among those the
+    crate response lists. That response is the one the latest release is
+    read from, so a range costs no request of its own.
 
     A requirement that is not Cargo syntax, or that no published version
     satisfies, resolves to nothing; it never falls back to the latest
