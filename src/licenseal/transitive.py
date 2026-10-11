@@ -359,18 +359,30 @@ def _uncovered_by(
     root lockfile whose ``shared`` is 1.0, and a manifest is not covered by
     a lockfile it has moved ahead of.
 
+    A declaration with an origin has no version to compare, and a registry
+    row of its package covers it only when no manifest declares the package
+    as a registry requirement: the row then takes the declared origin
+    (:func:`_keep_declared_origins`). When one does, the registry row is
+    that requirement's, and only a row with an origin covers the
+    off-registry declaration. Uncovered, it is reported as it is declared.
+
     ``also_named`` holds the identity keys of the packages a lockfile lists
     without a row, such as the project's own path packages. Those are
     covered by name: there is no version to compare.
     """
+    direct_deps = list(direct_deps)
+    registry_declared = {(d.ecosystem, d.identity) for d in direct_deps if not d.origin}
     held: dict[tuple[Ecosystem, str], list[Dependency]] = {}
     for row in locked:
         held.setdefault((row.ecosystem, row.identity), []).append(row)
     uncovered: list[Dependency] = []
     for dep in direct_deps:
-        rows = held.get((dep.ecosystem, dep.identity))
+        key = (dep.ecosystem, dep.identity)
+        rows = held.get(key)
         if rows is None:
             covered = dep.identity in also_named
+        elif dep.origin and key in registry_declared:
+            covered = any(row.origin for row in rows)
         else:
             covered = any(_meets(row, dep) is not False for row in rows)
         if not covered:
@@ -816,7 +828,9 @@ def _keep_declared_origins(
     came from, must not turn the UNKNOWN row the manifest calls for into a
     registry lookup: a direct row without an origin takes the declared one.
     A name that some manifest also declares as a registry requirement is
-    left as the lockfile has it. A row that takes an origin is not a version
+    left as the lockfile has it: that row is the registry requirement's, and
+    the off-registry declaration is reported beside it
+    (:func:`_uncovered_by`). A row that takes an origin is not a version
     estimate: no registry is asked about it.
     """
     declared: dict[tuple[Ecosystem, str], str] = {}
@@ -1114,6 +1128,14 @@ def _resolve_r_transitive(
         # Manifest-only / lock-uncovered closure walks the CRAN index locally;
         # fetch + parse it lazily (only when there's something to walk).
         _record_missing_lockfiles(project_path, uncovered)
+        # A package that one DESCRIPTION takes from CRAN and another from a
+        # remote is two rows. The closure holds one node per package name, so
+        # it takes the CRAN requirement, and the remote declaration is
+        # reported as it is declared.
+        cran_declared = {d.identity for d in uncovered if not d.origin}
+        beside_cran = [d for d in uncovered if d.origin and d.identity in cran_declared]
+        out.extend(beside_cran)
+        uncovered = [d for d in uncovered if not d.origin or d.identity not in cran_declared]
         cran_index = fetch_cran_index(client, fetcher=fetcher)
         # A depth-0 row of the closure is the row of the uncovered dep it was
         # seeded from, whatever version the index holds: it takes that dep's

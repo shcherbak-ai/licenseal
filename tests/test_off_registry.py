@@ -18,6 +18,7 @@ import respx
 from click.testing import CliRunner
 
 from licenseal.cli import main
+from licenseal.discovery import discover_all_dependencies
 from licenseal.discovery._origin import (
     git_origin,
     hosted_git_origin,
@@ -25,6 +26,7 @@ from licenseal.discovery._origin import (
     strip_credentials,
     url_origin,
 )
+from licenseal.discovery._read import collect_read_diagnostics
 from licenseal.discovery._walk import scan_exclusions
 from licenseal.discovery.npm._specs import npm_spec_origin
 from licenseal.discovery.r.description import _remote_origins
@@ -41,7 +43,8 @@ from licenseal.review import (
     review_key,
     source_review_key,
 )
-from tests._helpers import _check_json, _dirs, _file_diagnostics, _write
+from licenseal.transitive import resolve_transitive
+from tests._helpers import _check_json, _dirs, _file_diagnostics, _no_registry, _write
 
 
 def _refuse_everything_else() -> None:
@@ -2683,7 +2686,7 @@ class TestLockfileCannotClearADeclaredSource:
         assert _requests_mentioning("git-fork") == []
 
     @respx.mock
-    def test_name_also_declared_as_a_registry_requirement_follows_the_lockfile(self, tmp_path):
+    def test_name_also_declared_as_a_registry_requirement_is_two_rows(self, tmp_path):
         _write(
             tmp_path / "pyproject.toml",
             '[project]\nname = "app"\nlicense = "MIT"\ndependencies = ["git-fork>=1.0"]\n',
@@ -2695,10 +2698,402 @@ class TestLockfileCannotClearADeclaredSource:
         _write(tmp_path / "uv.lock", self._LOCK)
         _mock_pypi_release("git-fork", "1.2.0")
         _refuse_everything_else()
+        origin = "git+https://git.example.org/team/git-fork.git@v1.2"
         result, data = _check_json(tmp_path)
+        assert result.exit_code == 1
+        # The lockfile's row is the registry requirement's. The reference in
+        # the other file is a row of its own, as it is without a lockfile.
+        assert sorted(
+            (d["origin"], d["license"], d["resolved_version"], d["source"])
+            for d in data["dependencies"]
+        ) == [
+            ("", "MIT", "1.2.0", "pyproject.toml"),
+            (origin, "UNKNOWN", "", "tools/requirements.txt"),
+        ]
+        assert _file_diagnostics(data) == []
+
+        _review_file(
+            tmp_path,
+            f"""\
+            [[review]]
+            ecosystem = "python"
+            package = "git-fork"
+            source = "{origin}"
+            license = "MIT"
+            """,
+        )
+        reviewed, _ = _check_json(tmp_path)
+        assert reviewed.exit_code == 0
+
+
+# ------------------ one package, declared from a registry and from elsewhere
+
+
+def _declared_rows(project: Path) -> set[tuple[str, str, str]]:
+    """Scan ``project`` from its files alone: the ``(version, origin, source)`` of each row.
+
+    No registry answers, so a row a lockfile does not pin keeps its declared
+    constraint as its version.
+    """
+    with collect_read_diagnostics():
+        direct, _ = discover_all_dependencies(project)
+        with httpx.Client() as client:
+            deps = resolve_transitive(
+                direct,
+                project,
+                include_dev=True,
+                max_depth=50,
+                client=client,
+                fetcher=_no_registry,
+                pom_fetcher=_no_registry,
+            )
+    return {(d.version_constraint, d.origin, d.source) for d in deps}
+
+
+# Per ecosystem: the files of a tree whose ``a`` project requires a package
+# from the registry, with a lockfile that holds it, and whose ``b`` project
+# takes the same name from elsewhere; the lockfile; and the rows expected with
+# the lockfile and without it.
+_TWO_DECLARATIONS: dict[str, tuple[dict[str, str], str, set, set]] = {
+    "rust": (
+        {
+            "a/Cargo.toml": (
+                '[package]\nname = "a"\nversion = "0.1.0"\n\n[dependencies]\nshared = "1"\n'
+            ),
+            "b/Cargo.toml": (
+                '[package]\nname = "b"\nversion = "0.1.0"\n\n[dependencies]\n'
+                'shared = { git = "https://git.example.org/team/shared.git", tag = "v1" }\n'
+            ),
+            "a/Cargo.lock": (
+                'version = 3\n\n[[package]]\nname = "a"\nversion = "0.1.0"\n'
+                'dependencies = ["shared"]\n\n[[package]]\nname = "shared"\nversion = "1.0.0"\n'
+                'source = "registry+https://github.com/rust-lang/crates.io-index"\n'
+            ),
+        },
+        "a/Cargo.lock",
+        {
+            ("==1.0.0", "", "a/Cargo.toml"),
+            ("", "git+https://git.example.org/team/shared.git@v1", "b/Cargo.toml"),
+        },
+        {
+            ("1", "", "a/Cargo.toml"),
+            ("", "git+https://git.example.org/team/shared.git@v1", "b/Cargo.toml"),
+        },
+    ),
+    "php": (
+        {
+            "a/composer.json": json.dumps({"name": "x/a", "require": {"acme/shared": "^1.0"}}),
+            "b/composer.json": json.dumps(
+                {
+                    "name": "x/b",
+                    "require": {"acme/shared": "1.0.0"},
+                    "repositories": [
+                        {
+                            "type": "package",
+                            "package": {
+                                "name": "acme/shared",
+                                "version": "1.0.0",
+                                "source": {
+                                    "type": "git",
+                                    "url": "https://git.example.org/acme/shared.git",
+                                    "reference": "0123abcd",
+                                },
+                            },
+                        }
+                    ],
+                }
+            ),
+            "a/composer.lock": json.dumps(
+                {
+                    "packages": [{"name": "acme/shared", "version": "1.0.0", "license": ["MIT"]}],
+                    "packages-dev": [],
+                }
+            ),
+        },
+        "a/composer.lock",
+        {
+            ("==1.0.0", "", "a/composer.json"),
+            ("", "git+https://git.example.org/acme/shared.git@0123abcd", "b/composer.json"),
+        },
+        {
+            ("^1.0", "", "a/composer.json"),
+            ("", "git+https://git.example.org/acme/shared.git@0123abcd", "b/composer.json"),
+        },
+    ),
+    "ruby": (
+        {
+            "a/Gemfile": 'source "https://rubygems.org"\ngem "shared", "~> 1.0"\n',
+            "b/Gemfile": (
+                'source "https://rubygems.org"\n'
+                'gem "shared", git: "https://git.example.org/team/shared.git"\n'
+            ),
+            "a/Gemfile.lock": (
+                "GEM\n  remote: https://rubygems.org/\n  specs:\n    shared (1.0.0)\n\n"
+                "PLATFORMS\n  ruby\n\nDEPENDENCIES\n  shared (~> 1.0)\n"
+            ),
+        },
+        "a/Gemfile.lock",
+        {
+            ("==1.0.0", "", "a/Gemfile"),
+            ("", "git+https://git.example.org/team/shared.git", "b/Gemfile"),
+        },
+        {
+            ("~> 1.0", "", "a/Gemfile"),
+            ("", "git+https://git.example.org/team/shared.git", "b/Gemfile"),
+        },
+    ),
+    "hex": (
+        {
+            "a/mix.exs": (
+                "defmodule A.MixProject do\n  def project, do: [app: :a, deps: deps()]\n"
+                '  defp deps do\n    [{:shared, "~> 1.0"}]\n  end\nend\n'
+            ),
+            "b/mix.exs": (
+                "defmodule B.MixProject do\n  def project, do: [app: :b, deps: deps()]\n"
+                '  defp deps do\n    [{:shared, git: "https://git.example.org/team/shared.git"}]\n'
+                "  end\nend\n"
+            ),
+            "a/mix.lock": (
+                '%{\n  "shared": {:hex, :shared, "1.0.0", "h", [:mix], [], "hexpm", "h2"},\n}\n'
+            ),
+        },
+        "a/mix.lock",
+        {
+            ("==1.0.0", "", "a/mix.exs"),
+            ("", "git+https://git.example.org/team/shared.git", "b/mix.exs"),
+        },
+        {
+            ("~> 1.0", "", "a/mix.exs"),
+            ("", "git+https://git.example.org/team/shared.git", "b/mix.exs"),
+        },
+    ),
+    "dotnet": (
+        {
+            "a/a.csproj": (
+                '<Project Sdk="Microsoft.NET.Sdk">\n  <ItemGroup>\n'
+                '    <PackageReference Include="Shared" Version="1.0.0" />\n'
+                "  </ItemGroup>\n</Project>\n"
+            ),
+            "b/b.csproj": (
+                '<Project Sdk="Microsoft.NET.Sdk">\n  <ItemGroup>\n'
+                '    <ProjectReference Include="..\\..\\outside\\Shared\\Shared.csproj" />\n'
+                "  </ItemGroup>\n</Project>\n"
+            ),
+            "a/packages.lock.json": json.dumps(
+                {
+                    "version": 1,
+                    "dependencies": {
+                        "net8.0": {
+                            "Shared": {
+                                "type": "Direct",
+                                "requested": "[1.0.0, )",
+                                "resolved": "1.0.0",
+                            }
+                        }
+                    },
+                }
+            ),
+        },
+        "a/packages.lock.json",
+        {
+            ("==1.0.0", "", "a/a.csproj"),
+            ("", "..\\..\\outside\\Shared\\Shared.csproj", "b/b.csproj"),
+        },
+        {
+            ("==1.0.0", "", "a/a.csproj"),
+            ("", "..\\..\\outside\\Shared\\Shared.csproj", "b/b.csproj"),
+        },
+    ),
+    "java": (
+        {
+            "a/build.gradle": "dependencies {\n    implementation 'com.vendor:shared:1.0'\n}\n",
+            "a/gradle.lockfile": (
+                "# This is a Gradle generated file for dependency locking.\n"
+                "com.vendor:shared:1.0=compileClasspath,runtimeClasspath\nempty=\n"
+            ),
+            "b/pom.xml": (
+                '<project xmlns="http://maven.apache.org/POM/4.0.0">\n'
+                "  <modelVersion>4.0.0</modelVersion>\n"
+                "  <groupId>org.example</groupId><artifactId>b</artifactId>"
+                "<version>1.0.0</version>\n"
+                "  <dependencies><dependency>\n"
+                "    <groupId>com.vendor</groupId><artifactId>shared</artifactId>"
+                "<version>1.0</version>\n"
+                "    <scope>system</scope><systemPath>${basedir}/lib/shared.jar</systemPath>\n"
+                "  </dependency></dependencies>\n</project>\n"
+            ),
+        },
+        "a/gradle.lockfile",
+        {
+            ("==1.0", "", "a/build.gradle"),
+            ("", "${basedir}/lib/shared.jar", "b/pom.xml"),
+        },
+        {
+            ("==1.0", "", "a/build.gradle"),
+            ("", "${basedir}/lib/shared.jar", "b/pom.xml"),
+        },
+    ),
+    "go": (
+        {
+            "a/go.mod": "module example.com/a\n\ngo 1.22\n\nrequire example.org/shared v1.0.0\n",
+            "a/go.sum": "example.org/shared v1.0.0 h1:h\nexample.org/shared v1.0.0/go.mod h1:h\n",
+            "b/go.mod": (
+                "module example.com/b\n\ngo 1.22\n\nrequire example.org/shared v1.0.0\n\n"
+                "replace example.org/shared => ../../outside/shared\n"
+            ),
+        },
+        "a/go.sum",
+        {("v1.0.0", "", "a/go.mod"), ("", "../../outside/shared", "b/go.mod")},
+        {("v1.0.0", "", "a/go.mod"), ("", "../../outside/shared", "b/go.mod")},
+    ),
+}
+
+
+class TestRegistryAndOffRegistryDeclarationsOfOnePackage:
+    """One manifest requires a package from the registry, another takes it from elsewhere.
+
+    Both are reported: the registry row at the version a lockfile holds, and
+    the off-registry row with its origin. A lockfile that lists only the
+    registry package does not stand for the other declaration.
+    """
+
+    @respx.mock
+    def test_npm_lockfile_with_only_the_registry_package(self, tmp_path):
+        _npm_manifest(tmp_path / "a", {"shared": "^1.0.0"}, name="a")
+        _npm_manifest(tmp_path / "b", {"shared": "github:team/shared#abc"}, name="b")
+        (tmp_path / "a" / "package-lock.json").write_text(
+            json.dumps(
+                {
+                    "name": "a",
+                    "lockfileVersion": 3,
+                    "packages": {
+                        "": {"name": "a", "dependencies": {"shared": "^1.0.0"}},
+                        "node_modules/shared": {
+                            "version": "1.0.0",
+                            "resolved": f"{_NPMJS}/shared/-/shared-1.0.0.tgz",
+                        },
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+        _mock_npm_package("shared", "1.0.0")
+        _refuse_everything_else()
+        result, data = _check_json(tmp_path)
+        assert result.exit_code == 1
+        # The registry row is the lockfile's: its version is not an estimate.
+        assert sorted(
+            (d["origin"], d["license"], d["resolved_version"], d["estimated"], d["source"])
+            for d in data["dependencies"]
+        ) == [
+            ("", "MIT", "1.0.0", [], "a/package.json"),
+            ("git+https://github.com/team/shared@abc", "UNKNOWN", "", [], "b/package.json"),
+        ]
+        # The lockfile covers the one registry requirement there is, and a
+        # declaration with an origin asks for no lockfile.
+        assert data["diagnostics"] == []
+
+        _review_file(
+            tmp_path,
+            """\
+            [[review]]
+            ecosystem = "npm"
+            package = "shared"
+            source = "git+https://github.com/team/shared@abc"
+            license = "MIT"
+            """,
+        )
+        reviewed, _ = _check_json(tmp_path)
+        assert reviewed.exit_code == 0
+
+    @respx.mock
+    def test_npm_lockfile_that_records_the_other_source_too(self, tmp_path):
+        _npm_manifest(tmp_path / "a", {"shared": "^1.0.0"}, name="a")
+        _npm_manifest(tmp_path / "b", {"shared": "github:team/shared#abc"}, name="b")
+        for project, resolved in (
+            ("a", f"{_NPMJS}/shared/-/shared-1.0.0.tgz"),
+            ("b", "git+ssh://git@github.com/team/shared.git#0123abcd"),
+        ):
+            (tmp_path / project / "package-lock.json").write_text(
+                json.dumps(
+                    {
+                        "name": project,
+                        "lockfileVersion": 3,
+                        "packages": {
+                            "": {"name": project},
+                            "node_modules/shared": {"version": "1.0.0", "resolved": resolved},
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+        _mock_npm_package("shared", "1.0.0")
+        _refuse_everything_else()
+        result, data = _check_json(tmp_path, "--no-strict")
         assert result.exit_code == 0
-        assert [(d["name"], d["origin"], d["license"]) for d in data["dependencies"]] == [
-            ("git-fork", "", "MIT")
+        assert sorted((d["origin"], d["license"], d["source"]) for d in data["dependencies"]) == [
+            ("", "MIT", "a/package.json"),
+            ("git+ssh://github.com/team/shared.git@0123abcd", "UNKNOWN", "b/package.json"),
+        ]
+
+    @respx.mock
+    @pytest.mark.parametrize("ecosystem", sorted(_TWO_DECLARATIONS))
+    def test_lockfile_with_only_the_registry_package(self, tmp_path, ecosystem):
+        files, lockfile, locked, unlocked = _TWO_DECLARATIONS[ecosystem]
+        for relative, content in files.items():
+            _write(tmp_path / relative, content)
+        _refuse_everything_else()
+        assert _declared_rows(tmp_path) == locked
+        (tmp_path / lockfile).unlink()
+        assert _declared_rows(tmp_path) == unlocked
+
+    @respx.mock
+    @pytest.mark.parametrize("remote_first", [True, False], ids=["remote-first", "cran-first"])
+    def test_r_packages_with_and_without_a_lockfile(self, tmp_path, remote_first):
+        # Discovery reads ``a`` before ``b``, whichever of the two holds the remote.
+        remote, cran = ("a", "b") if remote_first else ("b", "a")
+        _write(
+            tmp_path / remote / "DESCRIPTION",
+            f"Package: {remote}pkg\nImports: shared\nRemotes: team/shared@v2\n",
+        )
+        _write(tmp_path / cran / "DESCRIPTION", f"Package: {cran}pkg\nImports: shared\n")
+        _mock_cran(("shared", "1.4.0", "MIT + file LICENSE"))
+        _refuse_everything_else()
+        origin = "git+https://github.com/team/shared@v2"
+
+        def rows(data: dict) -> list[tuple[str, str, str, str]]:
+            return sorted(
+                (d["origin"], d["license"], d["resolved_version"], d["source"])
+                for d in data["dependencies"]
+            )
+
+        result, data = _check_json(tmp_path, "--no-strict")
+        assert result.exit_code == 0
+        assert rows(data) == [
+            ("", "MIT", "1.4.0", f"{cran}/DESCRIPTION"),
+            (origin, "UNKNOWN", "", f"{remote}/DESCRIPTION"),
+        ]
+
+        (tmp_path / cran / "renv.lock").write_text(
+            json.dumps(
+                {
+                    "Packages": {
+                        "shared": {
+                            "Package": "shared",
+                            "Version": "1.4.0",
+                            "Source": "Repository",
+                            "Repository": "CRAN",
+                        }
+                    }
+                }
+            ),
+            encoding="utf-8",
+        )
+        result, data = _check_json(tmp_path, "--no-strict")
+        assert result.exit_code == 0
+        assert rows(data) == [
+            ("", "MIT", "1.4.0", f"{cran}/DESCRIPTION"),
+            (origin, "UNKNOWN", "", f"{remote}/DESCRIPTION"),
         ]
 
 
