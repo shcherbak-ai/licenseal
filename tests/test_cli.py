@@ -4756,25 +4756,63 @@ class TestJavaEcosystem:
     )
     def test_check_reports_versionless_gradle_coordinates(self, tmp_path, filename, content):
         # A build that leaves versions to a BOM declares bare
-        # ``group:artifact`` coordinates. They are reported — unresolved,
-        # since the version is not knowable without a lockfile — so strict
-        # fails instead of passing an empty scan. The build file is read in
-        # full; the one thing recorded on it is that it has no lockfile.
+        # ``group:artifact`` coordinates. The version the build selects is
+        # not knowable without a lockfile, so each is reported at its latest
+        # release, as an estimate, or unresolved when no registry lists the
+        # artifact. Strict fails instead of passing an empty scan. The build
+        # file is read in full; the one thing recorded on it is that it has
+        # no lockfile.
         (tmp_path / filename).write_text(content, encoding="utf-8")
+        central = "https://repo.maven.apache.org/maven2/org/example"
+        respx.get(f"{central}/web/maven-metadata.xml").respond(
+            text="<metadata><versioning><versions><version>1.0.0</version>"
+            "<version>1.2.0</version></versions></versioning></metadata>"
+        )
+        respx.get(f"{central}/web/1.2.0/web-1.2.0.pom").respond(
+            text="<project><groupId>org.example</groupId><artifactId>web</artifactId>"
+            "<version>1.2.0</version><licenses><license><name>MIT</name></license>"
+            "</licenses></project>"
+        )
+        respx.get(
+            "https://api.deps.dev/v3/systems/MAVEN/packages/org.example%3Aweb/versions/1.2.0"
+            ":dependencies"
+        ).respond(
+            json={
+                "nodes": [
+                    {
+                        "versionKey": {
+                            "system": "MAVEN",
+                            "name": "org.example:web",
+                            "version": "1.2.0",
+                        },
+                        "relation": "SELF",
+                    }
+                ]
+            }
+        )
+        for registry in (
+            "https://repo.maven.apache.org/maven2",
+            "https://dl.google.com/dl/android/maven2",
+            "https://repo.jenkins-ci.org/public",
+        ):
+            respx.get(f"{registry}/org/example/driver/maven-metadata.xml").respond(404)
         runner = CliRunner()
 
         strict = runner.invoke(main, ["check", "--path", str(tmp_path), "--strict", "-f", "json"])
         assert strict.exit_code == 1
         data = json.loads(strict.output[strict.output.index("{") :])
         assert data["summary"]["total"] == 2
-        assert data["summary"]["unknown"] == 2
+        assert data["summary"]["unknown"] == 1
         assert data["summary"]["gaps"] == 1
         assert data["diagnostics"] == [
             {"path": filename, "reason": _MISSING_LOCKFILE, "severity": "gap"}
         ]
-        assert {(d["name"], d["license"], d["group"]) for d in data["dependencies"]} == {
-            ("org.example:web", "UNKNOWN", "prod"),
-            ("org.example:driver", "UNKNOWN", "prod"),
+        assert {
+            (d["name"], d["resolved_version"], d["license"], d["group"], tuple(d["estimated"]))
+            for d in data["dependencies"]
+        } == {
+            ("org.example:web", "1.2.0", "MIT", "prod", ("version",)),
+            ("org.example:driver", "", "UNKNOWN", "prod", ()),
         }
 
         advisory = runner.invoke(main, ["check", "--path", str(tmp_path), "--no-strict"])

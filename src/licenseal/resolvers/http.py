@@ -876,6 +876,14 @@ _POM_KEEP_TAGS = frozenset(
     }
 )
 
+# ``maven-metadata.xml`` keep sets. The Maven registries list an artifact's
+# published versions in this file, beside the per-version directories its POMs
+# are in. Only ``<versioning><versions>`` is read, to pick the latest release
+# of a Gradle coordinate declared with no version; ``<latest>``, ``<release>``
+# and ``<lastUpdated>`` are dropped.
+_MAVEN_METADATA_KEEP_TAGS = frozenset({"versioning"})
+_MAVEN_VERSIONING_KEEP_TAGS = frozenset({"versions"})
+
 # NuGet ``.nuspec`` XML keep set. The flatcontainer endpoint serves the
 # raw nuspec at ``api.nuget.org/v3-flatcontainer/{id}/{version}/{id}.nuspec``;
 # the resolver reads only ``<id>``, ``<version>``, ``<license>``,
@@ -1012,6 +1020,34 @@ def _serialize_trimmed_xml(root: Element) -> dict:
         return {"text": DefusedET.tostring(root, encoding="unicode")}
     except RecursionError:
         return {"text": ""}
+
+
+def _trim_maven_metadata(data: dict) -> dict:
+    """Strip a ``maven-metadata.xml`` body to its list of published versions.
+
+    Same shape and failure handling as :func:`_trim_maven_central_pom`:
+    malformed XML is cached as it is, an entity bomb as an empty sentinel.
+    Keeps ``<versioning>`` under the root and ``<versions>`` under that.
+    """
+    text = data.get("text", "")
+    if not isinstance(text, str) or not text:
+        return data
+    try:
+        root = DefusedET.fromstring(text)
+    except DefusedET.ParseError:
+        return data
+    except DefusedET.EntitiesForbidden:
+        return {"text": ""}
+
+    for child in list(root):
+        if child.tag.rsplit("}", 1)[-1] not in _MAVEN_METADATA_KEEP_TAGS:
+            root.remove(child)
+            continue
+        for sub in list(child):
+            if sub.tag.rsplit("}", 1)[-1] not in _MAVEN_VERSIONING_KEEP_TAGS:
+                child.remove(sub)
+
+    return _serialize_trimmed_xml(root)
 
 
 def _trim_nuspec(data: dict) -> dict:
@@ -1252,7 +1288,10 @@ def _trim_for_cache(url: str, data: dict | None) -> dict | None:
         # (``repo.maven.apache.org`` plus its historical ``repo1`` aliases),
         # Google Android Maven, and the Jenkins public repository. All
         # serve POM XML at the canonical layout, so the same trim handles
-        # every response shape.
+        # every response shape. An artifact's version list is the one other
+        # file read from them; the POM trim would drop what it holds.
+        if path.endswith("/maven-metadata.xml"):
+            return _trim_maven_metadata(data)
         return _trim_maven_central_pom(data)
     if (
         host == "api.nuget.org"

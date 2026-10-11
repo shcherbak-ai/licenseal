@@ -157,6 +157,7 @@ from licenseal.resolvers.maven_central import (
     _MAX_PARENT_DEPTH,  # noqa: PLC2701
     _extract_pinned_version_maven,  # noqa: PLC2701
     _fetch_pom,  # noqa: PLC2701
+    estimate_gradle_version,
 )
 from licenseal.resolvers.npm_registry import (
     _extract_pinned_version as _extract_npm_pinned_version,  # noqa: PLC2701
@@ -1824,13 +1825,24 @@ def _resolve_java_transitive(
     # from the same POM share the same parent chain, and the
     # ``RegistryCache`` further dedupes the actual Maven Central
     # fetches across sibling poms.
+    #
+    # A Gradle coordinate declared with no version (the build leaves it to a
+    # BOM or a dependency-management plugin) has no POM to walk. It is given
+    # its artifact's latest release, marked as an estimate, and is then
+    # expanded like any other direct. One lookup per such coordinate, in
+    # parallel; every other dependency answers None without a request.
+    gradle_estimates = map_with_context(
+        lambda d: estimate_gradle_version(d, client, pom_fetcher), direct_uncovered, max_workers
+    )
     dm_resolved: list[Dependency] = []
-    for d in direct_uncovered:
-        # Both lookups read ``d.source`` as a POM. A dependency declared in
-        # a Gradle build file has no POM to walk, so it keeps its version
-        # as declared (empty when the build leaves it to a BOM).
+    for d, estimate in zip(direct_uncovered, gradle_estimates, strict=True):
+        # Both parent-chain lookups read ``d.source`` as a POM. A dependency
+        # declared anywhere else keeps its version as declared, unless it is
+        # a Gradle coordinate estimated above.
         if d.source.rsplit("/", 1)[-1] != "pom.xml":
-            dm_resolved.append(d)
+            dm_resolved.append(
+                replace(d, version_constraint=estimate, version_estimated=True) if estimate else d
+            )
             continue
         if not d.version_constraint:
             managed_version = _resolve_managed_version(
@@ -1863,7 +1875,9 @@ def _resolve_java_transitive(
     # Direct deps whose version parses to a concrete Maven pin can be
     # walked; ones that don't (range syntax, unresolved ``${…}``) still
     # surface in the output so the license resolver sees them. A pin is
-    # exact whether the declaration states it or the parent chain manages it.
+    # exact whether the declaration states it or the parent chain manages it;
+    # a latest release standing in for a missing Gradle version keeps its
+    # estimate mark.
     walkable: list[tuple[Dependency, str]] = []
     first_direct = len(out)
     for d in direct_uncovered:

@@ -39,6 +39,7 @@ input).
 from __future__ import annotations
 
 import re
+from dataclasses import replace
 from typing import cast
 
 import httpx
@@ -49,13 +50,14 @@ from licenseal.analysis.spdx import (
     normalize_license,
     spdx_from_license_url,
 )
+from licenseal.discovery.java.build_gradle import _BUILD_GRADLE_NAMES
 from licenseal.discovery.java.pom_xml import (
     _expand_properties,
     _parse_pom,
     _PomData,
     _project_properties,
 )
-from licenseal.models import Dependency, LicenseInfo
+from licenseal.models import Dependency, Ecosystem, LicenseInfo
 from licenseal.resolvers.deps_dev import (
     _license_entries,
     _license_info_from_version_object,
@@ -66,6 +68,7 @@ from licenseal.resolvers.http import (
     fetch_registry_text,
     quote_coordinate,
 )
+from licenseal.resolvers.version_selection import select_version
 
 # Sonatype publishes Maven Central at multiple equivalent hostnames
 # (CNAMEs to the same Cloudflare-fronted backend):
@@ -112,6 +115,15 @@ _FALLBACK_POM_REGISTRIES: tuple[str, ...] = (
     # Foundation-operated Maven repository serving a parent-POM chain not
     # mirrored to Central. Same inclusion criterion as above; see SECURITY.md.
     "https://repo.jenkins-ci.org/public/{group_path}/{artifact}/{version}/{artifact}-{version}.pom",
+)
+
+# A registry of the standard layout lists an artifact's published versions in
+# ``maven-metadata.xml``, beside the per-version directories its POMs are in.
+# The list is read from the registries the POMs are read from, in the same
+# order, and from no other host.
+_VERSION_LIST_URLS: tuple[str, ...] = tuple(
+    template.partition("{version}/")[0] + "maven-metadata.xml"
+    for template in (_MAVEN_CENTRAL_POM_URL, *_FALLBACK_POM_REGISTRIES)
 )
 
 # Cap parent-chain traversal. Maven itself permits unbounded inheritance
@@ -230,6 +242,89 @@ def _fetch_pom(
             continue
         return _parse_pom(text)
     return None
+
+
+def _versions_from_metadata(text: str) -> list[str]:
+    """The versions a ``maven-metadata.xml`` body lists; empty when it lists none.
+
+    Reads ``<versioning><versions><version>`` only. The ``<release>`` and
+    ``<latest>`` elements beside it are not used: both may name a prerelease.
+    """
+    try:
+        from defusedxml import ElementTree as DefusedET
+
+        root = DefusedET.fromstring(text)
+    except Exception:  # noqa: BLE001 - defusedxml raises many entity classes
+        return []
+    return [
+        version.text.strip()
+        for versioning in root
+        if versioning.tag.rsplit("}", 1)[-1] == "versioning"
+        for versions in versioning
+        if versions.tag.rsplit("}", 1)[-1] == "versions"
+        for version in versions
+        if version.tag.rsplit("}", 1)[-1] == "version" and version.text and version.text.strip()
+    ]
+
+
+def _latest_release(
+    group_id: str, artifact_id: str, client: httpx.Client, fetcher: Fetcher
+) -> str | None:
+    """The latest release of an artifact, or None when it cannot be determined.
+
+    Asks each registry in :data:`_VERSION_LIST_URLS` in turn for the
+    artifact's version list and answers from the first one that lists a
+    usable version. The latest release is the highest version that is not a
+    prerelease (an alpha, a milestone, a release candidate); an artifact
+    published only as prereleases answers with the highest of those. A
+    ``-SNAPSHOT`` is a build in progress, not a published version, and is
+    never the answer.
+    """
+    group_path = quote_coordinate(group_id.replace(".", "/"), safe="/")
+    artifact = quote_coordinate(artifact_id, safe="")
+    for template in _VERSION_LIST_URLS:
+        data = fetcher(template.format(group_path=group_path, artifact=artifact), client)
+        text = data.get("text") if data is not None else None
+        if not isinstance(text, str) or not text:
+            continue
+        # Only versions a POM can be fetched for are candidates.
+        published = [
+            version
+            for version in _versions_from_metadata(text)
+            if _extract_pinned_version_maven(version) is not None
+            and not version.upper().endswith("-SNAPSHOT")
+        ]
+        if published:
+            return select_version(Ecosystem.JAVA, "", published)
+    return None
+
+
+def estimate_gradle_version(dep: Dependency, client: httpx.Client, fetcher: Fetcher) -> str | None:
+    """The version to report for a Gradle coordinate declared with no version.
+
+    A build that leaves versions to a BOM or to a dependency-management
+    plugin declares bare ``group:artifact`` coordinates, and only a
+    ``gradle.lockfile`` records the version the build selects. Without one,
+    the artifact's latest release stands in as an estimate.
+
+    Returns None for anything else: a coordinate that states a version (even
+    one that cannot be resolved, such as a range or a ``${…}`` token), a
+    dependency not declared in a Gradle build file (a ``pom.xml`` gets its
+    missing versions from its parent chain), a dependency with an origin
+    (it is not a registry artifact, and nothing is requested for it), and an
+    artifact whose latest release cannot be determined. ``fetcher`` is the
+    text-mode fetcher the POMs are read with.
+    """
+    if (
+        dep.origin
+        or dep.version_constraint.strip()
+        or dep.source.rsplit("/", 1)[-1] not in _BUILD_GRADLE_NAMES
+    ):
+        return None
+    group_id, _, artifact_id = dep.name.partition(":")
+    if not group_id or not artifact_id:
+        return None
+    return _latest_release(group_id, artifact_id, client, fetcher)
 
 
 def _licenses_from_deps_dev(
@@ -401,6 +496,12 @@ def resolve_maven_central_license(
             from_registry=False,
         )
     pinned = _extract_pinned_version_maven(dep.version_constraint)
+    if pinned is None:
+        # A Gradle coordinate with no version is read at its latest release,
+        # the version the transitive walk gives it too.
+        pinned = estimate_gradle_version(dep, client, fetcher)
+        if pinned is not None:
+            dep = replace(dep, version_estimated=True)
     if pinned is None:
         return LicenseInfo(
             dependency=dep,

@@ -6740,9 +6740,10 @@ class TestJavaTransitiveResolution:
     @respx.mock
     def test_versionless_gradle_dependency_is_not_read_as_a_pom(self, tmp_path):
         # A Gradle coordinate without a concrete version has no POM whose
-        # parent chain could supply one. It stays as declared, and the build
-        # file is never parsed as XML (which would surface as a gap on it):
-        # all that is recorded on it is that it has no lockfile.
+        # parent chain could supply one. With no registry listing the
+        # artifact it stays as declared, and the build file is never parsed
+        # as XML (which would surface as a gap on it): all that is recorded
+        # on it is that it has no lockfile.
         (tmp_path / "build.gradle").write_text(
             "dependencies {\n"
             "    implementation 'org.example:managed'\n"
@@ -6750,6 +6751,12 @@ class TestJavaTransitiveResolution:
             "}\n",
             encoding="utf-8",
         )
+        for registry in (
+            "https://repo.maven.apache.org/maven2",
+            "https://dl.google.com/dl/android/maven2",
+            "https://repo.jenkins-ci.org/public",
+        ):
+            respx.get(f"{registry}/org/example/managed/maven-metadata.xml").respond(404)
         with collect_read_diagnostics() as diags, httpx.Client() as client:
             direct, _ = discover_all_dependencies(tmp_path)
             deps = resolve_transitive(
