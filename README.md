@@ -197,7 +197,7 @@ No tool clears every row. The discovery rows are about source-tree analysis: man
 | `--strict` | Warnings, unknowns, and analysis gaps fail CI in addition to violations. |
 | `--require-lockfile` | A manifest whose dependencies no lockfile covers is an analysis gap: it is scanned from the registry and its versions are marked as estimates (`~1.2.3`). `--no-require-lockfile` accepts that estimate: the manifest is still reported, and does not fail the check. |
 | Violations always fail | `--no-strict` demotes warnings, unknowns, and gaps only; definite incompatibilities still fail. |
-| Project license from the scanned directory, else `Proprietary` | The project's own license is read from a manifest in the scanned directory itself, never from a nested package, and the scan prints which file supplied it. If none declares a recognised license, licenseal labels the project `Proprietary` and checks dependencies as if it were permissively licensed — copyleft dependencies are still flagged, so the default errs strict, not lenient. See [USAGE.md](USAGE.md#project-license). |
+| Project license from the scanned directory, else `Proprietary` | The project's own license is read from a manifest in the scanned directory itself, never from a nested package, and the scan prints which file supplied it. If none declares a license, or the first one that does declares a value that is not a recognised license, licenseal labels the project `Proprietary` and checks dependencies as if it were permissively licensed — copyleft dependencies are still flagged, so the default errs strict, not lenient. See [USAGE.md](USAGE.md#project-license). |
 | Registry-only resolution | No installs, builds, package archive downloads, or source-prose license extraction. |
 
 ## 🎯 Scope
@@ -299,12 +299,12 @@ How compound and ambiguous license strings are read (the full rules are in [USAG
 
 - An **`OR` expression** gets the verdict of the single choice that suits the project best, each choice checked as a whole: `GPL-3.0-only OR MIT` in a `GPL-2.0-only` project is OK through its MIT choice. The Risk column shows the dependency's least restrictive choice.
 - In an **`AND` expression** an operand that is a violation decides the verdict; an operand that did not resolve makes it Unknown only when no operand is a violation.
-- A **`WITH` exception** is matched against a fixed list. The Classpath exception on a GPL license makes the dependency weak copyleft, and an exception that only adds a permission leaves it judged as its bare license. Any other text after `WITH` is terms licenseal did not read: the dependency is a violation when the bare license is one and Unknown otherwise.
+- A **`WITH` exception** is matched against a fixed list. The Classpath exception on a GPL license makes the dependency weak copyleft, and an exception that only adds a permission leaves it judged as its bare license (except that `Apache-2.0 WITH LLVM-exception` is OK in a `GPL-2.0-only` project). Any other text after `WITH` is terms licenseal did not read: the dependency is a violation when the bare license is one and Unknown otherwise.
 - A **license list whose source does not say what it means** (a RubyGems or Hex array, several PyPI license classifiers, `MIT, GPL-3.0-only` in one string) is judged twice: as a choice, and with every entry applying. When the readings differ the dependency is Unknown until you confirm the reading and record it in `licenseal.review.toml`.
 
 A **dual-licensed project** (e.g. `AGPL-3.0-only OR Proprietary`) is checked against the strictest of its arms: dependencies must be compatible with every license the project distributes under, so the commercial arm of an open-core project still flags copyleft dependencies. An arm licenseal does not recognize is judged as a `Proprietary` arm.
 
-When `--dev` is set, violations on dev dependencies are downgraded to warnings — licenseal treats dev deps as lower risk because they usually do not ship with the project.
+When `--dev` is set, violations on dev dependencies are downgraded to warnings — licenseal treats dev deps as lower risk because they usually do not ship with the project. A dev dependency whose license did not resolve cleanly is Unknown instead.
 
 | Risk level | Examples | Meaning |
 | --- | --- | --- |
@@ -312,7 +312,7 @@ When `--dev` is set, violations on dev dependencies are downgraded to warnings �
 | Weak Copyleft | LGPL, MPL-2.0, EPL, CDDL, GPL with Classpath exception | File-scope reciprocity; linking from other files is usually allowed |
 | Strong Copyleft | GPL, OSL, EUPL, CC-BY-SA | Share-alike obligations can extend to the derivative work |
 | Network Copyleft | AGPL-3.0-only | Strong copyleft with network-use source-offer obligations |
-| Unknown | SSPL, BUSL, Elastic, CC-BY-NC; missing or unrecognized licenses; an unrecognized `WITH` exception | Cannot be auto-classified; routed to manual review |
+| Unknown | SSPL, BUSL, Elastic, CC-BY-NC; missing or unrecognized licenses; an unrecognized `WITH` exception on a license that is not strong or network copyleft | Cannot be auto-classified; routed to manual review |
 
 A dependency is **Unknown** when the registry returns no license, a non-SPDX string, or a source-available / use-restricted license (`SSPL`, `BUSL`, `Elastic`, `FSL`, `Parity`, `PolyForm`, `CC-BY-NC*` / `CC-BY-ND*`, `BSD-3-Clause-No-Military-License` and the other use-restricted BSD variants, `Unicode-TOU`) whose custom terms are not auto-evaluated.
 
