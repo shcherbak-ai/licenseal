@@ -1091,8 +1091,9 @@ def _scan_licenses(
     default=True,
     show_default=True,
     help=(
-        "Whether warnings, unknowns, and analysis gaps (manifests that couldn't "
-        "be read or parsed, or that have no lockfile) fail CI in addition to "
+        "Whether warnings, unknowns, and analysis gaps (a manifest or lockfile "
+        "that couldn't be read or parsed, a manifest no lockfile covers, a "
+        "dependency list a registry did not return) fail CI in addition to "
         "violations. Violations always fail regardless of this flag."
     ),
 )
@@ -1122,7 +1123,10 @@ def _scan_licenses(
     type=click.IntRange(1, 100),
     default=_DEFAULT_MAX_DEPTH,
     show_default=True,
-    help="Maximum transitive depth (only meaningful with --transitive).",
+    help=(
+        "Maximum depth of the registry walk that resolves dependencies no "
+        "lockfile covers. Not allowed with --no-transitive."
+    ),
 )
 @click.option(
     "--exclude-dirs",
@@ -1306,7 +1310,10 @@ def _render_report_to_string(report: AnalysisReport, output_format: str, project
     "-p",
     type=click.Path(exists=True, file_okay=False, path_type=Path),
     default=".",
-    help="Project directory to scan.",
+    help=(
+        "Project directory: where licenseal.review.toml is written, and what "
+        "is scanned without --from-report."
+    ),
 )
 @click.option(
     "--dev/--no-dev",
@@ -1327,7 +1334,10 @@ def _render_report_to_string(report: AnalysisReport, output_format: str, project
     "from_report",
     type=click.Path(exists=True, dir_okay=False, path_type=Path),
     default=None,
-    help="Read flagged dependencies from a saved JSON report instead of resolving live.",
+    help=(
+        "Read flagged dependencies from a saved JSON report instead of resolving "
+        "live. Not allowed with --dev/--no-dev, --max-workers, or --exclude-dirs."
+    ),
 )
 @click.option(
     "--merge",

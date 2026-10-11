@@ -3987,6 +3987,25 @@ class TestSkillStaleness:
 
 
 class TestFlagValidation:
+    def test_help_names_the_rejected_flag_combinations(self):
+        """`--help` states what the usage errors below enforce, and what a gap is."""
+        runner = CliRunner()
+
+        def help_of(command: str) -> str:
+            # Wide enough that no option description is wrapped mid-phrase.
+            result = runner.invoke(
+                main, [command, "--help"], terminal_width=400, max_content_width=400
+            )
+            assert result.exit_code == 0
+            return " ".join(result.output.split())
+
+        check_help = help_of("check")
+        assert "Not allowed with --no-transitive." in check_help
+        assert "a dependency list a registry did not return" in check_help
+        review_help = help_of("init-review-file")
+        assert "where licenseal.review.toml is written" in review_help
+        assert "Not allowed with --dev/--no-dev, --max-workers, or --exclude-dirs." in review_help
+
     def test_max_depth_with_no_transitive_errors(self, tmp_path):
         """`--max-depth` and `--no-transitive` are mutually exclusive: the
         cap only applies to transitive expansion. Pass both → UsageError."""
