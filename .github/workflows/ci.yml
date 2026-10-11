@@ -43,6 +43,11 @@ jobs:
   test:
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
+    env:
+      # .python-version pins the development interpreter. Without this, a
+      # plain `uv run` rebuilds the environment on that pin, and every cell
+      # of the matrix tests the same Python.
+      UV_PYTHON: ${{ matrix.python-version }}
     strategy:
       fail-fast: false
       matrix:
@@ -62,6 +67,9 @@ jobs:
 
       - name: Install dependencies
         run: uv sync --python ${{ matrix.python-version }}
+
+      - name: Show the interpreter the tests run on
+        run: uv run python --version
 
       - name: Run tests with coverage
         run: uv run pytest tests/ -n auto --cov=src/licenseal --cov-report=xml --cov-report=term-missing --cov-fail-under=100
