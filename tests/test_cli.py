@@ -4037,6 +4037,69 @@ class TestSkillStaleness:
         assert "install-skill" in result.output
 
 
+def _help_screen(*command: str, width: int = 80) -> str:
+    """The ``--help`` output of ``licenseal <command>`` on a terminal ``width`` columns wide.
+
+    At ``width`` 400 no description is wrapped, and the whitespace is
+    collapsed so that an option and its description read as one line.
+    """
+    result = CliRunner().invoke(
+        main, [*command, "--help"], terminal_width=width, max_content_width=width
+    )
+    assert result.exit_code == 0
+    return " ".join(result.output.split()) if width == 400 else result.output
+
+
+class TestHelpText:
+    _COMMANDS = ("check", "init-review-file", "install-skill")
+
+    def test_command_list_shows_every_summary_whole(self):
+        # A summary longer than the column is cut off with "...".
+        listing = _help_screen()
+        for line in (
+            "  check             Scan dependencies and check license compatibility.",
+            "  init-review-file  Scaffold review entries for flagged dependencies.",
+            "  install-skill     Install the Claude Code review skill.",
+        ):
+            assert line in listing.splitlines()
+
+    @pytest.mark.parametrize("command", _COMMANDS)
+    def test_help_has_no_markup(self, command):
+        # A terminal prints Markdown and reStructuredText markup as written.
+        screen = _help_screen(command)
+        assert "`" not in screen
+        assert "**" not in screen
+
+    @pytest.mark.parametrize("command", _COMMANDS)
+    def test_default_path_is_shown_the_way_every_default_is(self, command):
+        screen = _help_screen(command, width=400)
+        assert re.search(r"-p, --path DIRECTORY [^\[]*\[default: \.\]", screen)
+        assert "Default:" not in screen
+
+    def test_check_shows_the_default_format(self):
+        screen = _help_screen("check", width=400)
+        assert "-f, --format [table|json|markdown] Output format. [default: table]" in screen
+
+    def test_metavars_name_what_the_option_takes(self):
+        check_help = _help_screen("check", width=400)
+        assert "-o, --output FILE Write the report to FILE instead of stdout." in check_help
+        assert "--exclude-dirs PATH[,PATH...] Skip these subdirectories" in check_help
+        review_help = _help_screen("init-review-file", width=400)
+        assert "--exclude-dirs PATH[,PATH...] Skip these subdirectories" in review_help
+        assert "--from-report FILE Read flagged dependencies" in review_help
+
+    def test_require_lockfile_says_what_no_require_lockfile_accepts(self):
+        # Without a lockfile the report is estimated for a registry dependency
+        # and incomplete for an off-registry one; the flag accepts both.
+        screen = _help_screen("check", width=400)
+        assert "what an off-registry dependency requires is missing" in screen
+        assert "--no-require-lockfile accepts the estimated or incomplete result" in screen
+
+    def test_merge_says_what_happens_without_it(self):
+        screen = _help_screen("init-review-file", width=400)
+        assert "Without it, an existing file is an error." in screen
+
+
 class TestFlagValidation:
     def test_help_names_the_rejected_flag_combinations(self):
         """`--help` states what the usage errors below enforce, and what a gap is."""

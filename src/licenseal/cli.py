@@ -1083,6 +1083,7 @@ def _scan_licenses(
     "-p",
     type=click.Path(exists=True, file_okay=False, path_type=Path),
     default=".",
+    show_default=True,
     help="Project directory to scan.",
 )
 @click.option(
@@ -1091,6 +1092,7 @@ def _scan_licenses(
     "output_format",
     type=click.Choice(["table", "json", "markdown"]),
     default="table",
+    show_default=True,
     help="Output format.",
 )
 @click.option(
@@ -1099,10 +1101,10 @@ def _scan_licenses(
     "output_file",
     type=click.Path(path_type=Path),
     default=None,
+    metavar="FILE",
     help=(
-        "Write the rendered report to FILE instead of stdout. UTF-8 encoded; "
-        "table-format output is rendered without ANSI escapes. Default "
-        "(omitted) keeps stdout behavior for shell pipelines / CI."
+        "Write the report to FILE instead of stdout. UTF-8 encoded; the table "
+        "format is written without ANSI escapes."
     ),
 )
 @click.option(
@@ -1125,9 +1127,9 @@ def _scan_licenses(
     show_default=True,
     help=(
         "Whether warnings, unknowns, and analysis gaps (a manifest or lockfile "
-        "that couldn't be read or parsed, a manifest no lockfile covers, a "
-        "dependency list a registry did not return) fail CI in addition to "
-        "violations. Violations always fail regardless of this flag."
+        "that could not be read or parsed, a manifest without a lockfile, a "
+        "dependency list a registry did not return) fail the check in addition "
+        "to violations. Violations always fail."
     ),
 )
 @click.option(
@@ -1135,10 +1137,11 @@ def _scan_licenses(
     default=True,
     show_default=True,
     help=(
-        "Whether a manifest whose dependencies no lockfile covers is an analysis "
-        "gap. Without a lockfile the versions and the transitive graph are "
-        "estimated from the registry; --no-require-lockfile accepts that "
-        "estimate and reports it without failing."
+        "Whether a manifest that declares dependencies no lockfile covers is an "
+        "analysis gap. Their versions and transitive dependencies are estimated "
+        "from the registry, and what an off-registry dependency requires is "
+        "missing; --no-require-lockfile accepts the estimated or incomplete "
+        "result and reports it without failing."
     ),
 )
 @click.option(
@@ -1166,11 +1169,11 @@ def _scan_licenses(
     "exclude_dirs",
     multiple=True,
     type=click.UNPROCESSED,
+    metavar="PATH[,PATH...]",
     help=(
         "Skip these subdirectories during discovery. Accepts one or more paths "
         "(comma-separated) relative to --path or absolute; may also be repeated. "
-        "Subdirectories that contain their own .git are skipped automatically "
-        "without needing this flag."
+        "Subdirectories that contain their own .git are skipped automatically."
     ),
 )
 def check(
@@ -1185,7 +1188,7 @@ def check(
     max_depth: int,
     exclude_dirs: tuple[str, ...],
 ) -> None:
-    """Scan dependencies and assess license compliance."""
+    """Scan dependencies and check license compatibility."""
     if not transitive:
         ctx = click.get_current_context()
         if ctx.get_parameter_source("max_depth") is not click.core.ParameterSource.DEFAULT:
@@ -1344,6 +1347,7 @@ def _render_report_to_string(report: AnalysisReport, output_format: str, project
     "-p",
     type=click.Path(exists=True, file_okay=False, path_type=Path),
     default=".",
+    show_default=True,
     help=(
         "Project directory: where licenseal.review.toml is written, and what "
         "is scanned without --from-report."
@@ -1369,26 +1373,29 @@ def _render_report_to_string(report: AnalysisReport, output_format: str, project
     type=click.Path(exists=True, dir_okay=False, path_type=Path),
     default=None,
     help=(
-        "Read flagged dependencies from a saved JSON report instead of resolving "
-        "live. Not allowed with --dev/--no-dev, --max-workers, or --exclude-dirs."
+        "Read flagged dependencies from a saved JSON report instead of scanning. "
+        "Not allowed with --dev/--no-dev, --max-workers, or --exclude-dirs."
     ),
 )
 @click.option(
     "--merge",
     "merge",
     is_flag=True,
-    help="Merge new flagged entries into an existing review file (preserves existing entries).",
+    help=(
+        "Add new flagged entries to an existing review file; existing entries are "
+        "kept. Without it, an existing file is an error."
+    ),
 )
 @click.option(
     "--exclude-dirs",
     "exclude_dirs",
     multiple=True,
     type=click.UNPROCESSED,
+    metavar="PATH[,PATH...]",
     help=(
         "Skip these subdirectories during discovery. Accepts one or more paths "
         "(comma-separated) relative to --path or absolute; may also be repeated. "
-        "Subdirectories that contain their own .git are skipped automatically "
-        "without needing this flag."
+        "Subdirectories that contain their own .git are skipped automatically."
     ),
 )
 def init_review_file(
@@ -1399,10 +1406,11 @@ def init_review_file(
     merge: bool,
     exclude_dirs: tuple[str, ...],
 ) -> None:
-    """Generate or extend `licenseal.review.toml` for flagged dependencies.
+    """Scaffold review entries for flagged dependencies.
 
-    Without --from-report the project is scanned as `check` scans it with its
-    default options: lockfiles first, transitive dependencies included.
+    Writes licenseal.review.toml, or adds to it with --merge. Without
+    --from-report the project is scanned as the check command scans it with
+    its default options: lockfiles first, transitive dependencies included.
     """
     if from_report is not None:
         ctx = click.get_current_context()
@@ -1493,9 +1501,7 @@ def _project_skill_file(project_path: Path) -> Path:
     """Path to the project-local installed skill.
 
     licenseal installs the skill **only inside the project** (``.claude/skills``),
-    never globally, so the tool never reads or writes outside the project
-    directory — keeping its footprint non-intrusive and the skill committable
-    alongside the code it audits.
+    never globally, so the skill can be committed alongside the code it audits.
     """
     return project_path / ".claude" / "skills" / _SKILL_NAME / _SKILL_FILENAME
 
@@ -1594,7 +1600,8 @@ def _project_skill_staleness_hint(project_path: Path) -> str | None:
     "-p",
     type=click.Path(exists=True, file_okay=False, path_type=Path),
     default=".",
-    help="Project directory to install into (.claude/skills/). Default: current dir.",
+    show_default=True,
+    help="Project directory to install into (.claude/skills/).",
 )
 @click.option(
     "--force",
@@ -1602,20 +1609,11 @@ def _project_skill_staleness_hint(project_path: Path) -> str | None:
     help="Overwrite a hand-edited skill (an unedited prior install refreshes without it).",
 )
 def install_skill(path: Path, force: bool) -> None:
-    """Install or refresh the bundled Claude Code skill into the project.
+    """Install the Claude Code review skill.
 
-    Writes ``<project>/.claude/skills/licenseal-review/SKILL.md``. licenseal
-    installs the skill **only inside the project** — never globally — so it
-    stays non-intrusive and the skill can be committed alongside the code it
-    audits. Claude Code discovers project skills by scanning ``.claude/skills``
-    for ``SKILL.md`` files, so it is picked up automatically. The skill walks
-    an agent through running ``licenseal check``, investigating flagged
-    dependencies with the user, writing ``licenseal.review.toml``, and
-    re-verifying.
-
-    Re-running after a licenseal upgrade refreshes a pristine prior install
-    in place — no ``--force`` needed. ``--force`` is only required to
-    overwrite a skill that looks hand-edited (or predates version stamping).
+    Writes <project>/.claude/skills/licenseal-review/SKILL.md, inside the
+    project only. Re-running after an upgrade refreshes an unedited install;
+    --force overwrites an edited one.
     """
     body = _bundled_skill_body()
     current_version = _package_version()
