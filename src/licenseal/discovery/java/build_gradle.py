@@ -15,6 +15,7 @@ Recognized declaration forms:
     implementation group: 'com.example', name: 'some-lib', version: '1.2.3'
     testImplementation 'com.example:test-lib:4.13.2'
     implementation 'com.example:managed-lib'          // version-less — emitted, empty version
+    implementation 'com.example:some-lib:1.2.3@aar'   // artifact type — not part of the version
     api libs.someLib                                  // version-catalog ref — NOT resolved
     implementation("com.example:some-lib:$libVersion")  // variable — NOT resolved
     implementation platform('com.example:some-bom:1.0')  // BOM reference — NOT resolved
@@ -22,7 +23,11 @@ Recognized declaration forms:
 The first four forms are extracted faithfully. A version-less coordinate
 (string or map form) is emitted with an empty version: the version comes
 from a BOM or a dependency-management plugin, so the dependency is
-reported but its license stays UNKNOWN unless a lockfile pins it. The
+reported but its license stays UNKNOWN unless a lockfile pins it. An
+``@type`` that ends a string coordinate (``@aar``, ``@jar``), and the
+``ext`` key of the map form, name the artifact type: which file of the
+module the build uses. It is not part of the version, so a coordinate is
+the same dependency with and without it. The
 last three are skipped: version catalogs (``libs.…``), variable
 interpolation (``$var``), and ``platform(...)`` / ``enforcedPlatform(...)``
 would require evaluating Gradle's full configuration phase, which is out
@@ -149,35 +154,45 @@ _DEP_LINE_RE = re.compile(
     re.VERBOSE,
 )
 
+# The artifact type that ends a single-string coordinate: ``@aar``, ``@jar``.
+# Gradle reads what follows the last ``@`` as the type when it holds no
+# ``:``. It selects which file of the module is used and is no part of the
+# version, so it is matched and left out.
+_ARTIFACT_TYPE = r"""(?:@[^:@'"]+)?"""
+
 # Single-string coordinate: ``"group:artifact:version"`` or ``'group:artifact:version'``.
 # Allows colons inside the version (Maven classifier-style ``g:a:v:classifier``)
 # — we still take the first three components. The version pattern excludes
 # ``$`` so ``"g:a:$springVersion"`` is correctly skipped as a variable
-# interpolation (the heuristic refuses to resolve those).
+# interpolation (the heuristic refuses to resolve those). The version is
+# matched lazily, so that an ``@type`` after it is taken as the type.
 _COORD_STRING_RE = re.compile(
-    r"""['"]
+    rf"""['"]
     (?P<group>[A-Za-z0-9_.\-]+)
     :
     (?P<artifact>[A-Za-z0-9_.\-]+)
     :
     (?P<version>[^:'"$]+?)
-    (?::[^'"]*)?           # optional classifier suffix
+    (?::[^'"]*)?           # optional classifier suffix, with its own type
+    {_ARTIFACT_TYPE}
     ['"]
     """,
     re.VERBOSE,
 )
 
-# Version-less single-string coordinate: ``'group:artifact'``. The version is
+# Version-less single-string coordinate: ``'group:artifact'``, or
+# ``'group:artifact@aar'`` with an artifact type. The version is
 # supplied by a BOM or a dependency-management plugin, which the heuristic
 # does not evaluate, so the coordinate is emitted with an empty version (as
 # the map form without ``version`` is). Applied with ``match`` — only as the
 # declaration's first argument — so a two-segment string further along the
 # line (a closure argument, a map value) is not read as a coordinate.
 _VERSIONLESS_COORD_RE = re.compile(
-    r"""['"]
+    rf"""['"]
     (?P<group>[A-Za-z0-9_.\-]+)
     :
     (?P<artifact>[A-Za-z0-9_.\-]+)
+    {_ARTIFACT_TYPE}
     ['"]
     """,
     re.VERBOSE,
@@ -185,7 +200,9 @@ _VERSIONLESS_COORD_RE = re.compile(
 
 # Groovy / Kotlin map form: ``group: 'g', name: 'a', version: 'v'``
 # or ``group = "g", name = "a", version = "v"``. We extract each piece
-# by name to tolerate any argument order.
+# by name to tolerate any argument order. The artifact type and the
+# classifier are keys of their own there (``ext``, ``classifier``) and are
+# not read.
 _MAP_KEY_RE = re.compile(
     r"""(?P<key>group|name|version)
         \s*[:=]\s*
