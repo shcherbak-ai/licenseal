@@ -46,6 +46,7 @@ import httpx
 from licenseal.analysis.spdx import (
     all_apply_reading,
     and_join_licenses,
+    declares_proprietary,
     normalize_license,
     spdx_from_license_url,
 )
@@ -517,6 +518,12 @@ def resolve_maven_central_license(
         # licenseal's direct POM fetch makes available — ``deps.dev``'s
         # API surfaces only the name.
         #
+        # A name that declares the license proprietary in so many words
+        # (``Proprietary``, ``Commercial License``) is the declaration, and
+        # the URL does not replace it. A placeholder (``non-standard``) or a
+        # pointer to a bundled file reads as Proprietary too, declares
+        # nothing, and is still answered by the URL.
+        #
         # A ``<name>`` that is a comma- or slash-separated list does not
         # say whether its entries are alternatives. ``normalized_parts``
         # reads each such name as a choice and ``all_apply_parts`` reads it
@@ -527,7 +534,10 @@ def resolve_maven_central_license(
         for name, url in licenses:
             primary = normalize_license(name) if name else "UNKNOWN"
             all_apply = all_apply_reading(name) or primary
-            if primary in ("UNKNOWN", "Proprietary") and url:
+            undeclared = primary == "UNKNOWN" or (
+                primary == "Proprietary" and not declares_proprietary(name)
+            )
+            if undeclared and url:
                 from_url = spdx_from_license_url(url)
                 if from_url:
                     primary = all_apply = normalize_license(from_url)

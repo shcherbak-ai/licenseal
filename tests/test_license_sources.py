@@ -133,8 +133,10 @@ def _maven_project(tmp_path, project_license: str) -> None:
     )
 
 
-def _mock_maven_pom(*license_names: str) -> None:
-    entries = "".join(f"<license><name>{name}</name></license>" for name in license_names)
+def _mock_maven_pom(*license_names: str, url: str = "") -> None:
+    """Serve the dependency's POM with one ``<license>`` per name, each with ``url`` if given."""
+    url_xml = f"<url>{url}</url>" if url else ""
+    entries = "".join(f"<license><name>{name}</name>{url_xml}</license>" for name in license_names)
     respx.get("https://repo.maven.apache.org/maven2/com/example/dep/1.0.0/dep-1.0.0.pom").mock(
         return_value=httpx.Response(
             200,
@@ -696,6 +698,145 @@ class TestPyPILicenseClassifiers:
         assert exit_code == 0
         assert dep["license"] == "MIT"
         assert dep["verdict"] == "compatible"
+
+
+_APACHE_URL = "https://www.apache.org/licenses/LICENSE-2.0"
+
+# A license text on one line, longer than any declared value, that says
+# "commercial" in passing.
+_LICENSE_TEXT = (
+    "Permission to use, modify and distribute this software for any purpose, commercial or "
+    "non-commercial, with or without fee, is granted provided that this notice is kept in "
+    "every copy."
+)
+
+# A declared value and the license it is reported as.
+_PROPRIETARY_DECLARATIONS = [
+    ("Commercial License", "Proprietary"),
+    ("commercial", "Proprietary"),
+    ("Closed source", "Proprietary"),
+    ("closed-source software", "Proprietary"),
+    ("Internal use only", "Proprietary"),
+    ("For internal use only", "Proprietary"),
+    ("Proprietary", "Proprietary"),
+    ("Acme proprietary terms", "Proprietary"),
+    # One word shaped like a license ID is reported as that ID, as before.
+    ("Commercial", "Commercial"),
+]
+
+
+class TestDeclaredProprietaryLicense:
+    """A license field that says the package is proprietary, commercial,
+    closed-source, or for internal use only is the publisher's declaration.
+    A second source beside it (a classifier, a license URL, a legacy field)
+    does not replace it. All in an MIT project."""
+
+    @pytest.mark.parametrize(("declared", "license_id"), _PROPRIETARY_DECLARATIONS)
+    @respx.mock
+    def test_pypi_license_field_is_not_replaced_by_a_classifier(
+        self, tmp_path, declared, license_id
+    ):
+        _pypi_project(tmp_path)
+        _mock_pypi({"license": declared, "classifiers": [_MIT_CLASSIFIER]})
+        exit_code, dep = _check(tmp_path)
+        assert exit_code == 1
+        assert (dep["license"], dep["license_raw"]) == (license_id, declared)
+        assert dep["verdict"] == "unknown"
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            pytest.param(_LICENSE_TEXT, id="one-line"),
+            pytest.param("Commercial use is permitted.\nSee the terms below.", id="several-lines"),
+        ],
+    )
+    @respx.mock
+    def test_pypi_license_text_still_resolves_from_its_classifier(self, tmp_path, text):
+        _pypi_project(tmp_path)
+        _mock_pypi({"license": text, "classifiers": [_MIT_CLASSIFIER]})
+        exit_code, dep = _check(tmp_path)
+        assert exit_code == 0
+        assert (dep["license"], dep["verdict"]) == ("MIT", "compatible")
+
+    @respx.mock
+    def test_pypi_recognised_license_is_the_control(self, tmp_path):
+        _pypi_project(tmp_path)
+        _mock_pypi({"license": "Apache-2.0", "classifiers": [_MIT_CLASSIFIER]})
+        exit_code, dep = _check(tmp_path)
+        assert exit_code == 0
+        assert (dep["license"], dep["license_raw"]) == ("Apache-2.0", "Apache-2.0")
+
+    @pytest.mark.parametrize(("declared", "license_id"), _PROPRIETARY_DECLARATIONS)
+    @respx.mock
+    def test_pom_license_name_is_not_replaced_by_its_url(self, tmp_path, declared, license_id):
+        _maven_project(tmp_path, "MIT")
+        _mock_maven_pom(declared, url=_APACHE_URL)
+        respx.get(
+            "https://api.deps.dev/v3/systems/MAVEN/packages/com.example%3Adep/versions/1.0.0"
+        ).mock(return_value=httpx.Response(404))
+        exit_code, dep = _check(tmp_path)
+        assert exit_code == 1
+        assert (dep["license"], dep["license_raw"]) == (license_id, declared)
+        assert dep["verdict"] == "unknown"
+
+    @pytest.mark.parametrize(
+        "name",
+        [
+            # A placeholder and a pointer to a bundled file declare nothing.
+            "non-standard",
+            "see LICENSE.txt",
+            # Neither does a name that is not recognised at all.
+            "Project terms",
+            _LICENSE_TEXT,
+        ],
+    )
+    @respx.mock
+    def test_pom_license_name_that_declares_nothing_is_read_from_its_url(self, tmp_path, name):
+        _maven_project(tmp_path, "MIT")
+        _mock_maven_pom(name, url=_APACHE_URL)
+        exit_code, dep = _check(tmp_path)
+        assert exit_code == 0
+        assert (dep["license"], dep["verdict"]) == ("Apache-2.0", "compatible")
+
+    @respx.mock
+    def test_nuget_license_is_not_replaced_by_its_license_url(self, tmp_path):
+        _declare_project_license(tmp_path, "MIT")
+        (tmp_path / "app.csproj").write_text(
+            '<Project Sdk="Microsoft.NET.Sdk"><ItemGroup>'
+            '<PackageReference Include="Dep" Version="1.0.0" />'
+            "</ItemGroup></Project>"
+        )
+        respx.get("https://api.nuget.org/v3-flatcontainer/dep/1.0.0/dep.nuspec").mock(
+            return_value=httpx.Response(
+                200,
+                text=(
+                    "<package><metadata><id>Dep</id>"
+                    '<license type="expression">Commercial License</license>'
+                    f"<licenseUrl>{_APACHE_URL}</licenseUrl>"
+                    "</metadata></package>"
+                ),
+            )
+        )
+        exit_code, dep = _check(tmp_path)
+        assert exit_code == 1
+        assert (dep["license"], dep["license_raw"]) == ("Proprietary", "Commercial License")
+
+    @respx.mock
+    def test_npm_license_is_not_replaced_by_the_legacy_licenses_field(self, tmp_path):
+        _npm_project(tmp_path)
+        respx.get("https://registry.npmjs.org/dep/1.0.0").mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "version": "1.0.0",
+                    "license": "Commercial License",
+                    "licenses": [{"type": "MIT"}],
+                },
+            )
+        )
+        exit_code, dep = _check(tmp_path)
+        assert exit_code == 1
+        assert (dep["license"], dep["license_raw"]) == ("Proprietary", "Commercial License")
 
 
 class TestDepsDevNonStandardBesideALicense:

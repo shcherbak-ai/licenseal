@@ -84,6 +84,21 @@ _PROPRIETARY_SIGNAL_RE = re.compile(
     re.IGNORECASE,
 )
 
+# Wordings that say outright that a package is proprietary: ``Commercial
+# License``, ``Closed source``, ``Internal use only``. Unlike the signals
+# above, a license text uses these words in passing ("for any purpose,
+# commercial or non-commercial"), so they count only in a declared value: one
+# line, no longer than ``_MAX_DECLARATION_LENGTH`` (`declares_proprietary`).
+# ``non-commercial`` is a restriction on use, not this declaration.
+_PROPRIETARY_DECLARATION_RE = re.compile(
+    r"\bproprietary\b"
+    r"|(?<!non[\s-])\bcommercial\b"
+    r"|\bclosed[\s-]?source\b"
+    r"|\binternal[\s-]+use[\s-]+only\b",
+    re.IGNORECASE,
+)
+_MAX_DECLARATION_LENGTH = 100
+
 # Non-license descriptor phrases some publishers append to a comma list of
 # real SPDX IDs — e.g. ``"BSD-3-Clause, Apache-2.0, dependency licenses"``,
 # where the trailing phrase points at bundled third-party dependency licenses,
@@ -1269,6 +1284,30 @@ def is_license_file_pointer(raw: str) -> bool:
     return bool(_SEE_FILE_RE.match(stripped) or _LICENSE_FILENAME_RE.match(stripped))
 
 
+def declares_proprietary(raw: str) -> bool:
+    """True when ``raw`` is a declared value saying the package is proprietary.
+
+    ``Proprietary``, ``Commercial License``, ``Closed source``, ``Internal
+    use only``. That is the publisher's declaration: :func:`normalize_license`
+    reads it as ``Proprietary``, and a resolver with a second source beside
+    the field (a classifier, a license URL) must not let that source replace
+    it. A placeholder (``non-standard``) and a pointer to a bundled file
+    (:func:`is_license_file_pointer`) also read as ``Proprietary`` and
+    declare nothing.
+
+    Only a short single-line value is a declaration. Anything longer, or
+    spread over several lines, is license text, where the same words say
+    nothing about the license.
+    """
+    stripped = raw.strip()
+    return (
+        len(stripped) <= _MAX_DECLARATION_LENGTH
+        and len(stripped.splitlines()) == 1
+        and _PROPRIETARY_DECLARATION_RE.search(stripped) is not None
+        and not is_license_file_pointer(stripped)
+    )
+
+
 def _normalize_part(raw: str) -> str:
     """Normalize one part of a string that was split on a separator or connector.
 
@@ -1336,6 +1375,11 @@ def _normalize_license_inner(
     if key in _NORMALIZATION_MAP:
         return _NORMALIZATION_MAP[key]
 
+    # The value as declared, and the lists read from it: the slash translation
+    # below rewrites ``stripped``, and ``found`` is only there when asked for.
+    declared = stripped
+    lists = found if found is not None else []
+
     # Translate Cargo's legacy slash-as-OR form before SPDX recognition.
     # Compound expressions like `MIT/Apache-2.0` are unwrapped here and
     # fall through to the compound classifier — no alias entry combines
@@ -1356,8 +1400,8 @@ def _normalize_license_inner(
                     "," in p and n == "UNKNOWN"
                     for p, n in zip(parts, normalized_parts, strict=True)
                 )
-                if found is not None and not nested:
-                    found.append(("/", normalized_parts))
+                if not nested:
+                    lists.append(("/", normalized_parts))
                 if all(p != "UNKNOWN" for p in normalized_parts):
                     return " OR ".join(normalized_parts)
             stripped = _SLASH_OR_RE.sub(" OR ", stripped)
@@ -1401,8 +1445,7 @@ def _normalize_license_inner(
             # _LICENSE_NOISE_RE) — they still block the compound.
             parts = [p for p in parts if not _LICENSE_NOISE_RE.match(p)]
             normalized_parts = [_normalize_part(p) for p in parts]
-            if found is not None:
-                found.append((",", normalized_parts))
+            lists.append((",", normalized_parts))
             if parts and all(p != "UNKNOWN" for p in normalized_parts):
                 return " OR ".join(normalized_parts)
 
@@ -1445,6 +1488,21 @@ def _normalize_license_inner(
     expression = _INNER_PAREN_SPACE_RE.sub("", stripped)
     if _looks_like_spdx(expression):
         return expression
+
+    # A declared value that says the package is proprietary in a wording the
+    # signals above leave out. Read last, in place of UNKNOWN alone, so a
+    # string any rule above finds a license in keeps that reading. Not read
+    # inside an expression, nor in a list that names a license beside it:
+    # that license still binds (`unresolved_list_readings`).
+    if (
+        not part
+        and " OR " not in declared
+        and " AND " not in declared
+        and " WITH " not in declared
+        and not any(entry != "UNKNOWN" for _, entries in lists for entry in entries)
+        and declares_proprietary(declared)
+    ):
+        return "Proprietary"
 
     return "UNKNOWN"
 

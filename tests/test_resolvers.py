@@ -5994,7 +5994,17 @@ class TestPyPILicenseClassifiers:
         assert info.license_id == "LicenseRef-Public-Domain"
 
     @pytest.mark.parametrize(
-        "declared", ["Proprietary", "proprietary", "Proprietary License", "LicenseRef-Acme-EULA"]
+        "declared",
+        [
+            "Proprietary",
+            "proprietary",
+            "Proprietary License",
+            "LicenseRef-Acme-EULA",
+            "Commercial License",
+            "commercial",
+            "Closed source",
+            "Internal use only",
+        ],
     )
     @respx.mock
     def test_explicit_proprietary_license_is_not_overridden_by_a_classifier(self, declared):

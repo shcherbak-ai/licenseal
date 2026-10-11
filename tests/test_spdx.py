@@ -6,11 +6,12 @@ import time
 
 import pytest
 
-from licenseal.analysis.risk import unrecognized_exception
+from licenseal.analysis.risk import KNOWN_SPDX_IDS, unrecognized_exception
 from licenseal.analysis.spdx import (
     _ALTERNATIVES_BY_OWN_TERMS,
     _CLASSIFIER_MAP,
     _LICENSE_URL_PREFIXES,
+    _MAX_DECLARATION_LENGTH,
     _MAX_LICENSE_LENGTH,
     _NORMALIZATION_MAP,
     _looks_like_spdx,
@@ -18,6 +19,7 @@ from licenseal.analysis.spdx import (
     and_join_licenses,
     canonical_license_id,
     collapse_bundled_license_pairs,
+    declares_proprietary,
     is_license_file_pointer,
     license_list_items,
     malformed_expression_conjunction,
@@ -1654,6 +1656,108 @@ class TestLicenseFilePointer:
     def test_license_and_empty_value_are_not_pointers(self):
         for raw in ("MIT", "MIT License", "", "see the license file for details"):
             assert is_license_file_pointer(raw) is False
+
+
+class TestProprietaryDeclaration:
+    """A short declared value that says the package is proprietary, commercial,
+    closed-source, or for internal use only reads as ``Proprietary``."""
+
+    @pytest.mark.parametrize(
+        "raw",
+        [
+            "Commercial License",
+            "commercial",
+            "COMMERCIAL LICENCE",
+            "Closed source",
+            "closed-source software",
+            "closedsource",
+            "Internal use only",
+            "For internal use only",
+            "internal-use only",
+            "(Commercial License)",
+            "  Commercial License  ",
+            "Closed source and commercial",
+            "Commercial and non-commercial licenses available",
+            "Commercial License " + "x" * (_MAX_DECLARATION_LENGTH - 19),
+            # A slash or a comma that separates no license off.
+            "Commercial License - see https://example.com/terms",
+            "Proprietary - see https://example.com/eula",
+            "Acme Inc., commercial license",
+        ],
+    )
+    def test_declaration_is_proprietary(self, raw):
+        assert declares_proprietary(raw) is True
+        assert normalize_license(raw) == "Proprietary"
+        assert is_license_file_pointer(raw) is False
+
+    @pytest.mark.parametrize(
+        "raw",
+        [
+            # Longer than a declared value, or on several lines: license text.
+            "Commercial License " + "x" * (_MAX_DECLARATION_LENGTH - 18),
+            "Permission is granted to use this software for any purpose, commercial or "
+            "non-commercial, with or without fee, provided this notice is kept.",
+            "Commercial License\nSee the terms below.",
+            "Commercial License\r\nSee the terms below.",
+            # No such wording.
+            "Not open source",
+            "freeware",
+            "noncommercial terms",
+            # A restriction on use, not a commercial license.
+            "Free for non-commercial use",
+            "License :: Free for non-commercial use",
+            "non commercial",
+            "",
+        ],
+    )
+    def test_anything_else_declares_nothing(self, raw):
+        assert declares_proprietary(raw) is False
+        assert normalize_license(raw) == "UNKNOWN"
+
+    @pytest.mark.parametrize(
+        "raw, normalized",
+        [
+            # One word shaped like a license ID is passed through as that ID.
+            ("Commercial", "Commercial"),
+            ("closed-source", "closed-source"),
+            ("Non-Commercial", "Non-Commercial"),
+            # An expression keeps its arms, and so does a list every entry of
+            # which reads as a license.
+            ("MIT OR Commercial", "Commercial OR MIT"),
+            ("MIT, Commercial", "Commercial OR MIT"),
+            ("Apache-2.0 WITH commercial", "UNKNOWN"),
+            # A URL is not a declared value.
+            ("https://example.com/commercial-license", "UNKNOWN"),
+        ],
+    )
+    def test_value_another_rule_reads_keeps_that_reading(self, raw, normalized):
+        assert normalize_license(raw) == normalized
+
+    @pytest.mark.parametrize(
+        "raw",
+        [
+            "GPL-3.0-only, commercial license",
+            "GPL-3.0-only/commercial license",
+            "MIT/commercial",
+        ],
+    )
+    def test_list_that_names_a_license_beside_it_keeps_its_readings(self, raw):
+        # The named license still binds under the all-apply reading; reading
+        # the whole string as a declaration would lose it.
+        assert normalize_license(raw) == "UNKNOWN"
+        choice, all_apply = unresolved_list_readings(raw)
+        assert choice.endswith(" OR UNKNOWN")
+        assert all_apply.endswith(" AND UNKNOWN")
+
+    def test_pointer_to_a_bundled_file_declares_nothing(self):
+        for raw in ("SEE LICENSE IN commercial-license.txt", "See proprietary.txt"):
+            assert is_license_file_pointer(raw) is True
+            assert declares_proprietary(raw) is False
+            assert normalize_license(raw) == "Proprietary"
+
+    def test_no_license_identifier_reads_as_a_declaration(self):
+        for license_id in KNOWN_SPDX_IDS:
+            assert declares_proprietary(license_id) is False, license_id
 
 
 class TestReadLicenseArray:
