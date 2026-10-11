@@ -6,8 +6,13 @@ for its license, which is reported as an estimate under the pinned version.
 A lookup that failed says nothing about the release, so nothing is borrowed
 and the dependency is UNKNOWN unless deps.dev has that exact version.
 
-The resolver tests read through ``RegistryCache.fetch``, which is where a
-404 is told from a failed lookup; the others scan files on disk.
+The same holds one step on, for a release whose own JSON declares no license.
+Its wheel metadata is read next. A 404 says the wheel has no metadata sidecar,
+and the license of the latest release is then borrowed as an estimate; a
+sidecar lookup that failed leaves the release's license undetermined.
+
+The resolver tests read through ``RegistryCache``, which is where a 404 is
+told from a failed lookup; the others scan files on disk.
 """
 
 from __future__ import annotations
@@ -22,13 +27,14 @@ from click.testing import CliRunner
 
 from licenseal.cli import main
 from licenseal.models import Dependency, Ecosystem, LicenseInfo
-from licenseal.resolvers.http import RegistryCache, fetch_registry_json
+from licenseal.resolvers.http import RegistryCache, fetch_pep658_metadata, fetch_registry_json
 from licenseal.resolvers.pypi import resolve_python_license
 from tests._helpers import _check_json, _write
 
 _PYPI = "https://pypi.org/pypi"
 _DEPS_DEV = "https://api.deps.dev/v3/systems/PYPI/packages"
 _WHEEL = "https://files.pythonhosted.org/packages/aa/bb/pkg_a-1.2.3-py3-none-any.whl"
+_SIDECAR = _WHEEL + ".metadata"
 
 # Each way a lookup can end without the registry saying "no such release": a
 # response served on every attempt, or an error raised on every attempt.
@@ -46,6 +52,10 @@ _FAILURES: dict[str, Callable[[], httpx.Response | Exception]] = {
     "connect-timeout": lambda: httpx.ConnectTimeout("timed out"),
     "read-timeout": lambda: httpx.ReadTimeout("timed out"),
 }
+
+# The ways a sidecar lookup can fail. An answer with a body is not one of
+# them: the wheel then has metadata, whatever it holds.
+_SIDECAR_FAILURES = [name for name in _FAILURES if name not in {"json-array", "not-json"}]
 
 
 def _fail(url: str, failure: str) -> respx.Route:
@@ -68,12 +78,23 @@ def _release(version: str, license_expression: str | None = None, **extra: objec
     return {"info": info, **extra}
 
 
+def _release_with_a_wheel(version: str) -> dict:
+    """A release's JSON that declares no license and names a wheel."""
+    return _release(version, urls=[{"packagetype": "bdist_wheel", "url": _WHEEL}])
+
+
 def _resolve(spec: str) -> LicenseInfo:
     """Resolve ``pkg-a`` at ``spec`` through a per-scan cache, as the CLI does."""
     cache = RegistryCache()
     dep = Dependency(name="pkg-a", version_constraint=spec, ecosystem=Ecosystem.PYTHON)
     with httpx.Client() as client:
-        return resolve_python_license(dep, client, fetcher=cache.fetch, not_found=cache.not_found)
+        return resolve_python_license(
+            dep,
+            client,
+            fetcher=cache.fetch,
+            pep658_fetcher=cache.fetch_pep658,
+            not_found=cache.not_found,
+        )
 
 
 def _summary(info: LicenseInfo) -> tuple[str, str, bool, bool]:
@@ -222,12 +243,136 @@ class TestFailedLookup:
         assert _summary(_resolve("==1.0.0")) == ("MIT", "1.0.0", True, True)
 
 
+class TestWheelMetadataLookup:
+    """A release whose JSON declares no license and names a wheel: the wheel's
+    metadata sidecar is read next, and what follows depends on why it gave
+    nothing.
+    """
+
+    @staticmethod
+    def _registry() -> respx.Route:
+        """Release 1.0.0 declares nothing and has a wheel; the latest release is MIT.
+
+        Returns the route of the project-level endpoint, which describes 2.0.0.
+        """
+        _serve(f"{_PYPI}/pkg-a/1.0.0/json", 200, _release_with_a_wheel("1.0.0"))
+        latest = {**_release("2.0.0", "MIT"), "releases": {"1.0.0": [], "2.0.0": []}}
+        return _serve(f"{_PYPI}/pkg-a/json", 200, latest)
+
+    @pytest.mark.parametrize("failure", _SIDECAR_FAILURES)
+    @respx.mock
+    def test_failed_lookup_borrows_nothing(self, failure, fake_registry_clock):
+        latest = self._registry()
+        _fail(_SIDECAR, failure)
+        exact = _serve(f"{_DEPS_DEV}/pkg-a/versions/1.0.0")
+        assert _summary(_resolve("==1.0.0")) == ("UNKNOWN", "1.0.0", False, False)
+        assert not latest.called
+        assert exact.called
+
+    @respx.mock
+    def test_deps_dev_answer_for_that_exact_version_is_not_an_estimate(self, fake_registry_clock):
+        latest = self._registry()
+        _fail(_SIDECAR, "503")
+        _serve(
+            f"{_DEPS_DEV}/pkg-a/versions/1.0.0",
+            200,
+            {
+                "versionKey": {"system": "PYPI", "name": "pkg-a", "version": "1.0.0"},
+                "licenses": ["GPL-3.0-only"],
+                "links": [],
+            },
+        )
+        assert _summary(_resolve("==1.0.0")) == ("GPL-3.0-only", "1.0.0", False, True)
+        assert not latest.called
+
+    @respx.mock
+    def test_wheel_with_no_sidecar_takes_the_latest_license_as_an_estimate(self):
+        self._registry()
+        _serve(_SIDECAR)
+        assert _summary(_resolve("==1.0.0")) == ("MIT", "1.0.0", True, True)
+
+    @pytest.mark.parametrize(
+        "body",
+        [
+            pytest.param("Metadata-Version: 2.4\nName: pkg-a\n\n", id="no-license-header"),
+            pytest.param("\x00\x01 not a metadata file", id="not-metadata"),
+            pytest.param("", id="empty"),
+        ],
+    )
+    @respx.mock
+    def test_sidecar_with_no_license_takes_the_latest_license_as_an_estimate(self, body):
+        self._registry()
+        respx.get(_SIDECAR).mock(return_value=httpx.Response(200, text=body))
+        assert _summary(_resolve("==1.0.0")) == ("MIT", "1.0.0", True, True)
+
+    @respx.mock
+    def test_lookup_that_recovers_within_its_retries_is_read_normally(self, fake_registry_clock):
+        latest = self._registry()
+        respx.get(_SIDECAR).mock(
+            side_effect=[
+                httpx.Response(503),
+                httpx.ConnectError("reset"),
+                httpx.Response(200, text="License-Expression: GPL-3.0-only\n\n"),
+            ]
+        )
+        assert _summary(_resolve("==1.0.0")) == ("GPL-3.0-only", "1.0.0", False, True)
+        assert not latest.called
+
+    @respx.mock
+    def test_404_after_a_failed_attempt_is_a_wheel_with_no_sidecar(self, fake_registry_clock):
+        self._registry()
+        respx.get(_SIDECAR).mock(side_effect=[httpx.Response(503), httpx.Response(404)])
+        assert _summary(_resolve("==1.0.0")) == ("MIT", "1.0.0", True, True)
+
+    @respx.mock
+    def test_release_a_range_selects_borrows_nothing_either(self, fake_registry_clock):
+        # The project-level response is already in hand, read for its release
+        # list. It still does not answer for the release the range selected.
+        self._registry()
+        _fail(_SIDECAR, "503")
+        exact = _serve(f"{_DEPS_DEV}/pkg-a/versions/1.0.0")
+        assert _summary(_resolve(">=1.0,<2.0")) == ("UNKNOWN", "1.0.0", False, False)
+        assert exact.called
+
+    @respx.mock
+    def test_stand_in_release_whose_sidecar_lookup_failed_answers_nothing(
+        self, fake_registry_clock
+    ):
+        # PyPI does not have the pinned build, so its public release stands in,
+        # and that release's license could not be determined. deps.dev is
+        # asked for the pinned build, not for the stand-in.
+        _serve(f"{_PYPI}/pkg-a/1.0.0+internal/json")
+        latest = self._registry()
+        _fail(_SIDECAR, "503")
+        exact = _serve(f"{_DEPS_DEV}/pkg-a/versions/1.0.0%2Binternal")
+        assert _summary(_resolve("==1.0.0+internal")) == (
+            "UNKNOWN",
+            "1.0.0+internal",
+            False,
+            False,
+        )
+        assert not latest.called
+        assert exact.called
+
+
 class TestWithoutLookupOutcomes:
     """With a fetcher that cannot tell a 404 from a failure, every miss is a failure."""
 
     @respx.mock
     def test_plain_fetcher_borrows_nothing_for_a_404(self):
         _serve(f"{_PYPI}/pkg-a/1.0.0/json")
+        latest = _serve(f"{_PYPI}/pkg-a/json", 200, _release("2.0.0", "MIT"))
+        _serve(f"{_DEPS_DEV}/pkg-a/versions/1.0.0")
+        dep = Dependency(name="pkg-a", version_constraint="==1.0.0", ecosystem=Ecosystem.PYTHON)
+        with httpx.Client() as client:
+            info = resolve_python_license(dep, client)
+        assert _summary(info) == ("UNKNOWN", "1.0.0", False, False)
+        assert not latest.called
+
+    @respx.mock
+    def test_plain_fetchers_borrow_nothing_for_a_wheel_with_no_sidecar(self):
+        _serve(f"{_PYPI}/pkg-a/1.0.0/json", 200, _release_with_a_wheel("1.0.0"))
+        _serve(_SIDECAR)
         latest = _serve(f"{_PYPI}/pkg-a/json", 200, _release("2.0.0", "MIT"))
         _serve(f"{_DEPS_DEV}/pkg-a/versions/1.0.0")
         dep = Dependency(name="pkg-a", version_constraint="==1.0.0", ecosystem=Ecosystem.PYTHON)
@@ -266,6 +411,34 @@ class TestRegistryCacheNotFound:
             # With no set to report to, the fetch still just returns nothing.
             assert fetch_registry_json(f"{_PYPI}/gone/1.0.0/json", client) is None
         assert missing == {f"{_PYPI}/gone/1.0.0/json"}
+
+    @respx.mock
+    def test_only_a_404_is_recorded_for_a_sidecar(self, fake_registry_clock):
+        sidecars = {name: f"{_WHEEL}.{name}.metadata" for name in ("gone", "down", "here")}
+        _serve(sidecars["gone"])
+        _serve(sidecars["down"], 503)
+        respx.get(sidecars["here"]).mock(
+            return_value=httpx.Response(200, text="License-Expression: MIT\n\n")
+        )
+        cache = RegistryCache()
+        with httpx.Client() as client:
+            assert cache.fetch_pep658(sidecars["gone"], client) is None
+            assert cache.fetch_pep658(sidecars["down"], client) is None
+            assert cache.fetch_pep658(sidecars["here"], client) == {"License-Expression": "MIT"}
+        assert cache.not_found(sidecars["gone"]) is True
+        assert cache.not_found(sidecars["down"]) is False
+        assert cache.not_found(sidecars["here"]) is False
+
+    @respx.mock
+    def test_direct_sidecar_fetch_reports_a_404_to_the_set_it_is_given(self):
+        _serve(_SIDECAR)
+        _serve(_SIDECAR + ".denied", 403)
+        missing: set[str] = set()
+        with httpx.Client() as client:
+            for url in (_SIDECAR, _SIDECAR + ".denied"):
+                assert fetch_pep658_metadata(url, client, not_found=missing) is None
+            assert fetch_pep658_metadata(_SIDECAR, client) is None
+        assert missing == {_SIDECAR}
 
 
 def _locked_project(tmp_path: Path, version: str = "1.0.0") -> Path:
@@ -355,6 +528,31 @@ class TestScan:
         assert result.exit_code == 0
         assert _rows(data)["pkg-a"] == ("1.0.0", "BSD-3-Clause", [])
         assert data["summary"]["reviewed"] == 1
+
+    @pytest.mark.parametrize("status", [500, 503, 429])
+    @respx.mock
+    def test_failed_sidecar_lookup_does_not_report_the_latest_release(
+        self, tmp_path, fake_registry_clock, status
+    ):
+        _serve(f"{_PYPI}/pkg-a/1.0.0/json", 200, _release_with_a_wheel("1.0.0"))
+        sidecar = _serve(_SIDECAR, status)
+        latest = _serve(f"{_PYPI}/pkg-a/json", 200, _release("2.0.0", "MIT"))
+        _serve(f"{_DEPS_DEV}/pkg-a/versions/1.0.0")
+        result, data = _check_json(_locked_project(tmp_path))
+        assert result.exit_code == 1
+        assert _rows(data) == {"pkg-a": ("1.0.0", "UNKNOWN", []), "steady": ("3.0.0", "MIT", [])}
+        assert "Warning: 1 package(s) could not be resolved from registries." in result.output
+        assert sidecar.call_count == 3
+        assert not latest.called
+
+    @respx.mock
+    def test_wheel_with_no_sidecar_reports_the_latest_license_as_an_estimate(self, tmp_path):
+        _serve(f"{_PYPI}/pkg-a/1.0.0/json", 200, _release_with_a_wheel("1.0.0"))
+        _serve(_SIDECAR)
+        _serve(f"{_PYPI}/pkg-a/json", 200, _release("2.0.0", "MIT"))
+        result, data = _check_json(_locked_project(tmp_path))
+        assert result.exit_code == 0
+        assert _rows(data)["pkg-a"] == ("1.0.0", "MIT", ["license"])
 
     @respx.mock
     def test_build_from_another_index_keeps_its_pinned_version(self, tmp_path):

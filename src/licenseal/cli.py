@@ -775,11 +775,14 @@ def _resolve_license_infos(
                     if cached is not None:
                         return cached
                     # A pinned release PyPI answers 404 for is read from a
-                    # stand-in release; one whose lookup failed is not.
+                    # stand-in release; one whose lookup failed is not. A
+                    # wheel with no metadata sidecar and a sidecar lookup that
+                    # failed are told apart the same way.
                     return resolve_python_license(
                         dep,
                         client,
                         fetcher=registry_cache.fetch,
+                        pep658_fetcher=registry_cache.fetch_pep658,
                         not_found=registry_cache.not_found,
                     )
                 if dep.ecosystem == Ecosystem.RUST:

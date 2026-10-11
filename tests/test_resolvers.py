@@ -2983,7 +2983,8 @@ class TestPep658MetadataFallback:
     @respx.mock
     def test_sidecar_404_stays_unknown(self):
         # Older wheels may predate PEP 658 and lack a `.metadata` sibling.
-        # The fetch helper returns None; resolver stays at UNKNOWN.
+        # The fetch helper returns None and the cache keeps the 404; with no
+        # license at the project level either, the resolver stays at UNKNOWN.
         respx.get("https://pypi.org/pypi/oldwheel/1.0.0/json").mock(
             return_value=httpx.Response(
                 200,
@@ -3005,9 +3006,17 @@ class TestPep658MetadataFallback:
             return_value=httpx.Response(404)
         )
         dep = _python_dep("oldwheel", version="==1.0.0")
+        cache = RegistryCache()
         with httpx.Client() as client:
-            info = resolve_python_license(dep, client)
+            info = resolve_python_license(
+                dep,
+                client,
+                fetcher=cache.fetch,
+                pep658_fetcher=cache.fetch_pep658,
+                not_found=cache.not_found,
+            )
         assert info.license_id == "UNKNOWN"
+        assert info.from_registry is True
 
     @respx.mock
     def test_sidecar_used_when_json_license_is_unparseable_unknown(self):
@@ -3431,6 +3440,7 @@ class TestExtractWheelUrl:
                 {"wheel_url": "https://example.com/x.whl"},
                 client,
                 stub_fetcher,
+                lambda url: False,
             )
         assert result == ""
 
@@ -3578,7 +3588,11 @@ class TestSidecarBeforeProjectLevel:
         cache = RegistryCache()
         with httpx.Client() as client:
             return resolve_python_license(
-                _python_dep("pkg-a", version=spec), client, fetcher=cache.fetch
+                _python_dep("pkg-a", version=spec),
+                client,
+                fetcher=cache.fetch,
+                pep658_fetcher=cache.fetch_pep658,
+                not_found=cache.not_found,
             )
 
     @respx.mock

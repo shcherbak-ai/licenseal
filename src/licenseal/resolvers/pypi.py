@@ -307,7 +307,8 @@ def _license_from_pep658(
     data: dict,
     client: httpx.Client,
     fetcher_text: Callable[[str, httpx.Client], dict[str, str] | None],
-) -> str:
+    not_found: Callable[[str], bool],
+) -> str | None:
     """Best-effort license read from a wheel's PEP 658 ``.metadata`` sidecar.
 
     Used when the PyPI JSON API leaves ``license`` / ``license_expression``
@@ -325,14 +326,19 @@ def _license_from_pep658(
     continuation line with a newline, and a value carrying one is a license
     text body and is rejected whole (its first line must never become the
     identifier); the length guard covers bodies that landed on a single line.
-    Returns ``""`` if no usable identifier is found.
+
+    Returns ``""`` when the release declares no usable identifier there: it
+    has no wheel, the wheel has no sidecar (``not_found`` says the lookup
+    ended on a 404), or the sidecar holds none. Returns ``None`` when the
+    sidecar lookup failed, so what the release declares is not known.
     """
     wheel_url = _extract_wheel_url(data)
     if not wheel_url:
         return ""
-    headers = fetcher_text(wheel_url + ".metadata", client)
+    sidecar_url = wheel_url + ".metadata"
+    headers = fetcher_text(sidecar_url, client)
     if not isinstance(headers, dict):
-        return ""
+        return "" if not_found(sidecar_url) else None
     expression = headers.get("License-Expression", "")
     if isinstance(expression, str) and expression.strip():
         # RFC 5322 unfolding: the continuation lines are part of one value.
@@ -373,14 +379,17 @@ def resolve_python_license(
     URLs that the transitive walker has already pulled. Same URLs are
     hit either way; the cache just short-circuits the second visit.
 
-    ``not_found`` tells whether PyPI answered a URL that ``fetcher`` returned
-    nothing for with HTTP 404 (``RegistryCache.not_found`` beside a
-    cache-backed ``fetcher``). It decides what a pinned release with no
-    metadata of its own gets. A 404 means PyPI does not have the release:
-    another release then stands in for its license, reported as an estimate
-    under the pinned version. Any other miss is a lookup that failed, and
-    nothing is borrowed for it. The default knows of no 404, so with it every
-    miss is a failed lookup.
+    ``not_found`` tells whether PyPI answered a URL that ``fetcher`` or
+    ``pep658_fetcher`` returned nothing for with HTTP 404
+    (``RegistryCache.not_found`` beside that cache's ``fetch`` and
+    ``fetch_pep658``). It decides when another release answers for this one.
+    A 404 for a pinned release means PyPI does not have it: another release
+    then stands in for its license, reported as an estimate under the pinned
+    version. A 404 for a wheel's metadata sidecar means the wheel has none: a
+    release that declares no license in its JSON either takes the license of
+    the latest release, as an estimate. Any other miss is a lookup that
+    failed, and nothing is borrowed for it. The default knows of no 404, so
+    with it every miss is a failed lookup.
     """
     name = dep.name
     spec = dep.version_constraint.strip()
@@ -482,7 +491,19 @@ def resolve_python_license(
     # The sidecar is this release's own metadata, so it is read before the
     # project-level endpoint below, which describes the latest release.
     if _license_readings(raw_license, classifiers)[0] == "UNKNOWN":
-        pep658_license = _license_from_pep658(data, client, pep658_fetcher)
+        pep658_license = _license_from_pep658(data, client, pep658_fetcher, not_found)
+        if pep658_license is None:
+            # The sidecar could not be read, so what this release declares is
+            # not known. That is a failed lookup of the release: deps.dev
+            # answers for the exact version or nothing does, and no other
+            # release is read in its place.
+            return resolve_via_deps_dev_stable_get(
+                dep,
+                pinned_version or resolved_version,
+                system="PYPI",
+                client=client,
+                fetcher=fetcher,
+            )
         if pep658_license:
             raw_license, classifiers = pep658_license, []
 

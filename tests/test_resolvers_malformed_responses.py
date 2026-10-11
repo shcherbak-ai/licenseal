@@ -176,7 +176,7 @@ class TestPyPIFieldOfTheWrongType:
             pytest.param("https://files\uff0fpythonhosted.org/pkg_a.whl", id="unparseable-host"),
         ],
     )
-    def test_wheel_link_that_is_not_a_url_skips_the_sidecar(self, client, wheel_url):
+    def test_wheel_link_that_is_not_a_url_is_a_failed_sidecar_lookup(self, client, wheel_url):
         _json(
             "https://pypi.org/pypi/pkg-a/json",
             {
@@ -184,11 +184,16 @@ class TestPyPIFieldOfTheWrongType:
                 "urls": [{"packagetype": "bdist_wheel", "url": wheel_url}],
             },
         )
+        exact = respx.get(
+            "https://api.deps.dev/v3/systems/PYPI/packages/pkg-a/versions/1.0.0"
+        ).mock(return_value=httpx.Response(404))
         result = _resolve_python(client)
         assert result.license_id == "UNKNOWN"
-        assert result.from_registry is True
-        # Only the JSON lookup went out.
-        assert respx.calls.call_count == 1
+        # What the wheel declares could not be read, so the release is looked
+        # up once more, for that exact version; no sidecar request went out.
+        assert result.from_registry is False
+        assert respx.calls.call_count == 2
+        assert exact.call_count == 1
 
 
 class TestPyPIRequirementsAndVersionsNoParserAccepts:
