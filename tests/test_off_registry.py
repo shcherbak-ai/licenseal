@@ -1211,13 +1211,20 @@ class TestHexOffRegistry:
                   {:regular, "~> 1.0"},
                   {:paired_fork, [{:git, "https://git.example.org/paired_fork.git"}]},
                   {:quoted_fork, "github": "team/quoted_fork", "tag": "v3"},
-                  {:paired_outside, "~> 1.0", [{:path, "../paired_outside"}]}
+                  {:paired_outside, "~> 1.0", [{:path, "../paired_outside"}]},
+                  {:atom_fork, [{:"git", "https://git.example.org/atom_fork.git"}]},
+                  {:atom_hub, "~> 1.0", [{:"github", "team/atom_hub"}, {:"branch", "main"}]},
+                  {:atom_outside, [{:'path', "../atom_outside"}]}
                 ]
               end
             end
             """,
         )
         _mock_hex("regular", "1.0.0")
+        # hex.pm has a package under each of those names.
+        forks = ("paired_fork", "quoted_fork", "paired_outside", "atom_fork", "atom_hub")
+        for name in (*forks, "atom_outside"):
+            _mock_hex(name, "1.0.0", "GPL-3.0-only")
         _refuse_everything_else()
         result, data = _check_json(project, "--no-strict")
         assert result.exit_code == 0
@@ -1226,8 +1233,11 @@ class TestHexOffRegistry:
             "paired_fork": ("git+https://git.example.org/paired_fork.git", "UNKNOWN"),
             "quoted_fork": ("git+https://github.com/team/quoted_fork.git@v3", "UNKNOWN"),
             "paired_outside": ("../paired_outside", "UNKNOWN"),
+            "atom_fork": ("git+https://git.example.org/atom_fork.git", "UNKNOWN"),
+            "atom_hub": ("git+https://github.com/team/atom_hub.git@main", "UNKNOWN"),
+            "atom_outside": ("../atom_outside", "UNKNOWN"),
         }
-        assert _requests_mentioning("paired_fork", "quoted_fork", "paired_outside") == []
+        assert _requests_mentioning(*forks, "atom_outside") == []
 
     @respx.mock
     def test_rebar_sources_other_than_git_with_and_without_a_lockfile(self, tmp_path):

@@ -107,7 +107,8 @@ class TestDiscoverMixExsDependencies:
 
     def test_source_options_with_a_quoted_or_paired_key(self, tmp_path):
         # A keyword-list key can be quoted, or written as the first element
-        # of a pair. Either way the dep is not a hex.pm package.
+        # of a pair, as a bare atom or a quoted one. Either way the dep is
+        # not a hex.pm package.
         (tmp_path / "apps" / "inside").mkdir(parents=True)
         (tmp_path / "mix.exs").write_text(
             "defmodule M.MixProject do\n"
@@ -120,6 +121,14 @@ class TestDiscoverMixExsDependencies:
             "      {:paired_sibling, [{:in_umbrella, true}]},\n"
             '      {:quoted_git, "git": "https://example.org/quoted_git.git", "ref": "abc123"},\n'
             '      {:quoted_path, "path": "../quoted_path"},\n'
+            '      {:quoted_sibling, "in_umbrella": true},\n'
+            "      {:single_git, 'git': \"https://example.org/single_git.git\"},\n"
+            '      {:atom_git, [{:"git", "https://example.org/atom_git.git"}, {:"ref", "f00"}]},\n'
+            '      {:atom_hub, "~> 1.0", [{ :"github" , "me/atom_hub"}]},\n'
+            '      {:atom_path, [{:"path", "../atom_path"}]},\n'
+            '      {:atom_inside, [{:"path", "apps/inside"}]},\n'
+            '      {:atom_sibling, [{:"in_umbrella", true}]},\n'
+            "      {:single_atom_git, [{:'git', \"https://example.org/single_atom_git.git\"}]},\n"
             "      {:computed_pair, [{:git, repo_url()}]},\n"
             # A package whose own name is one of the option keys.
             '      {:path, "~> 1.0"},\n'
@@ -128,20 +137,59 @@ class TestDiscoverMixExsDependencies:
             "  end\n"
             "end\n"
         )
-        deps, filtered = discover_mix_exs_dependencies(
-            tmp_path, workspace_names=frozenset({"paired_sibling"})
-        )
+        siblings = frozenset({"paired_sibling", "quoted_sibling", "atom_sibling"})
+        deps, filtered = discover_mix_exs_dependencies(tmp_path, workspace_names=siblings)
         assert {d.name: (d.version_constraint, d.origin) for d in deps} == {
             "paired_git": ("", "git+https://example.org/paired_git.git@v2"),
             "paired_hub": ("", "git+https://github.com/me/paired_hub.git"),
             "paired_path": ("", "../paired_path"),
             "quoted_git": ("", "git+https://example.org/quoted_git.git@abc123"),
             "quoted_path": ("", "../quoted_path"),
+            "single_git": ("", "git+https://example.org/single_git.git"),
+            "atom_git": ("", "git+https://example.org/atom_git.git@f00"),
+            "atom_hub": ("", "git+https://github.com/me/atom_hub.git"),
+            "atom_path": ("", "../atom_path"),
+            "single_atom_git": ("", "git+https://example.org/single_atom_git.git"),
             "computed_pair": ("", "unrecorded source"),
             "path": ("~> 1.0", ""),
             "tag": ("~> 2.0", ""),
         }
-        assert filtered == 1
+        assert filtered == 3
+
+    def test_only_and_hex_options_in_every_spelling_of_the_key(self, tmp_path):
+        (tmp_path / "mix.exs").write_text(
+            "defmodule M.MixProject do\n"
+            "  defp deps do\n"
+            "    [\n"
+            '      {:keyword_dev, "~> 1.0", only: :dev},\n'
+            '      {:quoted_dev, "~> 1.0", "only": :dev},\n'
+            '      {:paired_dev, "~> 1.0", [{:only, [:dev, :test]}]},\n'
+            '      {:atom_dev, "~> 1.0", [{:"only", :test}]},\n'
+            '      {:atom_prod, "~> 1.0", [{:"only", [:prod, :test]}]},\n'
+            # The quoted key is not the version.
+            '      {:unversioned_dev, "only": :test},\n'
+            '      {:keyword_alias, "~> 1.0", hex: :keyword_real},\n'
+            '      {:quoted_alias, "~> 1.0", "hex": :quoted_real},\n'
+            '      {:paired_alias, "~> 1.0", [{:hex, :paired_real}]},\n'
+            '      {:atom_alias, "~> 1.0", [{:"hex", :atom_real}, {:"only", :dev}]}\n'
+            "    ]\n"
+            "  end\n"
+            "end\n"
+        )
+        deps, _ = discover_mix_exs_dependencies(tmp_path)
+        dev, prod = DependencyGroup.DEV, DependencyGroup.PROD
+        assert {d.name: (d.version_constraint, d.group, d.registry_name) for d in deps} == {
+            "keyword_dev": ("~> 1.0", dev, ""),
+            "quoted_dev": ("~> 1.0", dev, ""),
+            "paired_dev": ("~> 1.0", dev, ""),
+            "atom_dev": ("~> 1.0", dev, ""),
+            "atom_prod": ("~> 1.0", prod, ""),
+            "unversioned_dev": ("", dev, ""),
+            "keyword_alias": ("~> 1.0", prod, "keyword_real"),
+            "quoted_alias": ("~> 1.0", prod, "quoted_real"),
+            "paired_alias": ("~> 1.0", prod, "paired_real"),
+            "atom_alias": ("~> 1.0", dev, "atom_real"),
+        }
 
     def test_umbrella_workspace_filter(self):
         workspace = workspace_mix_names(_FIXTURES / "umbrella")
