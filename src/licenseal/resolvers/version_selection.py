@@ -651,19 +651,32 @@ _NUGET_INTERVAL_RE = re.compile(r"([\[(])\s*([^,\s]*)\s*(?:(,)\s*([^,\s]*)\s*)?(
 _NugetVersion = tuple[Any, ...]
 
 
-def _nuget_version(text: str) -> _NugetVersion | None:
+def _nuget_parse(text: str) -> tuple[_NugetVersion, str] | None:
+    """Parse a NuGet version: its sort key, and its normalized spelling.
+
+    NuGet reads ``1.2``, ``1.2.0``, and ``1.2.0.0`` as one version, and
+    nuget.org lists and serves it under the normalized spelling alone: three
+    numeric segments, a fourth only when it is not zero, no leading zeros,
+    no build metadata. A prerelease label is kept as written.
+    """
     match = _NUGET_VERSION_RE.fullmatch(text.strip())
     if match is None:
         return None
     numbers = tuple(int(part or 0) for part in match.group(1, 2, 3, 4))
+    normalized = ".".join(str(number) for number in (numbers if numbers[3] else numbers[:3]))
     label = match.group(5)
     if label is None:
-        return (*numbers, (1,))
+        return (*numbers, (1,)), normalized
     # SemVer 2 precedence: a numeric identifier sorts below a textual one.
     identifiers = tuple(
         (0, int(part), "") if part.isdigit() else (1, 0, part.lower()) for part in label.split(".")
     )
-    return (*numbers, (0, identifiers))
+    return (*numbers, (0, identifiers)), f"{normalized}-{label}"
+
+
+def _nuget_version(text: str) -> _NugetVersion | None:
+    parsed = _nuget_parse(text)
+    return None if parsed is None else parsed[0]
 
 
 def _nuget_is_prerelease(version: _NugetVersion) -> bool:
@@ -674,9 +687,10 @@ def _nuget_is_prerelease(version: _NugetVersion) -> bool:
 class NugetRange:
     """A parsed NuGet version range.
 
-    ``minimum`` is the text of an inclusive lower bound that lies inside the
-    range: the version NuGet restores when it is published. It is the whole
-    of a bare version or of ``[1.2.3]`` and the lower end of ``[1.0,2.0)``,
+    ``minimum`` is an inclusive lower bound that lies inside the range: the
+    version NuGet restores when it is published. It is the whole of a bare
+    version or of ``[1.2.3]`` and the lower end of ``[1.0,2.0)``, in the
+    normalized spelling nuget.org serves it under (``1.0.0`` for ``1.0``),
     and is empty when the range has no such bound (``(1.0,)``, ``(,2.0]``) or
     floats (``1.*``). ``exact`` tells a range that names one version from one
     that bounds several. A ``floating`` range resolves to its highest match;
@@ -717,27 +731,30 @@ def parse_nuget_range(constraint: str) -> NugetRange | None:
     interval = _NUGET_INTERVAL_RE.fullmatch(spec)
     if interval is None:
         # A bare version is an inclusive minimum, and the version restored.
-        minimum = _nuget_version(spec)
-        if minimum is None:
+        bare = _nuget_parse(spec)
+        if bare is None:
             return None
-        return NugetRange(matches=_nuget_bounded([(">=", minimum)]), minimum=spec, exact=True)
+        minimum, spelling = bare
+        return NugetRange(matches=_nuget_bounded([(">=", minimum)]), minimum=spelling, exact=True)
     opening, low, comma, high, closing = interval.groups()
     if comma is None:
         # ``[1.2.3]`` is the one-version range; ``(1.2.3)`` is not a range.
-        only = _nuget_version(low)
+        only = _nuget_parse(low)
         if only is None or (opening, closing) != ("[", "]"):
             return None
-        return NugetRange(matches=_nuget_bounded([("==", only)]), minimum=low, exact=True)
+        return NugetRange(matches=_nuget_bounded([("==", only[0])]), minimum=only[1], exact=True)
     bounds: list[tuple[str, _NugetVersion]] = []
+    spellings: dict[str, str] = {}
     for text, op in (
         (low, ">=" if opening == "[" else ">"),
         (high, "<=" if closing == "]" else "<"),
     ):
         if text:
-            bound = _nuget_version(text)
+            bound = _nuget_parse(text)
             if bound is None:
                 return None
-            bounds.append((op, bound))
+            bounds.append((op, bound[0]))
+            spellings[text] = bound[1]
     if not bounds:
         return None
     # An inclusive lower bound that its own range excludes (``[2.0,1.0]``) is
@@ -747,7 +764,7 @@ def parse_nuget_range(constraint: str) -> NugetRange | None:
         and opening == "["
         and all(_COMPARISONS[op](bounds[0][1], bound) for op, bound in bounds)
     )
-    return NugetRange(matches=_nuget_bounded(bounds), minimum=low if inclusive else "")
+    return NugetRange(matches=_nuget_bounded(bounds), minimum=spellings[low] if inclusive else "")
 
 
 def _nuget_matcher(constraint: str) -> _Matcher | None:

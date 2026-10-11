@@ -85,12 +85,17 @@ def _extract_pinned_version_nuget(version_constraint: str) -> str | None:
     NuGet restores the lowest version a requirement allows, so an inclusive
     lower bound is the version it restores when that version is published:
 
-    * Bare ``MAJOR.MINOR.PATCH[-prerelease][+build]`` (a minimum) — passthrough.
-    * 4-part legacy ``MAJOR.MINOR.PATCH.REVISION`` — passthrough.
+    * Bare ``MAJOR.MINOR.PATCH[-prerelease]`` (a minimum) — that version.
+    * 4-part legacy ``MAJOR.MINOR.PATCH.REVISION`` — that version.
     * NuGet bracket syntax ``[1.2.3]`` (exact) — strip brackets.
     * A range with an inclusive lower bound, ``[1.0,2.0)`` or ``[1.0,)`` —
       the lower bound.
     * licenseal-internal ``==X.Y.Z`` form — strip the ``==``.
+
+    The version is returned in NuGet's normalized spelling, the one nuget.org
+    lists and serves it under: ``1.2`` and ``1.2.0.0`` are ``1.2.0``, leading
+    zeros and build metadata are dropped. The flatcontainer answers 404 for
+    any other spelling of a version it has.
 
     Returns ``None`` when no version can be named this way: a range whose
     lower bound is exclusive or absent (``(1.0,2.0]``, ``(,2.0]``) or lies
@@ -141,7 +146,8 @@ def _resolve_version(
     """Resolve a declared NuGet version to the version to report, or None.
 
     A requirement with an inclusive lower bound (a bare version, ``[1.2.3]``,
-    ``[1.0,2.0)``) resolves to that bound without a request. Any other range
+    ``[1.0,2.0)``) resolves to that bound without a request, in the spelling
+    nuget.org serves it under (``1.0.0`` for ``1.0``). Any other range
     is resolved against the package's published versions, one request: the
     lowest release inside an interval (``(1.0,2.0]``), the highest release a
     floating version matches (``1.*``).

@@ -12,7 +12,8 @@ Three endpoints carry the load:
   reported when it satisfies the declared requirement.
 * ``GET /api/v1/versions/{name}.json`` — the gem's version list, requested
   only when the latest release is outside the declared requirement, to find
-  the highest release inside it.
+  the highest release inside it, and when an exact pin is not published
+  under the spelling it is written in, to find the release it names.
 
 Unlike PHP / Composer, ``Gemfile.lock`` carries no embedded SPDX license
 field, so there is **no lockfile-license pre-pass** for Ruby — every dep
@@ -171,6 +172,33 @@ def _published_versions(name: str, client: httpx.Client, text_fetcher: Fetcher) 
     ]
 
 
+def _resolve_pin(
+    name: str, spec: str, client: httpx.Client, fetcher: Fetcher, text_fetcher: Fetcher
+) -> str | None:
+    """The version an exact pin names, as rubygems.org spells it; None when ``spec`` is no pin.
+
+    RubyGems compares versions with trailing zero segments ignored, so
+    ``1.2``, ``1.2.0``, and ``1.2.0.0`` are one version, while the API
+    answers only for the spelling the gem was published under. A lockfile
+    entry (``==X``) is spelled as published and is returned as it is, with
+    no request. A pin in a manifest or in another gem's requirements
+    (``gem "x", "1.2"``, ``= 1.2``) is asked for as written first, which is
+    the request its caller makes next; only when that misses is the gem's
+    version list fetched, for the published version equal to the pin.
+
+    A pin no published version equals is returned as written: its lookup
+    then finds nothing, and the gem is UNKNOWN. The walker and the license
+    resolver both resolve through here.
+    """
+    pinned = _extract_pinned_version(spec)
+    if pinned is None or spec.strip().startswith("=="):
+        return pinned
+    if isinstance(fetcher(_rubygems_version_url(name, pinned), client), dict):
+        return pinned
+    published = _published_versions(name, client, text_fetcher)
+    return select_version(Ecosystem.RUBY, f"= {pinned}", published) or pinned
+
+
 def _select_version(
     name: str, spec: str, latest: dict, client: httpx.Client, text_fetcher: Fetcher
 ) -> str | None:
@@ -226,7 +254,8 @@ def resolve_ruby_license(
     """Resolve license for a Ruby gem via rubygems.org.
 
     A pinned dep (``==X.Y.Z``, ``= X.Y.Z``, a bare version) hits the v2
-    per-version endpoint. An unpinned one is resolved to a version first
+    per-version endpoint, under the spelling the gem was published with
+    (:func:`_resolve_pin`). An unpinned one is resolved to a version first
     (:func:`_select_version`): the latest release's own response answers
     when that release is the one selected, the per-version endpoint
     otherwise. A requirement that selects no version is UNKNOWN with no
@@ -235,7 +264,7 @@ def resolve_ruby_license(
     ``text_fetcher`` fetches the gem's version list, which is a JSON array.
     """
     name = dep.name
-    version = _extract_pinned_version(dep.version_constraint)
+    version = _resolve_pin(name, dep.version_constraint, client, fetcher, text_fetcher)
 
     if version is None:
         latest = fetcher(_rubygems_gem_url(name), client)

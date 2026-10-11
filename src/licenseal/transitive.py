@@ -181,6 +181,9 @@ from licenseal.resolvers.rubygems import (
     _extract_pinned_version as _extract_ruby_pinned_version,  # noqa: PLC2701
 )
 from licenseal.resolvers.rubygems import (
+    _resolve_pin as _resolve_ruby_pin,  # noqa: PLC2701
+)
+from licenseal.resolvers.rubygems import (
     _rubygems_gem_url,  # noqa: PLC2701
     fetch_rubygems_dependencies,
 )
@@ -2578,7 +2581,8 @@ def _resolve_version(
         return _resolve_php_version(dep.name, spec, client, fetcher) or ""
 
     if ecosystem == Ecosystem.RUBY:
-        pinned = _extract_ruby_pinned_version(spec)
+        # A pin, in the spelling the gem was published under.
+        pinned = _resolve_ruby_pin(dep.name, spec, client, fetcher, text_fetcher)
         if pinned:
             return pinned
         # Unpinned: the v1 latest-version endpoint, and the gem's version

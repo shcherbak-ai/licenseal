@@ -706,9 +706,14 @@ class TestNugetRange:
             (" 1.2.3 ", "1.2.3", True, False),
             ("[1.2.3]", "1.2.3", True, False),
             ("==1.2.3", "1.2.3", True, False),
-            ("[1.0,2.0)", "1.0", False, False),
-            ("[ 1.0 , 2.0 ]", "1.0", False, False),
-            ("[1.0,)", "1.0", False, False),
+            # The lower bound in the spelling nuget.org serves it under.
+            ("[1.0,2.0)", "1.0.0", False, False),
+            ("[ 1.0 , 2.0 ]", "1.0.0", False, False),
+            ("[1.0,)", "1.0.0", False, False),
+            ("1.2", "1.2.0", True, False),
+            ("[1.2.0.0]", "1.2.0", True, False),
+            ("1.2.3.4", "1.2.3.4", True, False),
+            ("1.2.3-Beta+build.5", "1.2.3-Beta", True, False),
             # No inclusive lower bound to restore.
             ("(1.0,2.0]", "", False, False),
             ("(1.0,)", "", False, False),

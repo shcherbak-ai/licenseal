@@ -44,18 +44,23 @@ def _dotnet_dep(name: str = "Newtonsoft.Json", version: str = "13.0.1") -> Depen
 class TestExtractPinnedVersionNuget:
     def test_semver_passthrough(self):
         assert _extract_pinned_version_nuget("13.0.1") == "13.0.1"
-        assert _extract_pinned_version_nuget("1.0") == "1.0"
-        assert _extract_pinned_version_nuget("1") == "1"
+
+    def test_missing_segments_are_zero(self):
+        # nuget.org lists a version under three segments.
+        assert _extract_pinned_version_nuget("1.0") == "1.0.0"
+        assert _extract_pinned_version_nuget("1") == "1.0.0"
 
     def test_prerelease_passthrough(self):
         assert _extract_pinned_version_nuget("8.0.0-rc.2.24474.1") == "8.0.0-rc.2.24474.1"
         assert _extract_pinned_version_nuget("1.2.3-beta.4") == "1.2.3-beta.4"
 
-    def test_build_metadata_passthrough(self):
-        assert _extract_pinned_version_nuget("1.0.0+sha.abc123") == "1.0.0+sha.abc123"
+    def test_build_metadata_is_not_part_of_the_version(self):
+        assert _extract_pinned_version_nuget("1.0.0+sha.abc123") == "1.0.0"
 
     def test_four_part_legacy_version(self):
         assert _extract_pinned_version_nuget("1.2.3.4") == "1.2.3.4"
+        # A zero fourth segment is left out.
+        assert _extract_pinned_version_nuget("1.2.3.0") == "1.2.3"
 
     def test_bracket_exact_pin(self):
         # NuGet's ``[1.2.3]`` syntax means "exactly this version".
@@ -64,9 +69,9 @@ class TestExtractPinnedVersionNuget:
     def test_bracket_range_picks_an_inclusive_lower_bound(self):
         # NuGet restores the lowest version a range allows, which is the
         # lower bound when the range includes it.
-        assert _extract_pinned_version_nuget("[1.0,2.0)") == "1.0"
-        assert _extract_pinned_version_nuget("[1.0,)") == "1.0"
-        assert _extract_pinned_version_nuget("[ 1.0 , 2.0 ]") == "1.0"
+        assert _extract_pinned_version_nuget("[1.0,2.0)") == "1.0.0"
+        assert _extract_pinned_version_nuget("[1.0,)") == "1.0.0"
+        assert _extract_pinned_version_nuget("[ 1.0 , 2.0 ]") == "1.0.0"
 
     def test_bracket_range_without_an_inclusive_lower_bound_names_no_version(self):
         # The bound is excluded, absent, or outside its own range: the
