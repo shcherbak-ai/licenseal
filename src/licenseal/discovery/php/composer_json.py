@@ -17,18 +17,32 @@ resolver path masks the most common cases because composer.lock records the
 real replacement; manifest-only mode may emit a phantom dep that resolves
 UNKNOWN until the package is reviewed away.
 
-Private Composer registries (``repositories: [{"type": "composer"}]``) and
-custom VCS / path sources are also out of scope — those package names won't
-resolve via Packagist, but we can't tell at manifest-parse time which named
-deps come from those sources (Composer learns it at install). The 404 →
-UNKNOWN path absorbs them; users can override via ``licenseal.review.toml``.
+``repositories`` says where a package comes from when that is not Packagist.
+What composer.json alone lets us determine:
+
+* a ``package`` repository defines a package inline, with its ``source`` or
+  ``dist``: a requirement of that name is not a Packagist package and is
+  emitted with that origin;
+* a ``path`` repository inside the scanned directory holds the project's own
+  packages: a requirement that names one (by the ``name`` of a composer.json
+  found there) is not a dependency.
+
+What it does not: which requirements a ``vcs`` repository, or a ``path``
+repository outside the scanned directory, provides. Composer learns that by
+reading the repository. Those names are looked up on Packagist unless a
+composer.lock says where each package came from. A ``composer`` repository
+is another registry: its packages are looked up on Packagist by name.
 """
 
 from __future__ import annotations
 
+import os
+import re
+from fnmatch import fnmatchcase
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
+from licenseal.discovery._origin import UNRECORDED, git_origin, path_origin, url_origin
 from licenseal.discovery._read import (
     load_json,
     record_unexpected_type,
@@ -73,17 +87,146 @@ def composer_map(path: Path, table: dict[str, Any], key: str, what: str = "") ->
     return typed_field(path, table, key, dict, what or f'"{key}"') or {}
 
 
-def _parse_composer_json(filepath: Path, source: str) -> list[Dependency]:
-    """Parse a single composer.json file into direct Dependencies.
+# Repository types that fetch a package from a version-control repository.
+VCS_REPOSITORY_TYPES = frozenset(
+    {
+        "vcs",
+        "git",
+        "github",
+        "gitlab",
+        "bitbucket",
+        "git-bitbucket",
+        "forgejo",
+        "hg",
+        "svn",
+        "fossil",
+        "perforce",
+    }
+)
+# The ``source.type`` values that are not git.
+_OTHER_VCS = frozenset({"hg", "svn", "fossil"})
+
+_URL_SCHEME_RE = re.compile(r"^[a-z][a-z0-9+.-]*://")
+_URL_USER_RE = re.compile(r"^[^/@]+@")
+
+
+def composer_repositories(data: dict[str, Any]) -> list[dict[str, Any]]:
+    """The repository tables of a composer.json, in its list or its map form."""
+    repositories = data.get("repositories")
+    if isinstance(repositories, dict):
+        repositories = list(repositories.values())
+    if not isinstance(repositories, list):
+        return []
+    return [cast("dict[str, Any]", repo) for repo in repositories if isinstance(repo, dict)]
+
+
+def repository_key(url: str) -> str:
+    """A repository URL in a form two spellings of one repository share.
+
+    Host and path, lowercased, without scheme, user, ``.git``, or a trailing
+    slash; ``git@host:path`` reads as ``host/path``.
+    """
+    key = url.strip().lower()
+    if "://" in key:
+        key = _URL_USER_RE.sub("", _URL_SCHEME_RE.sub("", key))
+    else:
+        key = _URL_USER_RE.sub("", key).replace(":", "/", 1)
+    return key.rstrip("/").removesuffix(".git")
+
+
+def package_origin(package: dict[str, Any], base_dir: Path, scan_root: Path) -> str | None:
+    """Origin of a Composer package definition, from its ``source`` or ``dist``.
+
+    ``package`` is a composer.lock entry or an inline ``package`` repository
+    definition. ``source`` is the repository plus its ``reference`` (the
+    locked commit in a lockfile). Without one, ``dist`` is a path
+    (``None`` when it is inside ``scan_root``) or a download URL plus its
+    ``shasum``.
+    """
+    source = package.get("source")
+    dist = package.get("dist")
+    for table, is_source in ((source, True), (dist, False)):
+        if not isinstance(table, dict):
+            continue
+        url = table.get("url")
+        if not isinstance(url, str) or not url:
+            continue
+        kind = table.get("type")
+        if kind == "path":
+            return path_origin(url, base_dir, scan_root)
+        reference = table.get("reference")
+        if is_source:
+            vcs = kind if kind in _OTHER_VCS else "git"
+            return git_origin(url, reference if isinstance(reference, str) else "", vcs=vcs)
+        shasum = table.get("shasum")
+        return url_origin(url, shasum if isinstance(shasum, str) else "")
+    return UNRECORDED
+
+
+def inline_package_origins(
+    repositories: list[dict[str, Any]], base_dir: Path, scan_root: Path
+) -> dict[str, str | None]:
+    """Lowercased name → origin of each package a ``package`` repository defines."""
+    origins: dict[str, str | None] = {}
+    for repo in repositories:
+        if repo.get("type") != "package":
+            continue
+        defined = repo.get("package")
+        for package in defined if isinstance(defined, list) else [defined]:
+            if isinstance(package, dict) and isinstance(package.get("name"), str):
+                origins.setdefault(
+                    package["name"].lower(),
+                    package_origin(cast("dict[str, Any]", package), base_dir, scan_root),
+                )
+    return origins
+
+
+def _own_path_packages(
+    repositories: list[dict[str, Any]], base_dir: Path, names_by_dir: dict[Path, str]
+) -> set[str]:
+    """Lowercased names of the in-tree packages the ``path`` repositories hold.
+
+    ``names_by_dir`` maps the directory of each composer.json in the scanned
+    tree to the name it declares. A ``path`` repository URL is relative to
+    ``base_dir`` and may hold ``*`` wildcards (``packages/*``).
+    """
+    patterns = [
+        repo["url"].replace("\\", "/").removeprefix("./").rstrip("/")
+        for repo in repositories
+        if repo.get("type") == "path" and isinstance(repo.get("url"), str)
+    ]
+    own: set[str] = set()
+    for directory, name in names_by_dir.items():
+        relative = Path(os.path.relpath(directory, base_dir)).as_posix()
+        if any(fnmatchcase(relative, pattern) for pattern in patterns):
+            own.add(name.lower())
+    return own
+
+
+def _parse_composer_json(
+    filepath: Path,
+    data: dict[str, Any],
+    source: str,
+    scan_root: Path,
+    names_by_dir: dict[Path, str],
+) -> tuple[list[Dependency], int]:
+    """Parse a single composer.json document into direct Dependencies.
 
     A section that is not a map, and a constraint that is not a string, are
     recorded as gaps and read as absent: the section declares nothing, the
     package is unconstrained. The other section is still read.
+
+    Returns ``(deps, filtered)``. A requirement on a package that a
+    ``package`` repository of this file defines carries that origin. One on
+    a package of the scanned tree, held by a ``path`` repository of this
+    file, is the project's own code: it is counted in ``filtered`` and not
+    returned.
     """
     deps: list[Dependency] = []
-    data = root_table(filepath, load_json(filepath))
-    if data is None:
-        return deps
+    filtered = 0
+    repositories = composer_repositories(data)
+    inline = inline_package_origins(repositories, filepath.parent, scan_root)
+    own = _own_path_packages(repositories, filepath.parent, names_by_dir)
 
     for field_name, group in (
         ("require", DependencyGroup.PROD),
@@ -97,16 +240,21 @@ def _parse_composer_json(filepath: Path, source: str) -> list[Dependency]:
             if not isinstance(spec, str):
                 record_unexpected_type(filepath, f'an entry of "{field_name}"')
                 spec = ""
+            origin = inline.get(name.lower(), "")
+            if name.lower() in own or origin is None:
+                filtered += 1
+                continue
             deps.append(
                 Dependency(
                     name=name,
-                    version_constraint=spec,
+                    version_constraint="" if origin else spec,
                     ecosystem=Ecosystem.PHP,
                     group=group,
                     source=source,
+                    origin=origin,
                 )
             )
-    return deps
+    return deps, filtered
 
 
 def discover_composer_dependencies(
@@ -116,18 +264,27 @@ def discover_composer_dependencies(
 ) -> tuple[list[Dependency], int]:
     """Discover all PHP dependencies from composer.json files in the tree.
 
-    Returns ``(deps, filtered_count)``. The filter count is currently always
-    zero — composer.json carries no analogue to npm's workspace-local refs
-    that we can identify at manifest-parse time without additional install-
-    side context. Kept in the return shape for parity with the other
-    ecosystems' aggregator wiring.
+    Returns ``(deps, filtered_count)``. The filter count is the number of
+    requirements on a package of the scanned tree that a ``path`` repository
+    of the requiring composer.json holds: the project's own code.
     """
     composer_files = walk_project_files(project_path, "composer.json", exclude_paths=exclude_paths)
+    parsed = [
+        (cj, data) for cj in composer_files if (data := root_table(cj, load_json(cj))) is not None
+    ]
+    names_by_dir = {
+        cj.parent: data["name"] for cj, data in parsed if isinstance(data.get("name"), str)
+    }
     deps: list[Dependency] = []
-    for cj in composer_files:
+    filtered = 0
+    for cj, data in parsed:
         source = cj.relative_to(project_path).as_posix()
-        deps.extend(_parse_composer_json(cj, source))
-    return deps, 0
+        file_deps, file_filtered = _parse_composer_json(
+            cj, data, source, project_path, names_by_dir
+        )
+        deps.extend(file_deps)
+        filtered += file_filtered
+    return deps, filtered
 
 
 def detect_project_license_composer_json(composer_json: Path) -> str:

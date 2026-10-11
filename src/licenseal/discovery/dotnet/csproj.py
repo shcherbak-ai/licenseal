@@ -67,10 +67,15 @@ lockfile parsers take for target frameworks). A ``<PropertyGroup>`` inside
 a branch is not read: which branch a build takes is unknown, so its values
 never reach the project's property scope.
 
-``<ProjectReference>`` elements point at other in-tree ``.csproj`` files
-and are NOT NuGet dependencies. They are emitted by the workspace-local
-filter scan (the project IDs become workspace-local sentinels) but never
-appear as ``Dependency`` rows.
+``<ProjectReference>`` elements point at other project files and are NOT
+NuGet dependencies: nothing is looked up for them. One that points inside
+the scanned directory is the project's own code and is no row (the project
+IDs of the in-tree project files are workspace-local sentinels). One that
+leaves the scanned directory is a ``Dependency`` named after the referenced
+project file, with the path as written as its origin. A path that cannot be
+located, because it holds a ``$(Property)`` the project file does not
+define, is the project's own code when the scanned tree has a project file
+of that name.
 
 MSBuild property expansion (``$(PropertyName)``) is performed in a single
 locally-resolvable pass against the project's own ``<PropertyGroup>``
@@ -88,11 +93,12 @@ from __future__ import annotations
 import re
 from collections import deque
 from dataclasses import dataclass, field
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from xml.etree.ElementTree import Element  # nosec B405
 
 from defusedxml import ElementTree as DefusedET
 
+from licenseal.discovery._origin import path_origin
 from licenseal.discovery._read import read_xml_bytes, record_parse_failure
 from licenseal.discovery._walk import walk_project_files_matching
 from licenseal.models import Dependency, DependencyGroup, Ecosystem
@@ -393,6 +399,58 @@ def _walk_project_files(
     return walk_project_files_matching(project_path, _match, exclude_paths=exclude_paths)
 
 
+# MSBuild properties that name the directory of the project file itself.
+# The first two end in a path separator.
+_PROJECT_DIR_PROPERTIES = {
+    "MSBuildThisFileDirectory": "",
+    "ProjectDir": "",
+    "MSBuildProjectDirectory": ".",
+}
+
+
+def _project_reference_dependencies(
+    data: _CsprojData,
+    project_file: Path,
+    scan_root: Path,
+    source: str,
+    local_file_names: set[str],
+) -> list[Dependency]:
+    """One dependency per ``<ProjectReference>`` that leaves the scanned directory.
+
+    A referenced project inside ``scan_root`` is the project's own code and
+    is skipped. The path is read with the project's own ``$(Property)``
+    values filled in. One that still holds a ``$(…)`` token cannot be
+    located: it is the project's own code when ``local_file_names`` (the
+    lowercased names of the project files of the scanned tree) has the
+    referenced file's name, and is reported otherwise. An ``Include`` can
+    list several paths, separated by ``;``. The dependency is named after
+    the referenced project file and carries the path as written as its
+    origin.
+    """
+    properties = {**_PROJECT_DIR_PROPERTIES, **data.properties}
+    out: list[Dependency] = []
+    for include in data.project_refs:
+        for written in filter(None, (part.strip() for part in include.split(";"))):
+            expanded = _expand_properties(written, properties)
+            if "$(" in expanded:
+                inside = PureWindowsPath(expanded).name.lower() in local_file_names
+            else:
+                inside = path_origin(expanded, project_file.parent, scan_root) is None
+            if inside:
+                continue
+            out.append(
+                Dependency(
+                    name=PureWindowsPath(expanded).stem or written,
+                    version_constraint="",
+                    ecosystem=Ecosystem.DOTNET,
+                    group=DependencyGroup.PROD,
+                    source=source,
+                    origin=written,
+                )
+            )
+    return out
+
+
 def _dependencies_from_refs(
     refs: list[_CsprojDep],
     *,
@@ -432,7 +490,8 @@ def discover_csproj_dependencies(
 
     Walks every ``.csproj``, ``.fsproj``, and ``.vbproj`` in the tree
     (subject to the shared ``exclude_paths`` set), parses each, and emits
-    one :class:`Dependency` per ``<PackageReference>``. Returns
+    one :class:`Dependency` per ``<PackageReference>``, and one per
+    ``<ProjectReference>`` that leaves the scanned directory. Returns
     ``(deps, filtered_count)`` where ``filtered_count`` is the number of
     refs dropped because they pointed at an in-tree workspace-local
     project ID (the rare corner case where a NuGet package shares a name
@@ -449,7 +508,9 @@ def discover_csproj_dependencies(
     out: list[Dependency] = []
     filtered = 0
 
-    for project_file in _walk_project_files(project_path, exclude_paths=exclude_paths):
+    project_files = _walk_project_files(project_path, exclude_paths=exclude_paths)
+    local_file_names = {project_file.name.lower() for project_file in project_files}
+    for project_file in project_files:
         raw = read_xml_bytes(project_file)
         if raw is None:
             continue
@@ -457,12 +518,18 @@ def discover_csproj_dependencies(
         if data is None:
             record_parse_failure(project_file, "XML")
             continue
+        source = project_file.relative_to(project_path).as_posix()
         deps, dropped = _dependencies_from_refs(
             data.package_refs,
-            source=project_file.relative_to(project_path).as_posix(),
+            source=source,
             workspace_local=workspace_local,
         )
         out.extend(deps)
+        out.extend(
+            _project_reference_dependencies(
+                data, project_file, project_path, source, local_file_names
+            )
+        )
         filtered += dropped
 
     return out, filtered

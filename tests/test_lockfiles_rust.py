@@ -91,7 +91,7 @@ class TestParseCargoLock:
         )
         assert [d.name for d in deps] == ["serde"]
 
-    def test_skips_path_and_git_sources(self, tmp_path):
+    def test_git_and_unknown_sources_carry_an_origin(self, tmp_path):
         path = _write(
             tmp_path,
             f"""\
@@ -100,7 +100,12 @@ class TestParseCargoLock:
             [[package]]
             name = "git-dep"
             version = "0.1.0"
-            source = "git+https://github.com/x/y#abc123"
+            source = "git+https://github.com/x/y?tag=v0.1.0#abc123"
+
+            [[package]]
+            name = "odd-dep"
+            version = "0.2.0"
+            source = "directory+file:///opt/vendor"
 
             [[package]]
             name = "serde"
@@ -109,9 +114,17 @@ class TestParseCargoLock:
             """,
         )
         deps, _ = parse_cargo_lock(
-            path, prod_root_names={"serde"}, dev_root_names=set(), include_dev=False
+            path,
+            prod_root_names={"serde", "git-dep", "odd-dep"},
+            dev_root_names=set(),
+            include_dev=False,
         )
-        assert [d.name for d in deps] == ["serde"]
+        assert [(d.name, d.version_constraint, d.origin) for d in deps] == [
+            ("git-dep", "==0.1.0", "git+https://github.com/x/y@abc123"),
+            # A source of a kind the parser does not know is the origin as written.
+            ("odd-dep", "==0.2.0", "directory+file:///opt/vendor"),
+            ("serde", "==1.0.193", ""),
+        ]
 
     def test_dependencies_with_version_and_source_suffix(self, tmp_path):
         # Real Cargo.lock entries can be "name", "name 1.2.3", or
@@ -460,7 +473,8 @@ class TestParseCargoLock:
         """[patch.crates-io] overrides land in Cargo.lock with a git/path
         source rather than the registry. The parser must:
 
-        1. Exclude the patched dep itself from the output (no crates.io entry).
+        1. Report the patched dep itself with the repository and the locked
+           commit as its origin (it is no crates.io release).
         2. Track its edges so the BFS reaches its lockfile-resolved
            children — those children ARE registry-sourced and need
            emitting with the patched dep as their direct ancestor.
@@ -496,9 +510,9 @@ class TestParseCargoLock:
             include_dev=False,
         )
         names = {d.name for d in deps}
-        assert "patched-root" not in names, (
-            "git-sourced patched dep must not appear in output (no crates.io license)"
-        )
+        patched = next(d for d in deps if d.name == "patched-root")
+        assert patched.origin == "git+https://github.com/fork/patched-root@abc"
+        assert (patched.version_constraint, patched.depth) == ("==1.0.0", 0)
         assert "real-child" in names, (
             "real-child should be reached via BFS through the patched dep's edges"
         )

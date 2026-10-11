@@ -419,7 +419,9 @@ def _stitch_dotnet_versions(
 
     out: list[Dependency] = []
     for dep in deps:
-        if dep.ecosystem != Ecosystem.DOTNET or not dep.source:
+        # A project reference (it has an origin) is not a package: it takes
+        # no version from either file.
+        if dep.ecosystem != Ecosystem.DOTNET or not dep.source or dep.origin:
             out.append(dep)
             continue
         # Reconstruct the declaring file's absolute path from the dep's

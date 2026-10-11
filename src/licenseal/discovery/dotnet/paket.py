@@ -60,11 +60,11 @@ Source kinds:
 
 * ``source https://api.nuget.org/...`` → fetched via the standard NuGet
   resolver path.
-* ``git https://...``, ``github user/repo``, ``http URL`` → **not honored**.
-  Per the manifest+registry-only paradigm, only the NUGET source is
-  resolved. Packages declared via non-NUGET sources emit ``Dependency``
-  entries with empty ``version_constraint`` (so the license resolver
-  surfaces them as UNKNOWN rather than silently dropping them).
+* ``git https://...``, ``github user/repo``, ``gist user/id``, ``http URL``
+  → **not read**. They reference source files and repositories, not NuGet
+  packages: nothing is emitted for them and nothing is requested, in
+  ``paket.dependencies`` and in the ``GIT`` / ``GITHUB`` / ``GIST`` /
+  ``HTTP`` sections of ``paket.lock`` alike.
 
 This parser does NOT cross-validate ``paket.dependencies`` against
 ``paket.lock``. When the lockfile is present, the transitive walker
@@ -111,7 +111,7 @@ _GROUP_LOCK_RE = re.compile(r"^GROUP\s+(\S+)\s*$")
 # changes how we treat following entries. Only NUGET sections are
 # resolvable against ``api.nuget.org``.
 _NUGET_SOURCE_LINE = "NUGET"
-_NON_NUGET_SOURCE_LINES = frozenset({"GIT", "GITHUB", "HTTP"})
+_NON_NUGET_SOURCE_LINES = frozenset({"GIT", "GITHUB", "GIST", "HTTP"})
 
 _DEV_GROUP_NAMES = frozenset({"test", "build", "tools"})
 
@@ -172,8 +172,9 @@ def _parse_paket_lock_text(text: str) -> list[tuple[str, str, DependencyGroup]]:
     * ``GROUP <name>`` directives → switch to that group's mapping.
 
     Within a group, ``NUGET`` source sections list resolved entries.
-    Other source sections (``GIT``, ``GITHUB``, ``HTTP``) are skipped
-    because licenseal does not resolve from those.
+    Other source sections (``GIT``, ``GITHUB``, ``GIST``, ``HTTP``) are
+    skipped: their entries are not NuGet packages, and reading one as a
+    package would send its name to the registry.
 
     An entry (``    Pkg (1.0)``) is a resolved package at its pinned
     version. The more-indented entries under it (``      Dep (>= 1.0)``)

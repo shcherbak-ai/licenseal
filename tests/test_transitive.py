@@ -1136,9 +1136,9 @@ _NO_DEPENDENCY_PROJECTS = {
         'dependencies = ["second"]\n\n[[package]]\nname = "second"\nversion = "0.1.0"\n',
     },
     "nuget project reference": {
-        "App.csproj": '<Project Sdk="Microsoft.NET.Sdk">\n  <ItemGroup>\n'
+        "App/App.csproj": '<Project Sdk="Microsoft.NET.Sdk">\n  <ItemGroup>\n'
         '    <ProjectReference Include="..\\Lib\\Lib.csproj" />\n  </ItemGroup>\n</Project>\n',
-        "packages.lock.json": json.dumps(
+        "App/packages.lock.json": json.dumps(
             {"version": 1, "dependencies": {"net8.0": {"lib": {"type": "Project"}}}}
         ),
     },
@@ -1395,13 +1395,21 @@ class TestCargoOffRegistryDependencyClosure:
     ):
         self._write_project(tmp_path, manifest, forked_source)
         direct, _ = discover_all_dependencies(tmp_path)
-        assert [d.name for d in direct] == ["unrelated"]
+        assert sorted(d.name for d in direct) == ["forked", "unrelated"]
 
-        # ``forked`` itself has no row; what it pulls in from crates.io does.
-        assert self._rows(_resolve_tree(tmp_path, include_dev=False)) == {
+        # ``forked`` is a row of its own, at the locked version, beside what
+        # it pulls in from crates.io.
+        tree = _resolve_tree(tmp_path, include_dev=False)
+        assert self._rows(tree) == {
             self._UNRELATED,
+            ("forked", "==0.3.0", self.PROD, 0, (), "Cargo.toml"),
             *self._CLOSURE,
         }
+        forked = next(d for d in tree if d.name == "forked")
+        assert forked.origin == (
+            "git+https://example.org/forked.git@0123abc" if forked_source else "../forked"
+        )
+        assert all(d.origin == "" for d in tree if d.name != "forked")
 
     def test_same_closure_as_a_registry_dependency(self, tmp_path):
         # Control: with ``forked`` taken from crates.io the same crates are
@@ -1457,6 +1465,7 @@ class TestCargoOffRegistryDependencyClosure:
         assert self._rows(_resolve_tree(tmp_path, include_dev=False)) == production
         assert self._rows(_resolve_tree(tmp_path, include_dev=True)) == {
             *production,
+            ("test-fork", "==0.3.0", self.DEV, 0, (), "Cargo.toml"),
             ("test-dep", "==1.0.0", self.DEV, 1, ("test-fork",), ""),
         }
 
@@ -1476,8 +1485,9 @@ class TestCargoOffRegistryDependencyClosure:
             ),
             encoding="utf-8",
         )
-        assert discover_all_dependencies(tmp_path)[0] == []
+        assert [d.name for d in discover_all_dependencies(tmp_path)[0]] == ["forked"]
         assert self._rows(_resolve_tree(tmp_path, include_dev=False)) == {
+            ("forked", "==0.3.0", self.PROD, 0, (), "Cargo.toml"),
             ("fork-dep", "==1.0.0", self.PROD, 1, ("forked",), ""),
         }
 

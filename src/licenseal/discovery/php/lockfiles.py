@@ -14,9 +14,19 @@ Edges live in each entry's ``require`` map (transitive children). We extract
 them for ancestor attribution via :func:`_graph.compute_direct_ancestors`,
 matching the Go / npm / Java lockfile paths.
 
-Entries with ``dist.type == "path"`` are local source references (workspace
-sibling, vendored fork, monorepo internal) — never published, never license-
-resolvable via Packagist; they're filtered out.
+An entry with ``dist.type == "path"`` is a local source reference. Inside the
+scanned directory it is the project's own code (workspace sibling, monorepo
+internal) and gets no row; outside it, it is a row with the path as origin.
+
+An entry Composer took from a version-control repository looks, in the
+lockfile, like one it took from Packagist: both carry a ``source`` (the
+repository) and a ``dist``. The lockfile alone does not tell them apart, so
+the composer.json beside it is consulted. An entry is not a Packagist package
+when its ``source.url`` is the URL of a ``vcs`` repository that composer.json
+declares, or when its name is one a ``package`` repository there defines; its
+origin is then the repository plus the locked ``source.reference``. Every
+other entry is a registry row, including one from a ``composer`` repository
+(another registry).
 """
 
 from __future__ import annotations
@@ -25,6 +35,7 @@ from pathlib import Path
 from typing import Any, cast
 
 from licenseal._graph import compute_direct_ancestors
+from licenseal.discovery._origin import UNRECORDED, path_origin
 from licenseal.discovery._read import (
     load_json,
     record_unexpected_type,
@@ -33,7 +44,14 @@ from licenseal.discovery._read import (
     typed_field,
 )
 from licenseal.discovery._walk import walk_project_files
-from licenseal.discovery.php.composer_json import composer_map
+from licenseal.discovery.php.composer_json import (
+    VCS_REPOSITORY_TYPES,
+    composer_map,
+    composer_repositories,
+    inline_package_origins,
+    package_origin,
+    repository_key,
+)
 from licenseal.models import Dependency, DependencyGroup, Ecosystem
 
 # What a gap names when an entry of ``packages`` / ``packages-dev``, or a
@@ -82,12 +100,58 @@ def _license_array_to_raw(value: object) -> str:
 
 
 def _is_path_source(meta: dict[str, Any]) -> bool:
-    """Return True for path-type dist entries (workspace siblings)."""
+    """Return True for path-type dist entries."""
     dist = meta.get("dist")
     if isinstance(dist, dict) and dist.get("type") == "path":
         return True
     source = meta.get("source")
     return isinstance(source, dict) and source.get("type") == "path"
+
+
+def _declared_off_registry(lock: Path, scan_root: Path) -> tuple[set[str], dict[str, str | None]]:
+    """What the composer.json beside ``lock`` declares outside Packagist.
+
+    Returns ``(vcs_keys, inline)``: the comparable URLs of its ``vcs``
+    repositories, and the packages its ``package`` repositories define.
+    Both are empty when there is no readable composer.json there.
+    """
+    manifest = lock.parent / "composer.json"
+    data = root_table(manifest, load_json(manifest)) if manifest.is_file() else None
+    if data is None:
+        return set(), {}
+    repositories = composer_repositories(data)
+    vcs_keys = {
+        repository_key(repo["url"])
+        for repo in repositories
+        if repo.get("type") in VCS_REPOSITORY_TYPES and isinstance(repo.get("url"), str)
+    }
+    return vcs_keys, inline_package_origins(repositories, lock.parent, scan_root)
+
+
+def _entry_origin(
+    entry: dict[str, Any],
+    name: str,
+    lock_dir: Path,
+    scan_root: Path,
+    vcs_keys: set[str],
+    inline: dict[str, str | None],
+) -> str | None:
+    """Origin of a lock entry: empty for a registry package, ``None`` for own code."""
+    if _is_path_source(entry):
+        for table in (entry.get("dist"), entry.get("source")):
+            if isinstance(table, dict) and table.get("type") == "path":
+                url = table.get("url")
+                if isinstance(url, str) and url:
+                    return path_origin(url, lock_dir, scan_root)
+        # A path entry that records no path is not shown to be inside the
+        # scanned directory.
+        return UNRECORDED
+    source = entry.get("source")
+    source_url = source.get("url") if isinstance(source, dict) else None
+    from_vcs = isinstance(source_url, str) and repository_key(source_url) in vcs_keys
+    if from_vcs or name.lower() in inline:
+        return package_origin(entry, lock_dir, scan_root)
+    return ""
 
 
 def _is_platform_require(name: str) -> bool:
@@ -109,6 +173,7 @@ def parse_composer_lockfile(
     *,
     direct_names: set[str],
     include_dev: bool,
+    scan_root: Path | None = None,
 ) -> tuple[list[Dependency], LockfileLicenseMap]:
     """Parse ``composer.lock`` into ``(deps, license_map)``.
 
@@ -127,11 +192,18 @@ def parse_composer_lockfile(
         * ``license_map`` — ``{(name_lower, resolved_version): raw_license}``
           extracted from each entry's structured ``license`` field. Empty
           string values are kept (signals "lockfile knew this entry but
-          had no license" → resolver falls back to Packagist).
+          had no license" → resolver falls back to Packagist). Every entry
+          the lockfile holds is in the map, the project's own path packages
+          included: its keys are the names the lockfile covers.
+
+    ``scan_root`` is the scanned directory, the lockfile's own directory when
+    omitted. A path entry inside it gets no row.
     """
+    scan_root = scan_root or path.parent
     data = root_table(path, load_json(path))
     if data is None:
         return [], {}
+    vcs_keys, inline = _declared_off_registry(path, scan_root)
 
     raw_packages: list[dict[str, Any]] = []
     # Pre-compute the names that live in ``packages-dev`` so older lockfiles
@@ -167,14 +239,16 @@ def parse_composer_lockfile(
         if name is None or version is None:
             continue
         read += 1
-        if _is_path_source(entry):
-            continue
 
         # Canonicalize the version by stripping the decorative ``v`` prefix
         # so license-map keys and the pinned-version extractor agree on the
         # same shape regardless of how the publisher tagged the release.
         canonical_version = version.lstrip("v")
         normalized = name.lower()
+        license_map[(normalized, canonical_version)] = _license_array_to_raw(entry.get("license"))
+        origin = _entry_origin(entry, name, path.parent, scan_root, vcs_keys, inline)
+        if origin is None:
+            continue
         name_case.setdefault(normalized, name)
 
         # Edge map (lowercased child names) — drop platform requires;
@@ -183,8 +257,6 @@ def parse_composer_lockfile(
         edges.setdefault(normalized, set()).update(
             child.lower() for child in require if not _is_platform_require(child)
         )
-
-        license_map[(normalized, canonical_version)] = _license_array_to_raw(entry.get("license"))
 
         if (normalized, canonical_version) in seen:
             continue
@@ -205,6 +277,7 @@ def parse_composer_lockfile(
             ecosystem=Ecosystem.PHP,
             group=DependencyGroup.DEV if is_dev else DependencyGroup.PROD,
             depth=0 if is_direct else 1,
+            origin=origin,
         )
         pending.append((dep, is_direct))
 
@@ -230,6 +303,7 @@ def parse_composer_lockfile(
                 group=dep.group,
                 depth=dep.depth,
                 direct_ancestors=ancestors.get(dep.name.lower(), ()),
+                origin=dep.origin,
             )
         )
     return out, license_map

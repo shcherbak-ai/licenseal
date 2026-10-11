@@ -3300,3 +3300,882 @@ class TestNpmLockfilesOffRegistry:
         assert row["origin"] == "git+https://github.com/team/git-fork@v1.2.0"
         assert (row["license"], row["resolved_version"]) == ("UNKNOWN", "1.2.0")
         assert _requests_mentioning("git-fork") == []
+
+
+# ------------------------------------------------------------------ Rust: Cargo
+
+_CRATES_IO_INDEX = "registry+https://github.com/rust-lang/crates.io-index"
+_TEAM = "https://git.example.org/team"
+
+
+def _mock_crate(
+    name: str, version: str, license_id: str = "MIT", requires: tuple[str, ...] = ()
+) -> None:
+    """Answer crates.io for ``name``: its newest version, license, and dependencies."""
+    base = f"https://crates.io/api/v1/crates/{name}"
+    respx.get(base).mock(
+        return_value=httpx.Response(200, json={"crate": {"max_stable_version": version}})
+    )
+    respx.get(f"{base}/{version}").mock(
+        return_value=httpx.Response(200, json={"version": {"num": version, "license": license_id}})
+    )
+    respx.get(f"{base}/{version}/dependencies").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "dependencies": [
+                    {"crate_id": child, "kind": "normal", "req": "^1.0", "optional": False}
+                    for child in requires
+                ]
+            },
+        )
+    )
+
+
+def _cargo_lock(*packages: tuple[str, str, str, tuple[str, ...]]) -> str:
+    """Cargo.lock text from ``(name, version, source, dependencies)`` packages.
+
+    An empty ``source`` writes no ``source`` line: a crate built from a path.
+    """
+    blocks = []
+    for name, version, source, dependencies in packages:
+        lines = ["[[package]]", f'name = "{name}"', f'version = "{version}"']
+        if source:
+            lines.append(f'source = "{source}"')
+        if dependencies:
+            lines.append(f"dependencies = {json.dumps(list(dependencies))}")
+        blocks.append("\n".join(lines))
+    return "version = 3\n\n" + "\n\n".join(blocks) + "\n"
+
+
+class TestCargoManifestSources:
+    """Cargo.toml without a Cargo.lock."""
+
+    _FORKS = {
+        "git-fork": f"git+{_TEAM}/git-fork.git@0123abcd",
+        "tag-fork": f"git+{_TEAM}/tag-fork@v2.0.0",
+        "branch-fork": f"git+{_TEAM}/branch-fork@next",
+        "bare-fork": f"git+{_TEAM}/bare-fork",
+        "real-fork": f"git+{_TEAM}/real-fork",
+        "build-fork": f"git+{_TEAM}/build-fork",
+        "unix-fork": f"git+{_TEAM}/unix-fork",
+        "dir-outside": "../dir-outside",
+        "versioned-outside": "../versioned-outside",
+    }
+
+    @staticmethod
+    def _project(tmp_path: Path) -> Path:
+        project = tmp_path / "project"
+        _write(
+            project / "Cargo.toml",
+            """\
+            [package]
+            name = "app"
+            version = "0.1.0"
+            license = "MIT"
+
+            [dependencies]
+            regular = "1.0"
+            mirrored = { version = "2.0", registry = "internal" }
+            tag-fork = { git = "https://git.example.org/team/tag-fork", tag = "v2.0.0" }
+            branch-fork = { git = "https://git.example.org/team/branch-fork", branch = "next" }
+            bare-fork = { git = "https://git.example.org/team/bare-fork" }
+            renamed = { package = "real-fork", git = "https://git.example.org/team/real-fork" }
+            dir-outside = { path = "../dir-outside" }
+            versioned-outside = { path = "../versioned-outside", version = "0.4" }
+            dir-inside = { path = "crates/dir-inside" }
+
+            [dependencies.git-fork]
+            git = "https://user:tok3n@git.example.org/team/git-fork.git"
+            rev = "0123abcd"
+            branch = "ignored-beside-rev"
+
+            [build-dependencies]
+            build-fork = { git = "https://git.example.org/team/build-fork" }
+
+            [dev-dependencies]
+            dev-fork = { git = "https://git.example.org/team/dev-fork" }
+
+            [target.'cfg(unix)'.dependencies]
+            unix-fork = { git = "https://git.example.org/team/unix-fork" }
+            """,
+        )
+        return project
+
+    def _mock_registry(self) -> None:
+        # crates.io owns every one of the fork names, under another license.
+        for name in (*self._FORKS, "renamed", "dev-fork", "dir-inside"):
+            _mock_crate(name, "9.9.9", "GPL-3.0-only")
+        _mock_crate("regular", "1.0.0")
+        _mock_crate("mirrored", "2.0.0")
+        _refuse_everything_else()
+
+    @respx.mock
+    def test_git_and_path_dependencies_are_unknown_rows(self, tmp_path):
+        project = self._project(tmp_path)
+        self._mock_registry()
+        result, data = _check_json(project, "--no-strict")
+        assert result.exit_code == 0
+        assert _origins(data) == {"regular": "", "mirrored": "", **self._FORKS}
+        rows = _rows(data)
+        for name in self._FORKS:
+            assert (rows[name]["license"], rows[name]["resolved_version"]) == ("UNKNOWN", "")
+            assert rows[name]["source"] == "Cargo.toml"
+        # A ``registry`` key names another registry, which is not an
+        # off-registry source: crates.io is asked.
+        assert rows["mirrored"]["license"] == "MIT"
+        assert _requests_mentioning("mirrored")
+        assert _requests_mentioning(*self._FORKS, "renamed", "dev-fork", "dir-inside") == []
+        assert "tok3n" not in json.dumps(data)
+
+    @respx.mock
+    def test_unknown_rows_fail_a_strict_scan(self, tmp_path):
+        project = self._project(tmp_path)
+        self._mock_registry()
+        result, data = _check_json(project)
+        assert result.exit_code == 1
+        assert data["summary"]["unknown"] == len(self._FORKS)
+
+    @respx.mock
+    def test_dev_git_dependency_is_a_dev_row(self, tmp_path):
+        project = self._project(tmp_path)
+        self._mock_registry()
+        result, data = _check_json(project, "--no-strict", "--dev")
+        assert result.exit_code == 0
+        row = _rows(data)["dev-fork"]
+        assert (row["origin"], row["group"]) == (f"git+{_TEAM}/dev-fork", "dev")
+        assert _requests_mentioning("dev-fork") == []
+
+    @respx.mock
+    def test_patch_and_replace_redirect_registry_crates(self, tmp_path):
+        project = tmp_path / "project"
+        _write(
+            project / "Cargo.toml",
+            """\
+            [package]
+            name = "app"
+            version = "0.1.0"
+            license = "MIT"
+
+            [dependencies]
+            regular = "1.0"
+            patched = "1.0"
+            replaced = "2.0"
+            local-patch = "3.0"
+            repinned = "1.0"
+
+            [patch.crates-io]
+            patched = { git = "https://git.example.org/team/patched", branch = "fix" }
+            local-patch = { path = "vendor/local-patch" }
+            deep-patch = { git = "https://git.example.org/team/deep-patch" }
+            own-deep = { path = "vendor/own-deep" }
+            repinned = { version = "1.0.5", registry = "internal" }
+
+            [replace]
+            "replaced:2.0.0" = { path = "../replaced" }
+            """,
+        )
+        # ``regular`` needs two crates the manifest redirects, and a plain one.
+        _mock_crate("regular", "1.0.0", requires=("deep-patch", "own-deep", "plain-child"))
+        _mock_crate("plain-child", "1.0.0")
+        _mock_crate("repinned", "1.0.0")
+        redirected = ("patched", "replaced", "local-patch", "deep-patch", "own-deep")
+        for name in redirected:
+            _mock_crate(name, "9.9.9", "GPL-3.0-only")
+        _refuse_everything_else()
+        result, data = _check_json(project, "--no-strict")
+        assert result.exit_code == 0
+        assert _origins(data) == {
+            "regular": "",
+            "plain-child": "",
+            # An entry that only names another registry is not a redirect.
+            "repinned": "",
+            "patched": f"git+{_TEAM}/patched@fix",
+            "replaced": "../replaced",
+            # Redirected wherever it appears in the graph, not only where it
+            # is declared. A redirect to a path inside the scanned directory
+            # is the project's own code: no row.
+            "deep-patch": f"git+{_TEAM}/deep-patch",
+        }
+        rows = _rows(data)
+        assert rows["deep-patch"]["direct_ancestors"] == ["regular"]
+        assert all(
+            rows[name]["license"] == "UNKNOWN" for name in ("patched", "replaced", "deep-patch")
+        )
+        assert _requests_mentioning(*redirected) == []
+
+
+class TestCargoLockSources:
+    """What a Cargo.lock records, read beside the Cargo.toml that declares it."""
+
+    _OFF_REGISTRY = {
+        "git-fork": (f"git+{_TEAM}/git-fork.git@0123abcd", "0.5.0"),
+        "dir-outside": ("../dir-outside", "0.2.0"),
+        "patched": (f"git+{_TEAM}/patched@89abcdef", "1.0.9"),
+        "deep-patch": ("../deep-patch", "0.7.0"),
+    }
+    _REGISTRY = {
+        "regular": "1.0.3",
+        "mirrored": "2.0.1",
+        "sparse-mirrored": "2.1.0",
+        "via-git": "3.0.0",
+        "via-path": "1.1.0",
+        "via-own": "1.2.0",
+    }
+
+    def _project(self, tmp_path: Path) -> Path:
+        project = tmp_path / "project"
+        _write(
+            project / "Cargo.toml",
+            """\
+            [package]
+            name = "app"
+            version = "0.1.0"
+            license = "MIT"
+
+            [dependencies]
+            regular = "1.0"
+            mirrored = { version = "2.0", registry = "internal" }
+            sparse-mirrored = { version = "2.1", registry = "sparse-internal" }
+            git-fork = { git = "https://git.example.org/team/git-fork.git", branch = "main" }
+            dir-outside = { path = "../dir-outside" }
+            dir-inside = { path = "crates/dir-inside" }
+            patched = "1.0"
+
+            [patch.crates-io]
+            patched = { git = "https://git.example.org/team/patched" }
+            deep-patch = { path = "../deep-patch" }
+            """,
+        )
+        internal = "https://cargo.internal.example.org/index"
+        roots = ("regular", "mirrored", "sparse-mirrored", "git-fork", "dir-outside")
+        (project / "Cargo.lock").write_text(
+            _cargo_lock(
+                ("app", "0.1.0", "", (*roots, "dir-inside", "patched")),
+                ("regular", "1.0.3", _CRATES_IO_INDEX, ("deep-patch",)),
+                ("mirrored", "2.0.1", f"registry+{internal}", ()),
+                ("sparse-mirrored", "2.1.0", f"sparse+{internal}/", ()),
+                (
+                    "git-fork",
+                    "0.5.0",
+                    f"git+{_TEAM}/git-fork.git?branch=main#0123abcd",
+                    ("via-git",),
+                ),
+                ("via-git", "3.0.0", _CRATES_IO_INDEX, ()),
+                ("dir-outside", "0.2.0", "", ("via-path",)),
+                ("via-path", "1.1.0", _CRATES_IO_INDEX, ()),
+                ("dir-inside", "0.1.0", "", ("via-own",)),
+                ("via-own", "1.2.0", _CRATES_IO_INDEX, ()),
+                ("patched", "1.0.9", f"git+{_TEAM}/patched#89abcdef", ()),
+                ("deep-patch", "0.7.0", "", ()),
+            ),
+            encoding="utf-8",
+        )
+        for name, version in self._REGISTRY.items():
+            _mock_crate(name, version)
+        # crates.io owns the other names too, at the locked versions.
+        for name, (_origin, version) in self._OFF_REGISTRY.items():
+            _mock_crate(name, version, "GPL-3.0-only")
+        _mock_crate("dir-inside", "0.1.0", "GPL-3.0-only")
+        _refuse_everything_else()
+        return project
+
+    @respx.mock
+    def test_git_and_path_crates_are_rows_at_the_locked_version(self, tmp_path):
+        project = self._project(tmp_path)
+        result, data = _check_json(project, "--no-strict")
+        assert result.exit_code == 0
+        assert _versions(data) == {
+            **{name: ("", version) for name, version in self._REGISTRY.items()},
+            **self._OFF_REGISTRY,
+        }
+        rows = _rows(data)
+        assert all(rows[name]["license"] == "UNKNOWN" for name in self._OFF_REGISTRY)
+        assert all(rows[name]["license"] == "MIT" for name in self._REGISTRY)
+        # What a git or path crate pulls in from the registry names it, and
+        # so does what the project's own path crate pulls in.
+        assert rows["via-git"]["direct_ancestors"] == ["git-fork"]
+        assert rows["via-path"]["direct_ancestors"] == ["dir-outside"]
+        assert rows["via-own"]["direct_ancestors"] == ["dir-inside"]
+        assert rows["deep-patch"]["direct_ancestors"] == ["regular"]
+        assert rows["git-fork"]["source"] == "Cargo.toml"
+        assert _requests_mentioning(*self._OFF_REGISTRY, "dir-inside") == []
+        # A crate locked from another registry is looked up on crates.io.
+        assert _requests_mentioning("sparse-mirrored")
+
+    @respx.mock
+    def test_review_keyed_on_the_origin_clears_each_row(self, tmp_path):
+        project = self._project(tmp_path)
+        result, data = _check_json(project)
+        assert result.exit_code == 1
+        stanzas = "".join(
+            f'[[review]]\necosystem = "rust"\npackage = "{dep["name"]}"\n'
+            f'source = "{dep["origin"]}"\nlicense = "MIT"\nnote = "read at that source"\n\n'
+            for dep in data["dependencies"]
+            if dep["origin"]
+        )
+        (project / REVIEW_FILE_NAME).write_text(stanzas, encoding="utf-8", newline="\n")
+        result, data = _check_json(project)
+        assert result.exit_code == 0
+        assert data["summary"]["reviewed"] == len(self._OFF_REGISTRY)
+        assert _requests_mentioning(*self._OFF_REGISTRY) == []
+
+
+# ---------------------------------------------------------------- PHP: Composer
+
+_VENDOR_GIT = "https://git.example.org/acme"
+
+
+def _mock_packagist(name: str, version: str = "1.0.0", license_id: str = "MIT") -> None:
+    respx.get(f"https://repo.packagist.org/p2/{name}.json").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "packages": {name: [{"version": version, "license": [license_id], "require": {}}]}
+            },
+        )
+    )
+
+
+_COMPOSER_REPOSITORIES = [
+    {
+        "type": "package",
+        "package": {
+            "name": "acme/inline-git",
+            "version": "1.2.0",
+            "source": {
+                "type": "git",
+                "url": "https://tok3n@git.example.org/acme/inline-git.git",
+                "reference": "v1.2.0",
+            },
+        },
+    },
+    {
+        "type": "package",
+        "package": [
+            {
+                "name": "acme/inline-zip",
+                "version": "2.0.0",
+                "dist": {
+                    "type": "zip",
+                    "url": "https://dl.example.org/inline-zip-2.0.0.zip",
+                    "shasum": "abc123",
+                },
+            },
+            {"name": "acme/inline-bare", "version": "0.1.0"},
+            {
+                "name": "acme/inline-own",
+                "version": "0.2.0",
+                "dist": {"type": "path", "url": "lib/inline-own"},
+            },
+        ],
+    },
+    {"type": "path", "url": "./packages/*"},
+    {"type": "path", "url": "../outside-lib"},
+    {"type": "vcs", "url": f"{_VENDOR_GIT}/vcs-fork"},
+    {"type": "hg", "url": "https://hg.example.org/acme/hg-fork"},
+    {"type": "composer", "url": "https://packages.internal.example.org"},
+]
+
+_COMPOSER_REQUIRE = {
+    "php": "^8.1",
+    "acme/regular": "^1.0",
+    "acme/mirrored": "^1.0",
+    "acme/inline-git": "^1.2",
+    "acme/inline-zip": "^2.0",
+    "acme/inline-bare": "*",
+    "acme/inline-own": "*",
+    "acme/own-lib": "*",
+    "acme/vcs-fork": "dev-main",
+    "acme/hg-fork": "dev-default",
+    "acme/outside-lib": "*",
+}
+
+
+def _composer_project(tmp_path: Path, repositories: object = None) -> Path:
+    """A composer.json that takes packages from every kind of repository."""
+    project = tmp_path / "project"
+    manifest = {
+        "name": "acme/app",
+        "license": "MIT",
+        "repositories": _COMPOSER_REPOSITORIES if repositories is None else repositories,
+        "require": _COMPOSER_REQUIRE,
+        "require-dev": {"acme/own-lib": "*"},
+    }
+    _write(project / "composer.json", json.dumps(manifest))
+    # The project's own package, held by the ``packages/*`` path repository.
+    own = {"name": "acme/own-lib", "require": {"acme/own-dep": "^1.0"}}
+    _write(project / "packages" / "own-lib" / "composer.json", json.dumps(own))
+    return project
+
+
+class TestComposerManifestSources:
+    """composer.json without a composer.lock."""
+
+    _INLINE = {
+        "acme/inline-git": f"git+{_VENDOR_GIT}/inline-git.git@v1.2.0",
+        "acme/inline-zip": "https://dl.example.org/inline-zip-2.0.0.zip#abc123",
+        "acme/inline-bare": "unrecorded source",
+    }
+    # Looked up on Packagist: registry packages, and the packages of a
+    # ``vcs`` repository or of a ``path`` repository outside the scanned
+    # directory, which composer.json does not name.
+    _LOOKED_UP = (
+        "acme/regular",
+        "acme/mirrored",
+        "acme/own-dep",
+        "acme/vcs-fork",
+        "acme/hg-fork",
+        "acme/outside-lib",
+    )
+
+    @respx.mock
+    @pytest.mark.parametrize("as_map", [False, True], ids=["list", "map"])
+    def test_inline_packages_are_rows_and_own_path_packages_are_not(self, tmp_path, as_map):
+        repositories: object = _COMPOSER_REPOSITORIES
+        if as_map:
+            repositories = {f"repo-{i}": repo for i, repo in enumerate(_COMPOSER_REPOSITORIES)}
+        project = _composer_project(tmp_path, repositories)
+        for name in self._LOOKED_UP:
+            _mock_packagist(name)
+        for name in (*self._INLINE, "acme/inline-own", "acme/own-lib"):
+            _mock_packagist(name, "9.9.9", "GPL-3.0-only")
+        _refuse_everything_else()
+        result, data = _check_json(project, "--no-strict", "--dev")
+        assert result.exit_code == 0
+        assert _origins(data) == {**dict.fromkeys(self._LOOKED_UP, ""), **self._INLINE}
+        rows = _rows(data)
+        assert all(rows[name]["license"] == "UNKNOWN" for name in self._INLINE)
+        assert all(rows[name]["resolved_version"] == "" for name in self._INLINE)
+        assert rows["acme/own-dep"]["source"] == "packages/own-lib/composer.json"
+        assert _requests_mentioning("inline-", "own-lib") == []
+        assert all(_requests_mentioning(name) for name in self._LOOKED_UP)
+        assert "tok3n" not in json.dumps(data)
+        # The inline package at a path inside the scanned directory, and both
+        # requirements on the package the path repository holds.
+        assert "Excluded 3 local PHP workspace package reference(s)" in result.output
+
+    @respx.mock
+    def test_malformed_repository_entries_are_read_as_absent(self, tmp_path):
+        project = tmp_path / "project"
+        manifest = {
+            "name": "acme/app",
+            "license": "MIT",
+            "repositories": [
+                "packagist.org",
+                {"type": "package", "package": "not a table"},
+                {"type": "package", "package": [{"version": "1.0.0"}, 7]},
+                {"type": "path", "url": 7},
+                {"type": "vcs", "url": None},
+            ],
+            "require": {"acme/regular": "^1.0"},
+        }
+        _write(project / "composer.json", json.dumps(manifest))
+        _write(project / "composer.lock", json.dumps({"packages": []}))
+        _mock_packagist("acme/regular")
+        _refuse_everything_else()
+        result, data = _check_json(project, "--no-strict")
+        assert result.exit_code == 0
+        assert _origins(data) == {"acme/regular": ""}
+
+    @respx.mock
+    def test_repositories_that_are_not_a_list_or_a_map_declare_nothing(self, tmp_path):
+        project = tmp_path / "project"
+        manifest = {"repositories": "none", "require": {"acme/regular": "^1.0"}}
+        _write(project / "composer.json", json.dumps(manifest))
+        _mock_packagist("acme/regular")
+        _refuse_everything_else()
+        result, data = _check_json(project, "--no-strict")
+        assert result.exit_code == 0
+        assert _origins(data) == {"acme/regular": ""}
+
+
+def _lock_entry(name: str, version: str, **fields: object) -> dict:
+    return {"name": name, "version": version, "license": ["MIT"], **fields}
+
+
+class TestComposerLockSources:
+    """composer.lock, read beside the composer.json that declares the repositories."""
+
+    _OFF_REGISTRY = {
+        "acme/vcs-fork": ("git+git.example.org:acme/vcs-fork.git@0123abcd", "dev-main"),
+        # The repository URL is reported as the lockfile writes it.
+        "acme/hg-fork": ("hg+https://hg.example.org/acme/hg-fork/@tip", "dev-default"),
+        "acme/inline-git": (f"git+{_VENDOR_GIT}/inline-git.git@89abcdef", "1.2.0"),
+        "acme/inline-zip": ("https://dl.example.org/inline-zip-2.0.0.zip#abc123", "2.0.0"),
+        "acme/inline-bare": ("unrecorded source", "0.1.0"),
+        "acme/outside-lib": ("../outside-lib", "dev-main"),
+    }
+    _REGISTRY = {
+        "acme/regular": "1.0.0",
+        "acme/mirrored": "1.4.0",
+        "acme/child": "1.1.0",
+        "acme/via-vcs": "1.0.0",
+        "acme/own-dep": "1.0.0",
+    }
+
+    def _lock(self) -> dict:
+        hub = "https://github.com/acme"
+        internal = "https://packages.internal.example.org/dist"
+        return {
+            "packages": [
+                _lock_entry(
+                    "acme/regular",
+                    "v1.0.0",
+                    source={"type": "git", "url": f"{hub}/regular.git", "reference": "aaa"},
+                    dist={"type": "zip", "url": f"{hub}/regular/zipball/aaa", "shasum": ""},
+                    require={"php": "^8.1", "acme/child": "^1.0"},
+                ),
+                _lock_entry("acme/child", "1.1.0"),
+                _lock_entry("acme/mirrored", "1.4.0", dist={"type": "zip", "url": internal}),
+                _lock_entry(
+                    "acme/vcs-fork",
+                    "dev-main",
+                    source={
+                        "type": "git",
+                        "url": "git@git.example.org:acme/vcs-fork.git",
+                        "reference": "0123abcd",
+                    },
+                    dist={"type": "zip", "url": f"{_VENDOR_GIT}/vcs-fork/zipball/0123abcd"},
+                    license=["GPL-3.0-only"],
+                    require={"acme/via-vcs": "^1.0"},
+                ),
+                _lock_entry("acme/via-vcs", "1.0.0"),
+                _lock_entry(
+                    "acme/hg-fork",
+                    "dev-default",
+                    source={
+                        "type": "hg",
+                        "url": "https://hg.example.org/acme/hg-fork/",
+                        "reference": "tip",
+                    },
+                ),
+                _lock_entry(
+                    "acme/inline-git",
+                    "1.2.0",
+                    source={
+                        "type": "git",
+                        "url": f"{_VENDOR_GIT}/inline-git.git",
+                        "reference": "89abcdef",
+                    },
+                ),
+                _lock_entry(
+                    "acme/inline-zip",
+                    "2.0.0",
+                    dist={
+                        "type": "zip",
+                        "url": "https://dl.example.org/inline-zip-2.0.0.zip",
+                        "shasum": "abc123",
+                    },
+                ),
+                _lock_entry("acme/inline-bare", "0.1.0", source={"type": "git"}, dist="none"),
+                _lock_entry(
+                    "acme/inline-own", "0.2.0", dist={"type": "path", "url": "lib/inline-own"}
+                ),
+                _lock_entry(
+                    "acme/outside-lib",
+                    "dev-main",
+                    dist={"type": "path", "url": "../outside-lib", "reference": "xyz"},
+                    license=["GPL-3.0-only"],
+                ),
+                _lock_entry(
+                    "acme/own-lib", "dev-main", dist={"type": "path", "url": "packages/own-lib"}
+                ),
+                _lock_entry("acme/own-dep", "1.0.0"),
+            ],
+            "packages-dev": [],
+        }
+
+    def _project(self, tmp_path: Path, repositories: object = None) -> Path:
+        project = _composer_project(tmp_path, repositories)
+        _write(project / "composer.lock", json.dumps(self._lock()))
+        # Packagist owns every name, under another license.
+        for name in (*self._OFF_REGISTRY, *self._REGISTRY, "acme/own-lib", "acme/inline-own"):
+            _mock_packagist(name, "9.9.9", "GPL-3.0-only")
+        _refuse_everything_else()
+        return project
+
+    @respx.mock
+    def test_entries_from_declared_repositories_are_unknown_rows(self, tmp_path):
+        project = self._project(tmp_path)
+        result, data = _check_json(project, "--no-strict", "--dev")
+        assert result.exit_code == 0
+        assert _versions(data) == {
+            **{name: ("", version) for name, version in self._REGISTRY.items()},
+            **self._OFF_REGISTRY,
+        }
+        rows = _rows(data)
+        # The license the lockfile records for such an entry is not used.
+        assert all(rows[name]["license"] == "UNKNOWN" for name in self._OFF_REGISTRY)
+        assert all(rows[name]["license"] == "MIT" for name in self._REGISTRY)
+        assert rows["acme/via-vcs"]["direct_ancestors"] == ["acme/vcs-fork"]
+        assert rows["acme/vcs-fork"]["source"] == "composer.json"
+        # The lockfile answers for every name it holds: nothing is asked.
+        assert respx.calls.call_count == 0
+
+    @respx.mock
+    def test_without_declared_repositories_the_same_entries_are_registry_rows(self, tmp_path):
+        # The lockfile alone does not say that an entry came from a
+        # version-control repository: only a path entry does.
+        project = self._project(tmp_path, repositories=[])
+        result, data = _check_json(project, "--no-strict", "--dev")
+        origins = _origins(data)
+        assert origins.pop("acme/outside-lib") == "../outside-lib"
+        assert "acme/inline-own" not in origins
+        assert "acme/own-lib" not in origins
+        assert set(origins.values()) == {""}
+        # As a registry row it has the license the lockfile records.
+        assert _rows(data)["acme/vcs-fork"]["license"] == "GPL-3.0-only"
+        assert result.exit_code == 1
+
+    @respx.mock
+    def test_review_keyed_on_the_locked_commit_clears_the_row(self, tmp_path):
+        project = self._project(tmp_path)
+        result, data = _check_json(project)
+        assert result.exit_code == 1
+        stanzas = "".join(
+            f'[[review]]\necosystem = "php"\npackage = "{dep["name"]}"\n'
+            f'source = "{dep["origin"]}"\nlicense = "MIT"\nnote = "read at that source"\n\n'
+            for dep in data["dependencies"]
+            if dep["origin"]
+        )
+        (project / REVIEW_FILE_NAME).write_text(stanzas, encoding="utf-8", newline="\n")
+        result, data = _check_json(project)
+        assert result.exit_code == 0
+        assert data["summary"]["reviewed"] == len(self._OFF_REGISTRY)
+        assert respx.calls.call_count == 0
+
+    @respx.mock
+    def test_lockfile_without_a_manifest_beside_it(self, tmp_path):
+        project = tmp_path / "project"
+        _write(project / "composer.lock", json.dumps(self._lock()))
+        _refuse_everything_else()
+        _result, data = _check_json(project, "--no-strict")
+        origins = _origins(data)
+        assert origins.pop("acme/outside-lib") == "../outside-lib"
+        assert set(origins.values()) == {""}
+        assert respx.calls.call_count == 0
+
+
+# ------------------------------------------------- .NET: project references
+
+
+def _mock_nuspec(name: str, version: str, license_id: str = "MIT") -> None:
+    lower = name.lower()
+    respx.get(f"https://api.nuget.org/v3-flatcontainer/{lower}/{version}/{lower}.nuspec").mock(
+        return_value=httpx.Response(
+            200,
+            text=(
+                '<?xml version="1.0" encoding="utf-8"?>\n'
+                '<package xmlns="http://schemas.microsoft.com/packaging/2013/05/nuspec.xsd">'
+                f"<metadata><id>{name}</id><version>{version}</version>"
+                f'<license type="expression">{license_id}</license></metadata></package>'
+            ),
+        )
+    )
+
+
+_APP_CSPROJ = """\
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <LibsDir>..\\..\\..\\libs</LibsDir>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="Regular.Lib" Version="1.0.0" />
+    <PackageReference Include="Pinned.Lib" />
+    <ProjectReference Include="..\\..\\..\\Shared\\Shared.csproj" />
+    <ProjectReference Include="$(LibsDir)\\ByProperty\\ByProperty.fsproj" />
+    <ProjectReference Include="$(SolutionDir)Unlocated\\Unlocated.csproj" />
+    <ProjectReference Include="$(RepoRoot)src\\Sibling\\SIBLING.csproj" />
+    <ProjectReference Include="$(MSBuildThisFileDirectory)..\\Sibling\\Sibling.csproj" />
+    <ProjectReference Include="..\\Sibling\\Sibling.csproj; ..\\..\\..\\Listed\\Listed.csproj" />
+  </ItemGroup>
+</Project>
+"""
+
+
+class TestDotnetProjectReferences:
+    """A ``<ProjectReference>`` is a row only when it leaves the scanned directory."""
+
+    _OUTSIDE = {
+        "Shared": "..\\..\\..\\Shared\\Shared.csproj",
+        # Located through the project's own property, reported as written.
+        "ByProperty": "$(LibsDir)\\ByProperty\\ByProperty.fsproj",
+        # A property the project file does not define, and no project file of
+        # that name in the scanned tree: not shown to be inside.
+        "Unlocated": "$(SolutionDir)Unlocated\\Unlocated.csproj",
+        "Listed": "..\\..\\..\\Listed\\Listed.csproj",
+    }
+
+    @staticmethod
+    def _project(tmp_path: Path) -> Path:
+        project = tmp_path / "project"
+        _write(project / "src" / "App" / "App.csproj", _APP_CSPROJ)
+        # Central package versions: one for a package, one that happens to
+        # carry the name of a referenced project.
+        _write(
+            project / "Directory.Packages.props",
+            """\
+            <Project>
+              <ItemGroup>
+                <PackageVersion Include="Pinned.Lib" Version="2.0.0" />
+                <PackageVersion Include="Shared" Version="9.9.9" />
+              </ItemGroup>
+            </Project>
+            """,
+        )
+        _write(
+            project / "src" / "Sibling" / "Sibling.csproj", '<Project Sdk="Microsoft.NET.Sdk" />\n'
+        )
+        return project
+
+    def _mock_registry(self) -> None:
+        _mock_nuspec("Regular.Lib", "1.0.0")
+        _mock_nuspec("Pinned.Lib", "2.0.0")
+        # NuGet owns every one of the project names, under another license.
+        for name in (*self._OUTSIDE, "Sibling"):
+            _mock_nuspec(name, "9.9.9", "GPL-3.0-only")
+        _refuse_everything_else()
+
+    @respx.mock
+    def test_reference_outside_the_scanned_directory_is_an_unknown_row(self, tmp_path):
+        project = self._project(tmp_path)
+        self._mock_registry()
+        result, data = _check_json(project, "--no-strict")
+        assert result.exit_code == 0
+        assert _versions(data) == {
+            "Regular.Lib": ("", "1.0.0"),
+            "Pinned.Lib": ("", "2.0.0"),
+            # No version is taken from the central package versions.
+            **{name: (origin, "") for name, origin in self._OUTSIDE.items()},
+        }
+        rows = _rows(data)
+        assert all(rows[name]["license"] == "UNKNOWN" for name in self._OUTSIDE)
+        assert rows["Shared"]["source"] == "src/App/App.csproj"
+        assert _requests_mentioning(*self._OUTSIDE, "Sibling") == []
+
+    @respx.mock
+    def test_unknown_rows_fail_a_strict_scan_until_reviewed(self, tmp_path):
+        project = self._project(tmp_path)
+        self._mock_registry()
+        result, data = _check_json(project)
+        assert result.exit_code == 1
+        # A path holds backslashes: the stanza is written by the scaffold.
+        report = project / "report.json"
+        result = CliRunner().invoke(
+            main, ["init-review-file", "--path", str(project), "--from-report", str(report)]
+        )
+        assert result.exit_code == 0
+        scaffold = (project / REVIEW_FILE_NAME).read_text(encoding="utf-8")
+        assert 'source = "..\\\\..\\\\..\\\\Shared\\\\Shared.csproj"\n' in scaffold
+        (project / REVIEW_FILE_NAME).write_text(
+            scaffold.replace('license = ""', 'license = "MIT"'), encoding="utf-8", newline="\n"
+        )
+        result, data = _check_json(project)
+        assert result.exit_code == 0
+        assert data["summary"]["reviewed"] == len(self._OUTSIDE)
+        assert _requests_mentioning(*self._OUTSIDE, "Sibling") == []
+
+
+# -------------------------------------------------------- Maven: system scope
+
+
+class TestMavenSystemScope:
+    """A ``system``-scoped dependency is a local JAR: no repository is asked."""
+
+    _LOCAL = {
+        "com.vendor:outside-jar": "${libs.dir}/outside-jar-3.1.jar",
+        # A property the POM does not define: not shown to be inside.
+        "com.vendor:jdk-tools": "${java.home}/../lib/tools.jar",
+        "com.vendor:pathless": "unrecorded source",
+    }
+
+    @staticmethod
+    def _project(tmp_path: Path) -> Path:
+        project = tmp_path / "project"
+        _write(
+            project / "pom.xml",
+            """\
+            <project xmlns="http://maven.apache.org/POM/4.0.0">
+              <modelVersion>4.0.0</modelVersion>
+              <groupId>org.example</groupId>
+              <artifactId>app</artifactId>
+              <version>1.0.0</version>
+              <properties>
+                <libs.dir>${project.basedir}/../libs</libs.dir>
+              </properties>
+              <dependencies>
+                <dependency>
+                  <groupId>org.example</groupId>
+                  <artifactId>regular</artifactId>
+                  <version>1.0</version>
+                </dependency>
+                <dependency>
+                  <groupId>com.vendor</groupId>
+                  <artifactId>outside-jar</artifactId>
+                  <version>3.1</version>
+                  <scope>system</scope>
+                  <systemPath>${libs.dir}/outside-jar-3.1.jar</systemPath>
+                </dependency>
+                <dependency>
+                  <groupId>com.vendor</groupId>
+                  <artifactId>jdk-tools</artifactId>
+                  <version>1.8</version>
+                  <scope>system</scope>
+                  <systemPath>${java.home}/../lib/tools.jar</systemPath>
+                </dependency>
+                <dependency>
+                  <groupId>com.vendor</groupId>
+                  <artifactId>inside-jar</artifactId>
+                  <version>2.0</version>
+                  <scope>system</scope>
+                  <systemPath>${basedir}/lib/inside-jar-2.0.jar</systemPath>
+                </dependency>
+                <dependency>
+                  <groupId>com.vendor</groupId>
+                  <artifactId>pathless</artifactId>
+                  <version>1.0</version>
+                  <scope>system</scope>
+                </dependency>
+              </dependencies>
+            </project>
+            """,
+        )
+        respx.get(
+            "https://repo.maven.apache.org/maven2/org/example/regular/1.0/regular-1.0.pom"
+        ).mock(
+            return_value=httpx.Response(
+                200,
+                text=(
+                    '<project xmlns="http://maven.apache.org/POM/4.0.0">'
+                    "<groupId>org.example</groupId><artifactId>regular</artifactId>"
+                    "<version>1.0</version>"
+                    "<licenses><license><name>MIT</name></license></licenses></project>"
+                ),
+            )
+        )
+        _refuse_everything_else()
+        return project
+
+    @respx.mock
+    def test_local_jar_outside_the_scanned_directory_is_an_unknown_row(self, tmp_path):
+        project = self._project(tmp_path)
+        result, data = _check_json(project, "--no-strict", "--dev")
+        assert result.exit_code == 0
+        assert _versions(data) == {
+            "org.example:regular": ("", "1.0"),
+            **{name: (origin, "") for name, origin in self._LOCAL.items()},
+        }
+        rows = _rows(data)
+        assert all(rows[name]["license"] == "UNKNOWN" for name in self._LOCAL)
+        assert all(rows[name]["group"] == "dev" for name in self._LOCAL)
+        assert rows["org.example:regular"]["license"] == "MIT"
+        assert _requests_mentioning("vendor", "-jar", "jdk-tools", "pathless") == []
+
+    @respx.mock
+    def test_system_scope_is_left_out_without_dev(self, tmp_path):
+        project = self._project(tmp_path)
+        result, data = _check_json(project)
+        assert result.exit_code == 0
+        assert _origins(data) == {"org.example:regular": ""}
+        assert _requests_mentioning("vendor", "-jar", "jdk-tools", "pathless") == []

@@ -1,23 +1,60 @@
-"""Discover Rust dependencies from Cargo.toml files."""
+"""Discover Rust dependencies from Cargo.toml files.
+
+A dependency declared with ``git``, or with a ``path`` outside the scanned
+directory, is not a crates.io release: it is emitted with an origin and is
+never looked up. So is a registry dependency that a ``[patch]`` or
+``[replace]`` entry redirects to git or to such a path. A ``path`` inside the
+scanned directory is the project's own code and is not a dependency. A
+``registry = "…"`` key names another registry: that dependency stays a
+registry one.
+"""
 
 from __future__ import annotations
 
+import re
+from dataclasses import replace
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, NamedTuple, cast
 
+from licenseal.discovery._origin import UNRECORDED, git_origin, path_origin
 from licenseal.discovery._read import load_toml
 from licenseal.discovery._walk import walk_project_files
 from licenseal.models import Dependency, DependencyGroup, Ecosystem
+
+# The keys that say which revision of a git dependency to take, most
+# specific first.
+_REVISION_KEYS = ("rev", "tag", "branch")
+# What ends the crate name in a ``[replace]`` key (``name:1.0.0``, ``name@1.0.0``).
+_PACKAGE_ID_VERSION_RE = re.compile(r"[:@]")
 
 
 def _is_off_registry(spec: Any) -> bool:
     """True for a dependency declared with ``path`` or ``git``.
 
-    There is no crates.io release to look up for it, so it is not emitted as
-    a dependency. With a Cargo.lock it is still a root of the locked graph:
-    see :func:`cargo_off_registry_root_names`.
+    There is no crates.io release to look up for it.
     """
     return isinstance(spec, dict) and ("path" in spec or "git" in spec)
+
+
+def _spec_origin(spec: dict[str, Any], manifest_dir: Path, scan_root: Path) -> str | None:
+    """Origin of a dependency spec that has ``git`` or ``path``.
+
+    ``git`` is the repository plus ``rev``, ``tag``, or ``branch``. ``path``
+    is relative to ``manifest_dir``; ``None`` when it is inside
+    ``scan_root``. A value that is not a string leaves the source unrecorded.
+    """
+    if "git" in spec:
+        git = spec["git"]
+        if not isinstance(git, str) or not git:
+            return UNRECORDED
+        revision = next(
+            (spec[k] for k in _REVISION_KEYS if isinstance(spec.get(k), str) and spec[k]), ""
+        )
+        return git_origin(git, revision)
+    path = spec["path"]
+    if not isinstance(path, str) or not path:
+        return UNRECORDED
+    return path_origin(path, manifest_dir, scan_root)
 
 
 def _spec_to_version(spec: Any) -> str | None:
@@ -56,13 +93,47 @@ def _canonical_crate_name(name: str, spec: Any) -> str:
     return name
 
 
+def _emit_off_registry(
+    name: str,
+    spec: dict[str, Any],
+    group: DependencyGroup,
+    source: str,
+    manifest_dir: Path,
+    scan_root: Path,
+    out: list[Dependency],
+    own: list[tuple[str, DependencyGroup]],
+) -> None:
+    """Emit a git / path dependency with its origin, or record it as own code.
+
+    A path inside ``scan_root`` is a crate of the project: its name and
+    group go to ``own`` and it is not a dependency.
+    """
+    crate = _canonical_crate_name(name, spec)
+    origin = _spec_origin(spec, manifest_dir, scan_root)
+    if origin is None:
+        own.append((crate, group))
+        return
+    out.append(
+        Dependency(
+            name=crate,
+            version_constraint="",
+            ecosystem=Ecosystem.RUST,
+            group=group,
+            source=source,
+            origin=origin,
+        )
+    )
+
+
 def _emit_deps(
     section: Any,
     group: DependencyGroup,
     source: str,
     out: list[Dependency],
     ws_refs: list[tuple[str, DependencyGroup]],
-    off_registry: list[tuple[str, DependencyGroup]],
+    own: list[tuple[str, DependencyGroup]],
+    manifest_dir: Path,
+    scan_root: Path,
 ) -> None:
     """Append Dependency objects from a `[dependencies]`-style table.
 
@@ -72,8 +143,8 @@ def _emit_deps(
     ``ws_refs`` (alias name + table group) for the caller to stitch against
     the catalog.
 
-    A path/git entry is not emitted; its crate name and the table's group
-    are recorded in ``off_registry``.
+    A git entry, and a path entry outside ``scan_root``, is emitted with its
+    origin. A path entry inside it is recorded in ``own``.
     """
     if not isinstance(section, dict):
         return
@@ -84,8 +155,8 @@ def _emit_deps(
             continue
         version = _spec_to_version(spec)
         if version is None:
-            if _is_off_registry(spec):
-                off_registry.append((_canonical_crate_name(name, spec), group))
+            if isinstance(spec, dict) and _is_off_registry(spec):
+                _emit_off_registry(name, spec, group, source, manifest_dir, scan_root, out, own)
             continue
         out.append(
             Dependency(
@@ -99,18 +170,20 @@ def _emit_deps(
 
 
 def _parse_cargo_deps(
-    data: dict[str, Any], source: str
+    data: dict[str, Any], source: str, manifest_dir: Path, scan_root: Path
 ) -> tuple[list[Dependency], list[tuple[str, DependencyGroup]], list[tuple[str, DependencyGroup]]]:
     """Extract dependencies and workspace-catalog references from one Cargo.toml.
 
-    Returns ``(deps, ws_refs, off_registry)``: inline-version dependencies,
-    the ``{ workspace = true }`` references this file makes into its
-    workspace's ``[workspace.dependencies]`` catalog (stitched by the
-    caller), and the crate name and group of each path/git dependency.
+    Returns ``(deps, ws_refs, own)``: the dependencies (registry ones with
+    their version, git and out-of-tree path ones with their origin), the
+    ``{ workspace = true }`` references this file makes into its workspace's
+    ``[workspace.dependencies]`` catalog (stitched by the caller), and the
+    crate name and group of each path dependency inside the scanned
+    directory.
     """
     deps: list[Dependency] = []
     ws_refs: list[tuple[str, DependencyGroup]] = []
-    off_registry: list[tuple[str, DependencyGroup]] = []
+    own: list[tuple[str, DependencyGroup]] = []
 
     # Top-level dependency tables, then the target-specific ones:
     # [target.<cfg>.dependencies] etc. Cfg gates platform/feature, not legal
@@ -130,9 +203,41 @@ def _parse_cargo_deps(
             ("build-dependencies", DependencyGroup.PROD),
             ("dev-dependencies", DependencyGroup.DEV),
         ):
-            _emit_deps(table.get(key), group, source, deps, ws_refs, off_registry)
+            _emit_deps(table.get(key), group, source, deps, ws_refs, own, manifest_dir, scan_root)
 
-    return deps, ws_refs, off_registry
+    return deps, ws_refs, own
+
+
+def _patch_origins(
+    data: dict[str, Any], manifest_dir: Path, scan_root: Path
+) -> dict[str, str | None]:
+    """Crates this manifest redirects to git or a path, with the origin of each.
+
+    Reads ``[patch.<registry>]`` and ``[replace]``. The origin is ``None``
+    for a path inside ``scan_root``: that crate is the project's own code.
+    An entry that only pins another registry version is not a redirect.
+    """
+    tables: list[dict[str, Any]] = []
+    patch = data.get("patch")
+    if isinstance(patch, dict):
+        tables.extend(t for t in cast("dict[str, Any]", patch).values() if isinstance(t, dict))
+    replaced = data.get("replace")
+    if isinstance(replaced, dict):
+        # A key is a package id (``name:1.0.0``, ``<registry>#name@1.0.0``).
+        tables.append(
+            {
+                _PACKAGE_ID_VERSION_RE.split(key.rsplit("#", 1)[-1], maxsplit=1)[0]: spec
+                for key, spec in cast("dict[str, Any]", replaced).items()
+            }
+        )
+    origins: dict[str, str | None] = {}
+    for table in tables:
+        for name, spec in table.items():
+            if isinstance(spec, dict) and _is_off_registry(spec):
+                origins[_canonical_crate_name(name, spec)] = _spec_origin(
+                    spec, manifest_dir, scan_root
+                )
+    return origins
 
 
 def _workspace_catalog(data: dict[str, Any]) -> dict[str, Any] | None:
@@ -165,7 +270,7 @@ def _stitch_workspace_refs(
     refs: list[tuple[Path, str, DependencyGroup]],
     catalogs: dict[Path, tuple[str, dict[str, Any]]],
     project_path: Path,
-    off_registry: list[tuple[str, DependencyGroup]],
+    own: list[tuple[str, DependencyGroup]],
 ) -> list[Dependency]:
     """Emit one Dependency per catalog entry that some member actually uses.
 
@@ -180,8 +285,10 @@ def _stitch_workspace_refs(
     Group attribution comes from the referencing tables: referenced from any
     prod-side table → PROD, referenced only from dev-dependencies → DEV.
 
-    A referenced path/git catalog entry is not emitted; its crate name and
-    group are appended to ``off_registry``.
+    A referenced git catalog entry, and a path one outside the scanned
+    directory, is emitted with its origin; a catalog path is relative to the
+    catalog's own directory. A path entry inside the scanned directory is
+    appended to ``own``.
     """
     chosen: dict[tuple[Path, str], DependencyGroup] = {}
     catalog_dirs = set(catalogs)
@@ -201,8 +308,10 @@ def _stitch_workspace_refs(
         version = _spec_to_version(spec)
         if version is None:
             # path/git catalog entry — no registry lookup.
-            if _is_off_registry(spec):
-                off_registry.append((_canonical_crate_name(alias, spec), chosen[(cat_dir, alias)]))
+            if isinstance(spec, dict) and _is_off_registry(spec):
+                _emit_off_registry(
+                    alias, spec, chosen[(cat_dir, alias)], source, cat_dir, project_path, out, own
+                )
             continue
         out.append(
             Dependency(
@@ -225,9 +334,14 @@ def discover_cargo_toml_dependencies(
 
     Cargo workspaces declare `[workspace] members = [...]` at the root and
     per-crate deps in nested Cargo.toml files. Walk the tree, parse each,
-    and filter workspace-internal references (path/git deps are already
-    filtered by `_spec_to_version`; this catches version-bare crate-name
-    refs that match a local crate `[package].name`).
+    and filter workspace-internal references (a path dep inside the tree is
+    never emitted; this catches version-bare crate-name refs that match a
+    local crate `[package].name`).
+
+    A dependency declared with ``git``, or with a ``path`` outside the
+    scanned directory, is returned with its origin and no version
+    constraint, and so is a registry dependency that a ``[patch]`` or
+    ``[replace]`` entry of any Cargo.toml in the tree redirects there.
 
     ``[workspace.dependencies]`` tables are treated as version catalogs:
     entries are emitted only when some workspace member references them via
@@ -236,47 +350,75 @@ def discover_cargo_toml_dependencies(
     Returns ``(deps, filtered_count)`` where ``filtered_count`` is the number
     of deps removed because their name matched a workspace-local crate.
     """
-    deps, _off_registry, local_names = _scan_cargo_tomls(project_path, exclude_paths)
+    deps, _own, _patches, local_names = _scan_cargo_tomls(project_path, exclude_paths)
     kept = [d for d in deps if d.name not in local_names]
     return kept, len(deps) - len(kept)
 
 
-def cargo_off_registry_root_names(
+class CargoSources(NamedTuple):
+    """What the Cargo.toml files say about crates that are not registry releases."""
+
+    # Lowercased names of the path dependencies inside the scanned directory
+    # whose own Cargo.toml the scan does not read, by the table that
+    # declares them. They have no row, and are roots of a Cargo.lock graph.
+    prod_roots: set[str]
+    dev_roots: set[str]
+    # Lowercased crate name → origin, for every crate declared from, or
+    # redirected to, git or a path. ``None`` for a path inside the scanned
+    # directory.
+    origins: dict[str, str | None]
+    # The subset a ``[patch]`` or ``[replace]`` entry redirects: these apply
+    # to a crate wherever it appears in the graph, not only where it is
+    # declared.
+    patches: dict[str, str | None]
+
+
+def cargo_sources(
     project_path: Path,
     *,
     exclude_paths: frozenset[Path] = frozenset(),
-) -> tuple[set[str], set[str]]:
-    """Lowercased names of the dependencies declared with ``git`` or ``path``.
+) -> CargoSources:
+    """Collect the git / path sources the Cargo.toml files of the tree declare.
 
-    Returned as ``(prod, dev)``, by the table that declares them. Such a
-    dependency is not emitted by :func:`discover_cargo_toml_dependencies`,
-    but a Cargo.lock records the registry crates it pulls in. The lockfile
-    pass takes these names as roots beside the discovered direct deps, so
-    that closure is attributed instead of dropped as unreachable.
+    A Cargo.lock records no location for a crate that is built from a path,
+    and a registry walk knows nothing of a ``[patch]``; both read it here.
 
-    A ``path`` dependency on a crate of this tree is left out. That crate's
-    own Cargo.toml is scanned, so its dependencies are roots already, split
-    into prod and dev. Cargo.lock lists a workspace member's
-    dev-dependencies among its dependencies; walking the graph through the
-    member would make every one of them a production dependency.
+    ``prod_roots`` / ``dev_roots``: a path dependency inside the scanned
+    directory is the project's own code and has no row, but the Cargo.lock
+    records the registry crates it pulls in. The lockfile pass takes its
+    name as a root beside the discovered direct deps, so that closure is
+    attributed instead of dropped as unreachable. A path dependency on a
+    crate whose Cargo.toml is scanned is left out: its dependencies are
+    roots already, split into prod and dev. Cargo.lock lists a workspace
+    member's dev-dependencies among its dependencies; walking the graph
+    through the member would make every one of them a production
+    dependency.
     """
-    _deps, off_registry, local_names = _scan_cargo_tomls(project_path, exclude_paths)
-    roots = [(name.lower(), group) for name, group in off_registry if name not in local_names]
-    return (
-        {name for name, group in roots if group == DependencyGroup.PROD},
-        {name for name, group in roots if group == DependencyGroup.DEV},
+    deps, own, patches, local_names = _scan_cargo_tomls(project_path, exclude_paths)
+    roots = [(name.lower(), group) for name, group in own if name not in local_names]
+    redirected = {name.lower(): origin for name, origin in patches.items()}
+    origins: dict[str, str | None] = dict(redirected)
+    origins.update((dep.name.lower(), dep.origin) for dep in deps if dep.origin)
+    return CargoSources(
+        prod_roots={name for name, group in roots if group == DependencyGroup.PROD},
+        dev_roots={name for name, group in roots if group == DependencyGroup.DEV},
+        origins=origins,
+        patches=redirected,
     )
 
 
 def _scan_cargo_tomls(
     project_path: Path, exclude_paths: frozenset[Path]
-) -> tuple[list[Dependency], list[tuple[str, DependencyGroup]], set[str]]:
+) -> tuple[list[Dependency], list[tuple[str, DependencyGroup]], dict[str, str | None], set[str]]:
     """Parse every Cargo.toml in the tree.
 
-    Returns ``(deps, off_registry, local_names)``: the registry dependencies
-    (workspace-catalog references stitched, workspace-local names not yet
-    filtered), the crate name and group of each path/git dependency, and
-    the ``[package].name`` of every crate in the tree.
+    Returns ``(deps, own, patches, local_names)``: the dependencies
+    (workspace-catalog references stitched, ``[patch]`` / ``[replace]``
+    redirects applied, workspace-local names not yet filtered); the crate
+    name and group of each dependency that is a path inside the scanned
+    directory; the crates some manifest redirects to git or a path, with
+    the origin of each; and the ``[package].name`` of every crate in the
+    tree.
     """
     parsed: list[tuple[Path, dict[str, Any]]] = []
     for ct in walk_project_files(project_path, "Cargo.toml", exclude_paths=exclude_paths):
@@ -284,22 +426,37 @@ def _scan_cargo_tomls(
         if data is not None:
             parsed.append((ct, data))
 
-    deps: list[Dependency] = []
-    off_registry: list[tuple[str, DependencyGroup]] = []
+    declared: list[Dependency] = []
+    own: list[tuple[str, DependencyGroup]] = []
+    patches: dict[str, str | None] = {}
     catalogs: dict[Path, tuple[str, dict[str, Any]]] = {}
     pending_refs: list[tuple[Path, str, DependencyGroup]] = []
     for ct, data in parsed:
         source = ct.relative_to(project_path).as_posix()
-        file_deps, ws_refs, file_off_registry = _parse_cargo_deps(data, source)
-        deps.extend(file_deps)
-        off_registry.extend(file_off_registry)
+        file_deps, ws_refs, file_own = _parse_cargo_deps(data, source, ct.parent, project_path)
+        declared.extend(file_deps)
+        own.extend(file_own)
+        patches.update(_patch_origins(data, ct.parent, project_path))
         pending_refs.extend((ct.parent, alias, group) for alias, group in ws_refs)
         catalog = _workspace_catalog(data)
         if catalog is not None:
             catalogs[ct.parent] = (source, catalog)
 
-    deps.extend(_stitch_workspace_refs(pending_refs, catalogs, project_path, off_registry))
-    return deps, off_registry, _collect_local_rust_names(parsed)
+    declared.extend(_stitch_workspace_refs(pending_refs, catalogs, project_path, own))
+
+    # A registry dependency that a [patch] or [replace] entry redirects is
+    # built from that git repository or path, not from the registry.
+    deps: list[Dependency] = []
+    for dep in declared:
+        if dep.origin or dep.name not in patches:
+            deps.append(dep)
+            continue
+        origin = patches[dep.name]
+        if origin is None:
+            own.append((dep.name, dep.group))
+        else:
+            deps.append(replace(dep, origin=origin, version_constraint=""))
+    return deps, own, patches, _collect_local_rust_names(parsed)
 
 
 def _collect_local_rust_names(parsed: list[tuple[Path, dict[str, Any]]]) -> set[str]:

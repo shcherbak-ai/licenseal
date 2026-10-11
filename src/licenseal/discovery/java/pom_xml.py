@@ -58,6 +58,11 @@ Scope-to-group mapping (per the Maven scope semantics):
 * ``import`` → skipped entirely (a BOM-import marker, valid only inside
   ``<dependencyManagement>``; not a real dependency)
 
+A ``system``-scoped dependency is a JAR on the local filesystem, named by
+``<systemPath>``; no repository is asked for it. It is emitted with that
+path as its origin when the path leaves the scanned directory, and is not a
+dependency when the path is inside it.
+
 Profiles are unioned, not evaluated. A ``<dependency>`` declared under
 ``<profiles><profile><dependencies>`` is emitted like a top-level one,
 with the same scope mapping, whether the profile is active by default or
@@ -83,6 +88,7 @@ from pathlib import Path
 
 from defusedxml import ElementTree as DefusedET
 
+from licenseal.discovery._origin import UNRECORDED, path_origin
 from licenseal.discovery._read import read_xml_bytes, record_parse_failure
 from licenseal.discovery._walk import walk_project_files
 from licenseal.models import Dependency, DependencyGroup, Ecosystem
@@ -118,6 +124,9 @@ class _PomDep:
 
     ``from_profile`` flags a ``<dependencies>`` entry declared inside a
     ``<profiles><profile>`` block rather than at the top level.
+
+    ``system_path`` is the ``<systemPath>`` of a ``system``-scoped entry, as
+    written.
     """
 
     group_id: str
@@ -126,6 +135,7 @@ class _PomDep:
     scope: str
     is_import: bool
     from_profile: bool = False
+    system_path: str = ""
 
 
 @dataclass
@@ -327,6 +337,7 @@ def _collect_dependencies(parent_el, data: _PomData, *, from_profile: bool) -> N
                         scope=scope,
                         is_import=is_import,
                         from_profile=from_profile,
+                        system_path=_findtext(dep_el, "systemPath"),
                     )
                 )
         break
@@ -452,6 +463,26 @@ def _expand_properties(value: str, props: dict[str, str]) -> str:
     return value
 
 
+def _system_path_origin(
+    system_path: str, props: dict[str, str], pom_dir: Path, scan_root: Path
+) -> str | None:
+    """Origin of a ``system``-scoped dependency: its ``<systemPath>`` as written.
+
+    ``None`` when the path is inside ``scan_root``: that file is part of the
+    scanned project. ``${project.basedir}`` and ``${basedir}`` are the POM's
+    own directory. A path that still holds a ``${…}`` token after expansion
+    cannot be located and is reported; an entry with no ``<systemPath>`` has
+    an unrecorded source.
+    """
+    written = system_path.strip()
+    if not written:
+        return UNRECORDED
+    expanded = _expand_properties(written, {"project.basedir": ".", "basedir": ".", **props})
+    if "${" in expanded:
+        return written
+    return None if path_origin(expanded, pom_dir, scan_root) is None else written
+
+
 def _scope_to_group(scope: str) -> DependencyGroup:
     """Map a Maven dependency scope to ``DependencyGroup``.
 
@@ -563,6 +594,8 @@ def discover_pom_xml_dependencies(
     * BOM-import filter (``<scope>import</scope>`` + ``<type>pom</type>`` skipped)
     * Workspace-local filter (sibling-artifact coordinates dropped, count
       surfaced in ``filtered_count``)
+    * ``system`` scope: emitted with the ``<systemPath>`` as its origin and no
+      version, or skipped when that path is inside the scanned directory
 
     Coordinate format on ``Dependency.name`` is ``"groupId:artifactId"``
     (Maven canonical, colon-joined). Matches the ``api.deps.dev`` ``name``
@@ -627,6 +660,15 @@ def discover_pom_xml_dependencies(
             if coord in workspace_local:
                 filtered += 1
                 continue
+            origin = ""
+            if dep.scope == "system":
+                # A JAR on the local filesystem, never a repository artifact.
+                located = _system_path_origin(
+                    dep.system_path, dep_props, pom_path.parent, project_path
+                )
+                if located is None:
+                    continue
+                origin, version = located, ""
             out.append(
                 Dependency(
                     name=coord,
@@ -634,6 +676,7 @@ def discover_pom_xml_dependencies(
                     ecosystem=Ecosystem.JAVA,
                     group=_scope_to_group(dep.scope),
                     source=source,
+                    origin=origin,
                 )
             )
     return out, filtered

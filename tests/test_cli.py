@@ -7305,7 +7305,11 @@ def _cargo_lock(*packages: tuple[str, str, str | None, list[str]]) -> str:
 
 class TestCargoOffRegistryDependencyClosure:
     """A crate that Cargo.lock reaches only through a ``git`` or ``path``
-    dependency is checked like any other: a copyleft one fails the scan."""
+    dependency is checked like any other: a copyleft one fails the scan.
+
+    The dependency itself is one UNKNOWN row when it is a git repository or a
+    path outside the scanned directory, and no row when it is a path inside
+    it."""
 
     _MANIFEST = (
         '[package]\nname = "myapp"\nversion = "0.1.0"\nlicense = "MIT"\n\n'
@@ -7347,22 +7351,31 @@ class TestCargoOffRegistryDependencyClosure:
 
     @respx.mock
     @pytest.mark.parametrize(
-        ("forked_declaration", "forked_source"),
+        ("forked_declaration", "forked_source", "forked_row"),
         [
-            ('forked = { git = "https://example.org/forked.git" }\n', _GIT_SOURCE),
-            ('forked = { path = "../forked" }\n', None),
+            (
+                'forked = { git = "https://example.org/forked.git" }\n',
+                _GIT_SOURCE,
+                {("forked", "0.3.0"): ("prod", "unknown")},
+            ),
+            (
+                'forked = { path = "../forked" }\n',
+                None,
+                {("forked", "0.3.0"): ("prod", "unknown")},
+            ),
+            # A path inside the scanned directory is the project's own code.
+            ('forked = { path = "vendor/forked" }\n', None, {}),
         ],
-        ids=["git", "path"],
+        ids=["git", "path-outside", "path-inside"],
     )
     def test_copyleft_crate_behind_an_off_registry_dependency_fails_the_check(
-        self, tmp_path, forked_declaration, forked_source
+        self, tmp_path, forked_declaration, forked_source, forked_row
     ):
         self._write_project(tmp_path, forked_declaration, forked_source)
 
         exit_code, rows = _check_rows(tmp_path)
         assert exit_code == 1
-        # No row for ``forked`` itself.
-        assert rows == dict(self._CLOSURE)
+        assert rows == {**dict(self._CLOSURE), **forked_row}
 
     @respx.mock
     def test_same_verdict_as_a_registry_dependency(self, tmp_path):
@@ -7402,18 +7415,21 @@ class TestCargoOffRegistryDependencyClosure:
 
         exit_code, rows = _check_rows(tmp_path, "--dev")
         assert exit_code == 1
-        assert rows == {**production, ("test-dep-gpl", "1.0.0"): ("dev", "warning")}
+        assert rows == {
+            **production,
+            ("test-fork", "0.3.0"): ("dev", "unknown"),
+            ("test-dep-gpl", "1.0.0"): ("dev", "warning"),
+        }
 
     @respx.mock
     @pytest.mark.parametrize("output_format", ["table", "markdown"])
     def test_report_lists_each_crate_once_when_an_ancestor_has_no_row(
         self, tmp_path, output_format
     ):
-        # ``forked`` is the first ancestor of three rows and has no row of
-        # its own. Each crate is still listed exactly once.
-        self._write_project(
-            tmp_path, 'forked = { git = "https://example.org/forked.git" }\n', _GIT_SOURCE
-        )
+        # ``forked`` is the first ancestor of three rows and, being a path
+        # inside the scanned directory, has no row of its own. Each crate is
+        # still listed exactly once.
+        self._write_project(tmp_path, 'forked = { path = "vendor/forked" }\n', None)
         out = tmp_path / "report.out"
         result = CliRunner().invoke(
             main, ["check", "--path", str(tmp_path), "-f", output_format, "-o", str(out)]

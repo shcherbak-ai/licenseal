@@ -394,7 +394,7 @@ class TestChooseBranchesAndReferenceMetadata:
       <ItemGroup>
         <PackageReference Include="Legacy.Lib" Version="1.0.0" />
         <PackageReference Include="Token.Lib" Version="$(TokenVersion)" />
-        <ProjectReference Include="..\\Sibling\\Sibling.csproj" />
+        <ProjectReference Include="Sibling\\Sibling.csproj" />
       </ItemGroup>
     </When>
     <When Condition="'$(TargetFramework)' == 'net6.0'">
@@ -434,7 +434,7 @@ class TestChooseBranchesAndReferenceMetadata:
             (tmp_path / "App.csproj").read_bytes(), source_path=tmp_path / "App.csproj"
         )
         assert data is not None
-        assert data.project_refs == ["..\\Sibling\\Sibling.csproj"]
+        assert data.project_refs == ["Sibling\\Sibling.csproj"]
 
     def test_property_set_inside_a_branch_stays_out_of_the_project_scope(self, tmp_path):
         # Which branch a build takes is unknown, so a branch's own

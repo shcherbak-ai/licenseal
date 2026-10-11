@@ -904,12 +904,14 @@ class TestComposerLock:
         assert diags == []
 
     def test_only_local_path_packages_is_clean(self, tmp_path: Path):
+        path = {"type": "path", "url": "packages/a"}
         self._project(
-            tmp_path,
-            {"packages": [{"name": "a/a", "version": "dev-main", "dist": {"type": "path"}}]},
+            tmp_path, {"packages": [{"name": "a/a", "version": "dev-main", "dist": path}]}
         )
         rows, diags = _resolve(tmp_path)
-        assert rows == self._UNPINNED
+        # The lockfile covers ``a/a`` as the project's own path package: it
+        # is no row, and it is not walked from the registry either.
+        assert rows == {("d/d", "^1", DEV)}
         assert diags == []
 
     def test_only_dev_packages_without_dev_is_clean(self, tmp_path: Path):

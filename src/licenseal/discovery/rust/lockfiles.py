@@ -2,25 +2,32 @@
 
 Cargo.lock encodes the actually-resolved graph as a flat list of `[[package]]`
 blocks with `name`, `version`, optional `source`, and `dependencies = [...]`.
-A registry-sourced crate has `source = "registry+https://github.com/rust-lang/crates.io-index"`.
-The local crate(s) being scanned have no `source` field; path/git deps have
-non-registry source URIs. Both are skipped — there's no crates.io license to
-resolve for them. They stay in the edge graph, and a dependency declared with
-`git` or `path` is passed in as a root like any other direct dep, so the
-registry crates only it pulls in are attributed to it.
+A registry-sourced crate has `source = "registry+https://github.com/rust-lang/crates.io-index"`
+(or the `registry+` / `sparse+` URL of another registry, which is still a
+registry row). A git dependency has `source = "git+<url>?<ref>#<commit>"`: it
+is a row with the repository and the locked commit as its origin. A crate
+built from a path has no `source` field at all, and neither have the crates
+of the scanned workspace; the lockfile does not say which is which, so such a
+crate is a row only when a Cargo.toml of the scan declares it from a path
+outside the scanned directory. Every crate stays in the edge graph, row or
+not, so the registry crates only it pulls in are attributed to it.
 """
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any, cast
 
 from licenseal._graph import compute_direct_ancestors
+from licenseal.discovery._origin import git_origin, url_origin
 from licenseal.discovery._read import load_toml
 from licenseal.discovery._walk import walk_project_files
 from licenseal.models import Dependency, DependencyGroup, Ecosystem
 
-_REGISTRY_PREFIX = "registry+https://github.com/rust-lang/crates.io-index"
+# A ``source`` that names a registry: crates.io, or another one. Either way
+# the crate is looked up on crates.io by name.
+_REGISTRY_PREFIXES = ("registry+", "sparse+")
 
 
 def find_rust_lockfiles(
@@ -91,15 +98,23 @@ def parse_cargo_lock(
     prod_root_names: set[str],
     dev_root_names: set[str],
     include_dev: bool,
+    origins: Mapping[str, str | None] | None = None,
 ) -> tuple[list[Dependency], set[str]]:
     """Parse a `Cargo.lock` into ``(deps_list, all_known_names)``.
 
     Reverse-BFS from prod and dev root sets attributes group + direct
     ancestors per crate. A crate no root reaches is dropped, unless the
-    lockfile contains none of the roots at all: then every registry crate is
-    kept as PROD with no ancestors. A root need not be registry-sourced: one
-    that is not (a ``git`` / ``path`` dependency) has no row of its own, and
-    the registry crates it reaches name it in ``direct_ancestors``.
+    lockfile contains none of the roots at all: then every crate with a row
+    is kept as PROD with no ancestors. A root need not have a row: a path
+    dependency inside the scanned directory has none, and the registry
+    crates it reaches name it in ``direct_ancestors``.
+
+    ``origins`` maps a lowercased crate name to the origin a Cargo.toml of
+    the scan declares for it (see ``cargo_sources``). It decides the crates
+    the lockfile gives no ``source``: one it maps to a path is a row with
+    that origin, and any other one (a crate of the scanned workspace, a path
+    inside the scanned directory, a path dependency of a crate outside it)
+    is no row.
 
     ``all_known_names`` is the lowercased names of every package in the
     lockfile, registry-sourced or not. Callers in ``transitive.py`` use
@@ -113,13 +128,9 @@ def parse_cargo_lock(
     of crates the patched build never compiles. Cargo workspaces that
     patch registry crates are where this shows up.
 
-    Crates with no ``source`` field (the local workspace crate) and
-    crates whose source isn't the crates.io registry index (path / git /
-    [patch] deps) are excluded from the output list — there's no
-    crates.io entry to license-resolve. BUT they're still tracked in the
-    edge graph so the BFS can traverse through them to their resolved
-    children, and they're included in ``all_known_names`` so the
-    coverage check upstream is correct.
+    A crate with no row is still tracked in the edge graph, so the BFS can
+    traverse through it to its resolved children, and is included in
+    ``all_known_names`` so the coverage check upstream is correct.
     """
     data = load_toml(path)
     if data is None:
@@ -129,10 +140,10 @@ def parse_cargo_lock(
     if not isinstance(packages, list):
         return [], set()
 
-    raw_pkgs: list[tuple[str, str]] = []
+    raw_pkgs: list[tuple[str, str, str]] = []  # (name, version, origin)
     name_case: dict[str, str] = {}
     edges: dict[str, set[str]] = {}
-    seen: set[tuple[str, str]] = set()
+    seen: set[tuple[str, str, str]] = set()
     all_known_names: set[str] = set()
     for raw in packages:
         if not isinstance(raw, dict):
@@ -146,9 +157,13 @@ def parse_cargo_lock(
         normalized = name.lower()
         all_known_names.add(normalized)
 
-        if (normalized, version) in seen:
+        # One version of a crate can be locked from two sources (the
+        # registry release beside a git fork of it): each is an entry.
+        source = pkg.get("source")
+        source = source if isinstance(source, str) else ""
+        if (normalized, version, source) in seen:
             continue
-        seen.add((normalized, version))
+        seen.add((normalized, version, source))
 
         deps_field = pkg.get("dependencies", [])
         children: list[str] = []
@@ -162,21 +177,30 @@ def parse_cargo_lock(
                     children.append(child_name.lower())
 
         # Always populate edges + name_case so BFS can traverse through git /
-        # path / local crates to their registry-sourced children. Only
-        # registry-sourced crates land in ``raw_pkgs`` (the output list) —
-        # everything else has no crates.io license to resolve.
+        # path / local crates to their registry-sourced children.
         name_case[normalized] = name
         edges.setdefault(normalized, set()).update(children)
 
-        source = pkg.get("source")
-        is_registry = isinstance(source, str) and source.startswith(_REGISTRY_PREFIX)
-        if is_registry:
-            raw_pkgs.append((name, version))
+        origin: str | None
+        if not source:
+            # Built from a path: a row only when a manifest says the path is
+            # outside the scanned directory.
+            origin = (origins or {}).get(normalized)
+        elif source.startswith(_REGISTRY_PREFIXES):
+            origin = ""
+        elif source.startswith("git+"):
+            # ``git+<url>?<branch|tag|rev>=…#<commit>``
+            location, _, commit = source.partition("#")
+            origin = git_origin(location, commit)
+        else:
+            origin = url_origin(source)
+        if origin is not None:
+            raw_pkgs.append((name, version, origin))
 
     group_by_name, ancestors_by_name = _attribute(edges, name_case, prod_root_names, dev_root_names)
 
     out: list[Dependency] = []
-    for name, version in raw_pkgs:
+    for name, version, origin in raw_pkgs:
         normalized = name.lower()
         group = group_by_name.get(normalized)
         if group is None:
@@ -192,6 +216,7 @@ def parse_cargo_lock(
                 group=group,
                 depth=0 if is_root else 1,
                 direct_ancestors=() if is_root else ancestors_by_name.get(normalized, ()),
+                origin=origin,
             )
         )
     return out, all_known_names

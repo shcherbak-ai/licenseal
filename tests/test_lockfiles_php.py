@@ -126,7 +126,8 @@ class TestParseComposerLockfile:
         assert all(d.ecosystem == Ecosystem.PHP for d in deps)
 
     def test_path_source_filtered(self, tmp_path):
-        # ``dist.type == "path"`` entries are workspace-local — filter out.
+        # A ``dist.type == "path"`` entry inside the scanned directory is
+        # workspace-local — filter out.
         (tmp_path / "composer.lock").write_text(
             json.dumps(
                 {
@@ -134,7 +135,7 @@ class TestParseComposerLockfile:
                         {
                             "name": "vendor/workspace-sibling",
                             "version": "dev-main",
-                            "dist": {"type": "path", "url": "../sibling"},
+                            "dist": {"type": "path", "url": "packages/sibling"},
                             "license": ["MIT"],
                         },
                         {
@@ -416,7 +417,9 @@ class TestParseEdgeCases:
 
     def test_source_path_type_also_filtered(self, tmp_path):
         # ``source.type == "path"`` (rather than dist.type) — both shapes
-        # signal a workspace-local dep.
+        # signal a local path. Inside the scanned directory it is
+        # workspace-local. A path entry that records no path is not shown to
+        # be inside it: it is a row.
         (tmp_path / "composer.lock").write_text(
             json.dumps(
                 {
@@ -424,19 +427,59 @@ class TestParseEdgeCases:
                         {
                             "name": "vendor/workspace-by-source",
                             "version": "1.0.0",
-                            "source": {"type": "path", "url": "../sib"},
+                            "source": {"type": "path", "url": "sib"},
                             "license": ["MIT"],
-                        }
+                        },
+                        {
+                            "name": "vendor/pathless",
+                            "version": "1.0.0",
+                            "dist": {"type": "path"},
+                        },
+                    ]
+                }
+            )
+        )
+        deps, license_map = parse_composer_lockfile(
+            tmp_path / "composer.lock",
+            direct_names={"vendor/workspace-by-source"},
+            include_dev=False,
+        )
+        assert [(d.name, d.origin) for d in deps] == [("vendor/pathless", "unrecorded source")]
+        # The lockfile covers both names.
+        assert {name for name, _version in license_map} == {
+            "vendor/workspace-by-source",
+            "vendor/pathless",
+        }
+
+    def test_path_entry_outside_the_scanned_directory_is_a_row(self, tmp_path):
+        project = tmp_path / "project"
+        project.mkdir()
+        (project / "composer.lock").write_text(
+            json.dumps(
+                {
+                    "packages": [
+                        {
+                            "name": "vendor/by-dist",
+                            "version": "dev-main",
+                            "dist": {"type": "path", "url": "../by-dist", "reference": "abc"},
+                            "license": ["GPL-3.0-only"],
+                        },
+                        {
+                            "name": "vendor/by-source",
+                            "version": "v1.2.0",
+                            "source": {"type": "path", "url": "../by-source"},
+                        },
                     ]
                 }
             )
         )
         deps, _ = parse_composer_lockfile(
-            tmp_path / "composer.lock",
-            direct_names={"vendor/workspace-by-source"},
-            include_dev=False,
+            project / "composer.lock", direct_names={"vendor/by-dist"}, include_dev=False
         )
-        assert deps == []
+        assert [(d.name, d.version_constraint, d.origin, d.depth) for d in deps] == [
+            ("vendor/by-dist", "==dev-main", "../by-dist", 0),
+            ("vendor/by-source", "==1.2.0", "../by-source", 1),
+        ]
 
     def test_duplicate_entry_is_seen_only_once(self, tmp_path):
         # Defensive: same (name, version) appearing twice — second

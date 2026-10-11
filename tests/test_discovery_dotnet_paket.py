@@ -250,10 +250,13 @@ NUGET
         names = {e[0] for e in entries}
         assert names == {"KeepMe", "AlsoKeep"}
 
-    def test_github_and_http_sources_skipped(self):
+    def test_github_gist_and_http_sources_skipped(self):
         text = """NUGET
   remote: https://api.nuget.org/v3/index.json
     KeepMe (1.0)
+GIST
+  remote: user/0123abcd
+    snippet.fs (4567cdef)
 GITHUB
   remote: user/repo
     SkipMe (master)

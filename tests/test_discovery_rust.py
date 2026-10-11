@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 import textwrap
+from pathlib import Path
 from unittest.mock import patch
 
 from licenseal.discovery import ProjectLicense, detect_project_license
 from licenseal.discovery._walk import walk_project_files
 from licenseal.discovery.rust.cargo_toml import (
-    cargo_off_registry_root_names,
+    cargo_sources,
     detect_project_license_cargo_toml,
     discover_cargo_toml_dependencies,
 )
@@ -84,7 +85,7 @@ class TestDiscoverCargoToml:
         assert by_name["root-dep"].source == "Cargo.toml"
         assert by_name["nested-dep"].source == "crates/core/Cargo.toml"
 
-    def test_skips_path_and_git_deps(self, tmp_path):
+    def test_path_and_git_deps_carry_an_origin(self, tmp_path):
         _write(
             tmp_path,
             """\
@@ -95,7 +96,11 @@ class TestDiscoverCargoToml:
             """,
         )
         deps, _ = discover_cargo_toml_dependencies(tmp_path)
-        assert {d.name for d in deps} == {"registry-crate"}
+        assert {d.name: d.origin for d in deps} == {
+            "local-crate": "../local-crate",
+            "git-crate": "git+https://github.com/x/y",
+            "registry-crate": "",
+        }
 
     def test_target_specific_deps_flatten(self, tmp_path):
         _write(
@@ -242,9 +247,9 @@ class TestDiscoverCargoToml:
             )
         )
         deps, _ = discover_cargo_toml_dependencies(tmp_path)
-        # The alias resolves to the published crate name; the path-only
-        # catalog entry is workspace-local and yields nothing.
-        assert {d.name for d in deps} == {"real-crate"}
+        # The alias resolves to the published crate name; the path catalog
+        # entry points outside the scanned directory and carries its origin.
+        assert {d.name: d.origin for d in deps} == {"real-crate": "", "path-entry": "../local"}
 
     def test_workspace_ref_without_catalog_entry_dropped(self, tmp_path):
         # A `workspace = true` ref with no matching catalog entry (broken
@@ -380,27 +385,42 @@ class TestDiscoverCargoToml:
         assert renamed_versions == {"0.4", "0.3.3"}
 
 
-class TestCargoOffRegistryRootNames:
-    """Dependencies declared with ``git`` or ``path`` are not emitted as
-    dependencies; their crate names are reported separately, by group, for
-    the Cargo.lock reachability pass."""
+class TestCargoSources:
+    """Dependencies declared with ``git`` or ``path``.
+
+    One declared with ``git``, or with a ``path`` outside the scanned
+    directory, is emitted with its origin. A ``path`` inside it is the
+    project's own code: no dependency, and a root of the Cargo.lock graph
+    when its own Cargo.toml is not scanned."""
+
+    @staticmethod
+    def _rows(project: Path) -> dict[str, tuple[str, str, DependencyGroup]]:
+        deps, _ = discover_cargo_toml_dependencies(project)
+        return {d.name: (d.version_constraint, d.origin, d.group) for d in deps}
 
     def test_no_cargo_toml(self, tmp_path):
-        assert cargo_off_registry_root_names(tmp_path) == (set(), set())
+        assert cargo_sources(tmp_path) == (set(), set(), {}, {})
 
-    def test_git_and_path_dependencies_by_group(self, tmp_path):
+    def test_git_and_path_dependencies_carry_an_origin(self, tmp_path):
+        project = tmp_path / "project"
+        project.mkdir()
         _write(
-            tmp_path,
+            project,
             """\
             [package]
             name = "myapp"
 
             [dependencies]
-            Forked = { git = "https://example.org/forked.git", rev = "abc123" }
+            Forked = { git = "https://tok3n@example.org/forked.git", rev = "abc123", tag = "v9" }
+            by-tag = { git = "https://example.org/by-tag.git", tag = "v1.0" }
+            by-branch = { git = "https://example.org/by-branch.git", branch = "main" }
             sibling = { path = "../sibling" }
             pinned-fork = { git = "https://example.org/pinned.git", version = "1.2" }
             registry-crate = { version = "1.0" }
+            mirrored = { version = "2.0", registry = "internal" }
             no-version = { features = ["x"] }
+            bad-git = { git = 7 }
+            bad-path = { path = [] }
 
             [build-dependencies]
             build-fork = { git = "https://example.org/build.git" }
@@ -416,17 +436,33 @@ class TestCargoOffRegistryRootNames:
             windows-test-fork = { path = "../windows-test" }
             """,
         )
-        prod, dev = cargo_off_registry_root_names(tmp_path)
-        # Names are lowercased, as the lockfile pass compares them.
-        assert prod == {"forked", "sibling", "pinned-fork", "build-fork", "unix-fork"}
-        assert dev == {"test-fork", "windows-test-fork"}
-        # None of them is emitted as a dependency. Control: the registry
-        # dependencies beside them are, and are not roots of this kind.
-        deps, _ = discover_cargo_toml_dependencies(tmp_path)
-        assert {(d.name, d.group) for d in deps} == {
-            ("registry-crate", DependencyGroup.PROD),
-            ("registry-dev", DependencyGroup.DEV),
+        prod, dev = DependencyGroup.PROD, DependencyGroup.DEV
+        assert self._rows(project) == {
+            "Forked": ("", "git+https://example.org/forked.git@abc123", prod),
+            "by-tag": ("", "git+https://example.org/by-tag.git@v1.0", prod),
+            "by-branch": ("", "git+https://example.org/by-branch.git@main", prod),
+            "sibling": ("", "../sibling", prod),
+            # A version beside ``git`` does not make it a registry crate.
+            "pinned-fork": ("", "git+https://example.org/pinned.git", prod),
+            "registry-crate": ("1.0", "", prod),
+            # Another registry is not an off-registry source.
+            "mirrored": ("2.0", "", prod),
+            "bad-git": ("", "unrecorded source", prod),
+            "bad-path": ("", "unrecorded source", prod),
+            "build-fork": ("", "git+https://example.org/build.git", prod),
+            "test-fork": ("", "git+https://example.org/test.git", dev),
+            "registry-dev": ("2.0", "", dev),
+            "unix-fork": ("", "git+https://example.org/unix.git", prod),
+            "windows-test-fork": ("", "../windows-test", dev),
         }
+        sources = cargo_sources(project)
+        # None of them is inside the scanned directory, so none is a root
+        # without a row. Names are lowercased, as the lockfile pass compares
+        # them.
+        assert (sources.prod_roots, sources.dev_roots, sources.patches) == (set(), set(), {})
+        assert sources.origins["forked"] == "git+https://example.org/forked.git@abc123"
+        assert sources.origins["sibling"] == "../sibling"
+        assert "registry-crate" not in sources.origins
 
     def test_renamed_dependency_uses_the_package_name(self, tmp_path):
         # Cargo.lock records the package name, not the local alias.
@@ -437,46 +473,65 @@ class TestCargoOffRegistryRootNames:
             alias = { git = "https://example.org/real.git", package = "real-crate" }
             """,
         )
-        assert cargo_off_registry_root_names(tmp_path) == ({"real-crate"}, set())
+        assert self._rows(tmp_path) == {
+            "real-crate": ("", "git+https://example.org/real.git", DependencyGroup.PROD)
+        }
 
-    def test_path_dependency_on_a_crate_of_this_tree_is_not_a_root(self, tmp_path):
-        # ``core`` is scanned through its own Cargo.toml; ``elsewhere`` has no
-        # Cargo.toml in the tree.
+    def test_path_dependency_inside_the_scanned_directory_is_not_a_dependency(self, tmp_path):
+        # ``core`` is scanned through its own Cargo.toml. ``vendored`` is in
+        # the tree but under a directory the scan skips, so nothing declares
+        # its dependencies: it is a root of the lockfile graph, with no row.
+        project = tmp_path / "project"
+        project.mkdir()
         _write(
-            tmp_path,
+            project,
             """\
             [package]
             name = "app"
 
             [dependencies]
             core = { path = "core" }
+            vendored = { path = "vendor/vendored" }
             elsewhere = { path = "../elsewhere" }
+
+            [dev-dependencies]
+            dev-vendored = { path = "vendor/dev-vendored" }
             """,
         )
-        (tmp_path / "core").mkdir()
-        (tmp_path / "core" / "Cargo.toml").write_text(
+        (project / "core").mkdir()
+        (project / "core" / "Cargo.toml").write_text(
             '[package]\nname = "core"\n\n[dependencies]\ncore-dep = "1.0"\n'
         )
-        assert cargo_off_registry_root_names(tmp_path) == ({"elsewhere"}, set())
+        assert self._rows(project) == {
+            "elsewhere": ("", "../elsewhere", DependencyGroup.PROD),
+            "core-dep": ("1.0", "", DependencyGroup.PROD),
+        }
+        sources = cargo_sources(project)
+        assert (sources.prod_roots, sources.dev_roots) == ({"vendored"}, {"dev-vendored"})
+        assert sources.origins == {"elsewhere": "../elsewhere"}
 
-    def test_workspace_catalog_git_entry_referenced_by_a_member(self, tmp_path):
+    def test_workspace_catalog_entries_referenced_by_a_member(self, tmp_path):
+        project = tmp_path / "project"
+        project.mkdir()
         _write(
-            tmp_path,
+            project,
             """\
             [workspace]
-            members = ["member"]
+            members = ["crates/member"]
 
             [workspace.dependencies]
             forked = { git = "https://example.org/forked.git" }
             test-fork = { git = "https://example.org/test.git" }
             renamed = { git = "https://example.org/real.git", package = "real-crate" }
             unused-fork = { git = "https://example.org/unused.git" }
+            shared = { path = "../shared" }
+            inner = { path = "vendor/inner" }
             no-source = { features = ["x"] }
             serde = "1.0"
             """,
         )
-        (tmp_path / "member").mkdir()
-        (tmp_path / "member" / "Cargo.toml").write_text(
+        (project / "crates" / "member").mkdir(parents=True)
+        (project / "crates" / "member" / "Cargo.toml").write_text(
             textwrap.dedent("""\
                 [package]
                 name = "member"
@@ -484,6 +539,8 @@ class TestCargoOffRegistryRootNames:
                 [dependencies]
                 forked = { workspace = true }
                 renamed = { workspace = true }
+                shared = { workspace = true }
+                inner = { workspace = true }
                 no-source = { workspace = true }
                 serde = { workspace = true }
 
@@ -491,23 +548,89 @@ class TestCargoOffRegistryRootNames:
                 test-fork = { workspace = true }
             """)
         )
-        prod, dev = cargo_off_registry_root_names(tmp_path)
+        prod, dev = DependencyGroup.PROD, DependencyGroup.DEV
         # A catalog entry no member references is inert, as for registry
-        # entries; one that is neither git nor path is not a root.
-        assert prod == {"forked", "real-crate"}
-        assert dev == {"test-fork"}
-        deps, _ = discover_cargo_toml_dependencies(tmp_path)
-        assert [d.name for d in deps] == ["serde"]
+        # entries; one that is neither git nor path, and has no version, is
+        # not a dependency. A catalog path is relative to the catalog.
+        assert self._rows(project) == {
+            "forked": ("", "git+https://example.org/forked.git", prod),
+            "real-crate": ("", "git+https://example.org/real.git", prod),
+            "shared": ("", "../shared", prod),
+            "serde": ("1.0", "", prod),
+            "test-fork": ("", "git+https://example.org/test.git", dev),
+        }
+        assert cargo_sources(project).prod_roots == {"inner"}
+
+    def test_patch_and_replace_redirect_a_registry_dependency(self, tmp_path):
+        project = tmp_path / "project"
+        project.mkdir()
+        _write(
+            project,
+            """\
+            [package]
+            name = "app"
+
+            [dependencies]
+            serde = "1.0"
+            local-fix = "0.2"
+            own-fix = "0.1"
+            replaced = "0.3"
+            also-replaced = "0.4"
+            untouched = "2.0"
+            already-git = { git = "https://example.org/already.git" }
+
+            [patch.crates-io]
+            serde = { git = "https://example.org/serde.git", branch = "fix" }
+            local-fix = { path = "../local-fix" }
+            own-fix = { path = "patches/own-fix" }
+            already-git = { path = "../already" }
+            alias = { git = "https://example.org/transitive.git", package = "transitive-only" }
+            just-a-pin = { version = "=1.0.0" }
+
+            [patch."https://example.org/other.git"]
+            other = { path = "../other" }
+
+            [replace]
+            "replaced:0.3.0" = { git = "https://example.org/replaced.git", rev = "abc" }
+            "https://example.org/index#also-replaced@0.4.0" = { path = "../also-replaced" }
+            """,
+        )
+        prod = DependencyGroup.PROD
+        assert self._rows(project) == {
+            "serde": ("", "git+https://example.org/serde.git@fix", prod),
+            "local-fix": ("", "../local-fix", prod),
+            "replaced": ("", "git+https://example.org/replaced.git@abc", prod),
+            "also-replaced": ("", "../also-replaced", prod),
+            "untouched": ("2.0", "", prod),
+            # A dependency's own source is not overridden by a patch.
+            "already-git": ("", "git+https://example.org/already.git", prod),
+        }
+        sources = cargo_sources(project)
+        # A crate patched to a path inside the tree is the project's own
+        # code: no row, and a root of the lockfile graph.
+        assert sources.prod_roots == {"own-fix"}
+        assert sources.patches == {
+            "serde": "git+https://example.org/serde.git@fix",
+            "local-fix": "../local-fix",
+            "own-fix": None,
+            "already-git": "../already",
+            "transitive-only": "git+https://example.org/transitive.git",
+            "other": "../other",
+            "replaced": "git+https://example.org/replaced.git@abc",
+            "also-replaced": "../also-replaced",
+        }
+        # The declared git source is what the lockfile pass is told.
+        assert sources.origins["already-git"] == "git+https://example.org/already.git"
 
     def test_exclude_paths_respected(self, tmp_path):
         (tmp_path / "skipped").mkdir()
         (tmp_path / "skipped" / "Cargo.toml").write_text(
             '[dependencies]\nforked = { git = "https://example.org/forked.git" }\n'
         )
-        assert cargo_off_registry_root_names(tmp_path) == ({"forked"}, set())
-        assert cargo_off_registry_root_names(
-            tmp_path, exclude_paths=frozenset({tmp_path / "skipped"})
-        ) == (set(), set())
+        assert cargo_sources(tmp_path).origins == {"forked": "git+https://example.org/forked.git"}
+        assert (
+            cargo_sources(tmp_path, exclude_paths=frozenset({tmp_path / "skipped"})).origins == {}
+        )
 
 
 class TestDetectProjectLicenseCargoToml:

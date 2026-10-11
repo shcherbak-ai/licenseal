@@ -553,8 +553,9 @@ def _grouped_results(results: list[CompatibilityResult]) -> list[CompatibilityRe
     and name (two locked versions of one package), they are ordered by
     resolved version and the transitives go under the first. A transitive
     whose first ancestor has no row in the report, or that has no ancestors,
-    appears at the end. An ancestor can lack a row: a Cargo ``git`` / ``path``
-    dependency is a root of the lockfile graph but is not reported itself.
+    appears at the end. An ancestor can lack a row: a path dependency inside
+    the scanned directory is a root of the lockfile graph but is the
+    project's own code, and is not reported itself.
     """
     direct = sorted(
         [r for r in results if not r.license_info.dependency.is_transitive],

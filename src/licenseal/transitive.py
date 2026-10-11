@@ -24,7 +24,7 @@ from __future__ import annotations
 
 import contextvars
 import re
-from collections.abc import Callable, Container, Iterator
+from collections.abc import Callable, Container, Iterator, Mapping
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from pathlib import Path
@@ -108,7 +108,7 @@ from licenseal.discovery.ruby.lockfiles import (
     find_gemfile_lockfiles,
     parse_gemfile_lock,
 )
-from licenseal.discovery.rust.cargo_toml import cargo_off_registry_root_names
+from licenseal.discovery.rust.cargo_toml import cargo_sources
 from licenseal.discovery.rust.lockfiles import find_rust_lockfiles, parse_cargo_lock
 from licenseal.models import Dependency, DependencyGroup, Ecosystem
 from licenseal.resolvers.cran import CranIndex, fetch_cran_index, index_edge_names
@@ -257,6 +257,7 @@ def resolve_transitive(
         ecosystem: Ecosystem,
         lockfile_output: list[Dependency],
         lockfile_names: set[str],
+        origins: Mapping[str, str | None] | None = None,
     ) -> list[Dependency]:
         covered = lockfile_names | {d.name.lower() for d in lockfile_output if d.depth == 0}
         uncovered = [
@@ -276,6 +277,7 @@ def resolve_transitive(
             max_workers=max_workers,
             fetcher=fetcher,
             on_wave=on_wave,
+            origins=origins,
         )
 
     # A lockfile is read whenever it exists, whether or not discovery found a
@@ -321,30 +323,32 @@ def resolve_transitive(
         out.extend(_walk_uncovered(Ecosystem.NPM, locked, set()))
         handled.add(Ecosystem.NPM)
 
+    # What the Cargo.toml files say about crates that are not registry
+    # releases. A Cargo.lock gives no location for a crate built from a path,
+    # and a registry walk knows nothing of a ``[patch]``; both need it.
+    cargo = cargo_sources(project_path, exclude_paths=exclude_paths)
     rust_locks = find_rust_lockfiles(project_path, exclude_paths=exclude_paths)
     if rust_locks:
         locked = []
         rust_known_names: set[str] = set()
-        # A dependency declared with ``git`` / ``path`` is not a direct dep
-        # here (it has no row), but the lockfile records the registry crates
-        # it pulls in. It is a root of the lockfile graph all the same;
-        # without it those crates are unreachable and dropped as orphans.
-        off_registry_prod, off_registry_dev = cargo_off_registry_root_names(
-            project_path, exclude_paths=exclude_paths
-        )
         for rust_lock in rust_locks:
+            # A path dependency inside the scanned directory has no row, but
+            # the lockfile records the registry crates it pulls in. It is a
+            # root of the lockfile graph all the same; without it those
+            # crates are unreachable and dropped as orphans.
             lock_deps, lock_known = parse_cargo_lock(
                 rust_lock,
                 prod_root_names=names_by_group(Ecosystem.RUST, DependencyGroup.PROD)
-                | off_registry_prod,
+                | cargo.prod_roots,
                 dev_root_names=names_by_group(Ecosystem.RUST, DependencyGroup.DEV)
-                | off_registry_dev,
+                | cargo.dev_roots,
                 include_dev=include_dev,
+                origins=cargo.origins,
             )
             locked.extend(_stamp_sources(lock_deps))
             rust_known_names.update(lock_known)
         out.extend(locked)
-        out.extend(_walk_uncovered(Ecosystem.RUST, locked, rust_known_names))
+        out.extend(_walk_uncovered(Ecosystem.RUST, locked, rust_known_names, cargo.patches))
         handled.add(Ecosystem.RUST)
 
     if Ecosystem.JAVA in ecosystems_present or find_gradle_lockfiles(
@@ -409,12 +413,17 @@ def resolve_transitive(
             if d.ecosystem == Ecosystem.PHP and d.source
         }
         locked: list[Dependency] = []
+        # Every name a lockfile holds is covered by it, the project's own
+        # path packages included: none of them is walked from the registry.
+        php_lock_names: set[str] = set()
         for composer_lock in composer_locks:
-            lock_deps, _license_map = parse_composer_lockfile(
+            lock_deps, license_map = parse_composer_lockfile(
                 composer_lock,
                 direct_names=direct_php_names,
                 include_dev=include_dev,
+                scan_root=project_path,
             )
+            php_lock_names.update(name for name, _version in license_map)
             for dep in lock_deps:
                 if dep.depth == 0:
                     source = direct_source_by_name.get(dep.name.lower(), "")
@@ -425,7 +434,7 @@ def resolve_transitive(
                 else:
                     locked.append(dep)
         out.extend(locked)
-        out.extend(_walk_uncovered(Ecosystem.PHP, locked, set()))
+        out.extend(_walk_uncovered(Ecosystem.PHP, locked, php_lock_names))
         handled.add(Ecosystem.PHP)
 
     # Ruby transitive resolution: Gemfile.lock is authoritative when
@@ -586,6 +595,7 @@ def resolve_transitive(
             max_workers=max_workers,
             fetcher=fetcher,
             on_wave=on_wave,
+            origins=cargo.patches if ecosystem == Ecosystem.RUST else None,
         )
         out.extend(walked)
 
@@ -1637,6 +1647,10 @@ def _resolve_java_transitive(
         and d.name not in workspace_local
         and (include_dev or d.group != DependencyGroup.DEV)
     ]
+    # A dependency with an origin is a local file: it is a row as it stands,
+    # with no managed version to look up and no subgraph to walk.
+    out.extend(d for d in direct_uncovered if d.origin)
+    direct_uncovered = [d for d in direct_uncovered if not d.origin]
     if not direct_uncovered:
         return out
 
@@ -1836,8 +1850,15 @@ def _walk_registry(
     max_workers: int = 16,
     fetcher: Fetcher,
     on_wave: Callable[[int], None] | None = None,
+    origins: Mapping[str, str | None] | None = None,
 ) -> list[Dependency]:
     """BFS from `seeds` via per-version dependency metadata.
+
+    ``origins`` maps a lowercased package name to the origin a manifest
+    redirects that package to (a Cargo ``[patch]``). A package the walk
+    reaches under such a name is not the registry's: it is a row with that
+    origin, and nothing is requested for it. A name mapped to ``None`` is
+    the project's own code and is no row.
 
     Processes each BFS level in parallel via a ThreadPoolExecutor so multiple
     in-flight registry requests overlap. Wave dedup uses ``(name, spec)`` so
@@ -1901,7 +1922,11 @@ def _walk_registry(
     progress_total = 0
 
     def _walk_one(snapshot: contextvars.Context, dep: Dependency) -> _WalkResult:
-        return snapshot.run(_walk_one_inner, dep, ecosystem, max_depth, client, fetcher)
+        result = snapshot.run(_walk_one_inner, dep, ecosystem, max_depth, client, fetcher)
+        if not origins:
+            return result
+        walked, resolved_version, children = result
+        return (walked, resolved_version, _redirect_children(children, origins))
 
     current_level: list[Dependency] = list(seeds)
     while current_level:
@@ -1991,6 +2016,22 @@ def _walk_registry(
 
 # (dep, resolved_version_or_empty, children)
 _WalkResult = tuple[Dependency, str, list[Dependency]]
+
+
+def _redirect_children(
+    children: list[Dependency], origins: Mapping[str, str | None]
+) -> list[Dependency]:
+    """Give each child a manifest redirects its declared origin; drop own code."""
+    out: list[Dependency] = []
+    for child in children:
+        key = child.name.lower()
+        if key not in origins:
+            out.append(child)
+            continue
+        origin = origins[key]
+        if origin is not None:
+            out.append(replace(child, origin=origin, version_constraint=""))
+    return out
 
 
 def _walk_one_inner(
