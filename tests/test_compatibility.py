@@ -2322,22 +2322,37 @@ class TestOrArmJudgedWhole:
         clean = self._check(project, "MIT", group=DependencyGroup.DEV)
         assert clean.verdict == CompatibilityVerdict.UNKNOWN
 
-    def test_every_arm_with_a_pair_conflict_keeps_the_worst_one(self):
-        # Each arm has a pair-level conflict, so the worst one stands even
-        # though the EPL-2.0 arm alone only warns.
-        assert self._check("GPL-2.0-only", "Apache-2.0").verdict == (
-            CompatibilityVerdict.INCOMPATIBLE
-        )
-        assert self._check("GPL-2.0-only", "EPL-2.0").verdict == CompatibilityVerdict.WARNING
-        for license_id in ("Apache-2.0 OR EPL-2.0", "EPL-2.0 OR Apache-2.0"):
-            result = self._check("GPL-2.0-only", license_id)
-            assert result.verdict == CompatibilityVerdict.INCOMPATIBLE, license_id
-            assert "GPLv2-incompatible" in result.reason
+    @pytest.mark.parametrize(
+        "project, violating_arm",
+        [
+            ("GPL-2.0-only", "Apache-2.0"),
+            ("GPL-2.0-only", "GPL-3.0-only"),
+            ("GPL-3.0-only", "GPL-2.0-only"),
+            ("GPL-3.0-only", "CDDL-1.0"),
+        ],
+    )
+    def test_arm_with_a_pair_warning_is_taken_over_one_with_a_pair_violation(
+        self, project, violating_arm
+    ):
+        # Every arm has a pair-level conflict. The project can take the
+        # EPL-2.0 arm, whose conflict is a warning, and the other arm's
+        # violation does not follow it there.
+        assert self._check(project, violating_arm).verdict == CompatibilityVerdict.INCOMPATIBLE
+        alone = self._check(project, "EPL-2.0")
+        assert alone.verdict == CompatibilityVerdict.WARNING
+        for license_id in (f"{violating_arm} OR EPL-2.0", f"EPL-2.0 OR {violating_arm}"):
+            result = self._check(project, license_id)
+            assert result.verdict == CompatibilityVerdict.WARNING, license_id
+            assert result.reason == alone.reason.replace("EPL-2.0 —", f"{license_id} —")
 
-    def test_conflict_on_an_unresolved_arm_counts_when_every_resolved_arm_has_one(self):
-        result = self._check("GPL-2.0-only", "EPL-2.0 OR (Apache-2.0 AND CustomLicense)")
-        assert result.verdict == CompatibilityVerdict.INCOMPATIBLE
-        assert "GPLv2-incompatible" in result.reason
+    def test_conflict_on_an_unresolved_arm_does_not_reach_the_arm_taken(self):
+        for license_id in (
+            "EPL-2.0 OR (Apache-2.0 AND CustomLicense)",
+            "(Apache-2.0 AND CustomLicense) OR EPL-2.0",
+        ):
+            result = self._check("GPL-2.0-only", license_id)
+            assert result.verdict == CompatibilityVerdict.WARNING, license_id
+            assert "secondary license" in result.reason
 
     def test_no_fully_resolved_arm_routes_every_unresolved_license_to_review(self):
         # The GPL arm has a known risk class and no pair conflict, so the
@@ -2438,6 +2453,42 @@ class TestOrArmJudgedWhole:
             compound = self._check(project, f"{a} OR {b} OR {c}", group)
             assert self._STRICTNESS[compound.verdict] >= min(own[a], own[b], own[c]), (a, b, c)
 
+    @pytest.mark.parametrize(
+        "project",
+        [
+            "MIT",
+            "Apache-2.0",
+            "MPL-2.0",
+            "GPL-2.0-only",
+            "GPL-2.0-or-later",
+            "GPL-3.0-only",
+            "AGPL-3.0-only",
+            "Proprietary",
+        ],
+    )
+    def test_compound_is_never_stricter_than_its_best_arm_that_resolved(self, project):
+        # The counterpart of the test above, for a project under one license:
+        # the choice the project takes is judged as it is when it is the
+        # whole license. An arm that is unknown on its own did not resolve
+        # and is never the one taken. Production dependencies only: for a
+        # dev dependency a lone ``Proprietary`` is a warning, not unknown.
+        unknown = self._STRICTNESS[CompatibilityVerdict.UNKNOWN]
+        conjunctions = [f"({a} AND {b})" for a, b in itertools.combinations(self._BINDING, 2)]
+        own = {
+            arm: self._STRICTNESS[self._check(project, arm).verdict]
+            for arm in (*self._LEAVES, *conjunctions)
+        }
+
+        def best_resolved(*arms: str) -> int:
+            return min((own[arm] for arm in arms if own[arm] != unknown), default=unknown)
+
+        for a, b in itertools.combinations(own, 2):
+            compound = self._check(project, f"{a} OR {b}")
+            assert self._STRICTNESS[compound.verdict] <= best_resolved(a, b), (a, b)
+        for a, b, c in itertools.combinations(self._BINDING, 3):
+            compound = self._check(project, f"{a} OR {b} OR {c}")
+            assert self._STRICTNESS[compound.verdict] <= best_resolved(a, b, c), (a, b, c)
+
     @pytest.mark.parametrize("project", _PROJECTS)
     def test_and_keeps_the_obligations_of_every_operand(self, project):
         # An OR operand of an AND is no more lenient inside the AND than on
@@ -2529,6 +2580,181 @@ class TestOrArmVerdictDrivesTheExitCode:
         assert data["project_license"] == "GPL-2.0-only"
         assert data["dependencies"][0]["verdict"] == verdict
         assert data["dependencies"][0]["risk"] == risk
+
+
+class TestOrVerdictIsThatOfItsBestChoice:
+    """``licenseal check`` gives a dependency under an ``OR`` expression the
+    verdict of the choice that suits the project best. Each scan reports the
+    expression and every one of its choices as a dependency of its own, and
+    the verdict expected for the expression is computed from those rows."""
+
+    # Project license -> the choices of each ``OR`` expression scanned under it.
+    _CHOICES = {
+        "GPL-2.0-only": [
+            ("Apache-2.0", "EPL-2.0"),
+            ("GPL-3.0-only", "EPL-2.0"),
+            ("Apache-2.0", "GPL-2.0-only AND CustomLicense"),
+            ("Apache-2.0", "AGPL-1.0-only"),
+            ("GPL-3.0-only", "Proprietary"),
+            ("Apache-2.0", "MIT"),
+            ("Apache-2.0 AND MIT", "GPL-3.0-only"),
+            ("Apache-2.0", "GPL-2.0-only"),
+            ("Apache-2.0", "LGPL-2.1-only"),
+            ("Apache-2.0", "CustomLicense"),
+            ("GPL-3.0-only", "MIT AND CustomLicense"),
+            ("Apache-2.0", "MPL-2.0"),
+            ("Apache-2.0", "EPL-1.0"),
+            ("Apache-2.0", "CDDL-1.0"),
+            ("Apache-2.0", "LGPL-3.0-only"),
+            ("Apache-2.0", "AGPL-3.0-only"),
+            ("EPL-2.0", "MIT"),
+            ("EPL-2.0", "Apache-2.0 AND CustomLicense"),
+            ("Apache-2.0", "EPL-2.0", "GPL-3.0-only"),
+        ],
+        "GPL-3.0-only": [
+            ("GPL-2.0-only", "EPL-2.0"),
+            ("CDDL-1.0", "EPL-2.0"),
+            ("EPL-1.0", "AGPL-3.0-only"),
+            ("GPL-2.0-only", "AGPL-3.0-only"),
+            ("AGPL-3.0-only", "GPL-3.0-only AND CustomLicense"),
+            ("GPL-2.0-only", "MIT"),
+            ("EPL-1.0", "CDDL-1.0"),
+            ("GPL-2.0-only", "MPL-2.0"),
+        ],
+        "MIT": [
+            ("AGPL-3.0-only", "Proprietary"),
+            ("GPL-3.0-only", "MIT AND CustomLicense"),
+            ("GPL-3.0-only", "LGPL-3.0-only"),
+            ("GPL-3.0-only", "Apache-2.0"),
+            ("GPL-3.0-only AND CustomLicense", "LGPL-3.0-only"),
+            ("GPL-3.0-only AND CustomLicense", "Proprietary"),
+            ("CustomLicense", "Proprietary"),
+        ],
+        "AGPL-3.0-only": [
+            ("GPL-2.0-only", "Apache-2.0"),
+            ("GPL-2.0-only", "Apache-2.0 AND CustomLicense"),
+        ],
+        "LGPL-2.1-only": [
+            ("Apache-2.0", "GPL-3.0-only"),
+            ("GPL-2.0-only", "MIT AND CustomLicense"),
+        ],
+        "LGPL-3.0-only": [
+            ("GPL-2.0-only", "EPL-2.0"),
+        ],
+    }
+    _MOST_LENIENT_FIRST = ("compatible", "warning", "incompatible")
+
+    @classmethod
+    def _expected(cls, choice_verdicts: list[str]) -> str:
+        """The most lenient verdict among the choices that resolved.
+
+        A choice that is unknown as a license of its own did not resolve,
+        and is never the one taken; when none resolved the expression is
+        unknown.
+        """
+        resolved = [verdict for verdict in choice_verdicts if verdict != "unknown"]
+        return min(resolved, key=cls._MOST_LENIENT_FIRST.index, default="unknown")
+
+    @staticmethod
+    def _expression(choices: tuple[str, ...]) -> str:
+        return " OR ".join(f"({choice})" if " " in choice else choice for choice in choices)
+
+    @pytest.mark.parametrize("project", sorted(_CHOICES))
+    @respx.mock
+    def test_expression_has_the_verdict_of_its_best_choice(self, tmp_path, project):
+        declared = list(
+            dict.fromkeys(
+                license_string
+                for choices in self._CHOICES[project]
+                for license_string in (
+                    *choices,
+                    self._expression(choices),
+                    self._expression(choices[::-1]),
+                )
+            )
+        )
+        names = {license_string: f"dep-{index}" for index, license_string in enumerate(declared)}
+        (tmp_path / "package.json").write_text(
+            json.dumps(
+                {
+                    "name": "app",
+                    "license": project,
+                    "dependencies": dict.fromkeys(names.values(), "1.0.0"),
+                }
+            )
+        )
+        for license_string, name in names.items():
+            respx.get(f"https://registry.npmjs.org/{name}/1.0.0").mock(
+                return_value=httpx.Response(
+                    200, json={"version": "1.0.0", "license": license_string}
+                )
+            )
+
+        result = CliRunner().invoke(
+            main,
+            [
+                "check",
+                "--path",
+                str(tmp_path),
+                "-f",
+                "json",
+                "--no-require-lockfile",
+                "--no-strict",
+            ],
+        )
+        data = json.loads(result.output[result.output.index("{") :])
+        assert data["project_license"] == project
+        verdicts = {dep["name"]: dep["verdict"] for dep in data["dependencies"]}
+        assert len(verdicts) == len(names)
+        for choices in self._CHOICES[project]:
+            expected = self._expected([verdicts[names[choice]] for choice in choices])
+            for ordered in (choices, choices[::-1]):
+                expression = self._expression(ordered)
+                assert verdicts[names[expression]] == expected, expression
+        # A violation fails the scan whatever the strictness; each project
+        # here has a choice that is one.
+        assert "incompatible" in verdicts.values()
+        assert result.exit_code == 1
+
+    def test_expected_verdicts_cover_every_outcome(self):
+        # The rule the expectations are computed by, on its own.
+        assert self._expected(["incompatible", "warning"]) == "warning"
+        assert self._expected(["warning", "compatible", "incompatible"]) == "compatible"
+        assert self._expected(["incompatible", "unknown"]) == "incompatible"
+        assert self._expected(["unknown", "unknown"]) == "unknown"
+
+    @pytest.mark.parametrize(
+        "project, declared, extra_args, exit_code, verdict",
+        [
+            # The choice the project can take is a warning: it fails strict
+            # mode only.
+            ("GPL-2.0-only", "Apache-2.0 OR EPL-2.0", ["--no-strict"], 0, "warning"),
+            ("GPL-2.0-only", "Apache-2.0 OR EPL-2.0", [], 1, "warning"),
+            ("GPL-2.0-only", "GPL-3.0-only OR EPL-2.0", ["--no-strict"], 0, "warning"),
+            ("GPL-3.0-only", "GPL-2.0-only OR EPL-2.0", ["--no-strict"], 0, "warning"),
+            ("GPL-3.0-only", "CDDL-1.0 OR EPL-2.0", ["--no-strict"], 0, "warning"),
+            # Single-choice controls.
+            ("GPL-2.0-only", "EPL-2.0", ["--no-strict"], 0, "warning"),
+            ("GPL-2.0-only", "Apache-2.0", ["--no-strict"], 1, "incompatible"),
+            # Every choice a violation: so is the dependency.
+            ("GPL-3.0-only", "CDDL-1.0 OR EPL-1.0", ["--no-strict"], 1, "incompatible"),
+        ],
+    )
+    @respx.mock
+    def test_check_exit_code(self, tmp_path, project, declared, extra_args, exit_code, verdict):
+        (tmp_path / "package.json").write_text(
+            json.dumps({"name": "app", "license": project, "dependencies": {"some-lib": "1.0.0"}})
+        )
+        respx.get("https://registry.npmjs.org/some-lib/1.0.0").mock(
+            return_value=httpx.Response(200, json={"version": "1.0.0", "license": declared})
+        )
+        result = CliRunner().invoke(
+            main,
+            ["check", "--path", str(tmp_path), "-f", "json", "--no-require-lockfile", *extra_args],
+        )
+        assert result.exit_code == exit_code
+        dependency = json.loads(result.output[result.output.index("{") :])["dependencies"][0]
+        assert dependency["verdict"] == verdict
 
 
 class TestListSeparatorInsideAnExpression:

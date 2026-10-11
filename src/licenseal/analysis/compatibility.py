@@ -320,11 +320,13 @@ def _elect(project_risk: RiskLevel, project_leaf: str, dep_expr: str) -> _Outcom
       :func:`classify_risk`, the worst pair conflict stands, and the
       unresolved licenses add up.
     * **OR** → the fully-resolved arm with the most lenient verdict, taken
-      whole. An arm that binds an unresolved license is never elected over a
-      fully-resolved one, matching the dep-side convention that unresolvable
-      arms never relax a verdict (``AGPL-3.0-only OR Proprietary`` stays
-      driven by its AGPL arm). When every fully-resolved arm has a pair
-      conflict, the worst conflict across all arms stands.
+      whole: the dependency is judged exactly as that arm is when it is the
+      whole license, so a conflict of an arm the project does not take
+      never follows the one it takes (``Apache-2.0 OR EPL-2.0`` under
+      GPL-2.0-only is the EPL-2.0 warning). An arm that binds an unresolved
+      license is never elected over a fully-resolved one, matching the
+      dep-side convention that unresolvable arms never relax a verdict
+      (``AGPL-3.0-only OR Proprietary`` stays driven by its AGPL arm).
     * **OR with no fully-resolved arm** → no choice can be elected cleanly,
       so the unresolved licenses of every arm are unavoidable (``(GPL AND
       <custom>) OR Proprietary``). The risk class is the least restrictive
@@ -354,16 +356,13 @@ def _elect(project_risk: RiskLevel, project_leaf: str, dep_expr: str) -> _Outcom
 
     resolved = [arm for arm in arms if not arm.unresolved]
     if resolved:
-        best = min(
+        return min(
             resolved,
             key=lambda arm: (
                 _VERDICT_STRICTNESS[_outcome_verdict(project_risk, arm)[0]],
                 arm.risk.severity,
             ),
         )
-        if all(arm.pair is not None for arm in resolved):
-            return best._replace(pair=worst)
-        return best
     if any(arm.pair is None and arm.risk != RiskLevel.UNKNOWN for arm in arms):
         worst = None
     return _Outcome(risk, worst, unresolved)
