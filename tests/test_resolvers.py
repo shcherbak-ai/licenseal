@@ -5204,6 +5204,21 @@ class TestExtractMavenPinnedVersion:
         # how to interpret as a single pin — defensive reject.
         assert _extract_maven_pinned_version("(1.0)") is None
 
+    @pytest.mark.parametrize(
+        "dynamic", ["1.+", "1.2.+", "==1.+", "[1.+]", "+", "latest.release", "latest.integration"]
+    )
+    def test_gradle_dynamic_version_returns_none(self, dynamic):
+        from licenseal.resolvers.deps_dev import _extract_maven_pinned_version
+
+        # A prefix or a ``latest.*`` selector names a set of versions; the
+        # batch must not be asked about its literal text.
+        assert _extract_maven_pinned_version(dynamic) is None
+
+    def test_build_metadata_after_a_plus_is_a_pin(self):
+        from licenseal.resolvers.deps_dev import _extract_maven_pinned_version
+
+        assert _extract_maven_pinned_version("1.0.0+build.7") == "1.0.0+build.7"
+
 
 class TestDependenciesFromNuspec:
     """Edge cases in ``resolvers.nuget._dependencies_from_nuspec``."""

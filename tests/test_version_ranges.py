@@ -12,6 +12,7 @@ import pytest
 from licenseal.models import Ecosystem
 from licenseal.resolvers.version_selection import (
     composer_version,
+    is_gradle_dynamic_version,
     parse_nuget_range,
     satisfies,
     select_version,
@@ -539,6 +540,20 @@ class TestNugetRange:
     )
     def test_not_a_range(self, constraint):
         assert parse_nuget_range(constraint) is None
+
+
+class TestGradleDynamicVersion:
+    @pytest.mark.parametrize(
+        "text", ["1.+", "1.2.+", " 1.+ ", "1+", "+", "latest.release", "latest.integration"]
+    )
+    def test_dynamic(self, text):
+        assert is_gradle_dynamic_version(text)
+
+    @pytest.mark.parametrize(
+        "text", ["1.2.3", "1.0.0+build.7", "1.0-SNAPSHOT", "[1.0,2.0)", "", "RELEASE", "latest"]
+    )
+    def test_not_dynamic(self, text):
+        assert not is_gradle_dynamic_version(text)
 
 
 class TestComposerVersion:

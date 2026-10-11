@@ -245,6 +245,24 @@ class TestScan:
         assert _rows(report) == {"com.example:lib": _UNRESOLVED}
 
     @pytest.mark.parametrize("mode", ["--transitive", "--no-transitive"])
+    @pytest.mark.parametrize(
+        "version", ["1.+", "1.2.+", "+", "latest.release", "latest.integration"]
+    )
+    @respx.mock
+    def test_dynamic_version_is_unknown_and_nothing_is_requested_for_it(
+        self, tmp_path: Path, mode: str, version: str
+    ):
+        # A prefix or a ``latest.*`` version names a set of versions, not
+        # one. No registry is asked for the literal text, the row has no
+        # version, and no dependency list is recorded as unread for it.
+        _groovy(tmp_path, f"implementation 'com.example:lib:{version}'")
+        result, report = _check_json(tmp_path, mode, "--no-strict", "--no-require-lockfile")
+        assert result.exit_code == 0, result.output
+        assert _rows(report) == {"com.example:lib": _UNRESOLVED}
+        assert [d for d in report["diagnostics"] if d["severity"] != "estimate"] == []
+        assert respx.calls.call_count == 0
+
+    @pytest.mark.parametrize("mode", ["--transitive", "--no-transitive"])
     @respx.mock
     def test_maven_dependency_with_no_version_is_not_estimated(self, tmp_path: Path, mode: str):
         # A POM gets a missing version from its parent chain or from nowhere.

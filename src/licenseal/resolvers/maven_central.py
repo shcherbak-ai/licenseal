@@ -68,7 +68,7 @@ from licenseal.resolvers.http import (
     fetch_registry_text,
     quote_coordinate,
 )
-from licenseal.resolvers.version_selection import select_version
+from licenseal.resolvers.version_selection import is_gradle_dynamic_version, select_version
 
 # Sonatype publishes Maven Central at multiple equivalent hostnames
 # (CNAMEs to the same Cloudflare-fronted backend):
@@ -141,6 +141,9 @@ _MAX_PARENT_DEPTH = 5
 # and unresolved ``${…}`` property tokens that survived the discovery
 # layer's local property-expansion pass (post-expansion these should
 # not reach the network — the registry would 404 on the literal token).
+# A Gradle dynamic version (``1.+``, ``latest.release``) is not a version
+# either; the pattern alone would take ``1.+`` for one, so
+# ``_extract_pinned_version_maven`` rejects those before it is applied.
 _MAVEN_PINNED_VERSION_RE = re.compile(r"^\d+(?:\.\d+)*(?:[-+.][A-Za-z0-9.+_-]+)?$")
 
 
@@ -150,13 +153,18 @@ def _extract_pinned_version_maven(version_constraint: str) -> str | None:
     Accepts ``X.Y.Z`` / ``X.Y`` / ``X`` with optional qualifier suffix,
     plus the licenseal-internal ``==X.Y.Z`` form used by the transitive
     walker's lockfile-shaped output. Rejects ranges, ``RELEASE`` /
-    ``LATEST``, and unresolved ``${…}`` placeholders.
+    ``LATEST``, unresolved ``${…}`` placeholders, and Gradle dynamic
+    versions (``1.+``, ``+``, ``latest.release``): each names a set of
+    versions, and requesting the literal text would ask a registry for a
+    version that does not exist.
     """
     spec = version_constraint.strip()
     if not spec:
         return None
     if spec.startswith("=="):
         spec = spec[2:].strip()
+    if is_gradle_dynamic_version(spec):
+        return None
     if _MAVEN_PINNED_VERSION_RE.fullmatch(spec):
         return spec
     return None

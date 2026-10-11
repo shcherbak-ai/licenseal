@@ -54,6 +54,7 @@ from licenseal.resolvers.http import (
     has_utf8_encoding,
     quote_coordinate,
 )
+from licenseal.resolvers.version_selection import is_gradle_dynamic_version
 
 _DEPS_DEV_BATCH_URL = "https://api.deps.dev/v3alpha/versionbatch"
 _DEPS_DEV_V3_VERSION_URL = "https://api.deps.dev/v3/systems/GO/packages/{name}/versions/{version}"
@@ -615,8 +616,9 @@ def _extract_maven_pinned_version(version_constraint: str) -> str | None:
     POM ``<version>`` text. Lockfile-style pin (``[1.2.3]`` Maven-strict
     notation, ``==1.2.3`` licenseal-internal) and bare ``1.2.3`` are
     accepted; everything else (open ranges ``[1.0,)``, version-set
-    expressions, property substitutions like ``${spring.version}``) is
-    rejected so the per-package POM walker handles it.
+    expressions, property substitutions like ``${spring.version}``, Gradle
+    dynamic versions like ``1.+`` and ``latest.release``) is rejected so the
+    per-package POM walker handles it.
     """
     spec = version_constraint.strip()
     if not spec:
@@ -627,7 +629,7 @@ def _extract_maven_pinned_version(version_constraint: str) -> str | None:
         spec = spec[1:-1].strip()
     if not spec or "," in spec or "$" in spec or " " in spec:
         return None
-    if spec[0] in "([":
+    if spec[0] in "([" or is_gradle_dynamic_version(spec):
         return None
     return spec
 

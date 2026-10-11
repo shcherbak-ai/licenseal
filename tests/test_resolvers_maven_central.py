@@ -227,6 +227,18 @@ class TestExtractPinnedVersionMaven:
     def test_latest_macro_rejected(self):
         assert _extract_pinned_version_maven("LATEST") is None
 
+    @pytest.mark.parametrize(
+        "dynamic",
+        ["1.+", "1.2.+", "==1.+", "1+", "+", "latest.release", "latest.integration"],
+    )
+    def test_gradle_dynamic_version_rejected(self, dynamic):
+        # A prefix or a ``latest.*`` selector names a set of versions. Read
+        # as a version, its literal text would be asked of the registry.
+        assert _extract_pinned_version_maven(dynamic) is None
+
+    def test_build_metadata_after_a_plus_is_still_a_version(self):
+        assert _extract_pinned_version_maven("1.0.0+build.7") == "1.0.0+build.7"
+
     def test_unresolved_property_token_rejected(self):
         # If a literal ``${name}`` token slips through the discovery
         # layer's expansion (parent-POM property), we must NOT try to

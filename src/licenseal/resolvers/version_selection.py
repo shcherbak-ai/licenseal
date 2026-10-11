@@ -758,6 +758,17 @@ def _maven_is_prerelease(version: Any) -> bool:
     )
 
 
+def is_gradle_dynamic_version(version: str) -> bool:
+    """Whether a Gradle version is a dynamic one rather than a version.
+
+    A prefix version (``1.+``, ``1.2.+``, a bare ``+``) and a ``latest.*``
+    selector (``latest.release``, ``latest.integration``) each name a set of
+    versions. One is never a version to ask a registry for.
+    """
+    spec = version.strip()
+    return spec.endswith("+") or spec.startswith("latest.")
+
+
 def _maven_matcher(constraint: str) -> _Matcher | None:
     """Maven ranges and Gradle's dynamic forms; a bare version is a minimum."""
     spec = constraint.strip()
