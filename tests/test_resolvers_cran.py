@@ -166,6 +166,35 @@ class TestResolveRLicense:
         assert info.resolved_version == pinned
         assert info.license_estimated is estimated
 
+    @pytest.mark.parametrize(
+        ("pinned", "estimated"),
+        [
+            # ``-`` and ``.`` are one separator: these are the indexed version.
+            ("2.23-26", False),
+            ("2.23.26", False),
+            ("2-23-26", False),
+            # Another version, however it is spelled.
+            ("2.23-25", True),
+            ("2.23.26.1", True),
+            ("2.23", True),
+            # Not an R version: the same only as the same text.
+            ("2.23-26-rc", True),
+        ],
+    )
+    def test_pin_is_compared_with_the_indexed_version_as_r_versions(self, pinned, estimated):
+        # The index lists this package at ``2.23-26``.
+        for constraint in (f"=={pinned}", f"== {pinned}"):
+            info = resolve_r_license(_r_dep("KernSmooth", constraint), _index())
+            assert info.resolved_version == pinned
+            assert info.license_estimated is estimated
+
+    def test_pin_spelled_like_an_index_version_that_is_not_an_r_version(self):
+        index = {"odd": {"Package": "odd", "Version": "1.0-beta", "License": "MIT"}}
+        same = resolve_r_license(_r_dep("odd", "==1.0-beta"), index)
+        assert (same.resolved_version, same.license_estimated) == ("1.0-beta", False)
+        other = resolve_r_license(_r_dep("odd", "==1.0"), index)
+        assert (other.resolved_version, other.license_estimated) == ("1.0", True)
+
     @respx.mock
     def test_pin_against_a_record_without_a_version_is_an_estimate(self):
         respx.get(_CRAN_INDEX_URL).mock(

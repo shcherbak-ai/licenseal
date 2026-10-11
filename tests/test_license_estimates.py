@@ -140,6 +140,132 @@ class TestCranPin:
         assert _row(data, "jsonlite") == ("2.0.0", "MIT", ["version"])
 
 
+def _mock_cran_index(*packages: tuple[str, str, str]) -> None:
+    """Answer the CRAN index with ``(name, version, DCF fields)`` records."""
+    respx.get(_CRAN_INDEX).mock(
+        return_value=httpx.Response(
+            200,
+            text="\n".join(
+                f"Package: {name}\nVersion: {version}\n{fields}\n"
+                for name, version, fields in packages
+            ),
+        )
+    )
+
+
+def _rows(data: dict) -> list[tuple[str, str, str, list[str], str]]:
+    """``(name, resolved_version, license, estimated, source)`` of every row, sorted."""
+    return sorted(
+        (d["name"], d["resolved_version"], d["license"], d["estimated"], d["source"])
+        for d in data["dependencies"]
+    )
+
+
+class TestDescriptionPin:
+    """A ``DESCRIPTION`` requirement written ``(== x)`` is a pin, with or without
+    the transitive stage: the row is at ``x``, like a row a ``renv.lock`` pins."""
+
+    _SCANS = pytest.mark.parametrize(
+        "flags", [(), ("--no-transitive",)], ids=["default", "no-transitive"]
+    )
+
+    @respx.mock
+    @_SCANS
+    def test_pin_to_another_version_than_the_indexed_one(self, tmp_path, flags):
+        _write(
+            tmp_path / "DESCRIPTION",
+            "Package: myproj\nLicense: MIT\nImports: pinned (== 1.8.0), ranged (>= 2.0)\n",
+        )
+        _mock_cran_index(("pinned", "2.0.0", "License: MIT"), ("ranged", "2.3.0", "License: MIT"))
+        result, data = _check_json(tmp_path, "--no-require-lockfile", *flags)
+        assert result.exit_code == 0
+        # The pinned version is the manifest's, so only its license is an
+        # estimate. The range is resolved by the scan, to the indexed version.
+        assert _rows(data) == [
+            ("pinned", "1.8.0", "MIT", ["license"], "DESCRIPTION"),
+            ("ranged", "2.3.0", "MIT", ["version"], "DESCRIPTION"),
+        ]
+
+    @respx.mock
+    @_SCANS
+    @pytest.mark.parametrize("pin", ["2.23-26", "2.23.26"])
+    def test_pin_to_the_indexed_version_in_either_spelling(self, tmp_path, flags, pin):
+        _write(
+            tmp_path / "DESCRIPTION", f"Package: myproj\nLicense: MIT\nImports: dashed (== {pin})\n"
+        )
+        _mock_cran_index(("dashed", "2.23-26", "License: MIT"))
+        result, data = _check_json(tmp_path, "--no-require-lockfile", *flags)
+        assert result.exit_code == 0
+        assert _rows(data) == [("dashed", pin, "MIT", [], "DESCRIPTION")]
+
+    @respx.mock
+    def test_pinned_package_keeps_the_dependencies_the_index_lists(self, tmp_path):
+        _write(
+            tmp_path / "DESCRIPTION", "Package: myproj\nLicense: MIT\nImports: pinned (== 1.8.0)\n"
+        )
+        _mock_cran_index(
+            ("pinned", "2.0.0", "License: MIT\nImports: leaf"), ("leaf", "0.4-2", "License: MIT")
+        )
+        result, data = _check_json(tmp_path, "--no-require-lockfile")
+        assert result.exit_code == 0
+        assert _rows(data) == [
+            ("leaf", "0.4-2", "MIT", ["version"], ""),
+            ("pinned", "1.8.0", "MIT", ["license"], "DESCRIPTION"),
+        ]
+        (leaf,) = [d for d in data["dependencies"] if d["name"] == "leaf"]
+        assert leaf["direct_ancestors"] == ["pinned"]
+
+    @respx.mock
+    @_SCANS
+    def test_each_declaration_of_one_package_is_a_row_at_its_own_version(self, tmp_path, flags):
+        # Two packages of one tree pin ``shared`` differently, and a third
+        # leaves the version to the index.
+        for directory, requirement in (
+            ("a", "shared (== 1.0.0)"),
+            ("b", "shared (>= 1.0)"),
+            ("c", "shared (== 1.5.0)"),
+            ("d", "shared (== 1.0.0)"),
+        ):
+            _write(
+                tmp_path / directory / "DESCRIPTION",
+                f"Package: {directory}pkg\nLicense: MIT\nImports: {requirement}\n",
+            )
+        _mock_cran_index(("shared", "2.0.0", "License: MIT"))
+        result, data = _check_json(tmp_path, "--no-require-lockfile", *flags)
+        assert result.exit_code == 0
+        assert _rows(data) == [
+            ("shared", "1.0.0", "MIT", ["license"], "a/DESCRIPTION"),
+            ("shared", "1.5.0", "MIT", ["license"], "c/DESCRIPTION"),
+            ("shared", "2.0.0", "MIT", ["version"], "b/DESCRIPTION"),
+        ]
+
+    @respx.mock
+    def test_pin_the_lockfile_does_not_hold_is_reported_beside_the_locked_version(self, tmp_path):
+        project = _r_project(tmp_path, "1.8.0", current="2.0.0")
+        _write(
+            project / "DESCRIPTION", "Package: myproj\nLicense: MIT\nImports: jsonlite (== 1.7.0)\n"
+        )
+        result, data = _check_json(project, "--no-require-lockfile")
+        assert result.exit_code == 0
+        # The manifest has moved away from its lockfile: the pin is the
+        # direct dependency, and the locked version is still in the lockfile.
+        assert _rows(data) == [
+            ("jsonlite", "1.7.0", "MIT", ["license"], "DESCRIPTION"),
+            ("jsonlite", "1.8.0", "MIT", ["license"], ""),
+        ]
+
+    @respx.mock
+    @_SCANS
+    def test_pinned_package_the_index_does_not_list_is_unknown(self, tmp_path, flags):
+        _write(
+            tmp_path / "DESCRIPTION", "Package: myproj\nLicense: MIT\nImports: gone (== 0.3.1)\n"
+        )
+        _mock_cran_index(("other", "1.0.0", "License: MIT"))
+        result, data = _check_json(tmp_path, "--no-strict", *flags)
+        assert result.exit_code == 0
+        assert _rows(data) == [("gone", "", "UNKNOWN", [], "DESCRIPTION")]
+
+
 # Three releases of one Hex package. 1.9.1 went out on the older line after
 # 2.0.0, so it is the release the package-level metadata describes.
 _HEX_RELEASES = [

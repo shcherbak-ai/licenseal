@@ -7,8 +7,9 @@ licenseal fetches it once per scan (the same index ``install.packages`` / ``pak`
 consult), parses it, and resolves every R package's license and transitive
 closure locally — no per-package requests and no community mirror.
 
-The index carries only *current* versions. A ``renv.lock`` / ``packrat.lock``
-pin to another version is reported at the pinned version with the license the
+The index carries only *current* versions. A pin to another version (a
+``renv.lock`` / ``packrat.lock`` entry, or a ``DESCRIPTION`` requirement
+written ``(== x)``) is reported at the pinned version with the license the
 index records for the current one, marked as an estimate
 (``LicenseInfo.license_estimated``). A package absent from the index
 (archived, or off-CRAN such as Bioconductor / GitHub) resolves to UNKNOWN.
@@ -28,6 +29,7 @@ from licenseal.discovery.r._dcf import parse_dcf, parse_package_list
 from licenseal.discovery.r.description import is_base_package
 from licenseal.models import Dependency, Ecosystem, LicenseInfo
 from licenseal.resolvers.http import Fetcher, fetch_registry_text
+from licenseal.resolvers.version_selection import satisfies
 
 # Key of a package name in the name sets and graphs below (see
 # ``Ecosystem.identity``).
@@ -112,6 +114,17 @@ def index_edge_names(record: dict[str, str]) -> list[str]:
     return out
 
 
+def _same_version(pinned: str, indexed: str) -> bool:
+    """Whether a pinned version is the version the index lists.
+
+    R reads ``-`` and ``.`` in a version as one separator, so ``1.6-1`` and
+    ``1.6.1`` are the same version. Text that is not an R version is the
+    same only as the same text.
+    """
+    verdict = satisfies(Ecosystem.R, indexed, f"=={pinned}")
+    return pinned == indexed if verdict is None else verdict
+
+
 def _unknown(dep: Dependency, *, from_registry: bool) -> LicenseInfo:
     return LicenseInfo(
         dependency=dep,
@@ -125,10 +138,11 @@ def resolve_r_license(dep: Dependency, index: CranIndex) -> LicenseInfo:
     """Resolve an R package's license from the parsed CRAN ``PACKAGES`` index.
 
     A package absent from the current index (archived / off-CRAN) resolves to
-    UNKNOWN. The reported ``resolved_version`` is the lockfile pin when
-    present, else the index's current version. The index records the license
-    of that current version only, so the license of a pin to any other
-    version is an estimate. The index carries no repository/homepage URLs, so
+    UNKNOWN. The reported ``resolved_version`` is the pin of a lockfile entry
+    or of a ``(== x)`` requirement when present, else the index's current
+    version. The index records the license of that current version only, so
+    the license of a pin to any other version (:func:`_same_version`) is an
+    estimate. The index carries no repository/homepage URLs, so
     those stay empty for R. A package with an ``origin`` (GitHub /
     Bioconductor / Local) is not a CRAN package; the CLI never passes one to
     this function.
@@ -148,5 +162,5 @@ def resolve_r_license(dep: Dependency, index: CranIndex) -> LicenseInfo:
         license_raw=raw,
         resolved_version=pinned or current,
         from_registry=True,
-        license_estimated=pinned is not None and pinned != current,
+        license_estimated=pinned is not None and not _same_version(pinned, current),
     )

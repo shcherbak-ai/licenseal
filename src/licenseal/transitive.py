@@ -1155,18 +1155,38 @@ def _resolve_r_transitive(
         out.extend(beside_cran)
         uncovered = [d for d in uncovered if not d.origin or d.identity not in cran_declared]
         cran_index = fetch_cran_index(client, fetcher=fetcher)
-        # A depth-0 row of the closure is the row of the uncovered dep it was
-        # seeded from, whatever version the index holds: it takes that dep's
-        # manifest, the first one's when several declare the package.
-        seeds: dict[str, Dependency] = {}
-        for dep in uncovered:
-            seeds.setdefault(dep.identity, dep)
-        out.extend(
-            _stamped(d, seeds.get(d.identity)) if d.depth == 0 else d
-            for d in _r_index_closure(uncovered, cran_index, include_dev)
-            if d.identity not in r_workspace
-        )
+        # A depth-0 row of the closure stands for the uncovered deps it was
+        # seeded from, which can be several declarations of one package.
+        declared = _declarations(uncovered)
+        for row in _r_index_closure(uncovered, cran_index, include_dev):
+            if row.identity in r_workspace:
+                continue
+            if row.depth == 0:
+                out.extend(_declared_r_rows(row, declared[row.ecosystem, row.identity]))
+            else:
+                out.append(row)
     return out
+
+
+def _declared_r_rows(row: Dependency, declarations: list[Dependency]) -> list[Dependency]:
+    """The rows the uncovered declarations of one R package come to.
+
+    ``row`` is the package's depth-0 row from the CRAN index closure, at the
+    version the index holds. A declaration that pins a version (``== x``) is
+    a row at that version, which is not an estimate; any other declaration is
+    the index's row. Declarations that come to one version are one row, with
+    the manifest of the first of them.
+    """
+    rows: dict[str, Dependency] = {}
+    for declaration in declarations:
+        pinned = _extract_r_pinned_version(declaration.version_constraint)
+        at_version = (
+            replace(row, version_constraint=f"=={pinned}", version_estimated=False)
+            if pinned
+            else row
+        )
+        rows.setdefault(at_version.version_constraint, _stamped(at_version, declaration))
+    return list(rows.values())
 
 
 _r_key = Ecosystem.R.identity

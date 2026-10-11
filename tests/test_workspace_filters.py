@@ -329,3 +329,28 @@ class TestInitReviewFileSkipsTheMember:
         assert result.exit_code == 0, result.output
         assert _excluded(".NET") in result.output
         assert respx.calls.call_count == 0
+
+
+class TestRMemberNamedByTheCranIndex:
+    @respx.mock
+    def test_member_that_a_cran_package_depends_on_is_not_a_row(self, tmp_path):
+        # The package the project imports depends, by the index, on a name
+        # that is a package of the scanned tree, spelled in another case.
+        _write(tmp_path / "DESCRIPTION", "Package: app\nLicense: MIT\nImports: published\n")
+        _write(tmp_path / "pkgs" / "corelib" / "DESCRIPTION", "Package: corelib\nVersion: 0.1\n")
+        respx.get("https://cran.r-project.org/src/contrib/PACKAGES").mock(
+            return_value=httpx.Response(
+                200,
+                text=(
+                    "Package: published\nVersion: 1.0.0\nLicense: MIT\nImports: CoreLib, leaf\n\n"
+                    "Package: leaf\nVersion: 0.2.0\nLicense: MIT\n\n"
+                    "Package: corelib\nVersion: 9.9.9\nLicense: GPL-3\n"
+                ),
+            )
+        )
+        result, data = _check_json(tmp_path, *_FLAGS)
+        assert result.exit_code == 0
+        assert sorted((d["name"], d["license"]) for d in data["dependencies"]) == [
+            ("leaf", "MIT"),
+            ("published", "MIT"),
+        ]
