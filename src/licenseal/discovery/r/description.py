@@ -30,6 +30,10 @@ from licenseal.discovery._walk import walk_project_files
 from licenseal.discovery.r._dcf import parse_dcf, parse_package_list
 from licenseal.models import Dependency, DependencyGroup, Ecosystem
 
+# Key of a package name in the name sets and graphs below (see
+# ``Ecosystem.identity``).
+_key = Ecosystem.R.identity
+
 _PROD_FIELDS = ("Depends", "Imports", "LinkingTo")
 _DEV_FIELDS = ("Suggests", "Enhances")
 
@@ -52,7 +56,7 @@ _R_DESCRIPTION_MARKERS = (
 # (R package names are case-sensitive, but no CRAN package collides with a base
 # name under case folding).
 _R_BASE_PACKAGES = frozenset(
-    name.lower()
+    _key(name)
     for name in (
         "R",
         "base",
@@ -80,7 +84,7 @@ def is_base_package(name: str) -> bool:
     These ship with R and aren't published to CRAN, so discovery and the
     registry walker must skip them (they aren't in the CRAN PACKAGES index).
     """
-    return name.lower() in _R_BASE_PACKAGES
+    return _key(name) in _R_BASE_PACKAGES
 
 
 def _is_r_description(record: dict[str, str]) -> bool:
@@ -150,7 +154,7 @@ def _remote_origins(value: str, desc_dir: Path, scan_root: Path) -> dict[str, st
             origin = "Bioconductor"
         else:
             continue
-        origins[(entry.group("name") or provided).lower()] = origin
+        origins[_key(entry.group("name") or provided)] = origin
     return origins
 
 
@@ -178,11 +182,11 @@ def _parse_description_deps(
             for name, constraint in parse_package_list(value):
                 if is_base_package(name):
                     continue
-                key = (name.lower(), group.value)
+                key = (_key(name), group.value)
                 if key in seen:
                     continue
                 seen.add(key)
-                origin = remotes.get(name.lower(), "")
+                origin = remotes.get(_key(name), "")
                 if origin is None:
                     own.append(name)
                     continue
@@ -222,9 +226,9 @@ def discover_description_dependencies(
             continue
         source = desc.relative_to(project_path).as_posix()
         deps, own = _parse_description_deps(records[0], source, desc.parent, project_path)
-        filtered += sum(name.lower() in workspace_names for name in own)
+        filtered += sum(_key(name) in workspace_names for name in own)
         for dep in deps:
-            if dep.name.lower() in workspace_names:
+            if dep.identity in workspace_names:
                 filtered += 1
                 continue
             out.append(dep)
@@ -244,9 +248,9 @@ def collect_dev_direct_names(deps: list[Dependency]) -> set[str]:
         if dep.ecosystem != Ecosystem.R:
             continue
         if dep.group == DependencyGroup.DEV:
-            dev_names.add(dep.name.lower())
+            dev_names.add(dep.identity)
         else:
-            prod_names.add(dep.name.lower())
+            prod_names.add(dep.identity)
     return dev_names - prod_names
 
 
@@ -284,5 +288,5 @@ def workspace_r_names(
             continue
         records = parse_dcf(text)
         if records and records[0].get("Package"):
-            names.add(records[0]["Package"].strip().lower())
+            names.add(_key(records[0]["Package"].strip()))
     return frozenset(names)

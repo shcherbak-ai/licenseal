@@ -56,6 +56,10 @@ from licenseal.discovery.php.composer_json import (
 )
 from licenseal.models import Dependency, DependencyGroup, Ecosystem
 
+# Key of a package name in the name sets and graphs below (see
+# ``Ecosystem.identity``).
+_key = Ecosystem.PHP.identity
+
 # What a gap names when an entry of ``packages`` / ``packages-dev``, or a
 # field inside one, is not the type the lockfile format defines.
 _PACKAGES_ENTRY = 'an entry of "packages"'
@@ -151,7 +155,7 @@ def _entry_origin(
     source = entry.get("source")
     source_url = source.get("url") if isinstance(source, dict) else None
     from_vcs = isinstance(source_url, str) and repository_key(source_url) in vcs_keys
-    if from_vcs or name.lower() in inline:
+    if from_vcs or _key(name) in inline:
         return package_origin(entry, lock_dir, scan_root)
     # An archive on the local filesystem, as an ``artifact`` repository
     # provides: the dist of a registry package is always a URL.
@@ -253,7 +257,7 @@ def parse_composer_lockfile(
         # so license-map keys and the pinned-version extractor agree on the
         # same shape regardless of how the publisher tagged the release.
         canonical_version = version.lstrip("v")
-        normalized = name.lower()
+        normalized = _key(name)
         license_map[(normalized, canonical_version)] = _license_array_to_raw(entry.get("license"))
         origin = _entry_origin(entry, name, path.parent, scan_root, vcs_keys, inline)
         if origin is None:
@@ -264,7 +268,7 @@ def parse_composer_lockfile(
         # they're not Packagist packages.
         require = composer_map(path, entry, "require", _PACKAGES_ENTRY)
         edges.setdefault(normalized, set()).update(
-            child.lower() for child in require if not _is_platform_require(child)
+            _key(child) for child in require if not _is_platform_require(child)
         )
 
         if (normalized, canonical_version) in seen:
@@ -311,7 +315,7 @@ def parse_composer_lockfile(
                 ecosystem=dep.ecosystem,
                 group=dep.group,
                 depth=dep.depth,
-                direct_ancestors=ancestors.get(dep.name.lower(), ()),
+                direct_ancestors=ancestors.get(dep.identity, ()),
                 origin=dep.origin,
             )
         )
@@ -340,5 +344,5 @@ def extract_composer_lock_licenses(path: Path) -> LockfileLicenseMap:
             version = entry.get("version")
             if not isinstance(name, str) or not isinstance(version, str):
                 continue
-            out[(name.lower(), version.lstrip("v"))] = _license_array_to_raw(entry.get("license"))
+            out[(_key(name), version.lstrip("v"))] = _license_array_to_raw(entry.get("license"))
     return out

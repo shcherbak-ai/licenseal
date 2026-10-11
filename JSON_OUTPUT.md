@@ -21,6 +21,7 @@
   "dependencies": [
     {
       "name": "certifi",
+      "registry_name": "",
       "ecosystem": "python",
       "group": "prod",
       "depth": 1,
@@ -110,6 +111,7 @@ Each entry is a manifest/lockfile read or parse anomaly surfaced during the scan
 | Field | Type | Description |
 | --- | --- | --- |
 | `name` | string | Package name as published on the registry. Reported verbatim, like every other string field: the table and Markdown formats escape control characters and markup for display, JSON does not rewrite them (a control character appears as a JSON `\uXXXX` escape, and so does a lone surrogate). |
+| `registry_name` | string | Empty unless the package is published under another name than `name`: a Hex dependency that `mix.exs` renames (`{:my_alias, "~> 1.0", hex: :real_pkg}`) has the local name in `name` and the hex.pm package in `registry_name`. That is the name its license was looked up under and the `package` a [review entry](USAGE.md#manual-review-file) for it must carry. |
 | `ecosystem` | `"python"` \| `"npm"` \| `"rust"` \| `"go"` \| `"java"` \| `"dotnet"` \| `"php"` \| `"ruby"` \| `"hex"` \| `"r"` | Origin ecosystem. |
 | `group` | `"prod"` \| `"dev"` | Production or development. Reachability-based for transitives. |
 | `depth` | int | `0` for direct deps, `1` for transitives. A binary direct/transitive signal, not a tree level. |

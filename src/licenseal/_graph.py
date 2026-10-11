@@ -19,9 +19,9 @@ def compute_direct_ancestors(
     """Reverse-BFS from each root through the edge graph.
 
     `edges` maps a node → the set of its child nodes. A node is whatever key
-    the caller's graph uses: a lowercased name where one name is one package,
-    or a tuple that also carries the version where two versions of a package
-    must not share ancestry.
+    the caller's graph uses: a package's identity key (``Ecosystem.identity``)
+    where one name is one package, or a tuple that also carries the version
+    where two versions of a package must not share ancestry.
     `roots` maps each depth-0 node → its original-case name.
     Returns node → sorted tuple of the original-case names of the roots that
     can reach it. Cycles terminate naturally via the per-root `seen` set.

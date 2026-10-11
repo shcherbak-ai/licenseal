@@ -354,12 +354,13 @@ def _discover_all_dependencies(
     deps.extend(r_deps)
 
     # Deduplicate: preserve discovery order, but prefer prod over dev for the same package.
-    # A dependency declared from a git repository, a URL, or a path is not the
+    # Two names are one package by the ecosystem's own rule (``identity``). A
+    # dependency declared from a git repository, a URL, or a path is not the
     # registry package of the same name, so the origin is part of the key.
     index_by_key: dict[tuple[str, str, str], int] = {}
     unique: list[Dependency] = []
     for dep in deps:
-        key = (dep.name.lower(), dep.ecosystem.value, dep.origin)
+        key = (dep.identity, dep.ecosystem.value, dep.origin)
         existing_index = index_by_key.get(key)
         if existing_index is None:
             index_by_key[key] = len(unique)

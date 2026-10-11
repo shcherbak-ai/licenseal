@@ -29,7 +29,6 @@ Notes on registry-recursion fallback:
 from __future__ import annotations
 
 import contextvars
-import re
 from collections.abc import Callable, Container, Iterable, Iterator, Mapping
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
@@ -320,8 +319,8 @@ def resolve_transitive(
     ecosystems_present = {dep.ecosystem for dep in direct_deps}
 
     def names_by_group(eco: Ecosystem, group: DependencyGroup) -> set[str]:
-        """Lowercased names of direct deps in `direct_deps` matching ecosystem + group."""
-        return {d.name.lower() for d in direct_deps if d.ecosystem == eco and d.group == group}
+        """Identity keys of the direct deps in `direct_deps` of one ecosystem + group."""
+        return {d.identity for d in direct_deps if d.ecosystem == eco and d.group == group}
 
     out: list[Dependency] = []
     handled: set[Ecosystem] = set()
@@ -331,12 +330,12 @@ def resolve_transitive(
     # file each direct dep was declared in; we copy that here so the report's
     # Source column stays accurate for direct entries.
     sources_by_key: dict[tuple[Ecosystem, str], str] = {
-        (d.ecosystem, d.name.lower()): d.source for d in direct_deps if d.source
+        (d.ecosystem, d.identity): d.source for d in direct_deps if d.source
     }
 
     def _stamp_sources(deps: list[Dependency]) -> list[Dependency]:
         return [
-            replace(d, source=sources_by_key.get((d.ecosystem, d.name.lower()), ""))
+            replace(d, source=sources_by_key.get((d.ecosystem, d.identity), ""))
             if d.depth == 0
             else d
             for d in deps
@@ -364,12 +363,12 @@ def resolve_transitive(
         lockfile_names: set[str],
         origins: Mapping[str, str | None] | None = None,
     ) -> list[Dependency]:
-        covered = lockfile_names | {d.name.lower() for d in lockfile_output if d.depth == 0}
+        covered = lockfile_names | {d.identity for d in lockfile_output if d.depth == 0}
         uncovered = [
             d
             for d in direct_deps
             if d.ecosystem == ecosystem
-            and d.name.lower() not in covered
+            and d.identity not in covered
             and (include_dev or d.group != DependencyGroup.DEV)
         ]
         if not uncovered:
@@ -514,11 +513,9 @@ def resolve_transitive(
     # :func:`fetch_packagist_dependencies` per resolved dep.
     composer_locks = find_composer_lockfiles(project_path, exclude_paths=exclude_paths)
     if composer_locks:
-        direct_php_names = {d.name.lower() for d in direct_deps if d.ecosystem == Ecosystem.PHP}
+        direct_php_names = {d.identity for d in direct_deps if d.ecosystem == Ecosystem.PHP}
         direct_source_by_name = {
-            d.name.lower(): d.source
-            for d in direct_deps
-            if d.ecosystem == Ecosystem.PHP and d.source
+            d.identity: d.source for d in direct_deps if d.ecosystem == Ecosystem.PHP and d.source
         }
         locked: list[Dependency] = []
         # Every name a lockfile holds is covered by it, the project's own
@@ -534,7 +531,7 @@ def resolve_transitive(
             php_lock_names.update(name for name, _version in license_map)
             for dep in lock_deps:
                 if dep.depth == 0:
-                    source = direct_source_by_name.get(dep.name.lower(), "")
+                    source = direct_source_by_name.get(dep.identity, "")
                     if source:
                         locked.append(replace(dep, source=source))
                     else:
@@ -554,14 +551,12 @@ def resolve_transitive(
     gemfile_locks = find_gemfile_lockfiles(project_path, exclude_paths=exclude_paths)
     if gemfile_locks:
         ruby_workspace = workspace_gemspec_names(project_path, exclude_paths=exclude_paths)
-        direct_ruby_names = {d.name.lower() for d in direct_deps if d.ecosystem == Ecosystem.RUBY}
+        direct_ruby_names = {d.identity for d in direct_deps if d.ecosystem == Ecosystem.RUBY}
         dev_direct_ruby_names = collect_dev_direct_names(
             [d for d in direct_deps if d.ecosystem == Ecosystem.RUBY]
         )
         direct_source_by_name = {
-            d.name.lower(): d.source
-            for d in direct_deps
-            if d.ecosystem == Ecosystem.RUBY and d.source
+            d.identity: d.source for d in direct_deps if d.ecosystem == Ecosystem.RUBY and d.source
         }
         locked: list[Dependency] = []
         for gemfile_lock in gemfile_locks:
@@ -575,7 +570,7 @@ def resolve_transitive(
             # Drop workspace-internal lockfile entries — monorepo
             # siblings (one in-tree gem referencing another) are not
             # published gems we'd want to look up.
-            lock_deps = [d for d in lock_deps if d.name.lower() not in ruby_workspace]
+            lock_deps = [d for d in lock_deps if d.identity not in ruby_workspace]
             locked.extend(_attach_ruby_direct_sources(lock_deps, direct_source_by_name))
         out.extend(locked)
         out.extend(_walk_uncovered(Ecosystem.RUBY, locked, set()))
@@ -591,20 +586,18 @@ def resolve_transitive(
     rebar_locks = find_rebar_lockfiles(project_path, exclude_paths=exclude_paths)
     if mix_locks or rebar_locks:
         hex_workspace = workspace_hex_names(project_path, exclude_paths=exclude_paths)
-        direct_hex_names = {d.name.lower() for d in direct_deps if d.ecosystem == Ecosystem.HEX}
+        direct_hex_names = {d.identity for d in direct_deps if d.ecosystem == Ecosystem.HEX}
         dev_direct_hex_names = _collect_hex_dev_direct_names(
             [d for d in direct_deps if d.ecosystem == Ecosystem.HEX]
         )
         direct_source_by_name = {
-            d.name.lower(): d.source
-            for d in direct_deps
-            if d.ecosystem == Ecosystem.HEX and d.source
+            d.identity: d.source for d in direct_deps if d.ecosystem == Ecosystem.HEX and d.source
         }
 
         def _attach_and_filter(lock_deps: list[Dependency]) -> list[Dependency]:
             # Drop workspace-internal entries — umbrella siblings aren't
             # published on hex.pm — then stamp manifest sources.
-            kept = [d for d in lock_deps if d.name.lower() not in hex_workspace]
+            kept = [d for d in lock_deps if d.identity not in hex_workspace]
             return _attach_hex_direct_sources(kept, direct_source_by_name)
 
         locked = []
@@ -736,7 +729,7 @@ def _keep_declared_origins(
     declared: dict[tuple[Ecosystem, str], str] = {}
     registry_names: set[tuple[Ecosystem, str]] = set()
     for dep in direct_deps:
-        key = (dep.ecosystem, _canonical_name(dep))
+        key = (dep.ecosystem, dep.identity)
         if dep.origin:
             declared.setdefault(key, dep.origin)
         else:
@@ -747,7 +740,7 @@ def _keep_declared_origins(
         return deps
     out: list[Dependency] = []
     for dep in deps:
-        origin = declared.get((dep.ecosystem, _canonical_name(dep)), "")
+        origin = declared.get((dep.ecosystem, dep.identity), "")
         out.append(
             replace(dep, origin=origin, version_estimated=False)
             if origin and dep.depth == 0 and not dep.origin
@@ -757,6 +750,10 @@ def _keep_declared_origins(
 
 
 _GO_PROXY_URL = "https://proxy.golang.org"
+
+# Key of a module path in the Go edge graph: the path as written, since two
+# paths that differ only in case are two modules.
+_go_key = Ecosystem.GO.identity
 
 
 _GoModFetcher = Callable[[str, httpx.Client], "dict[str, str] | None"]
@@ -784,7 +781,7 @@ def _resolve_go_transitive(
          its direct require edges. Best-effort: proxy fetches that fail
          leave that module as a leaf in the edge graph (no outgoing edges).
          Skipped when there is no direct dep to attribute anything to.
-      3. Build the edge dict (lowercased names) and run
+      3. Build the edge dict and run
          :func:`compute_direct_ancestors` from PROD-root and DEV-root direct
          deps. Resulting attribution mirrors the npm/Rust/Python lockfile
          path: reachable from a PROD root → PROD; only from a DEV root →
@@ -805,8 +802,8 @@ def _resolve_go_transitive(
     """
     # Manifest of each requirement, keyed as go.mod states it.
     direct_sources = {(d.name, d.version_constraint): d.source for d in direct_go_deps}
-    prod_root_names = {d.name.lower() for d in direct_go_deps if d.group == DependencyGroup.PROD}
-    dev_root_names = {d.name.lower() for d in direct_go_deps if d.group == DependencyGroup.DEV}
+    prod_root_names = {d.identity for d in direct_go_deps if d.group == DependencyGroup.PROD}
+    dev_root_names = {d.identity for d in direct_go_deps if d.group == DependencyGroup.DEV}
 
     # Workspace-local modules (in-tree go.mod modules + go.work `use` targets)
     # must be filtered from the transitive output too, not just from the
@@ -865,7 +862,7 @@ def _resolve_go_transitive(
     # ---- 3. attribute group + direct_ancestors ----
     # name_case preserves the original-case module path so the reverse-BFS's
     # ancestor labels match the labels in the report.
-    name_case = {mod.lower(): mod for mod, _ in entries}
+    name_case = {_go_key(mod): mod for mod, _ in entries}
     # Every direct is in ``entries`` (step 1) unless it is workspace-local,
     # and a workspace-local module is not a root.
     prod_roots = {n: name_case[n] for n in prod_root_names if n in name_case}
@@ -875,23 +872,23 @@ def _resolve_go_transitive(
 
     out: list[Dependency] = []
     for module_path, version in entries:
-        lower = module_path.lower()
+        node = _go_key(module_path)
         is_direct = (module_path, version) in direct_sources
-        if lower in prod_root_names:
+        if node in prod_root_names:
             group = DependencyGroup.PROD
             ancestors: tuple[str, ...] = ()
-        elif lower in prod_anc:
+        elif node in prod_anc:
             # Checked before DEV-root membership: a ``tool`` module that a
             # production module also requires ships. It is still a direct
             # dep, so it carries no ancestors.
             group = DependencyGroup.PROD
-            ancestors = () if lower in dev_root_names else prod_anc[lower]
-        elif lower in dev_root_names:
+            ancestors = () if node in dev_root_names else prod_anc[node]
+        elif node in dev_root_names:
             group = DependencyGroup.DEV
             ancestors = ()
-        elif lower in dev_anc:
+        elif node in dev_anc:
             group = DependencyGroup.DEV
-            ancestors = dev_anc[lower]
+            ancestors = dev_anc[node]
         else:
             # Orphan (no incoming path from any direct root, e.g. because the
             # proxy fetch for its parent failed). Fall back to PROD to avoid
@@ -973,14 +970,14 @@ def _resolve_r_transitive(
     attribution reuses :func:`build_lock_dependencies`.
     """
     r_workspace = workspace_r_names(project_path, exclude_paths=exclude_paths)
-    direct_r_names = {d.name.lower() for d in direct_r_deps}
+    direct_r_names = {d.identity for d in direct_r_deps}
     dev_direct_r_names = _collect_r_dev_direct_names(direct_r_deps)
-    direct_source_by_name = {d.name.lower(): d.source for d in direct_r_deps if d.source}
+    direct_source_by_name = {d.identity: d.source for d in direct_r_deps if d.source}
 
     def _attach_and_filter(lock_deps: list[Dependency]) -> list[Dependency]:
         # Drop workspace-internal entries — multi-package R repo siblings aren't
         # published to CRAN — then stamp manifest sources onto direct entries.
-        kept = [d for d in lock_deps if d.name.lower() not in r_workspace]
+        kept = [d for d in lock_deps if d.identity not in r_workspace]
         return _attach_r_direct_sources(kept, direct_source_by_name)
 
     out: list[Dependency] = []
@@ -1011,12 +1008,12 @@ def _resolve_r_transitive(
 
     # Direct deps no lock covered (manifest-only project, or a nested DESCRIPTION
     # beside a root-only lock): walk their closure over the CRAN index.
-    covered = {d.name.lower() for d in out}
+    covered = {d.identity for d in out}
     uncovered = [
         d
         for d in direct_r_deps
-        if d.name.lower() not in covered
-        and d.name.lower() not in r_workspace
+        if d.identity not in covered
+        and d.identity not in r_workspace
         and (include_dev or d.group != DependencyGroup.DEV)
     ]
     if uncovered:
@@ -1026,6 +1023,9 @@ def _resolve_r_transitive(
         cran_index = fetch_cran_index(client, fetcher=fetcher)
         out.extend(_attach_and_filter(_r_index_closure(uncovered, cran_index, include_dev)))
     return out
+
+
+_r_key = Ecosystem.R.identity
 
 
 def _r_index_closure(
@@ -1047,11 +1047,11 @@ def _r_index_closure(
     """
     spec_info: dict[str, tuple[str, str, str | None]] = {}
     edges: dict[str, set[str]] = {}
-    prod_roots = {d.name.lower() for d in direct_deps if d.group == DependencyGroup.PROD}
-    dev_roots = {d.name.lower() for d in direct_deps if d.group == DependencyGroup.DEV}
+    prod_roots = {d.identity for d in direct_deps if d.group == DependencyGroup.PROD}
+    dev_roots = {d.identity for d in direct_deps if d.group == DependencyGroup.DEV}
 
     def _seed(name: str) -> None:
-        lower = name.lower()
+        lower = _r_key(name)
         if lower in spec_info:
             return
         record = cran_index.get(lower)
@@ -1061,7 +1061,7 @@ def _r_index_closure(
 
     for dep in direct_deps:
         if dep.origin:
-            spec_info.setdefault(dep.name.lower(), (dep.name, "", dep.origin))
+            spec_info.setdefault(dep.identity, (dep.name, "", dep.origin))
         else:
             _seed(dep.name)
 
@@ -1074,7 +1074,7 @@ def _r_index_closure(
             children: set[str] = set()
             if record is not None:
                 for child in index_edge_names(record):
-                    child_lower = child.lower()
+                    child_lower = _r_key(child)
                     _seed(child)
                     children.add(child_lower)
                     if child_lower not in seen:
@@ -1112,15 +1112,18 @@ def _promote_directs_reached_from_prod(
 ) -> None:
     """Make the direct deps in ``out[start:]`` PROD when a PROD direct reaches them.
 
-    ``reached`` holds the lowercased names a PROD direct reaches. The Maven
+    ``reached`` holds the identity keys a PROD direct reaches. The Maven
     and NuGet walks emit every direct with its declared group before the
     graph is fetched, and skip a graph node that is also a direct. A DEV
     direct that a PROD direct pulls in ships, so production wins — the same
     rule the lockfile parsers apply.
     """
     for index in range(start, len(out)):
-        if out[index].name.lower() in reached:
+        if out[index].identity in reached:
             out[index] = replace(out[index], group=DependencyGroup.PROD)
+
+
+_dotnet_key = Ecosystem.DOTNET.identity
 
 
 def _resolve_dotnet_transitive(
@@ -1163,16 +1166,16 @@ def _resolve_dotnet_transitive(
     IDs aren't published packages, so any ``<PackageReference>`` and any
     walker-resolved node matching one is filtered.
 
-    NuGet package IDs are case-insensitive per spec; comparison uses
-    ``.lower()`` everywhere. Orphan transitives → PROD fallback,
+    NuGet package IDs are case-insensitive per spec; every comparison is on
+    ``Ecosystem.identity`` keys. Orphan transitives → PROD fallback,
     conservative (matches the Java + Go paths).
     """
     workspace_local_ids = _discover_workspace_local_project_ids(
         project_path, exclude_paths=exclude_paths
     )
-    workspace_local_lower = {wid.lower() for wid in workspace_local_ids}
+    workspace_local_lower = {_dotnet_key(wid) for wid in workspace_local_ids}
 
-    direct_source_by_name = {d.name.lower(): d.source for d in direct_dotnet_deps if d.source}
+    direct_source_by_name = {d.identity: d.source for d in direct_dotnet_deps if d.source}
 
     out: list[Dependency] = []
     covered_names: set[str] = set()
@@ -1181,12 +1184,8 @@ def _resolve_dotnet_transitive(
     # Each lockfile is attributed on its own edges, against the direct deps of
     # the whole scan. A workspace-local entry stays in the graph the parser
     # walks (its children are reached through it) but is not emitted.
-    direct_prod_names = {
-        d.name.lower() for d in direct_dotnet_deps if d.group == DependencyGroup.PROD
-    }
-    direct_dev_names = {
-        d.name.lower() for d in direct_dotnet_deps if d.group == DependencyGroup.DEV
-    }
+    direct_prod_names = {d.identity for d in direct_dotnet_deps if d.group == DependencyGroup.PROD}
+    direct_dev_names = {d.identity for d in direct_dotnet_deps if d.group == DependencyGroup.DEV}
     for nuget_lock in find_nuget_lockfiles(project_path, exclude_paths=exclude_paths):
         for dep in parse_nuget_lockfile(
             nuget_lock,
@@ -1194,7 +1193,7 @@ def _resolve_dotnet_transitive(
             dev_root_names=direct_dev_names,
             include_dev=include_dev,
         ):
-            lower = dep.name.lower()
+            lower = dep.identity
             if lower in workspace_local_lower:
                 continue
             covered_names.add(lower)
@@ -1206,11 +1205,11 @@ def _resolve_dotnet_transitive(
     paket_prod_names: set[str] = set()
     for paket_lock in find_paket_lockfiles(project_path, exclude_paths=exclude_paths):
         for dep in parse_paket_lock(paket_lock, project_path=project_path):
-            if dep.name.lower() in workspace_local_lower:
+            if dep.identity in workspace_local_lower:
                 continue
             if not include_dev and dep.group == DependencyGroup.DEV:
                 continue
-            lower = dep.name.lower()
+            lower = dep.identity
             if dep.group == DependencyGroup.PROD:
                 paket_prod_names.add(lower)
             if lower in covered_names:
@@ -1231,7 +1230,7 @@ def _resolve_dotnet_transitive(
     # skipped entry is the one that ships: production wins.
     out = [
         replace(d, group=DependencyGroup.PROD)
-        if d.group == DependencyGroup.DEV and d.name.lower() in paket_prod_names
+        if d.group == DependencyGroup.DEV and d.identity in paket_prod_names
         else d
         for d in out
     ]
@@ -1240,8 +1239,8 @@ def _resolve_dotnet_transitive(
     direct_uncovered = [
         d
         for d in direct_dotnet_deps
-        if d.name.lower() not in covered_names
-        and d.name.lower() not in workspace_local_lower
+        if d.identity not in covered_names
+        and d.identity not in workspace_local_lower
         and (include_dev or d.group != DependencyGroup.DEV)
     ]
     if not direct_uncovered:
@@ -1291,26 +1290,26 @@ def _resolve_dotnet_transitive(
         _record_unread_dependencies(
             project_path,
             direct.source,
-            (pkg for pkg in unread if pkg[0].lower() not in workspace_local_lower),
+            (pkg for pkg in unread if _dotnet_key(pkg[0]) not in workspace_local_lower),
         )
         for node_name, node_version in nodes:
-            if node_name.lower() in workspace_local_lower:
+            if _dotnet_key(node_name) in workspace_local_lower:
                 continue
             merged_nodes.add((node_name, node_version))
         for from_name, _from_ver, to_name, _to_ver in edge_tuples:
             if (
-                from_name.lower() in workspace_local_lower
-                or to_name.lower() in workspace_local_lower
+                _dotnet_key(from_name) in workspace_local_lower
+                or _dotnet_key(to_name) in workspace_local_lower
             ):
                 continue
-            edges.setdefault(from_name.lower(), set()).add(to_name.lower())
+            edges.setdefault(_dotnet_key(from_name), set()).add(_dotnet_key(to_name))
 
     # ---- Reachability attribution ----
-    prod_root_names = {d.name.lower() for d, _ in walkable if d.group == DependencyGroup.PROD}
-    dev_root_names = {d.name.lower() for d, _ in walkable if d.group == DependencyGroup.DEV}
-    name_case: dict[str, str] = {d.name.lower(): d.name for d, _ in walkable}
+    prod_root_names = {d.identity for d, _ in walkable if d.group == DependencyGroup.PROD}
+    dev_root_names = {d.identity for d, _ in walkable if d.group == DependencyGroup.DEV}
+    name_case: dict[str, str] = {d.identity: d.name for d, _ in walkable}
     for node_name, _ in merged_nodes:
-        name_case.setdefault(node_name.lower(), node_name)
+        name_case.setdefault(_dotnet_key(node_name), node_name)
 
     prod_roots = {n: name_case[n] for n in prod_root_names if n in name_case}
     dev_roots = {n: name_case[n] for n in dev_root_names if n in name_case}
@@ -1318,9 +1317,9 @@ def _resolve_dotnet_transitive(
     dev_anc = compute_direct_ancestors(edges, dev_roots)
     _promote_directs_reached_from_prod(out, first_direct, prod_anc)
 
-    direct_lower = {d.name.lower() for d, _ in walkable}
+    direct_lower = {d.identity for d, _ in walkable}
     for node_name, node_version in merged_nodes:
-        lower = node_name.lower()
+        lower = _dotnet_key(node_name)
         if lower in direct_lower:
             continue
         if lower in prod_anc:
@@ -1772,7 +1771,7 @@ def _resolve_java_transitive(
     )
     workspace_local = set(workspace_local_poms)
 
-    direct_source_by_name = {d.name.lower(): d.source for d in direct_java_deps if d.source}
+    direct_source_by_name = {d.identity: d.source for d in direct_java_deps if d.source}
 
     out: list[Dependency] = []
     covered_names: set[str] = set()
@@ -1782,16 +1781,16 @@ def _resolve_java_transitive(
         for dep in parse_gradle_lockfile(lockfile, include_dev=include_dev):
             if dep.name in workspace_local:
                 continue
-            lower = dep.name.lower()
-            covered_names.add(lower)
-            source = direct_source_by_name.get(lower, "")
+            identity = dep.identity
+            covered_names.add(identity)
+            source = direct_source_by_name.get(identity, "")
             out.append(replace(dep, source=source) if source else dep)
 
     # ---- deps.dev :dependencies path for uncovered directs ----
     direct_uncovered = [
         d
         for d in direct_java_deps
-        if d.name.lower() not in covered_names
+        if d.identity not in covered_names
         and d.name not in workspace_local
         and (include_dev or d.group != DependencyGroup.DEV)
     ]
@@ -1918,13 +1917,13 @@ def _resolve_java_transitive(
         for node_name, node_version in nodes:
             if node_name in workspace_local:
                 continue
-            key = (node_name.lower(), node_version)
+            key = (Ecosystem.JAVA.identity(node_name), node_version)
             node_names.setdefault(key, node_name)
             owners.setdefault(key, set()).add(direct.name)
 
-    prod_direct_names = {d.name.lower() for d, _ in walkable if d.group == DependencyGroup.PROD}
+    prod_direct_names = {d.identity for d, _ in walkable if d.group == DependencyGroup.PROD}
     dev_direct_keys = {
-        (d.name.lower(), pinned) for d, pinned in walkable if d.group == DependencyGroup.DEV
+        (d.identity, pinned) for d, pinned in walkable if d.group == DependencyGroup.DEV
     }
     dev_direct_names = {name for name, _ in dev_direct_keys}
     # A DEV direct ships when a PROD direct pulls in the version it declares.
@@ -1933,15 +1932,15 @@ def _resolve_java_transitive(
     )
 
     for key, node_name in node_names.items():
-        lower, node_version = key
-        if lower in prod_direct_names or key in dev_direct_keys:
+        identity, node_version = key
+        if identity in prod_direct_names or key in dev_direct_keys:
             # A direct's own row stands for the node: a PROD direct's for any
             # version of its artifact, a DEV direct's for the version it
             # declares (promoted above when a PROD direct pulls that in).
             continue
         if key in prod_owners:
             group, owners = DependencyGroup.PROD, prod_owners[key]
-        elif lower in dev_direct_names:
+        elif identity in dev_direct_names:
             # Another version of a DEV direct, pulled in by DEV directs only.
             continue
         else:
@@ -1974,7 +1973,7 @@ def _fetch_go_edge_graph(
 ) -> dict[str, set[str]]:
     """Fetch each module's go.mod from ``proxy.golang.org`` concurrently.
 
-    Returns ``{lower(module_path): {lower(child_module_path), ...}}``: each
+    Returns ``{module_path: {child_module_path, ...}}``, keyed as written: each
     module's ``require`` entries, without that module's own ``replace``
     directives. Modules whose proxy fetch fails get an empty edge set (treated as
     leaves by reverse-BFS — they still appear in the output via go.sum,
@@ -1990,15 +1989,15 @@ def _fetch_go_edge_graph(
         url = f"{_GO_PROXY_URL}/{encode_module_proxy_path(module_path)}/@v/{version}.mod"
         data = go_mod_fetcher(url, client)
         if not isinstance(data, dict):
-            return (module_path.lower(), set())
+            return (_go_key(module_path), set())
         text = data.get("text", "")
         if not isinstance(text, str) or not text:
-            return (module_path.lower(), set())
+            return (_go_key(module_path), set())
         # The ``replace`` directives of this go.mod are not applied: Go honours
         # them only in the main module, so the module's requirements are its
         # edges as written.
         requires, _replaces, _tools = _parse_go_mod(text)
-        return (module_path.lower(), {req_path.lower() for req_path, _ in requires})
+        return (_go_key(module_path), {_go_key(req_path) for req_path, _ in requires})
 
     # Propagate the active tethered scope into the go.mod-fetch workers — a bare
     # pool fetches in an empty context and bypasses the egress policy.
@@ -2024,7 +2023,7 @@ def _walk_registry(
 ) -> list[Dependency]:
     """BFS from `seeds` via per-version dependency metadata.
 
-    ``origins`` maps a lowercased package name to the origin a manifest
+    ``origins`` maps a package's identity key to the origin a manifest
     redirects that package to (a Cargo ``[patch]``). A package the walk
     reaches under such a name is not the registry's: it is a row with that
     origin, and nothing is requested for it. A name mapped to ``None`` is
@@ -2085,7 +2084,7 @@ def _walk_registry(
     DedupKey = tuple[str, str, frozenset[str], str]  # noqa: N806  (PEP 695-style local type alias)
 
     def _key(dep: Dependency) -> DedupKey:
-        return (dep.name.lower(), dep.version_constraint, dep.extras, dep.origin)
+        return (dep.identity, dep.version_constraint, dep.extras, dep.origin)
 
     visited: set[DedupKey] = set()
     out: list[Dependency] = []
@@ -2226,7 +2225,7 @@ def _redirect_children(
     """Give each child a manifest redirects its declared origin; drop own code."""
     out: list[Dependency] = []
     for child in children:
-        key = child.name.lower()
+        key = child.identity
         if key not in origins:
             out.append(child)
             continue
@@ -2407,25 +2406,8 @@ def _resolve_version(
     return resolve_npm_spec(data, spec)
 
 
-_PYTHON_NAME_NORMALIZE_RE = re.compile(r"[-_.]+")
-
-
-def _canonical_name(dep: Dependency) -> str:
-    """Return the dedupe-stable name for ``dep``.
-
-    PEP 503 folds runs of ``-``, ``_``, and ``.`` in Python package names to
-    a single ``-`` and lowercases, so ``foo-bar``, ``foo_bar``, and
-    ``foo.bar`` all refer to the same PyPI distribution. npm / Rust have no
-    equivalent rule (``my-pkg`` and ``my_pkg`` are different packages on
-    those registries), so for them we only lowercase.
-    """
-    if dep.ecosystem == Ecosystem.PYTHON:
-        return _PYTHON_NAME_NORMALIZE_RE.sub("-", dep.name).lower()
-    return dep.name.lower()
-
-
 def _dedupe(deps: list[Dependency]) -> list[Dependency]:
-    """Deduplicate by (ecosystem, canonical-name, version_constraint, origin).
+    """Deduplicate by (ecosystem, identity, version_constraint, origin).
 
     The origin is part of the key: two commits of one repository that declare
     the same version are two rows, and so are a registry package and a git
@@ -2461,7 +2443,7 @@ def _dedupe(deps: list[Dependency]) -> list[Dependency]:
     prod_keys: set[tuple[Ecosystem, str, str, str]] = set()
     exact_keys: set[tuple[Ecosystem, str, str, str]] = set()
     for dep in filtered:
-        key = (dep.ecosystem, _canonical_name(dep), dep.version_constraint, dep.origin)
+        key = (dep.ecosystem, dep.identity, dep.version_constraint, dep.origin)
         existing = chosen.get(key)
         if existing is None or existing.depth > dep.depth:
             chosen[key] = dep
@@ -2474,7 +2456,7 @@ def _dedupe(deps: list[Dependency]) -> list[Dependency]:
     out: list[Dependency] = []
     used: set[tuple[Ecosystem, str, str, str]] = set()
     for dep in filtered:
-        key = (dep.ecosystem, _canonical_name(dep), dep.version_constraint, dep.origin)
+        key = (dep.ecosystem, dep.identity, dep.version_constraint, dep.origin)
         if key in used:
             continue
         used.add(key)
@@ -2505,7 +2487,7 @@ def _drop_phantom_unresolved(deps: list[Dependency]) -> list[Dependency]:
     unpinned registry entry a phantom.
     """
     resolved_names: set[tuple[Ecosystem, str]] = {
-        (d.ecosystem, _canonical_name(d))
+        (d.ecosystem, d.identity)
         for d in deps
         if d.version_constraint.startswith("==") and not d.origin
     }
@@ -2513,7 +2495,7 @@ def _drop_phantom_unresolved(deps: list[Dependency]) -> list[Dependency]:
     phantom_ancestors: dict[tuple[Ecosystem, str], set[str]] = {}
     survivors: list[Dependency] = []
     for dep in deps:
-        key = (dep.ecosystem, _canonical_name(dep))
+        key = (dep.ecosystem, dep.identity)
         is_pinned = dep.version_constraint.startswith("==")
         if not is_pinned and not dep.origin and key in resolved_names:
             phantom_ancestors.setdefault(key, set()).update(dep.direct_ancestors)
@@ -2529,13 +2511,13 @@ def _drop_phantom_unresolved(deps: list[Dependency]) -> list[Dependency]:
             direct_ancestors=tuple(
                 sorted(
                     set(d.direct_ancestors)
-                    | phantom_ancestors.get((d.ecosystem, _canonical_name(d)), set())
+                    | phantom_ancestors.get((d.ecosystem, d.identity), set())
                 )
             ),
         )
         if d.version_constraint.startswith("==")
         and not d.origin
-        and (d.ecosystem, _canonical_name(d)) in phantom_ancestors
+        and (d.ecosystem, d.identity) in phantom_ancestors
         else d
         for d in survivors
     ]

@@ -23,6 +23,10 @@ from licenseal.models import Dependency, DependencyGroup, Ecosystem, LicenseInfo
 from licenseal.resolvers.http import Fetcher, fetch_registry_json
 from licenseal.resolvers.version_selection import composer_version, select_version
 
+# Key of a package name in the name sets and graphs below (see
+# ``Ecosystem.identity``).
+_key = Ecosystem.PHP.identity
+
 _PACKAGIST_REGISTRY_URL = "https://repo.packagist.org/p2"
 
 # Composer 2 metadata is served minified. A response marked
@@ -262,9 +266,9 @@ def resolve_php_license(
     if (
         lockfile_license_map is not None
         and pinned is not None
-        and (name.lower(), pinned) in lockfile_license_map
+        and (_key(name), pinned) in lockfile_license_map
     ):
-        raw = lockfile_license_map[(name.lower(), pinned)]
+        raw = lockfile_license_map[(_key(name), pinned)]
         if raw:
             return LicenseInfo(
                 dependency=dep,
@@ -366,7 +370,7 @@ def fetch_packagist_dependencies(
         # ``ext-`` / ``lib-`` is a real package and is walked.
         if not isinstance(child_name, str) or "/" not in child_name:
             continue
-        lowered = child_name.lower()
+        lowered = _key(child_name)
         if lowered in seen:
             continue
         seen.add(lowered)

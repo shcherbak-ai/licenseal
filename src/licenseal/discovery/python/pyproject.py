@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import re
 from dataclasses import replace
 from pathlib import Path
 from typing import Any, cast
@@ -18,11 +17,7 @@ from licenseal.discovery.python import (
 from licenseal.models import Dependency, DependencyGroup, Ecosystem
 
 # PEP 503: collapse runs of `-`, `_`, `.` to a single `-` and lowercase.
-_PEP503_NORMALIZE_RE = re.compile(r"[-_.]+")
-
-
-def _pep503_normalize(name: str) -> str:
-    return _PEP503_NORMALIZE_RE.sub("-", name).lower()
+_pep503_normalize = Ecosystem.PYTHON.identity
 
 
 def _project_table(filepath: Path, data: dict) -> dict:

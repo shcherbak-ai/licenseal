@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from enum import Enum
+
+_PEP503_SEPARATORS_RE = re.compile(r"[-_.]+")
 
 
 class Ecosystem(str, Enum):
@@ -25,6 +28,37 @@ class Ecosystem(str, Enum):
         """Human-readable display label (e.g. for CLI workspace-filter messages)."""
         return _ECOSYSTEM_LABELS[self]
 
+    def identity(self, name: str) -> str:
+        """Return the key under which ``name`` is one package of this ecosystem.
+
+        Two names are the same package exactly when their keys are equal, by
+        the rule of the ecosystem's own registry:
+
+        - Python: PEP 503. Case is folded and runs of ``-``, ``_``, and ``.``
+          are one ``-``.
+        - .NET, PHP, Rust, Hex, R: case is folded. NuGet ids and Packagist
+          names are case-insensitive, and crates.io, hex.pm, and CRAN admit
+          no two names that differ only in case.
+        - Go, Java, npm, Ruby: the name as written. A Go module path, a Maven
+          ``groupId:artifactId``, an npm package name, and a gem name that
+          differ only in case are different packages.
+
+        Every key that tells packages apart is built with this: review keys,
+        the dedupe of discovered and resolved dependencies, the name sets and
+        edge graphs of the lockfile parsers, and report nesting.
+        """
+        if self is Ecosystem.PYTHON:
+            return _PEP503_SEPARATORS_RE.sub("-", name).lower()
+        if self in _CASE_FOLDING_ECOSYSTEMS:
+            return name.lower()
+        return name
+
+
+# Ecosystems whose registry treats names that differ only in case as one
+# package. Python folds case too, as part of PEP 503.
+_CASE_FOLDING_ECOSYSTEMS = frozenset(
+    {Ecosystem.DOTNET, Ecosystem.PHP, Ecosystem.RUST, Ecosystem.HEX, Ecosystem.R}
+)
 
 # Display labels for the (few) user-facing spots that name an ecosystem — the
 # enum value (``"r"``, ``"dotnet"``) isn't always the conventional spelling.
@@ -145,13 +179,19 @@ class Dependency:
         return 1 if self.is_transitive else 0
 
     @property
+    def identity(self) -> str:
+        """Key of the package ``name`` stands for (see :meth:`Ecosystem.identity`)."""
+        return self.ecosystem.identity(self.name)
+
+    @property
     def effective_registry_name(self) -> str:
         """Registry-lookup name: the rename target when set, else ``name``.
 
         Only renamed Hex deps populate ``registry_name``; everywhere else this
-        is just ``name``. Resolvers, the registry walker, and the report URL
-        use this to reach hex.pm under the real package name while the report
-        and the lock-edge graph still key on the declared local name.
+        is just ``name``. Resolvers, the registry walker, the report URL, and
+        review keys use this, so that hex.pm is asked about, and a review is
+        written for, the real package, while the report and the lock-edge
+        graph still key on the declared local name.
         """
         return self.registry_name or self.name
 

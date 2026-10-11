@@ -46,6 +46,10 @@ from licenseal.discovery._read import decode_text
 from licenseal.discovery._walk import walk_project_files
 from licenseal.models import Dependency, DependencyGroup, Ecosystem
 
+# Key of a gem name in the name sets and graphs below. Gem names are compared
+# as written: two that differ only in case are two gems.
+_key = Ecosystem.RUBY.identity
+
 # A bare ``gem`` call: ``gem "name"`` or ``gem 'name'``, followed by an
 # optional comma-separated list of version constraints and options.
 _GEM_LINE_RE = re.compile(
@@ -384,7 +388,7 @@ def _parse_gemfile_text(
         if origin == "" and source_frames:
             origin = source_frames[-1][1]
 
-        key = (name.lower(), group.value)
+        key = (_key(name), group.value)
         if key in seen:
             continue
         seen.add(key)
@@ -412,7 +416,7 @@ def discover_gemfile_dependencies(
 ) -> tuple[list[Dependency], int]:
     """Discover Ruby dependencies declared in ``Gemfile`` files.
 
-    ``workspace_names`` is the lowercased set of gem names declared by
+    ``workspace_names`` is the set of gem names (identity keys) declared by
     in-tree gemspecs — those are workspace-internal references (the
     multi-gem monorepo case) and get filtered. The filter count is returned as the
     int in the tuple.
@@ -425,9 +429,9 @@ def discover_gemfile_dependencies(
             continue
         source = gemfile.relative_to(project_path).as_posix()
         deps, own = _parse_gemfile_text(text, source, gemfile.parent, project_path)
-        filtered += sum(name.lower() in workspace_names for name in own)
+        filtered += sum(_key(name) in workspace_names for name in own)
         for dep in deps:
-            if dep.name.lower() in workspace_names:
+            if dep.identity in workspace_names:
                 filtered += 1
                 continue
             out.append(dep)
@@ -435,7 +439,7 @@ def discover_gemfile_dependencies(
 
 
 def collect_dev_direct_names(deps: list[Dependency]) -> set[str]:
-    """Return the lowercased set of Ruby dep names whose only declaration is DEV.
+    """Return the identity keys of the Ruby deps whose only declaration is DEV.
 
     A gem can appear in two groups across nested Gemfiles (or even on two
     lines of the same Gemfile); a single PROD declaration outranks any DEV
@@ -448,7 +452,7 @@ def collect_dev_direct_names(deps: list[Dependency]) -> set[str]:
         if dep.ecosystem != Ecosystem.RUBY:
             continue
         if dep.group == DependencyGroup.DEV:
-            dev_names.add(dep.name.lower())
+            dev_names.add(dep.identity)
         else:
-            prod_names.add(dep.name.lower())
+            prod_names.add(dep.identity)
     return dev_names - prod_names

@@ -139,7 +139,7 @@ def _parse_rebar_config_text(text: str, source: str) -> list[Dependency]:
 
     def _emit(deps: list[Dependency]) -> None:
         for dep in deps:
-            key = (dep.name.lower(), dep.group.value)
+            key = (dep.identity, dep.group.value)
             if key in seen:
                 continue
             seen.add(key)
@@ -177,7 +177,7 @@ def discover_rebar_config_dependencies(
             continue
         source = rebar_config.relative_to(project_path).as_posix()
         for dep in _parse_rebar_config_text(text, source):
-            if dep.name.lower() in workspace_names:
+            if dep.identity in workspace_names:
                 filtered += 1
                 continue
             out.append(dep)

@@ -56,6 +56,10 @@ from licenseal.discovery._read import (
 from licenseal.discovery._walk import walk_project_files
 from licenseal.models import Dependency, DependencyGroup, Ecosystem
 
+# Key of a package name in the name sets and graphs below (see
+# ``Ecosystem.identity``).
+_key = Ecosystem.PHP.identity
+
 
 def _license_field_to_raw(value: object) -> str:
     """Normalize composer's license field shape into a single raw string.
@@ -179,7 +183,7 @@ def inline_package_origins(
         for package in defined if isinstance(defined, list) else [defined]:
             if isinstance(package, dict) and isinstance(package.get("name"), str):
                 origins.setdefault(
-                    package["name"].lower(),
+                    _key(package["name"]),
                     package_origin(cast("dict[str, Any]", package), base_dir, scan_root),
                 )
     return origins
@@ -203,7 +207,7 @@ def _own_path_packages(
     for directory, name in names_by_dir.items():
         relative = Path(os.path.relpath(directory, base_dir)).as_posix()
         if any(fnmatchcase(relative, pattern) for pattern in patterns):
-            own.add(name.lower())
+            own.add(_key(name))
     return own
 
 
@@ -286,8 +290,8 @@ def _parse_composer_json(
             if not isinstance(spec, str):
                 record_unexpected_type(filepath, f'an entry of "{field_name}"')
                 spec = ""
-            origin = inline.get(name.lower(), "")
-            if name.lower() in own or origin is None:
+            origin = inline.get(_key(name), "")
+            if _key(name) in own or origin is None:
                 filtered += 1
                 continue
             deps.append(

@@ -65,6 +65,10 @@ from licenseal.discovery._read import decode_lockfile_text, record_unread_entrie
 from licenseal.discovery._walk import walk_project_files
 from licenseal.models import Dependency, DependencyGroup, Ecosystem
 
+# Key of a gem name in the name sets and graphs below. Gem names are compared
+# as written: two that differ only in case are two gems.
+_key = Ecosystem.RUBY.identity
+
 # RubyGems platform suffixes we recognize on lockfile spec lines. The
 # Bundler regex strips ``-platform`` from ``version-platform`` so a spec
 # like ``nokogiri (1.16.0-x86_64-linux)`` becomes name=nokogiri,
@@ -149,11 +153,11 @@ def parse_gemfile_lock(
 ) -> list[Dependency]:
     """Parse ``Gemfile.lock`` into a list of Dependencies.
 
-    ``direct_names`` is the lowercased set of gem names declared at the
+    ``direct_names`` is the set of gem names (identity keys) declared at the
     top level of any Gemfile in the project. Used to mark entries as
     depth=0 vs depth=1 and as roots for direct-ancestor attribution.
 
-    ``dev_direct_names`` is the lowercased subset of ``direct_names``
+    ``dev_direct_names`` is the subset of ``direct_names``
     declared only in dev groups (``:development``, ``:test``). Used to
     attribute group via reverse-BFS through the edge graph.
 
@@ -168,16 +172,16 @@ def parse_gemfile_lock(
         return []
     scan_root = scan_root or path.parent
 
-    # Spec metadata: name_lower -> (name_orig, version, origin). The origin
+    # Spec metadata: name key -> (name_orig, version, origin). The origin
     # is empty for a registry gem and None for a PATH spec of this project.
     spec_info: dict[str, tuple[str, str, str | None]] = {}
-    # Edges: name_lower -> set of child name_lower.
+    # Edges: name key -> set of child name keys.
     edges: dict[str, set[str]] = {}
 
     section: str = ""
     options: dict[str, str] = {}
     in_specs = False
-    current_spec: str | None = None  # name_lower of the most recent 4-space spec
+    current_spec: str | None = None  # name key of the most recent 4-space spec
     # Lines where the lockfile names a gem: inside a ``specs:`` block, or
     # under DEPENDENCIES. A lockfile that has some and yields no spec was
     # not read.
@@ -217,7 +221,7 @@ def parse_gemfile_lock(
                 name, version = _parse_spec_line(content)
                 if not name:
                     continue
-                normalized = name.lower()
+                normalized = _key(name)
                 origin = _section_origin(section, options, path.parent, scan_root)
                 spec_info.setdefault(normalized, (name, version, origin))
                 current_spec = normalized
@@ -227,7 +231,7 @@ def parse_gemfile_lock(
                 child_name = _parse_dep_line(content)
                 # pragma: no branch - 6-space lines always carry a name
                 if child_name:  # pragma: no branch
-                    edges[current_spec].add(child_name.lower())
+                    edges[current_spec].add(_key(child_name))
             continue
 
         # ``DEPENDENCIES`` section: 2-space indent for each line, ``name``
@@ -241,7 +245,7 @@ def parse_gemfile_lock(
                 content = line.strip().rstrip("!").strip()
                 child_name = _parse_dep_line(content)
                 if child_name:  # pragma: no branch
-                    direct_names = {*direct_names, child_name.lower()}
+                    direct_names = {*direct_names, _key(child_name)}
 
         # Other sections (PLATFORMS / RUBY VERSION / BUNDLED WITH / CHECKSUMS)
         # are informational — no per-line action needed.
@@ -368,7 +372,7 @@ def attach_direct_sources(
         if dep.depth != 0:
             out.append(dep)
             continue
-        source = direct_source_by_name.get(dep.name.lower(), "")
+        source = direct_source_by_name.get(dep.identity, "")
         if source:
             out.append(replace(dep, source=source))
         else:

@@ -37,8 +37,6 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any, cast
 
-from packaging.utils import canonicalize_name
-
 from licenseal._graph import compute_direct_ancestors
 from licenseal.discovery._origin import UNRECORDED, git_origin, path_origin, url_origin
 from licenseal.discovery._read import (
@@ -64,11 +62,10 @@ def _canon_name(name: str) -> str:
     must all pass through this; otherwise a lockfile that spells a name one way
     in ``[[package]] name`` and another in a parent's ``dependencies`` table
     fails to connect the edge and the dep is dropped as an orphan *before*
-    ``transitive._canonical_name`` (which normalizes the same way) can recover
-    it. ``str()`` keeps the result a plain ``str`` for the ``set[str]`` /
-    ``dict[str, ...]`` annotations below.
+    the dedupe in ``transitive`` (which keys names the same way) can recover
+    it.
     """
-    return str(canonicalize_name(name))
+    return Ecosystem.PYTHON.identity(name)
 
 
 _PYTHON_LOCKFILES = ("uv.lock", "poetry.lock", "Pipfile.lock")

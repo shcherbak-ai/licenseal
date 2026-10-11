@@ -55,6 +55,10 @@ from licenseal.models import Dependency, DependencyGroup, Ecosystem
 
 _NPM_LOCKFILES = ("package-lock.json", "pnpm-lock.yaml", "yarn.lock", "bun.lock")
 
+# Key of a package name in the edge graphs and name sets below. npm names are
+# compared as written: two that differ only in case are two packages.
+_key = Ecosystem.NPM.identity
+
 
 def find_npm_lockfiles(
     project_path: Path,
@@ -188,7 +192,7 @@ def _finalize(
     group_by_name, ancestors_by_name = _attribute(edges, name_case, prod_root_names, dev_root_names)
     out: list[Dependency] = []
     for dep in deps:
-        normalized = dep.name.lower()
+        normalized = _key(dep.name)
         group = group_by_name.get(normalized)
         if group is None:
             continue
@@ -228,7 +232,7 @@ _PNPM_UNREADABLE_BELOW = 6
 def _collect_npm_edge_children(
     path: Path, meta: dict[str, Any], what: str, *, pnpm_references: bool = False
 ) -> list[str]:
-    """Union dependencies + peerDependencies + optionalDependencies (lowercased names).
+    """Union dependencies + peerDependencies + optionalDependencies (as graph keys).
 
     Also captures ``transitivePeerDependencies`` (pnpm-lock v9 ``snapshots:``
     convention — peers consumed deeper in the tree that propagate to the
@@ -252,10 +256,10 @@ def _collect_npm_edge_children(
                     if value is not None and not isinstance(value, str):
                         record_unexpected_type(path, what)
                     child_name = _pnpm_edge_target(child_name, value)
-                children.append(child_name.lower())
+                children.append(_key(child_name))
     for child_name in typed_field(path, meta, "transitivePeerDependencies", list, what) or []:
         if isinstance(child_name, str):
-            children.append(child_name.lower())
+            children.append(_key(child_name))
     return children
 
 
@@ -314,11 +318,11 @@ def parse_package_lock_json(
         meta = cast("dict[str, Any]", raw)
         key_name = key.rsplit("node_modules/", 1)[-1]
         declared = meta.get("name")
-        if isinstance(declared, str) and declared and declared.lower() != key_name.lower():
-            alias_to_canonical[key_name.lower()] = declared
+        if isinstance(declared, str) and declared and _key(declared) != _key(key_name):
+            alias_to_canonical[_key(key_name)] = declared
 
     def _resolve_alias(child: str) -> str:
-        return alias_to_canonical.get(child.lower(), child).lower()
+        return _key(alias_to_canonical.get(_key(child), child))
 
     deps: list[Dependency] = []
     seen: set[tuple[str, str, str]] = set()
@@ -376,7 +380,7 @@ def parse_package_lock_json(
         # Prefer the declared canonical name when present (npm aliases).
         name = typed_field(path, meta, "name", str, _PACKAGES_ENTRY) or key_name
 
-        normalized = name.lower()
+        normalized = _key(name)
         edges.setdefault(normalized, set()).update(
             _resolve_alias(c) for c in _collect_npm_edge_children(path, meta, _PACKAGES_ENTRY)
         )
@@ -445,11 +449,11 @@ def _parse_package_lock_v1(
                 continue
             read += 1
 
-            normalized = name.lower()
+            normalized = _key(name)
             name_case.setdefault(normalized, name)
 
             requires = typed_field(path, meta, "requires", dict, entry_of) or {}
-            edges.setdefault(normalized, set()).update(n.lower() for n in requires)
+            edges.setdefault(normalized, set()).update(_key(n) for n in requires)
 
             origin: str | None
             spec_path = path_spec(version)
@@ -547,12 +551,12 @@ def parse_pnpm_lock(
             name, version, origin = off_registry
             # Its edges stay in the graph either way: the registry packages
             # it depends on are reached through it.
-            edges.setdefault(name.lower(), set()).update(
+            edges.setdefault(_key(name), set()).update(
                 _collect_npm_edge_children(path, meta, _PACKAGES_ENTRY, pnpm_references=True)
             )
-            if origin is not None and (name.lower(), version, origin) not in seen_off_registry:
-                seen_off_registry.add((name.lower(), version, origin))
-                name_case.setdefault(name.lower(), name)
+            if origin is not None and (_key(name), version, origin) not in seen_off_registry:
+                seen_off_registry.add((_key(name), version, origin))
+                name_case.setdefault(_key(name), name)
                 deps.append(
                     Dependency(
                         name=name,
@@ -569,7 +573,7 @@ def parse_pnpm_lock(
         if not name or not version:
             continue
 
-        normalized = name.lower()
+        normalized = _key(name)
         edges.setdefault(normalized, set()).update(
             _collect_npm_edge_children(path, meta, _PACKAGES_ENTRY, pnpm_references=True)
         )
@@ -605,7 +609,7 @@ def parse_pnpm_lock(
         snap_name, _ = _parse_pnpm_package_key(snap_key)
         if not snap_name:
             continue
-        edges.setdefault(snap_name.lower(), set()).update(
+        edges.setdefault(_key(snap_name), set()).update(
             _collect_npm_edge_children(path, snap_raw, snapshots_entry, pnpm_references=True)
         )
 
@@ -872,10 +876,10 @@ def _parse_yarn_berry(
             alias = _yarn_alias_descriptor_name(descriptor)
             target = _yarn_alias_target(descriptor)
             if alias and target:
-                alias_to_canonical[alias.lower()] = target
+                alias_to_canonical[_key(alias)] = target
 
     def _resolve_alias(child: str) -> str:
-        return alias_to_canonical.get(child.lower(), child).lower()
+        return _key(alias_to_canonical.get(_key(child), child))
 
     deps: list[Dependency] = []
     seen: set[tuple[str, str, str]] = set()
@@ -899,7 +903,7 @@ def _parse_yarn_berry(
         name = _yarn_name_from_descriptor(first)
         if not name:
             continue
-        normalized = name.lower()
+        normalized = _key(name)
 
         deps_field = typed_field(path, meta, "dependencies", dict, entry) or {}
         children = [_resolve_alias(child) for child in deps_field if isinstance(child, str)]
@@ -961,10 +965,10 @@ def _parse_yarn_v1(
             alias = _yarn_alias_descriptor_name(descriptor)
             target = _yarn_alias_target(descriptor)
             if alias and target:
-                alias_to_canonical[alias.lower()] = target
+                alias_to_canonical[_key(alias)] = target
 
     def _resolve_alias(child: str) -> str:
-        return alias_to_canonical.get(child.lower(), child).lower()
+        return _key(alias_to_canonical.get(_key(child), child))
 
     deps: list[Dependency] = []
     seen: set[tuple[str, str, str]] = set()
@@ -985,7 +989,7 @@ def _parse_yarn_v1(
         if current_name is None or current_version is None:
             return
         read += 1
-        normalized = current_name.lower()
+        normalized = _key(current_name)
         edges.setdefault(normalized, set()).update(pending_deps)
         name_case.setdefault(normalized, current_name)
         origin = npm_resolved_origin(current_resolved, current_integrity, path.parent, scan_root)
@@ -1195,7 +1199,7 @@ def parse_bun_lock(
         if not name or not version:
             continue
 
-        normalized = name.lower()
+        normalized = _key(name)
         edges.setdefault(normalized, set()).update(
             _collect_npm_edge_children(path, meta, _PACKAGES_ENTRY)
         )

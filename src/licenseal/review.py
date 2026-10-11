@@ -8,12 +8,17 @@ A dependency that does not come from a registry (a git repository, a direct
 URL, a path that the scan does not read) is keyed on ecosystem, package, and
 its origin instead: the entry carries a ``source`` key holding the origin
 string. The two kinds of key never match each other's rows.
+
+The package of a key is compared the way its ecosystem's registry compares
+names (:meth:`licenseal.models.Ecosystem.identity`): exactly for Go, Java,
+npm, and Ruby, without regard to case for .NET, PHP, Rust, Hex, and R, and
+PEP 503 normalized for Python. A Hex dependency is keyed on the package it
+is published as on hex.pm, not on the name ``mix.exs`` gives it.
 """
 
 from __future__ import annotations
 
 import json
-import re
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -32,7 +37,6 @@ else:
 
 REVIEW_FILE_NAME = "licenseal.review.toml"
 
-_PEP503_NORMALIZE_RE = re.compile(r"[-_.]+")
 _VALID_ECOSYSTEMS = frozenset(e.value for e in Ecosystem)
 
 
@@ -72,13 +76,11 @@ class ReviewFileContents:
 def canonical_name(ecosystem: Ecosystem | str, name: str) -> str:
     """Return the canonical package name used for review keys.
 
-    Python applies PEP 503 normalization (lowercase; runs of `-_.` collapse to `-`).
+    The ecosystem's own identity rule decides: a name is kept as written
+    where the registry tells names apart by case, and folded where it does
+    not (see :meth:`Ecosystem.identity`).
     """
-    eco = ecosystem.value if isinstance(ecosystem, Ecosystem) else ecosystem
-    stripped = name.strip()
-    if eco == Ecosystem.PYTHON.value:
-        return _PEP503_NORMALIZE_RE.sub("-", stripped).lower()
-    return stripped.lower()
+    return Ecosystem(ecosystem).identity(name.strip())
 
 
 def review_key(ecosystem: Ecosystem | str, name: str, version_text: str) -> str:
@@ -104,13 +106,18 @@ def info_review_key(info: LicenseInfo) -> str:
     """Return the key a review entry needs to apply to ``info``.
 
     Empty when no entry can: a registry package with no resolved version.
+
+    The package of the key is the name the registry publishes it under. For
+    a Hex dependency that ``mix.exs`` renames, that is the hex.pm package,
+    so an entry stops applying when the local name is pointed at another
+    package.
     """
     dep = info.dependency
     if dep.origin:
-        return source_review_key(dep.ecosystem, dep.name, dep.origin)
+        return source_review_key(dep.ecosystem, dep.effective_registry_name, dep.origin)
     if not info.resolved_version:
         return ""
-    return review_key(dep.ecosystem, dep.name, info.resolved_version)
+    return review_key(dep.ecosystem, dep.effective_registry_name, info.resolved_version)
 
 
 def _normalize_reviewed_license(raw_license: str) -> str:
@@ -284,7 +291,10 @@ def apply_reviewed_licenses(
             "key applies only to that exact source: when the commit, ref, "
             "URL, or path the dependency comes from has changed, review the "
             "new source and update `source` (and `version`, when the stanza "
-            "has one)."
+            "has one). `package` is compared the way the registry compares "
+            "names: for go, java, npm, and ruby it must be spelled exactly as "
+            "the report shows the dependency, upper and lower case included; "
+            "for hex it is the package's name on hex.pm."
         )
 
 
@@ -302,6 +312,9 @@ def flagged_entries_from_results(
 
     An off-registry dependency is keyed on its origin, so it is always an
     entry, with or without a version.
+
+    An entry is named the way its review key is: by the name the registry
+    publishes the package under.
     """
     entries: list[FlaggedEntry] = []
     unscaffoldable: list[str] = []
@@ -315,7 +328,7 @@ def flagged_entries_from_results(
         entries.append(
             FlaggedEntry(
                 ecosystem=info.dependency.ecosystem.value,
-                name=info.dependency.name,
+                name=info.dependency.effective_registry_name,
                 version=info.resolved_version,
                 detected_license=info.detected_license_id or "UNKNOWN",
                 license_raw=info.license_raw or "",
@@ -368,6 +381,11 @@ def flagged_entries_from_json_report(
         name = raw.get("name", "")
         if not isinstance(name, str) or not name:
             continue
+        # A package published under another name than the one the report
+        # shows it by is keyed on the published name.
+        registry_name = raw.get("registry_name")
+        if isinstance(registry_name, str) and registry_name:
+            name = registry_name
         version_text = raw.get("resolved_version", "")
         if not isinstance(version_text, str):
             version_text = ""

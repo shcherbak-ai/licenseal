@@ -467,7 +467,8 @@ class TestFetchRubygemsDependencies:
                         "runtime": [
                             "not-a-dict",
                             {"name": "rack", "requirements": ">= 2.0"},
-                            {"name": "Rack", "requirements": ">= 3.0"},  # case-dupe
+                            {"name": "rack", "requirements": ">= 3.0"},  # listed twice
+                            {"name": "Rack", "requirements": ">= 1.0"},  # another gem
                             {"name": "  ", "requirements": "x"},  # empty name
                             {"name": "no-req"},
                         ],
@@ -485,7 +486,7 @@ class TestFetchRubygemsDependencies:
             )
             assert complete is False
         names = sorted(c.name for c in children)
-        assert names == ["no-req", "rack"]
+        assert names == ["Rack", "no-req", "rack"]
         rack = next(c for c in children if c.name == "rack")
         assert rack.version_constraint == ">= 2.0"
         no_req = next(c for c in children if c.name == "no-req")

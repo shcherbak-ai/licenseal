@@ -41,7 +41,11 @@ from licenseal.discovery.r._lock import (
     hosted_origin,
     source_label_origin,
 )
-from licenseal.models import Dependency
+from licenseal.models import Dependency, Ecosystem
+
+# Key of a package name in the name sets and graphs below (see
+# ``Ecosystem.identity``).
+_key = Ecosystem.R.identity
 
 
 def find_renv_lockfiles(
@@ -138,7 +142,7 @@ def parse_renv_lock(
         name = strings["Package"] or key.strip()
         if not name:
             continue
-        normalized = name.lower()
+        normalized = _key(name)
         version = strings["Version"]
         origin = _entry_origin(strings, path.parent, scan_root)
         reqs = typed_field(path, entry, "Requirements", list, _PACKAGES_ENTRY) or []
@@ -146,7 +150,7 @@ def parse_renv_lock(
             record_unexpected_type(path, _PACKAGES_ENTRY)
         child_names = [r.strip() for r in reqs if isinstance(r, str) and r.strip()]
         spec_info.setdefault(normalized, (name, version, origin))
-        edges.setdefault(normalized, set()).update(c.lower() for c in child_names)
+        edges.setdefault(normalized, set()).update(_key(c) for c in child_names)
     record_unread_entries(path, len(packages), len(spec_info))
 
     return build_lock_dependencies(

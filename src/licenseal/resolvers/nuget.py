@@ -70,6 +70,10 @@ from licenseal.resolvers.http import (
 )
 from licenseal.resolvers.version_selection import parse_nuget_range, select_version
 
+# Key of a package name in the name sets and graphs below (see
+# ``Ecosystem.identity``).
+_key = Ecosystem.DOTNET.identity
+
 _NUGET_FLATCONTAINER_URL = "https://api.nuget.org/v3-flatcontainer/{name}/{version}/{name}.nuspec"
 # The flatcontainer's list of a package's published versions.
 _NUGET_INDEX_URL = "https://api.nuget.org/v3-flatcontainer/{name}/index.json"
@@ -242,7 +246,7 @@ def _dependencies_from_nuspec(text: str) -> tuple[list[tuple[str, str]], bool]:
         # the rest of the .NET path; the flatcontainer URL lowercases
         # at fetch time).
         declared = (elem.get("version") or "").strip()
-        key = (package_id.lower(), declared)
+        key = (_key(package_id), declared)
         if key not in seen:
             seen.add(key)
             out.append((package_id, declared))
@@ -494,7 +498,7 @@ def fetch_nuget_dependencies(
             # without one: reported, and unread in its turn.
             child_version = _resolve_version(child_name, declared, client, fetcher) or ""
             edges.append((parent_name, parent_version, child_name, child_version))
-            key = (child_name.lower(), child_version)
+            key = (_key(child_name), child_version)
             if key in visited:
                 continue
             visited.add(key)
@@ -504,6 +508,6 @@ def fetch_nuget_dependencies(
     # The SELF root itself isn't emitted as a node (caller already has
     # the direct dep), but its key is marked visited so a self-cycle
     # (rare but legal) doesn't recurse forever.
-    visited.add((name.lower(), version))
+    visited.add((_key(name), version))
     _walk(name, version, 0)
     return (nodes, edges, unread)

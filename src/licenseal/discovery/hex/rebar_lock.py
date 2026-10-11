@@ -36,6 +36,10 @@ from licenseal.discovery.hex.mix_lock import (  # noqa: PLC2701
 )
 from licenseal.models import Dependency, DependencyGroup, Ecosystem
 
+# Key of a package name in the name sets and graphs below (see
+# ``Ecosystem.identity``).
+_key = Ecosystem.HEX.identity
+
 _BINARY_RE = re.compile(r'<<"([^"]*)">>')
 # A dependency level: ASCII digits only, and few of them. ``str.isdigit`` also
 # accepts characters ``int()`` rejects, and ``int()`` refuses very long digit
@@ -153,7 +157,7 @@ def parse_rebar_lock(
             continue
         name, version, level, origin = _parse_lock_entry(elements)
         is_direct = level == 0
-        if is_direct and name.lower() in dev_direct_names:
+        if is_direct and _key(name) in dev_direct_names:
             group = DependencyGroup.DEV
         else:
             group = DependencyGroup.PROD

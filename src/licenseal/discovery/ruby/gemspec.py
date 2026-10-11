@@ -27,6 +27,10 @@ from licenseal.discovery._read import decode_text
 from licenseal.discovery._walk import walk_project_files_matching
 from licenseal.models import Dependency, DependencyGroup, Ecosystem
 
+# Key of a gem name in the name sets and graphs below. Gem names are compared
+# as written: two that differ only in case are two gems.
+_key = Ecosystem.RUBY.identity
+
 # Match ``spec.license = "MIT"`` / ``s.license = 'MIT'`` (singular).
 # Receiver is any identifier; we only need the RHS string.
 _LICENSE_SINGULAR_RE = re.compile(
@@ -126,7 +130,7 @@ def _parse_gemspec_text(text: str, source: str) -> list[Dependency]:
         group = (
             DependencyGroup.DEV if kind == "add_development_dependency" else DependencyGroup.PROD
         )
-        key = (name.lower(), group.value)
+        key = (_key(name), group.value)
         if key in seen:
             continue
         seen.add(key)
@@ -147,7 +151,7 @@ def workspace_gemspec_names(
     *,
     exclude_paths: frozenset[Path] = frozenset(),
 ) -> frozenset[str]:
-    """Return the lowercased set of in-tree gemspec ``spec.name`` values.
+    """Return the in-tree gemspec ``spec.name`` values, as identity keys.
 
     Used as the workspace-internal filter by the Gemfile and Gemfile.lock
     discovery paths so monorepo siblings (one in-tree gem referencing
@@ -160,12 +164,12 @@ def workspace_gemspec_names(
             continue
         spec_name = _extract_name_from_text(text)
         if spec_name:
-            names.add(spec_name.lower())
+            names.add(_key(spec_name))
         else:
             # Fall back to the file stem: ``activerecord.gemspec`` → ``activerecord``.
             stem = gemspec.stem
             if stem:  # pragma: no branch - *.gemspec always has a non-empty stem
-                names.add(stem.lower())
+                names.add(_key(stem))
     return frozenset(names)
 
 
@@ -201,7 +205,7 @@ def discover_gemspec_dependencies(
             continue
         source = gemspec.relative_to(project_path).as_posix()
         for dep in _parse_gemspec_text(text, source):
-            if dep.name.lower() in workspace_names:
+            if dep.identity in workspace_names:
                 filtered += 1
                 continue
             out.append(dep)

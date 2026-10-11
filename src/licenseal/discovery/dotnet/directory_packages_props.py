@@ -66,6 +66,7 @@ from defusedxml import ElementTree as DefusedET
 from licenseal.discovery._read import read_xml_bytes, record_parse_failure
 from licenseal.discovery._walk import walk_project_files
 from licenseal.discovery.dotnet.csproj import _strip_ns
+from licenseal.models import Ecosystem
 
 _PROPS_FILENAME = "Directory.Packages.props"
 
@@ -116,7 +117,7 @@ def _parse_directory_packages_props(raw: str | bytes) -> CpmData | None:
             version = (item.get("Version") or "").strip()
             if not include or not version:
                 continue
-            key = include.lower()
+            key = Ecosystem.DOTNET.identity(include)
             if item_local == "PackageVersion":
                 data.versions[key] = version
             elif item_local == "GlobalPackageReference":
@@ -198,4 +199,4 @@ def lookup_version(
     data = closest_cpm_data(csproj_path, cpm_files)
     if data is None:
         return ""
-    return data.versions.get(package_id.lower(), "")
+    return data.versions.get(Ecosystem.DOTNET.identity(package_id), "")

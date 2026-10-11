@@ -296,10 +296,10 @@ def fetch_rubygems_dependencies(
         if not isinstance(child_name, str) or not child_name.strip():
             complete = False
             continue
-        lowered = child_name.lower()
-        if lowered in seen:
+        key = Ecosystem.RUBY.identity(child_name)
+        if key in seen:
             continue
-        seen.add(lowered)
+        seen.add(key)
         child_constraint = entry.get("requirements")
         constraint_str = child_constraint.strip() if isinstance(child_constraint, str) else ""
         out.append(

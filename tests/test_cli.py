@@ -720,9 +720,9 @@ class TestCheckCommand:
         assert canonical_name(Ecosystem.PYTHON, "multiple___underscores") == "multiple-underscores"
         assert canonical_name("python", "MIXED-Case") == "mixed-case"
 
-    def test_canonical_name_keeps_npm_lowercase(self):
-        assert canonical_name(Ecosystem.NPM, "React-DOM") == "react-dom"
-        assert canonical_name(Ecosystem.NPM, "@scope/Pkg") == "@scope/pkg"
+    def test_canonical_name_keeps_npm_names_as_written(self):
+        assert canonical_name(Ecosystem.NPM, "React-DOM") == "React-DOM"
+        assert canonical_name(Ecosystem.NPM, " @scope/Pkg ") == "@scope/Pkg"
 
     def test_load_review_file_detects_pep503_duplicate(self, tmp_path):
         (tmp_path / "licenseal.review.toml").write_text(

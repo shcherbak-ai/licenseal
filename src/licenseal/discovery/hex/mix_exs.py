@@ -39,6 +39,10 @@ from licenseal.discovery.hex.mix_lock import (  # noqa: PLC2701
 )
 from licenseal.models import Dependency, DependencyGroup, Ecosystem
 
+# Key of a package name in the name sets and graphs below (see
+# ``Ecosystem.identity``).
+_key = Ecosystem.HEX.identity
+
 # The ``deps`` function header: ``def deps do`` / ``defp deps(env) do`` /
 # ``defp deps, do: [...]``. We only need to locate it; the list body is found
 # by a bracket scan from the match onward.
@@ -184,10 +188,10 @@ def _parse_mix_exs_text(
         rename = _HEX_RENAME_RE.search(entry)
         registry_name = (
             rename.group("hexname")
-            if rename and origin == "" and rename.group("hexname").lower() != name.lower()
+            if rename and origin == "" and _key(rename.group("hexname")) != _key(name)
             else ""
         )
-        key = (name.lower(), group.value)
+        key = (_key(name), group.value)
         if key in seen:
             continue
         seen.add(key)
@@ -228,9 +232,9 @@ def discover_mix_exs_dependencies(
             continue
         source = mix_exs.relative_to(project_path).as_posix()
         deps, own = _parse_mix_exs_text(text, source, mix_exs.parent, project_path)
-        filtered += sum(name.lower() in workspace_names for name in own)
+        filtered += sum(_key(name) in workspace_names for name in own)
         for dep in deps:
-            if dep.name.lower() in workspace_names:
+            if dep.identity in workspace_names:
                 filtered += 1
                 continue
             out.append(dep)
@@ -249,9 +253,9 @@ def collect_dev_direct_names(deps: list[Dependency]) -> set[str]:
         if dep.ecosystem != Ecosystem.HEX:
             continue
         if dep.group == DependencyGroup.DEV:
-            dev_names.add(dep.name.lower())
+            dev_names.add(dep.identity)
         else:
-            prod_names.add(dep.name.lower())
+            prod_names.add(dep.identity)
     return dev_names - prod_names
 
 
@@ -292,5 +296,5 @@ def workspace_mix_names(
             continue
         m = _APP_RE.search(_strip_comments(text))
         if m is not None:
-            names.add(m.group("app").lower())
+            names.add(_key(m.group("app")))
     return frozenset(names)

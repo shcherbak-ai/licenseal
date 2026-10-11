@@ -25,8 +25,12 @@ import httpx
 from licenseal.analysis.spdx import normalize_r_license
 from licenseal.discovery.r._dcf import parse_dcf, parse_package_list
 from licenseal.discovery.r.description import is_base_package
-from licenseal.models import Dependency, LicenseInfo
+from licenseal.models import Dependency, Ecosystem, LicenseInfo
 from licenseal.resolvers.http import Fetcher, fetch_registry_text
+
+# Key of a package name in the name sets and graphs below (see
+# ``Ecosystem.identity``).
+_key = Ecosystem.R.identity
 
 _CRAN_INDEX_URL = "https://cran.r-project.org/src/contrib/PACKAGES"
 
@@ -60,7 +64,7 @@ def fetch_cran_index(
     for record in parse_dcf(text):
         name = record.get("Package", "").strip()
         if name:
-            index.setdefault(name.lower(), record)
+            index.setdefault(_key(name), record)
     return index
 
 
@@ -99,7 +103,7 @@ def index_edge_names(record: dict[str, str]) -> list[str]:
         for name, _constraint in parse_package_list(value):
             if is_base_package(name):
                 continue
-            lowered = name.lower()
+            lowered = _key(name)
             if lowered in seen:
                 continue
             seen.add(lowered)
@@ -126,7 +130,7 @@ def resolve_r_license(dep: Dependency, index: CranIndex) -> LicenseInfo:
     ``origin`` (GitHub / Bioconductor / Local) is not a CRAN package; the CLI
     never passes one to this function.
     """
-    record = index.get(dep.name.lower())
+    record = index.get(dep.identity)
     if record is None:
         return _unknown(dep, from_registry=False)
     raw = record.get("License", "").strip()

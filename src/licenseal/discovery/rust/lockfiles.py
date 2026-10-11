@@ -25,6 +25,10 @@ from licenseal.discovery._read import load_toml
 from licenseal.discovery._walk import walk_project_files
 from licenseal.models import Dependency, DependencyGroup, Ecosystem
 
+# Key of a package name in the name sets and graphs below (see
+# ``Ecosystem.identity``).
+_key = Ecosystem.RUST.identity
+
 # A ``source`` that names a registry: crates.io, or another one. Either way
 # the crate is looked up on crates.io by name.
 _REGISTRY_PREFIXES = ("registry+", "sparse+")
@@ -154,7 +158,7 @@ def parse_cargo_lock(
         if not isinstance(name, str) or not isinstance(version, str):
             continue
 
-        normalized = name.lower()
+        normalized = _key(name)
         all_known_names.add(normalized)
 
         # One version of a crate can be locked from two sources (the
@@ -174,7 +178,7 @@ def parse_cargo_lock(
                 # Entries are either "name", "name 1.2.3", or "name 1.2.3 (registry+...)"
                 child_name = entry.split(" ", 1)[0]
                 if child_name:
-                    children.append(child_name.lower())
+                    children.append(_key(child_name))
 
         # Always populate edges + name_case so BFS can traverse through git /
         # path / local crates to their registry-sourced children.
@@ -201,7 +205,7 @@ def parse_cargo_lock(
 
     out: list[Dependency] = []
     for name, version, origin in raw_pkgs:
-        normalized = name.lower()
+        normalized = _key(name)
         group = group_by_name.get(normalized)
         if group is None:
             continue

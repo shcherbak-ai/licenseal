@@ -21,6 +21,10 @@ from licenseal.discovery._read import load_toml
 from licenseal.discovery._walk import walk_project_files
 from licenseal.models import Dependency, DependencyGroup, Ecosystem
 
+# Key of a package name in the name sets and graphs below (see
+# ``Ecosystem.identity``).
+_key = Ecosystem.RUST.identity
+
 # The keys that say which revision of a git dependency to take, most
 # specific first.
 _REVISION_KEYS = ("rev", "tag", "branch")
@@ -395,10 +399,10 @@ def cargo_sources(
     dependency.
     """
     deps, own, patches, local_names = _scan_cargo_tomls(project_path, exclude_paths)
-    roots = [(name.lower(), group) for name, group in own if name not in local_names]
-    redirected = {name.lower(): origin for name, origin in patches.items()}
+    roots = [(_key(name), group) for name, group in own if name not in local_names]
+    redirected = {_key(name): origin for name, origin in patches.items()}
     origins: dict[str, str | None] = dict(redirected)
-    origins.update((dep.name.lower(), dep.origin) for dep in deps if dep.origin)
+    origins.update((dep.identity, dep.origin) for dep in deps if dep.origin)
     return CargoSources(
         prod_roots={name for name, group in roots if group == DependencyGroup.PROD},
         dev_roots={name for name, group in roots if group == DependencyGroup.DEV},

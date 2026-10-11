@@ -53,6 +53,10 @@ from licenseal.discovery._read import decode_text, record_parse_failure
 from licenseal.discovery._walk import walk_project_files
 from licenseal.models import Dependency, DependencyGroup, Ecosystem
 
+# Key of a package name in the name sets and graphs below (see
+# ``Ecosystem.identity``).
+_key = Ecosystem.DOTNET.identity
+
 _PACKAGES_LOCK = "packages.lock.json"
 _PROJECT_ASSETS = "project.assets.json"
 
@@ -144,7 +148,7 @@ def _add_entry(entries: dict[tuple[str, str], _LockEntry], entry: _LockEntry) ->
     direct if any sighting is). Keeping only the first sighting would leave
     the other frameworks' children with no inbound edge.
     """
-    key = (entry.name.lower(), entry.version)
+    key = (_key(entry.name), entry.version)
     seen = entries.get(key)
     if seen is None:
         entries[key] = entry
@@ -193,7 +197,7 @@ def _extract_edges(raw: object) -> tuple[str, ...]:
     """
     if not isinstance(raw, dict):
         return ()
-    return tuple(name.lower() for name in raw if isinstance(name, str))
+    return tuple(_key(name) for name in raw if isinstance(name, str))
 
 
 def parse_project_assets_json(text: str) -> list[_LockEntry] | None:
@@ -262,7 +266,7 @@ def _collect_assets_direct_names(data: dict) -> set[str]:
         deps = fw_value.get("dependencies")
         if not isinstance(deps, dict):
             continue
-        names.update(name.lower() for name in deps)
+        names.update(_key(name) for name in deps)
     return names
 
 
@@ -294,7 +298,7 @@ def _iter_assets_entries(data: dict, *, direct_names: set[str]) -> Iterable[_Loc
                 _LockEntry(
                     name=name,
                     version=version,
-                    is_direct=name.lower() in direct_names,
+                    is_direct=_key(name) in direct_names,
                     edges=edges,
                 ),
             )
@@ -342,7 +346,7 @@ def parse_nuget_lockfile(
     name_case: dict[str, str] = {}
     edges: dict[str, set[str]] = {}
     for entry in entries:
-        lower = entry.name.lower()
+        lower = _key(entry.name)
         name_case.setdefault(lower, entry.name)
         edges.setdefault(lower, set()).update(entry.edges)
     prod_anc = compute_direct_ancestors(
@@ -354,7 +358,7 @@ def parse_nuget_lockfile(
 
     out: list[Dependency] = []
     for entry in entries:
-        lower = entry.name.lower()
+        lower = _key(entry.name)
         is_root = lower in prod_root_names or lower in dev_root_names
         if lower in prod_root_names or lower in prod_anc:
             group = DependencyGroup.PROD

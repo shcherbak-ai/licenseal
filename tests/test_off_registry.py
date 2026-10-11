@@ -361,8 +361,13 @@ class TestSourceReviewKey:
     def test_key_holds_ecosystem_canonical_name_and_origin(self):
         key = source_review_key(Ecosystem.PYTHON, "My_Pkg", f"  {_ORIGIN} ")
         assert key == f"off-registry python:my-pkg from {_ORIGIN}"
+        # A gem name keeps its case; a NuGet id does not.
         assert (
-            source_review_key("ruby", "Edge", _ORIGIN) == f"off-registry ruby:edge from {_ORIGIN}"
+            source_review_key("ruby", "Edge", _ORIGIN) == f"off-registry ruby:Edge from {_ORIGIN}"
+        )
+        assert (
+            source_review_key("dotnet", "Edge", _ORIGIN)
+            == f"off-registry dotnet:edge from {_ORIGIN}"
         )
 
     def test_info_key_by_kind_of_row(self):
@@ -400,7 +405,7 @@ class TestLoadReviewFileWithSource:
             """,
         )
         contents = load_review_file(tmp_path)
-        key = f"off-registry ruby:edge from {_ORIGIN}"
+        key = f"off-registry ruby:Edge from {_ORIGIN}"
         assert contents.licenses == {key: "MIT"}
         assert contents.notes == {key: "read LICENSE at that commit"}
         assert contents.versions == {}

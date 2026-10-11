@@ -218,7 +218,7 @@ If the command emits a `Note: N flagged dependencies could not be scaffolded (no
 
 ### 6. Fill in the review file
 
-For each empty `[[review]]` stanza in `licenseal.review.toml` — on a `--merge` run that's just the freshly-appended ones; leave already-filled stanzas from prior audits untouched — look up the dep's `(ecosystem, package, version)` triple (`(ecosystem, package, source)` when the stanza has a `source` line) in the decisions collected in step 4 and set `license = "<their answer>"`. Accepted values:
+For each empty `[[review]]` stanza in `licenseal.review.toml` — on a `--merge` run that's just the freshly-appended ones; leave already-filled stanzas from prior audits untouched — look up the dep's `(ecosystem, package, version)` triple (`(ecosystem, package, source)` when the stanza has a `source` line) in the decisions collected in step 4 and set `license = "<their answer>"`. A stanza's `package` is the report's `name` for that dependency, or its `registry_name` when that field is not empty (a Hex dependency that `mix.exs` renames is reviewed under the hex.pm package it is published as). Keep the `package` line as scaffolded: for Go, Java, npm, and Ruby it is matched exactly, upper and lower case included. Accepted values:
 
 - a single SPDX ID (e.g. `"MIT"`, `"Apache-2.0"`)
 - an SPDX expression (e.g. `"MIT OR Apache-2.0"`)
@@ -246,7 +246,7 @@ Verify:
   2. deps the user explicitly left undecided, plus
   3. **confirmed-real-incompatibilities** — deps where no exception applied and the user wisely chose not to write a fake review entry
 
-If the math doesn't work out for reasons 1 and 2, the review entries probably reference wrong versions — diff against the original scan JSON and fix. **A non-zero unreviewed residual from reason 3 is the correct outcome**, not a problem to solve: report the residual count and the dep names to the user as the honest result of the audit, so they can act on it outside this skill.
+If the math doesn't work out for reasons 1 and 2, the review entries probably reference wrong versions, or a `package` spelled differently from the scan's (a Go, Java, npm, or Ruby name in another case is another package) — diff against the original scan JSON and fix. **A non-zero unreviewed residual from reason 3 is the correct outcome**, not a problem to solve: report the residual count and the dep names to the user as the honest result of the audit, so they can act on it outside this skill.
 
 ### 8. Save the audit deliverable to LICENSES.md
 

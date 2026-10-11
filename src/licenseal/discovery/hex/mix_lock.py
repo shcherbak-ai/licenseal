@@ -37,6 +37,10 @@ from licenseal.discovery._read import decode_lockfile_text, record_unread_entrie
 from licenseal.discovery._walk import walk_project_files
 from licenseal.models import Dependency, DependencyGroup, Ecosystem
 
+# Key of a package name in the name sets and graphs below (see
+# ``Ecosystem.identity``).
+_key = Ecosystem.HEX.identity
+
 # A top-level lock entry on one line. ``mix deps.get`` emits the keyword-style
 # ``"name": {<tuple>}``; the equivalent map-literal ``"name" => {<tuple>}`` form
 # is accepted too. The greedy body capture takes everything up to the final
@@ -255,7 +259,7 @@ def parse_mix_lock(
         if m is None:
             continue
         name = m.group("name")
-        normalized = name.lower()
+        normalized = _key(name)
         hex_name, version, child_names, origin = _parse_lock_tuple(
             m.group("body"), path.parent, scan_root
         )
@@ -266,9 +270,9 @@ def parse_mix_lock(
         # and `_walk_uncovered` covers it — while the dep carries the hex name
         # as `registry_name` so license resolution targets the right package.
         # Empty when not renamed (byte-identical output for the common case).
-        reg_name = hex_name if hex_name and hex_name.lower() != normalized else ""
+        reg_name = hex_name if hex_name and _key(hex_name) != normalized else ""
         spec_info.setdefault(normalized, (name, reg_name, version, origin))
-        edges.setdefault(normalized, set()).update(c.lower() for c in child_names)
+        edges.setdefault(normalized, set()).update(_key(c) for c in child_names)
 
     record_unread_entries(path, entries, len(spec_info))
     if not spec_info:
@@ -331,6 +335,6 @@ def attach_direct_sources(
         if dep.depth != 0:
             out.append(dep)
             continue
-        source = direct_source_by_name.get(dep.name.lower(), "")
+        source = direct_source_by_name.get(dep.identity, "")
         out.append(replace(dep, source=source) if source else dep)
     return out

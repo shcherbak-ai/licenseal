@@ -577,9 +577,11 @@ def _grouped_results(results: list[CompatibilityResult]) -> list[CompatibilityRe
     alphabetically-first direct ancestor (a sorted tuple, so this is
     deterministic), matched within its own ecosystem: a transitive always
     shares its ancestors' ecosystem, so a same-named direct dep in another
-    ecosystem is not its parent. When several direct rows share an ecosystem
-    and name (two locked versions of one package), they are ordered by
-    resolved version and the transitives go under the first. A transitive
+    ecosystem is not its parent. Names are matched by the ecosystem's
+    identity rule (``Ecosystem.identity``). When several direct rows share
+    an ecosystem and name (two locked versions of one package), they are
+    ordered by resolved version and the transitives go under the first. A
+    transitive
     whose first ancestor has no row in the report, or that has no ancestors,
     appears at the end. An ancestor can lack a row: a path dependency inside
     the scanned directory is a root of the lockfile graph but is the
@@ -590,7 +592,7 @@ def _grouped_results(results: list[CompatibilityResult]) -> list[CompatibilityRe
         key=lambda r: (*_row_order(r), r.license_info.resolved_version),
     )
     direct_keys = {
-        (r.license_info.dependency.ecosystem, r.license_info.dependency.name) for r in direct
+        (r.license_info.dependency.ecosystem, r.license_info.dependency.identity) for r in direct
     }
     by_first_ancestor: dict[tuple[Ecosystem, str], list[CompatibilityResult]] = {}
     orphans: list[CompatibilityResult] = []
@@ -598,7 +600,11 @@ def _grouped_results(results: list[CompatibilityResult]) -> list[CompatibilityRe
         dep = r.license_info.dependency
         if not dep.is_transitive:
             continue
-        key = (dep.ecosystem, dep.direct_ancestors[0]) if dep.direct_ancestors else None
+        key = (
+            (dep.ecosystem, dep.ecosystem.identity(dep.direct_ancestors[0]))
+            if dep.direct_ancestors
+            else None
+        )
         if key in direct_keys:
             by_first_ancestor.setdefault(key, []).append(r)
         else:
@@ -609,7 +615,7 @@ def _grouped_results(results: list[CompatibilityResult]) -> list[CompatibilityRe
         dep = d.license_info.dependency
         # ``pop``, not ``get``: a bucket is emitted under the first direct row
         # that claims it and never again.
-        out.extend(sorted(by_first_ancestor.pop((dep.ecosystem, dep.name), []), key=_row_order))
+        out.extend(sorted(by_first_ancestor.pop((dep.ecosystem, dep.identity), []), key=_row_order))
     out.extend(sorted(orphans, key=_row_order))
     return out
 
@@ -1047,6 +1053,7 @@ def _dep_to_dict(r: CompatibilityResult) -> dict[str, Any]:
     package_url = _package_url(r)
     out: dict[str, Any] = {
         "name": r.license_info.dependency.name,
+        "registry_name": r.license_info.dependency.registry_name,
         "ecosystem": r.license_info.dependency.ecosystem.value,
         "group": r.license_info.dependency.group.value,
         "depth": r.license_info.dependency.display_depth,

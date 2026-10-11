@@ -34,6 +34,10 @@ from licenseal.discovery._walk import walk_project_files
 from licenseal.discovery.hex.mix_exs import workspace_mix_names
 from licenseal.models import Dependency, DependencyGroup, Ecosystem
 
+# Key of a package name in the name sets and graphs below (see
+# ``Ecosystem.identity``).
+_key = Ecosystem.HEX.identity
+
 # A project Makefile is treated as erlang.mk only when it includes the build
 # system — guards against parsing unrelated (C / generic) Makefiles.
 _INCLUDE_RE = re.compile(r"include\s+\S*erlang\.mk")
@@ -181,9 +185,9 @@ def discover_erlang_mk_dependencies(
             continue
         source = makefile.relative_to(project_path).as_posix()
         deps, own = _parse_makefile_text(text, source, makefile.parent, project_path)
-        filtered += sum(name.lower() in workspace_names for name in own)
+        filtered += sum(_key(name) in workspace_names for name in own)
         for dep in deps:
-            if dep.name.lower() in workspace_names:
+            if dep.identity in workspace_names:
                 filtered += 1
                 continue
             out.append(dep)
@@ -211,7 +215,7 @@ def workspace_erlang_mk_project_names(
         for line in _logical_lines(text):
             m = _PROJECT_RE.match(line)
             if m is not None:
-                names.add(m.group("val").lower())
+                names.add(_key(m.group("val")))
                 break
     return frozenset(names)
 

@@ -151,6 +151,6 @@ def attach_direct_sources(
         if dep.depth != 0:
             out.append(dep)
             continue
-        source = direct_source_by_name.get(dep.name.lower(), "")
+        source = direct_source_by_name.get(dep.identity, "")
         out.append(replace(dep, source=source) if source else dep)
     return out

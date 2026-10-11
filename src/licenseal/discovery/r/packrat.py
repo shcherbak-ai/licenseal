@@ -35,7 +35,11 @@ from licenseal.discovery.r._lock import (
     hosted_origin,
     source_label_origin,
 )
-from licenseal.models import Dependency
+from licenseal.models import Dependency, Ecosystem
+
+# Key of a package name in the name sets and graphs below (see
+# ``Ecosystem.identity``).
+_key = Ecosystem.R.identity
 
 # The major ``PackratFormat`` versions this parser was written for. A lockfile
 # that declares another one is still read, with a diagnostic that is not a gap.
@@ -113,13 +117,13 @@ def parse_packrat_lock(
         if not name:
             # Header record (PackratFormat / RVersion / Repos) — no Package.
             continue
-        normalized = name.lower()
+        normalized = _key(name)
         version = record.get("Version", "").strip()
         # packrat Source values: CRAN, github, bitbucket, Bioconductor, source.
         origin = _record_origin(record, project_dir, scan_root)
         child_names = [child for child, _c in parse_package_list(record.get("Requires", ""))]
         spec_info.setdefault(normalized, (name, version, origin))
-        edges.setdefault(normalized, set()).update(c.lower() for c in child_names)
+        edges.setdefault(normalized, set()).update(_key(c) for c in child_names)
     record_unread_entries(path, len(records) - len(headers), len(spec_info))
 
     return build_lock_dependencies(
