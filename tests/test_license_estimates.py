@@ -197,8 +197,11 @@ class TestHexPin:
     )
     @respx.mock
     def test_only_the_release_published_last_has_its_own_license(self, tmp_path, locked, estimated):
+        # The requirement admits all three releases, so the lockfile covers it
+        # whichever one is locked.
         _mock_hex_package(_HEX_RELEASES)
-        result, data = _check_json(_mix_project(tmp_path, locked=locked))
+        project = _mix_project(tmp_path, locked=locked, requirement=">= 1.0.0")
+        result, data = _check_json(project)
         assert result.exit_code == 0
         assert data["diagnostics"] == []
         assert _row(data, "acme") == (locked, "MIT", estimated)
