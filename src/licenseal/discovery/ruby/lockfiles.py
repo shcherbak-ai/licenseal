@@ -56,7 +56,6 @@ posture used elsewhere for orphan attribution.
 
 from __future__ import annotations
 
-from dataclasses import replace
 from pathlib import Path
 
 from licenseal._graph import compute_direct_ancestors
@@ -356,25 +355,3 @@ def _reachable(edges: dict[str, set[str]], roots: set[str]) -> set[str]:
                 new_front.add(child)
         front = new_front
     return reachable
-
-
-def attach_direct_sources(
-    deps: list[Dependency],
-    direct_source_by_name: dict[str, str],
-) -> list[Dependency]:
-    """Stamp the discovery source path onto depth-0 lockfile-derived deps.
-
-    Mirrors the PHP path: lockfile-parsed depth-0 entries get the matching
-    Gemfile / gemspec source filename from discovery.
-    """
-    out: list[Dependency] = []
-    for dep in deps:
-        if dep.depth != 0:
-            out.append(dep)
-            continue
-        source = direct_source_by_name.get(dep.identity, "")
-        if source:
-            out.append(replace(dep, source=source))
-        else:
-            out.append(dep)
-    return out

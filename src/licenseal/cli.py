@@ -472,6 +472,35 @@ def _off_registry_license_info(dep: Dependency) -> LicenseInfo:
     )
 
 
+def _merge_resolved_duplicates(license_infos: list[LicenseInfo]) -> list[LicenseInfo]:
+    """Report each registry package once per resolved version.
+
+    A scan that resolves declarations one by one, without the transitive
+    stage and its dedupe, gets one result per declaration. Two manifests
+    that declare a package with different constraints can resolve to the
+    same version: that is one row, the first declaration's, PROD when any of
+    them is. A result with no resolved version, or with an origin, is kept
+    as it is.
+    """
+    kept: dict[tuple[Ecosystem, str, str], int] = {}
+    out: list[LicenseInfo] = []
+    for info in license_infos:
+        dep = info.dependency
+        if dep.origin or not info.resolved_version:
+            out.append(info)
+            continue
+        key = (dep.ecosystem, dep.identity, info.resolved_version)
+        index = kept.setdefault(key, len(out))
+        if index == len(out):
+            out.append(info)
+        elif dep.group == DependencyGroup.PROD:
+            first = out[index]
+            out[index] = replace(
+                first, dependency=replace(first.dependency, group=DependencyGroup.PROD)
+            )
+    return out
+
+
 def _echo_missing_lockfiles(diagnostics: list[ReadDiagnostic], *, require_lockfile: bool) -> None:
     """Say what a scan without a lockfile means and how to settle it.
 
@@ -912,7 +941,9 @@ def _resolve_license_infos(
                     f"{registry_cache.fetches_attempted} ({by_host})",
                     err=True,
                 )
-            return results
+            # The transitive stage reports a package once per version; a
+            # direct-only scan has to do that here.
+            return results if transitive else _merge_resolved_duplicates(results)
     except tethered.EgressBlocked as exc:
         raise click.ClickException(
             f"{exc}\n"

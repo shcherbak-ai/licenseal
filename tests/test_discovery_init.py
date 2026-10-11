@@ -12,7 +12,23 @@ from licenseal.models import Ecosystem
 
 class TestDiscoverAll:
     def test_deduplication(self, tmp_path):
-        """Same package in pyproject.toml and requirements.txt — keep first."""
+        """Same requirement in pyproject.toml and requirements.txt — keep first."""
+        (tmp_path / "pyproject.toml").write_text(
+            textwrap.dedent("""\
+            [project]
+            name = "myproject"
+            dependencies = ["requests>=2.28"]
+            """)
+        )
+        (tmp_path / "requirements.txt").write_text("requests >= 2.28\n")
+
+        deps, _ = discover_all_dependencies(tmp_path)
+        req_deps = [d for d in deps if d.name.lower() == "requests"]
+        assert len(req_deps) == 1
+        assert req_deps[0].source == "pyproject.toml"
+
+    def test_different_constraints_are_both_kept(self, tmp_path):
+        """Each constraint a manifest declares is a dependency of its own."""
         (tmp_path / "pyproject.toml").write_text(
             textwrap.dedent("""\
             [project]
@@ -23,9 +39,10 @@ class TestDiscoverAll:
         (tmp_path / "requirements.txt").write_text("requests>=2.0\n")
 
         deps, _ = discover_all_dependencies(tmp_path)
-        req_deps = [d for d in deps if d.name.lower() == "requests"]
-        assert len(req_deps) == 1
-        assert req_deps[0].version_constraint == ">=2.28"  # from pyproject
+        assert [(d.version_constraint, d.source) for d in deps] == [
+            (">=2.28", "pyproject.toml"),
+            (">=2.0", "requirements.txt"),
+        ]
 
     def test_mixed_ecosystems(self, tmp_path):
         (tmp_path / "pyproject.toml").write_text(
@@ -53,7 +70,7 @@ class TestDiscoverAll:
             dependencies = ["Flask>=3.0"]
             """)
         )
-        (tmp_path / "requirements.txt").write_text("flask>=2.0\n")
+        (tmp_path / "requirements.txt").write_text("flask>=3.0\n")
 
         deps, _ = discover_all_dependencies(tmp_path)
         flask_deps = [d for d in deps if d.name.lower() == "flask"]
@@ -70,12 +87,13 @@ class TestDiscoverAll:
             dev = ["requests>=2.28"]
             """)
         )
-        (tmp_path / "requirements.txt").write_text("requests>=2.0\n")
+        (tmp_path / "requirements.txt").write_text("requests>=2.28\n")
 
         deps, _ = discover_all_dependencies(tmp_path)
-        requests_dep = next(d for d in deps if d.name.lower() == "requests")
+        (requests_dep,) = [d for d in deps if d.name.lower() == "requests"]
         assert requests_dep.group.value == "prod"
-        assert requests_dep.version_constraint == ">=2.0"
+        # The production declaration is the one reported.
+        assert requests_dep.source == "requirements.txt"
 
 
 class TestPolyglotDiscovery:

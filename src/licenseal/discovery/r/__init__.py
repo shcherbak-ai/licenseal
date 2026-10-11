@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from licenseal.discovery.r._lock import attach_direct_sources
 from licenseal.discovery.r.description import (
     collect_dev_direct_names,
     detect_project_license_description,
@@ -13,7 +12,6 @@ from licenseal.discovery.r.packrat import find_packrat_lockfiles, parse_packrat_
 from licenseal.discovery.r.renv_lock import find_renv_lockfiles, parse_renv_lock
 
 __all__ = [
-    "attach_direct_sources",
     "collect_dev_direct_names",
     "detect_project_license_description",
     "discover_description_dependencies",

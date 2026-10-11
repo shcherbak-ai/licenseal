@@ -1087,10 +1087,10 @@ class TestDiscoverPomXmlProfileDependencies:
         assert [d.name for d in deps] == ["org.example:lib"]
         assert counts["java"] == 1
 
-    def test_top_level_declaration_precedes_profile_declaration(self, tmp_path):
-        # The same coordinate declared at both levels: the always-active
-        # top-level entry is listed first, so it is the one the aggregator
-        # keeps.
+    def test_top_level_and_profile_declarations_of_two_versions_are_both_kept(self, tmp_path):
+        # The same coordinate declared at both levels, at two versions: the
+        # always-active top-level entry is listed first, and the version the
+        # profile switches to is a dependency of its own.
         _write_pom(
             tmp_path / "pom.xml",
             _profile_pom(
@@ -1101,7 +1101,7 @@ class TestDiscoverPomXmlProfileDependencies:
         deps, _ = discover_pom_xml_dependencies(tmp_path)
         assert [d.version_constraint for d in deps] == ["1.0.0", "2.0.0"]
         unique, _ = discover_all_dependencies(tmp_path)
-        assert [d.version_constraint for d in unique] == ["1.0.0"]
+        assert [d.version_constraint for d in unique] == ["1.0.0", "2.0.0"]
 
     def test_profile_production_scope_upgrades_top_level_test_scope(self, tmp_path):
         # Test-scoped at the top level, compile-scoped in a profile: the

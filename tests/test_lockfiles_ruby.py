@@ -5,7 +5,6 @@ from __future__ import annotations
 from pathlib import Path
 
 from licenseal.discovery.ruby.lockfiles import (
-    attach_direct_sources,
     find_gemfile_lockfiles,
     parse_gemfile_lock,
 )
@@ -335,59 +334,3 @@ class TestParseSpecLineHelpers:
         )
         # rails parses normally; the orphan-child 6-space line is dropped.
         assert {d.name for d in deps} == {"rails"}
-
-
-class TestAttachDirectSources:
-    def test_stamps_depth0_source(self):
-        from licenseal.models import Dependency
-
-        deps = [
-            Dependency(
-                name="rails",
-                version_constraint="==7.0",
-                ecosystem=Ecosystem.RUBY,
-                group=DependencyGroup.PROD,
-                depth=0,
-            ),
-            Dependency(
-                name="activesupport",
-                version_constraint="==7.0",
-                ecosystem=Ecosystem.RUBY,
-                depth=1,
-            ),
-        ]
-        out = attach_direct_sources(deps, {"rails": "Gemfile"})
-        by_name = {d.name: d for d in out}
-        assert by_name["rails"].source == "Gemfile"
-        assert by_name["activesupport"].source == ""
-
-    def test_off_registry_direct_dep_gets_its_manifest_and_keeps_its_origin(self):
-        from licenseal.models import Dependency
-
-        deps = [
-            Dependency(
-                name="edge",
-                version_constraint="==0.0.1",
-                ecosystem=Ecosystem.RUBY,
-                group=DependencyGroup.PROD,
-                depth=0,
-                origin="git+https://example.org/edge.git@abc",
-            ),
-        ]
-        out = attach_direct_sources(deps, {"edge": "Gemfile"})
-        assert out[0].source == "Gemfile"
-        assert out[0].origin == "git+https://example.org/edge.git@abc"
-
-    def test_no_match_keeps_empty_source(self):
-        from licenseal.models import Dependency
-
-        deps = [
-            Dependency(
-                name="solo",
-                version_constraint="==1.0",
-                ecosystem=Ecosystem.RUBY,
-                depth=0,
-            )
-        ]
-        out = attach_direct_sources(deps, {})
-        assert out[0].source == ""

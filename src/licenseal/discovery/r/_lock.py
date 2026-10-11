@@ -12,8 +12,6 @@ scanned directory is the project's own code and gets no row.
 
 from __future__ import annotations
 
-from dataclasses import replace
-
 from licenseal._graph import compute_direct_ancestors
 from licenseal.discovery._origin import UNRECORDED, hosted_git_origin
 from licenseal.models import Dependency, DependencyGroup, Ecosystem
@@ -134,23 +132,4 @@ def build_lock_dependencies(
                 origin=origin,
             )
         )
-    return out
-
-
-def attach_direct_sources(
-    deps: list[Dependency],
-    direct_source_by_name: dict[str, str],
-) -> list[Dependency]:
-    """Stamp the discovery source path onto depth-0 lock-derived deps.
-
-    Mirrors the Hex / Bundler path: depth-0 entries get the matching
-    ``DESCRIPTION`` source filename from discovery.
-    """
-    out: list[Dependency] = []
-    for dep in deps:
-        if dep.depth != 0:
-            out.append(dep)
-            continue
-        source = direct_source_by_name.get(dep.identity, "")
-        out.append(replace(dep, source=source) if source else dep)
     return out

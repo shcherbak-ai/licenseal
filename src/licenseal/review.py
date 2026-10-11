@@ -336,7 +336,25 @@ def flagged_entries_from_results(
                 origin=info.dependency.origin,
             )
         )
-    return entries, unscaffoldable
+    return _one_per_review_key(entries), unscaffoldable
+
+
+def _one_per_review_key(entries: list[FlaggedEntry]) -> list[FlaggedEntry]:
+    """Keep the first entry of each review key.
+
+    A review file holds one stanza per key, and that stanza applies to every
+    row with the key. Two flagged rows can share one: two manifests whose
+    declarations of a package resolve to the same version, or two local
+    names for one published package.
+    """
+    seen: set[str] = set()
+    unique: list[FlaggedEntry] = []
+    for entry in entries:
+        key = _entry_review_key(entry)
+        if key not in seen:
+            seen.add(key)
+            unique.append(entry)
+    return unique
 
 
 def flagged_entries_from_json_report(
@@ -407,7 +425,7 @@ def flagged_entries_from_json_report(
                 origin=origin,
             )
         )
-    return entries, unscaffoldable
+    return _one_per_review_key(entries), unscaffoldable
 
 
 # Longest value shown on a generated ``#`` comment line. The comment is a hint

@@ -2520,10 +2520,11 @@ class TestProductionPrecedence:
         "shape", ["paket-dev-first", "paket-prod-first", "nuget-lock-dev-then-paket-prod"]
     )
     def test_paket_production_group_wins_over_an_earlier_dev_entry(self, tmp_path, shape):
-        # A .NET package name is reported once, from the first lockfile that
-        # has it. Shared is DEV there (a Paket Test group, or reached only
-        # from a dev reference in a NuGet lockfile) and in a Paket production
-        # group in a lockfile read later. TestOnly is in a Test group only.
+        # Shared is pinned at one version in two lockfiles: DEV in the first
+        # (a Paket Test group, or reached only from a dev reference in a
+        # NuGet lockfile) and in a Paket production group in the one read
+        # later. That is one row, and it ships. TestOnly is in a Test group
+        # only.
         nuget = "NUGET\n  remote: https://api.nuget.org/v3/index.json\n"
         files = {
             "paket-dev-first": {
@@ -7022,11 +7023,12 @@ class TestResolveDotnetTransitive:
             )
         assert out == []
 
-    def test_orphan_transitive_falls_back_to_prod(self, tmp_path):
+    def test_node_belongs_to_the_direct_whose_subgraph_lists_it(self, tmp_path):
         from licenseal.transitive import _resolve_dotnet_transitive
 
         def deps_fetcher(name, version, client, *, fetcher):
-            # Return a node with NO incoming edge — orphaned from any root.
+            # A node of the direct's subgraph, with no edge leading to it:
+            # the subgraph it came in decides, not the edges.
             return (
                 [("OrphanDep", "9.0.0")],
                 [],
@@ -7046,7 +7048,7 @@ class TestResolveDotnetTransitive:
             )
         orphan = next(d for d in out if d.name == "OrphanDep")
         assert orphan.group == DependencyGroup.PROD
-        assert orphan.direct_ancestors == ()
+        assert orphan.direct_ancestors == ("Newtonsoft.Json",)
 
     def test_no_walkable_direct_returns_no_extras(self, tmp_path):
         from licenseal.transitive import _resolve_dotnet_transitive
@@ -7212,7 +7214,7 @@ class TestResolveDotnetTransitiveEdgeBranches:
         assert "Shared.Lib" not in names
         assert "RealDep" in names
 
-    def test_paket_entry_dedup_against_nuget_lockfile_entry(self, tmp_path):
+    def test_paket_entry_at_another_version_than_a_nuget_lockfile_entry(self, tmp_path):
         from licenseal.transitive import _resolve_dotnet_transitive
 
         _write(
@@ -7224,8 +7226,8 @@ class TestResolveDotnetTransitiveEdgeBranches:
                 }
             ),
         )
-        # Paket lockfile also mentions Shared; the second entry must
-        # be deduped (covered_names already contains "shared").
+        # Paket lockfile also holds Shared, at another version: both
+        # versions are rows.
         _write(
             tmp_path / "paket.lock",
             "NUGET\n  remote: https://api.nuget.org/v3/index.json\n"
@@ -7244,12 +7246,11 @@ class TestResolveDotnetTransitiveEdgeBranches:
                 fetcher=lambda url, c: None,
                 deps_fetcher=lambda *a, **kw: ([], [], []),
             )
-        names = {d.name for d in out}
-        assert "Shared" in names
-        # The NuGet lockfile's Shared @ 1.0 wins; the Paket entry is deduped.
-        shared = next(d for d in out if d.name == "Shared")
-        assert shared.version_constraint == "1.0"
-        assert "OnlyPaket" in names
+        assert {(d.name, d.version_constraint) for d in out} == {
+            ("Shared", "1.0"),
+            ("Shared", "2.0"),
+            ("OnlyPaket", "3.0"),
+        }
 
     def test_subgraph_node_overlapping_direct_skipped(self, tmp_path):
         from licenseal.transitive import _resolve_dotnet_transitive
@@ -7730,7 +7731,7 @@ class TestPaketLockfile:
             deps = resolve_transitive(
                 direct, project_path, include_dev=include_dev, max_depth=50, client=client
             )
-        assert len({d.name for d in deps}) == len(deps)
+        assert len({(d.name, d.version_constraint) for d in deps}) == len(deps)
         return deps
 
     def test_every_package_line_is_reported_at_its_pinned_version(self):
@@ -7742,22 +7743,31 @@ class TestPaketLockfile:
         assert len(lines) == 219
         assert len({name for _, name, _, _ in lines}) == 159
         assert sum(1 for *_, options in lines if options) == 136
-        first_pin: dict[str, str] = {}
-        for _, name, version, _ in lines:
-            first_pin.setdefault(name, version)
-        main_pins = {name: version for group, name, version, _ in lines if group == "Main"}
+        pins = {(name, version) for _, name, version, _ in lines}
+        # No line repeats another: a package in two groups is pinned differently.
+        assert len(pins) == 219
+        main_pins = {(name, version) for group, name, version, _ in lines if group == "Main"}
         assert len(main_pins) == 120
 
+        def rows(deps: list[Dependency]) -> set[tuple[str, str]]:
+            return {(d.name, d.version_constraint) for d in deps}
+
+        # Every pin of every group is a row, in the group it is pinned in.
         with_dev = self._resolve(_PAKET_FIXTURE, include_dev=True)
-        assert {d.name: d.version_constraint for d in with_dev} == first_pin
-        assert {d.name for d in with_dev if d.group == DependencyGroup.PROD} == set(main_pins)
-        # The twelve packages paket.dependencies lists keep it as their source.
-        assert sum(1 for d in with_dev if d.source == "paket.dependencies") == 12
+        assert rows(with_dev) == pins
+        assert rows([d for d in with_dev if d.group == DependencyGroup.PROD]) == main_pins
+        # The twelve packages paket.dependencies lists keep it as their
+        # source, at each of their pins.
+        declared = {d.name for d in with_dev if d.source == "paket.dependencies"}
+        assert len(declared) == 12
+        assert sum(1 for d in with_dev if d.name in declared) == 15
+        assert {d.source for d in with_dev if d.name in declared} == {"paket.dependencies"}
         assert {d.source for d in with_dev} == {"paket.dependencies", "paket.lock"}
 
-        # Without --dev: the main group, whole.
+        # Without --dev: the main group, whole, and nothing else. The
+        # production rows do not depend on the flag.
         prod_only = self._resolve(_PAKET_FIXTURE, include_dev=False)
-        assert {d.name: d.version_constraint for d in prod_only} == main_pins
+        assert rows(prod_only) == main_pins
         assert all(d.group == DependencyGroup.PROD for d in prod_only)
 
     def test_pin_wins_over_an_edge_constraint_listed_first(self, tmp_path):
@@ -7789,6 +7799,8 @@ class TestPaketLockfile:
             ("Alpha.Lib", "1.0.0", DependencyGroup.PROD),
             ("Zeta.Lib", "6.0.5", DependencyGroup.PROD),
             ("Test.Lib", "2.0.0", DependencyGroup.DEV),
+            # The Test group's own pin of Zeta.Lib is a row of its own.
+            ("Zeta.Lib", "8.0.1", DependencyGroup.DEV),
         }
 
     @respx.mock

@@ -11,7 +11,6 @@ from licenseal.discovery.hex.mix_lock import (
     _reachable,
     _split_top_level,
     _unquote,
-    attach_direct_sources,
     find_mix_lockfiles,
     parse_mix_lock,
 )
@@ -21,7 +20,7 @@ from licenseal.discovery.hex.rebar_lock import (
     find_rebar_lockfiles,
     parse_rebar_lock,
 )
-from licenseal.models import Dependency, DependencyGroup, Ecosystem
+from licenseal.models import DependencyGroup, Ecosystem
 
 _FIXTURES = Path(__file__).parent / "fixtures" / "mix"
 _REBAR_FIXTURES = Path(__file__).parent / "fixtures" / "rebar"
@@ -386,46 +385,6 @@ class TestMixLockHelpers:
 
     def test_parse_lock_tuple_hex_without_a_name(self, tmp_path):
         assert _parse_lock_tuple(":hex", tmp_path, tmp_path) == ("", "", [], "")
-
-
-class TestAttachDirectSources:
-    def test_stamps_depth0_source(self):
-        deps = [
-            Dependency(
-                name="phoenix",
-                version_constraint="==1.7",
-                ecosystem=Ecosystem.HEX,
-                group=DependencyGroup.PROD,
-                depth=0,
-            ),
-            Dependency(name="plug", version_constraint="==1.15", ecosystem=Ecosystem.HEX, depth=1),
-        ]
-        out = attach_direct_sources(deps, {"phoenix": "mix.exs"})
-        by_name = {d.name: d for d in out}
-        assert by_name["phoenix"].source == "mix.exs"
-        assert by_name["plug"].source == ""  # transitive untouched
-
-    def test_off_registry_direct_dep_gets_its_manifest_and_keeps_its_origin(self):
-        deps = [
-            Dependency(
-                name="my_fork",
-                version_constraint="",
-                ecosystem=Ecosystem.HEX,
-                group=DependencyGroup.PROD,
-                depth=0,
-                origin="git+https://example.org/my_fork.git@abc",
-            ),
-        ]
-        out = attach_direct_sources(deps, {"my_fork": "mix.exs"})
-        assert out[0].source == "mix.exs"
-        assert out[0].origin == "git+https://example.org/my_fork.git@abc"
-
-    def test_no_match_keeps_empty_source(self):
-        deps = [
-            Dependency(name="solo", version_constraint="==1.0", ecosystem=Ecosystem.HEX, depth=0),
-        ]
-        out = attach_direct_sources(deps, {})
-        assert out[0].source == ""
 
 
 class TestFindRebarLockfiles:

@@ -7,12 +7,11 @@ import textwrap
 from pathlib import Path
 
 from licenseal.discovery.r._lock import (
-    attach_direct_sources,
     build_lock_dependencies,
 )
 from licenseal.discovery.r.packrat import find_packrat_lockfiles, parse_packrat_lock
 from licenseal.discovery.r.renv_lock import _entry_origin, find_renv_lockfiles, parse_renv_lock
-from licenseal.models import Dependency, DependencyGroup, Ecosystem
+from licenseal.models import Dependency, DependencyGroup
 
 _RENV_LOCK = {
     "R": {"Version": "4.3.1"},
@@ -512,22 +511,3 @@ class TestBuildLockDependencies:
         assert deps["helper"].depth == 1
         assert deps["helper"].direct_ancestors == ("app",)
         assert deps["leaf"].direct_ancestors == ("app",)
-
-
-class TestAttachDirectSources:
-    def test_stamps_direct_registry_source(self):
-        deps = [
-            Dependency("cli", "==3.6.0", Ecosystem.R, depth=0),
-            Dependency("rlang", "==1.1.0", Ecosystem.R, depth=1),
-            Dependency("myfork", "==0.1.0", Ecosystem.R, depth=0, origin="GitHub"),
-            Dependency("nomatch", "==1.0", Ecosystem.R, depth=0),
-        ]
-        result = _by_name(
-            attach_direct_sources(deps, {"cli": "DESCRIPTION", "myfork": "DESCRIPTION"})
-        )
-        assert result["cli"].source == "DESCRIPTION"
-        assert result["rlang"].source == ""  # transitive untouched
-        # An off-registry direct dep gets its manifest too and keeps its origin.
-        assert result["myfork"].source == "DESCRIPTION"
-        assert result["myfork"].origin == "GitHub"
-        assert result["nomatch"].source == ""  # direct but no source match

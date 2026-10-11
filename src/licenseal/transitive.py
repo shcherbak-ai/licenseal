@@ -69,9 +69,6 @@ from licenseal.discovery.hex.mix_exs import (
     collect_dev_direct_names as _collect_hex_dev_direct_names,
 )
 from licenseal.discovery.hex.mix_lock import (
-    attach_direct_sources as _attach_hex_direct_sources,
-)
-from licenseal.discovery.hex.mix_lock import (
     find_mix_lockfiles,
     parse_mix_lock,
 )
@@ -96,9 +93,6 @@ from licenseal.discovery.python.lockfiles import (
     find_python_lockfiles,
     parse_python_lockfile,
 )
-from licenseal.discovery.r._lock import (
-    attach_direct_sources as _attach_r_direct_sources,
-)
 from licenseal.discovery.r._lock import build_lock_dependencies
 from licenseal.discovery.r.description import (
     collect_dev_direct_names as _collect_r_dev_direct_names,
@@ -108,9 +102,6 @@ from licenseal.discovery.r.packrat import find_packrat_lockfiles, parse_packrat_
 from licenseal.discovery.r.renv_lock import find_renv_lockfiles, parse_renv_lock
 from licenseal.discovery.ruby.gemfile import collect_dev_direct_names
 from licenseal.discovery.ruby.gemspec import workspace_gemspec_names
-from licenseal.discovery.ruby.lockfiles import (
-    attach_direct_sources as _attach_ruby_direct_sources,
-)
 from licenseal.discovery.ruby.lockfiles import (
     find_gemfile_lockfiles,
     parse_gemfile_lock,
@@ -198,6 +189,7 @@ from licenseal.resolvers.rubygems import (
 )
 from licenseal.resolvers.version_selection import (
     resolve_npm_spec,
+    satisfies,
     select_python_version,
 )
 
@@ -260,6 +252,59 @@ def _record_missing_lockfiles(project_path: Path, deps: list[Dependency]) -> Non
         manifest = _manifest_path(project_path, source)
         if manifest is not None and manifest.name not in _MANIFESTS_WITHOUT_LOCKFILE_FORMAT:
             record_missing_lockfile(manifest)
+
+
+# The direct deps that declare each package, by (ecosystem, identity), in
+# discovery order. Manifests that ask for different versions of one package
+# each declare it.
+_Declarations = dict[tuple[Ecosystem, str], list[Dependency]]
+
+
+def _declarations(direct_deps: list[Dependency]) -> _Declarations:
+    """Group ``direct_deps`` by the package they declare, keeping their order."""
+    declared: _Declarations = {}
+    for dep in direct_deps:
+        declared.setdefault((dep.ecosystem, dep.identity), []).append(dep)
+    return declared
+
+
+def _declaration_for(row: Dependency, declarations: _Declarations) -> Dependency | None:
+    """The direct dep under whose manifest a lockfile's row for its package is reported.
+
+    A lockfile parser builds its rows from scratch and does not know which
+    manifest declares a package, and several manifests can declare one. The
+    row belongs to the first declaration its version satisfies; failing
+    that, to the first whose constraint cannot be compared with it (a
+    branch, an unresolved property, a row with no version); failing that, to
+    the first declaration. An off-registry row is matched among the
+    declarations that have an origin, a registry row among those that have
+    none, when the package has a declaration of that kind.
+
+    None when no manifest declares the package.
+    """
+    declared = declarations.get((row.ecosystem, row.identity), [])
+    candidates = [d for d in declared if bool(d.origin) == bool(row.origin)] or declared
+    version = row.version_constraint.removeprefix("==").strip()
+    verdicts = [satisfies(row.ecosystem, version, d.version_constraint) for d in candidates]
+    for wanted in (True, None):
+        for verdict, candidate in zip(verdicts, candidates, strict=True):
+            if verdict is wanted:
+                return candidate
+    return candidates[0] if candidates else None
+
+
+def _with_declared_source(row: Dependency, declarations: _Declarations) -> Dependency:
+    """Give a lockfile's row for a direct dep the manifest that declares it.
+
+    A transitive row, and a row whose package no manifest declares, is
+    returned as it is.
+    """
+    if row.depth != 0:
+        return row
+    declared = _declaration_for(row, declarations)
+    if declared is None or not declared.source:
+        return row
+    return replace(row, source=declared.source)
 
 
 def _manifest_path(project_path: Path, source: str) -> Path | None:
@@ -325,21 +370,14 @@ def resolve_transitive(
     out: list[Dependency] = []
     handled: set[Ecosystem] = set()
 
-    # Manifest-source map for lockfile-derived direct deps. The lockfile parser
-    # constructs Dependency objects from scratch and doesn't know which manifest
-    # file each direct dep was declared in; we copy that here so the report's
-    # Source column stays accurate for direct entries.
-    sources_by_key: dict[tuple[Ecosystem, str], str] = {
-        (d.ecosystem, d.identity): d.source for d in direct_deps if d.source
-    }
+    # A lockfile parser constructs Dependency objects from scratch and doesn't
+    # know which manifest file each direct dep was declared in; we copy that
+    # here so the report's Source column names, for each direct row, the
+    # manifest that asks for the version the row holds.
+    declarations = _declarations(direct_deps)
 
     def _stamp_sources(deps: list[Dependency]) -> list[Dependency]:
-        return [
-            replace(d, source=sources_by_key.get((d.ecosystem, d.identity), ""))
-            if d.depth == 0
-            else d
-            for d in deps
-        ]
+        return [_with_declared_source(d, declarations) for d in deps]
 
     # --- lockfile-first ---
 
@@ -514,9 +552,6 @@ def resolve_transitive(
     composer_locks = find_composer_lockfiles(project_path, exclude_paths=exclude_paths)
     if composer_locks:
         direct_php_names = {d.identity for d in direct_deps if d.ecosystem == Ecosystem.PHP}
-        direct_source_by_name = {
-            d.identity: d.source for d in direct_deps if d.ecosystem == Ecosystem.PHP and d.source
-        }
         locked: list[Dependency] = []
         # Every name a lockfile holds is covered by it, the project's own
         # path packages included: none of them is walked from the registry.
@@ -529,15 +564,7 @@ def resolve_transitive(
                 scan_root=project_path,
             )
             php_lock_names.update(name for name, _version in license_map)
-            for dep in lock_deps:
-                if dep.depth == 0:
-                    source = direct_source_by_name.get(dep.identity, "")
-                    if source:
-                        locked.append(replace(dep, source=source))
-                    else:
-                        locked.append(dep)
-                else:
-                    locked.append(dep)
+            locked.extend(_stamp_sources(lock_deps))
         out.extend(locked)
         out.extend(_walk_uncovered(Ecosystem.PHP, locked, php_lock_names))
         handled.add(Ecosystem.PHP)
@@ -555,9 +582,6 @@ def resolve_transitive(
         dev_direct_ruby_names = collect_dev_direct_names(
             [d for d in direct_deps if d.ecosystem == Ecosystem.RUBY]
         )
-        direct_source_by_name = {
-            d.identity: d.source for d in direct_deps if d.ecosystem == Ecosystem.RUBY and d.source
-        }
         locked: list[Dependency] = []
         for gemfile_lock in gemfile_locks:
             lock_deps = parse_gemfile_lock(
@@ -571,7 +595,7 @@ def resolve_transitive(
             # siblings (one in-tree gem referencing another) are not
             # published gems we'd want to look up.
             lock_deps = [d for d in lock_deps if d.identity not in ruby_workspace]
-            locked.extend(_attach_ruby_direct_sources(lock_deps, direct_source_by_name))
+            locked.extend(_stamp_sources(lock_deps))
         out.extend(locked)
         out.extend(_walk_uncovered(Ecosystem.RUBY, locked, set()))
         handled.add(Ecosystem.RUBY)
@@ -590,15 +614,11 @@ def resolve_transitive(
         dev_direct_hex_names = _collect_hex_dev_direct_names(
             [d for d in direct_deps if d.ecosystem == Ecosystem.HEX]
         )
-        direct_source_by_name = {
-            d.identity: d.source for d in direct_deps if d.ecosystem == Ecosystem.HEX and d.source
-        }
 
         def _attach_and_filter(lock_deps: list[Dependency]) -> list[Dependency]:
             # Drop workspace-internal entries — umbrella siblings aren't
             # published on hex.pm — then stamp manifest sources.
-            kept = [d for d in lock_deps if d.identity not in hex_workspace]
-            return _attach_hex_direct_sources(kept, direct_source_by_name)
+            return _stamp_sources([d for d in lock_deps if d.identity not in hex_workspace])
 
         locked = []
         for mix_lock in mix_locks:
@@ -972,13 +992,16 @@ def _resolve_r_transitive(
     r_workspace = workspace_r_names(project_path, exclude_paths=exclude_paths)
     direct_r_names = {d.identity for d in direct_r_deps}
     dev_direct_r_names = _collect_r_dev_direct_names(direct_r_deps)
-    direct_source_by_name = {d.identity: d.source for d in direct_r_deps if d.source}
+    declarations = _declarations(direct_r_deps)
 
     def _attach_and_filter(lock_deps: list[Dependency]) -> list[Dependency]:
         # Drop workspace-internal entries — multi-package R repo siblings aren't
         # published to CRAN — then stamp manifest sources onto direct entries.
-        kept = [d for d in lock_deps if d.identity not in r_workspace]
-        return _attach_r_direct_sources(kept, direct_source_by_name)
+        return [
+            _with_declared_source(d, declarations)
+            for d in lock_deps
+            if d.identity not in r_workspace
+        ]
 
     out: list[Dependency] = []
     for renv_lock in renv_locks:
@@ -1108,19 +1131,22 @@ _TransitiveDepsFetcher = Callable[
 def _promote_directs_reached_from_prod(
     out: list[Dependency],
     start: int,
-    reached: Container[str],
+    reached: Container[tuple[str, str]],
 ) -> None:
     """Make the direct deps in ``out[start:]`` PROD when a PROD direct reaches them.
 
-    ``reached`` holds the identity keys a PROD direct reaches. The Maven
-    and NuGet walks emit every direct with its declared group before the
-    graph is fetched, and skip a graph node that is also a direct. A DEV
-    direct that a PROD direct pulls in ships, so production wins — the same
-    rule the lockfile parsers apply.
+    ``reached`` holds the ``(identity, version)`` of every package a PROD
+    direct pulls in. The Maven and NuGet walks emit every direct with its
+    declared group before the graph is fetched, and skip a graph node that a
+    direct's own row stands for. A DEV direct that a PROD direct pulls in,
+    at the version the DEV direct is pinned to, ships: production wins, the
+    same rule the lockfile parsers apply. Another version of it that only
+    production reaches is a row of its own and leaves the direct DEV.
     """
     for index in range(start, len(out)):
-        if out[index].identity in reached:
-            out[index] = replace(out[index], group=DependencyGroup.PROD)
+        dep = out[index]
+        if (dep.identity, dep.version_constraint.removeprefix("==")) in reached:
+            out[index] = replace(dep, group=DependencyGroup.PROD)
 
 
 _dotnet_key = Ecosystem.DOTNET.identity
@@ -1158,8 +1184,20 @@ def _resolve_dotnet_transitive(
        documented for npm / Cargo / Maven / PyPI only — the NuGet URL
        returns 404, so we read nuspecs directly from
        ``api.nuget.org``. Walking is depth-first per direct dep,
-       parallelized across directs; merge subgraphs, dedupe by
-       ``(name_lower, version)``, then run reachability attribution.
+       parallelized across directs. Each node of a direct's subgraph is
+       attributed, by ``(identity, version)``, to the directs whose
+       subgraph lists it: PROD when a PROD direct's does, otherwise DEV,
+       with the listing directs as its ancestors.
+
+    Every distinct version is a row, in both paths. A ``paket.lock`` entry
+    is a row at its pinned version in each group that lists it; a package
+    two groups pin differently is two rows, each with its group. In the
+    nuspec walk a node is left out only when a direct dep's own row has
+    that name and version: a version of a directly referenced package that
+    another package pulls in is a row of its own, and a DEV direct is PROD
+    only when a PROD direct pulls in the version it is pinned to. The PROD
+    rows of a scan that includes the DEV directs are therefore the rows of a
+    scan without them.
 
     Workspace-local filter: in-tree ``.csproj`` files declare their own
     project IDs via ``<PackageId>`` or fall back to the file stem. Those
@@ -1167,15 +1205,15 @@ def _resolve_dotnet_transitive(
     walker-resolved node matching one is filtered.
 
     NuGet package IDs are case-insensitive per spec; every comparison is on
-    ``Ecosystem.identity`` keys. Orphan transitives → PROD fallback,
-    conservative (matches the Java + Go paths).
+    ``Ecosystem.identity`` keys. A lockfile package no root reaches → PROD
+    fallback, conservative (matches the Java + Go paths).
     """
     workspace_local_ids = _discover_workspace_local_project_ids(
         project_path, exclude_paths=exclude_paths
     )
     workspace_local_lower = {_dotnet_key(wid) for wid in workspace_local_ids}
 
-    direct_source_by_name = {d.identity: d.source for d in direct_dotnet_deps if d.source}
+    declarations = _declarations(direct_dotnet_deps)
 
     out: list[Dependency] = []
     covered_names: set[str] = set()
@@ -1193,47 +1231,25 @@ def _resolve_dotnet_transitive(
             dev_root_names=direct_dev_names,
             include_dev=include_dev,
         ):
-            lower = dep.identity
-            if lower in workspace_local_lower:
+            if dep.identity in workspace_local_lower:
                 continue
-            covered_names.add(lower)
-            if dep.depth == 0:
-                dep = replace(dep, source=direct_source_by_name.get(lower, ""))
-            out.append(dep)
+            covered_names.add(dep.identity)
+            out.append(_with_declared_source(dep, declarations))
 
     # ---- Paket lockfile path ----
-    paket_prod_names: set[str] = set()
+    # Every entry is a row, at its pinned version and in its own group. The
+    # same package at the same version in two groups, or in a NuGet lockfile
+    # too, is one row after ``_dedupe``, PROD when any of them is. A row
+    # keeps the lockfile as its source unless ``paket.dependencies`` (or a
+    # project file) declares the package.
     for paket_lock in find_paket_lockfiles(project_path, exclude_paths=exclude_paths):
         for dep in parse_paket_lock(paket_lock, project_path=project_path):
             if dep.identity in workspace_local_lower:
                 continue
             if not include_dev and dep.group == DependencyGroup.DEV:
                 continue
-            lower = dep.identity
-            if dep.group == DependencyGroup.PROD:
-                paket_prod_names.add(lower)
-            if lower in covered_names:
-                continue
-            covered_names.add(lower)
-            source = direct_source_by_name.get(lower, dep.source)
-            out.append(
-                Dependency(
-                    name=dep.name,
-                    version_constraint=dep.version_constraint,
-                    ecosystem=Ecosystem.DOTNET,
-                    group=dep.group,
-                    source=source,
-                )
-            )
-    # A name is reported once, from the first lockfile that has it. When that
-    # entry is DEV and a Paket production group lists the same package, the
-    # skipped entry is the one that ships: production wins.
-    out = [
-        replace(d, group=DependencyGroup.PROD)
-        if d.group == DependencyGroup.DEV and d.identity in paket_prod_names
-        else d
-        for d in out
-    ]
+            covered_names.add(dep.identity)
+            out.append(_with_declared_source(dep, declarations))
 
     # ---- deps.dev :dependencies path for uncovered directs ----
     direct_uncovered = [
@@ -1272,19 +1288,26 @@ def _resolve_dotnet_transitive(
     if not walkable:
         return out
 
-    merged_nodes: set[tuple[str, str]] = set()
-    edges: dict[str, set[str]] = {}
-
-    def _one(
-        entry: tuple[Dependency, str],
-    ) -> tuple[list[tuple[str, str]], list[tuple[str, str, str, str]], list[tuple[str, str]]]:
+    def _one(entry: tuple[Dependency, str]) -> tuple[list[tuple[str, str]], list[tuple[str, str]]]:
         direct, pinned = entry
-        return deps_fetcher(direct.name, pinned, client, fetcher=fetcher)
+        nodes, _edges, unread = deps_fetcher(direct.name, pinned, client, fetcher=fetcher)
+        return nodes, unread
 
+    # ---- Attribution by subgraph ----
+    # The nuspec walk returns each direct's whole subgraph, so a node belongs
+    # to the directs whose subgraph lists it, at the version listed there.
+    # Nodes are keyed by (identity, version): a version only a DEV direct
+    # pulls in is DEV even when a PROD direct pulls in another version of the
+    # same package. Attribution by name would make it PROD, and the PROD
+    # rows of a walk that includes the DEV directs would then exceed the rows
+    # of a walk that leaves them out.
+    prod_owners: dict[tuple[str, str], set[str]] = {}
+    dev_owners: dict[tuple[str, str], set[str]] = {}
+    node_names: dict[tuple[str, str], str] = {}
     # Propagate the active tethered scope into the edge-fetch workers — a bare
     # pool fetches in an empty context and bypasses the egress policy.
     subgraphs = map_with_context(_one, walkable, max_workers)
-    for (direct, _pinned), (nodes, edge_tuples, unread) in zip(walkable, subgraphs, strict=True):
+    for (direct, _pinned), (nodes, unread) in zip(walkable, subgraphs, strict=True):
         # A package whose nuspec could not be read leaves a hole under the
         # direct dep it was reached from: a gap on that dep's manifest.
         _record_unread_dependencies(
@@ -1292,46 +1315,27 @@ def _resolve_dotnet_transitive(
             direct.source,
             (pkg for pkg in unread if _dotnet_key(pkg[0]) not in workspace_local_lower),
         )
+        owners = prod_owners if direct.group == DependencyGroup.PROD else dev_owners
         for node_name, node_version in nodes:
             if _dotnet_key(node_name) in workspace_local_lower:
                 continue
-            merged_nodes.add((node_name, node_version))
-        for from_name, _from_ver, to_name, _to_ver in edge_tuples:
-            if (
-                _dotnet_key(from_name) in workspace_local_lower
-                or _dotnet_key(to_name) in workspace_local_lower
-            ):
-                continue
-            edges.setdefault(_dotnet_key(from_name), set()).add(_dotnet_key(to_name))
+            key = (_dotnet_key(node_name), node_version)
+            node_names.setdefault(key, node_name)
+            owners.setdefault(key, set()).add(direct.name)
 
-    # ---- Reachability attribution ----
-    prod_root_names = {d.identity for d, _ in walkable if d.group == DependencyGroup.PROD}
-    dev_root_names = {d.identity for d, _ in walkable if d.group == DependencyGroup.DEV}
-    name_case: dict[str, str] = {d.identity: d.name for d, _ in walkable}
-    for node_name, _ in merged_nodes:
-        name_case.setdefault(_dotnet_key(node_name), node_name)
+    # A DEV direct ships when a PROD direct pulls in the version it is pinned to.
+    _promote_directs_reached_from_prod(out, first_direct, prod_owners.keys())
 
-    prod_roots = {n: name_case[n] for n in prod_root_names if n in name_case}
-    dev_roots = {n: name_case[n] for n in dev_root_names if n in name_case}
-    prod_anc = compute_direct_ancestors(edges, prod_roots)
-    dev_anc = compute_direct_ancestors(edges, dev_roots)
-    _promote_directs_reached_from_prod(out, first_direct, prod_anc)
-
-    direct_lower = {d.identity for d, _ in walkable}
-    for node_name, node_version in merged_nodes:
-        lower = _dotnet_key(node_name)
-        if lower in direct_lower:
+    direct_keys = {(d.identity, pinned) for d, pinned in walkable}
+    for key, node_name in node_names.items():
+        if key in direct_keys:
+            # The row of the direct pinned to this version stands for the node.
             continue
-        if lower in prod_anc:
-            group = DependencyGroup.PROD
-            ancestors = prod_anc[lower]
-        elif lower in dev_anc:
-            group = DependencyGroup.DEV
-            ancestors = dev_anc[lower]
+        if key in prod_owners:
+            group, owners = DependencyGroup.PROD, prod_owners[key]
         else:
-            group = DependencyGroup.PROD
-            ancestors = ()
-
+            group, owners = DependencyGroup.DEV, dev_owners[key]
+        node_version = key[1]
         out.append(
             Dependency(
                 name=node_name,
@@ -1341,7 +1345,7 @@ def _resolve_dotnet_transitive(
                 ecosystem=Ecosystem.DOTNET,
                 group=group,
                 depth=1,
-                direct_ancestors=ancestors,
+                direct_ancestors=tuple(sorted(owners)),
                 version_estimated=True,
             )
         )
@@ -1771,7 +1775,7 @@ def _resolve_java_transitive(
     )
     workspace_local = set(workspace_local_poms)
 
-    direct_source_by_name = {d.identity: d.source for d in direct_java_deps if d.source}
+    declarations = _declarations(direct_java_deps)
 
     out: list[Dependency] = []
     covered_names: set[str] = set()
@@ -1781,10 +1785,8 @@ def _resolve_java_transitive(
         for dep in parse_gradle_lockfile(lockfile, include_dev=include_dev):
             if dep.name in workspace_local:
                 continue
-            identity = dep.identity
-            covered_names.add(identity)
-            source = direct_source_by_name.get(identity, "")
-            out.append(replace(dep, source=source) if source else dep)
+            covered_names.add(dep.identity)
+            out.append(_with_declared_source(dep, declarations))
 
     # ---- deps.dev :dependencies path for uncovered directs ----
     direct_uncovered = [
@@ -1927,9 +1929,7 @@ def _resolve_java_transitive(
     }
     dev_direct_names = {name for name, _ in dev_direct_keys}
     # A DEV direct ships when a PROD direct pulls in the version it declares.
-    _promote_directs_reached_from_prod(
-        out, first_direct, {name for name, _ in dev_direct_keys & prod_owners.keys()}
-    )
+    _promote_directs_reached_from_prod(out, first_direct, dev_direct_keys & prod_owners.keys())
 
     for key, node_name in node_names.items():
         identity, node_version = key

@@ -28,7 +28,6 @@ otherwise — an orphan — PROD by conservative default).
 from __future__ import annotations
 
 import re
-from dataclasses import replace
 from pathlib import Path
 
 from licenseal._graph import compute_direct_ancestors
@@ -318,23 +317,4 @@ def parse_mix_lock(
                 registry_name=reg_name,
             )
         )
-    return out
-
-
-def attach_direct_sources(
-    deps: list[Dependency],
-    direct_source_by_name: dict[str, str],
-) -> list[Dependency]:
-    """Stamp the discovery source path onto depth-0 lock-derived deps.
-
-    Mirrors the Bundler path: depth-0 entries get the matching ``mix.exs`` /
-    ``rebar.config`` source filename from discovery.
-    """
-    out: list[Dependency] = []
-    for dep in deps:
-        if dep.depth != 0:
-            out.append(dep)
-            continue
-        source = direct_source_by_name.get(dep.identity, "")
-        out.append(replace(dep, source=source) if source else dep)
     return out

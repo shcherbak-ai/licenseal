@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 from licenseal.analysis.compatibility import is_recognised_project_license
@@ -194,7 +194,11 @@ def discover_all_dependencies(
 ) -> tuple[list[Dependency], dict[str, int]]:
     """Discover all dependencies in a project across ecosystems.
 
-    Returns ``(deduped_deps, local_filter_counts)``. ``local_filter_counts``
+    Returns ``(deduped_deps, local_filter_counts)``. A package that several
+    manifests declare with different version constraints is in
+    ``deduped_deps`` once per constraint; two declarations with the same
+    constraint are one entry that carries the extras of both and is PROD
+    when either is. ``local_filter_counts``
     is keyed by ecosystem name (``"python"``, ``"npm"``, ``"rust"``, ``"go"``,
     ``"java"``) and holds the number of deps removed from each ecosystem
     because their name matched a workspace-local package. Ecosystems that
@@ -353,23 +357,33 @@ def _discover_all_dependencies(
     )
     deps.extend(r_deps)
 
-    # Deduplicate: preserve discovery order, but prefer prod over dev for the same package.
-    # Two names are one package by the ecosystem's own rule (``identity``). A
-    # dependency declared from a git repository, a URL, or a path is not the
-    # registry package of the same name, so the origin is part of the key.
-    index_by_key: dict[tuple[str, str, str], int] = {}
+    # Deduplicate, preserving discovery order. Two declarations are one
+    # dependency when they name the same package (``identity``, the
+    # ecosystem's own rule) with the same version constraint. Manifests that
+    # ask for different versions of a package each keep their declaration, so
+    # each version is resolved and reported under the manifest that asks for
+    # it. A dependency declared from a git repository, a URL, or a path is
+    # not the registry package of the same name and takes no version from a
+    # registry: its origin is part of the key, and its constraint is not.
+    index_by_key: dict[tuple[str, str, str, str], int] = {}
     unique: list[Dependency] = []
     for dep in deps:
-        key = (dep.identity, dep.ecosystem.value, dep.origin)
+        constraint = "" if dep.origin else dep.version_constraint.strip()
+        key = (dep.ecosystem.value, dep.identity, constraint, dep.origin)
         existing_index = index_by_key.get(key)
         if existing_index is None:
             index_by_key[key] = len(unique)
             unique.append(dep)
             continue
 
+        # The same requirement, declared twice. Every extra either
+        # declaration asks for is needed. It ships when either declaration
+        # does, and a production declaration is then the one reported.
         existing = unique[existing_index]
+        kept = existing
         if existing.group == DependencyGroup.DEV and dep.group == DependencyGroup.PROD:
-            unique[existing_index] = dep
+            kept = dep
+        unique[existing_index] = replace(kept, extras=existing.extras | dep.extras)
 
     local_filter_counts = {
         "python": py_filtered,
