@@ -461,32 +461,51 @@ def _off_registry_license_info(dep: Dependency) -> LicenseInfo:
     )
 
 
-def _merge_resolved_duplicates(license_infos: list[LicenseInfo]) -> list[LicenseInfo]:
-    """Report each registry package once per resolved version.
+def _merge_duplicate_rows(license_infos: list[LicenseInfo]) -> list[LicenseInfo]:
+    """Report one row per package, resolved version, and origin.
 
-    A scan that resolves declarations one by one, without the transitive
-    stage and its dedupe, gets one result per declaration. Two manifests
-    that declare a package with different constraints can resolve to the
-    same version: that is one row, the first declaration's, PROD when any of
-    them is. A result with no resolved version, or with an origin, is kept
-    as it is.
+    Every declared constraint is resolved, and walked, on its own. What two
+    of them resolve to can be the same thing: two ranges that select one
+    version, in a scan without the transitive stage and its dedupe, or two
+    requirements that select none. Results that agree on ecosystem, package
+    identity, resolved version (an empty one included), and origin are one
+    row, which a reader of the table could not tell apart anyway: the row
+    of the first declaration among them (the first result at the lowest
+    depth, with its ``source``), PROD when any of them is, with the extras
+    of all. A merged transitive lists the direct ancestors of all; a direct
+    dep has none. Its version is an estimate only when every one is.
+
+    The first result of each row keeps its place in the list.
     """
-    kept: dict[tuple[Ecosystem, str, str], int] = {}
-    out: list[LicenseInfo] = []
+    rows: dict[tuple[Ecosystem, str, str, str], list[LicenseInfo]] = {}
     for info in license_infos:
         dep = info.dependency
-        if dep.origin or not info.resolved_version:
-            out.append(info)
+        rows.setdefault(
+            (dep.ecosystem, dep.identity, info.resolved_version, dep.origin), []
+        ).append(info)
+    out: list[LicenseInfo] = []
+    for same in rows.values():
+        deps = [info.dependency for info in same]
+        depth = min(dep.depth for dep in deps)
+        first = next(info for info in same if info.dependency.depth == depth)
+        if len(same) == 1:
+            out.append(first)
             continue
-        key = (dep.ecosystem, dep.identity, info.resolved_version)
-        index = kept.setdefault(key, len(out))
-        if index == len(out):
-            out.append(info)
-        elif dep.group == DependencyGroup.PROD:
-            first = out[index]
-            out[index] = replace(
-                first, dependency=replace(first.dependency, group=DependencyGroup.PROD)
-            )
+        ancestors = first.dependency.direct_ancestors
+        if depth:
+            ancestors = tuple(sorted({name for dep in deps for name in dep.direct_ancestors}))
+        merged = replace(
+            first.dependency,
+            group=(
+                DependencyGroup.PROD
+                if any(dep.group == DependencyGroup.PROD for dep in deps)
+                else DependencyGroup.DEV
+            ),
+            direct_ancestors=ancestors,
+            extras=frozenset().union(*(dep.extras for dep in deps)),
+            version_estimated=all(dep.version_estimated for dep in deps),
+        )
+        out.append(replace(first, dependency=merged))
     return out
 
 
@@ -934,9 +953,9 @@ def _resolve_license_infos(
                     f"{registry_cache.fetches_attempted} ({by_host})",
                     err=True,
                 )
-            # The transitive stage reports a package once per version; a
-            # direct-only scan has to do that here.
-            return results if transitive else _merge_resolved_duplicates(results)
+            # Only now is it known which declarations resolved to the same
+            # thing, in a transitive scan and in a direct-only one alike.
+            return _merge_duplicate_rows(results)
     except tethered.EgressBlocked as exc:
         raise click.ClickException(
             f"{exc}\n"

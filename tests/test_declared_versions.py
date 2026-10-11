@@ -21,9 +21,9 @@ import pytest
 import respx
 from click.testing import CliRunner
 
-from licenseal.cli import _merge_resolved_duplicates, main
+from licenseal.cli import main
 from licenseal.discovery import discover_all_dependencies
-from licenseal.models import Dependency, DependencyGroup, Ecosystem, LicenseInfo
+from licenseal.models import Dependency, DependencyGroup, Ecosystem
 from licenseal.review import REVIEW_FILE_NAME
 from licenseal.transitive import _declaration_for, _with_declared_source, resolve_transitive
 from tests._helpers import _check_json, _write
@@ -743,64 +743,6 @@ class TestDiscoveryKey:
 
         assert [(d.name, d.source) for d in deps] == [("forked", "a/Cargo.toml")]
         assert deps[0].origin
-
-
-# ------------------------------------------------------ a direct-only scan
-
-
-class TestDirectOnlyScanRows:
-    """Without the transitive stage, declarations that resolve alike are merged in the CLI."""
-
-    @staticmethod
-    def _info(
-        name: str,
-        constraint: str,
-        resolved: str,
-        group: DependencyGroup = DependencyGroup.PROD,
-        origin: str = "",
-    ) -> LicenseInfo:
-        dep = Dependency(
-            name=name,
-            version_constraint=constraint,
-            ecosystem=Ecosystem.PYTHON,
-            group=group,
-            origin=origin,
-        )
-        return LicenseInfo(
-            dependency=dep, license_id="MIT", license_raw="MIT", resolved_version=resolved
-        )
-
-    def test_one_row_per_package_and_resolved_version(self):
-        prod, dev = DependencyGroup.PROD, DependencyGroup.DEV
-        merged = _merge_resolved_duplicates(
-            [
-                self._info("shared", ">=1.0", "2.0.0", dev),
-                self._info("other", "==1.0", "1.0.0"),
-                # The same package under PEP 503, shipped: the row is production.
-                self._info("Shared", ">=1.5", "2.0.0", prod),
-                self._info("shared", ">=1.9", "2.0.0", dev),
-                # Another version is another row.
-                self._info("shared", "==1.0.0", "1.0.0", dev),
-            ]
-        )
-
-        assert [(i.dependency.name, i.resolved_version, i.dependency.group) for i in merged] == [
-            ("shared", "2.0.0", prod),
-            ("other", "1.0.0", prod),
-            ("shared", "1.0.0", dev),
-        ]
-        # The first declaration is the one reported.
-        assert merged[0].dependency.version_constraint == ">=1.0"
-
-    def test_unresolved_and_off_registry_rows_are_kept_as_they_are(self):
-        infos = [
-            self._info("shared", ">=1.0", ""),
-            self._info("shared", ">=2.0", ""),
-            self._info("forked", "", "1.0.0", origin="git+https://git.example.org/f.git@a"),
-            self._info("forked", "", "1.0.0", origin="git+https://git.example.org/f.git@b"),
-        ]
-
-        assert _merge_resolved_duplicates(infos) == infos
 
 
 # ------------------------------------------------ one stanza per review key

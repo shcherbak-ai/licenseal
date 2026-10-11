@@ -387,6 +387,7 @@ def flagged_entries_from_json_report(
 
     entries: list[FlaggedEntry] = []
     unscaffoldable: list[str] = []
+    seen_rows: set[tuple[str, str, str, str]] = set()
     for raw in deps:
         if not isinstance(raw, dict):
             continue
@@ -399,17 +400,24 @@ def flagged_entries_from_json_report(
         name = raw.get("name", "")
         if not isinstance(name, str) or not name:
             continue
-        # A package published under another name than the one the report
-        # shows it by is keyed on the published name.
-        registry_name = raw.get("registry_name")
-        if isinstance(registry_name, str) and registry_name:
-            name = registry_name
         version_text = raw.get("resolved_version", "")
         if not isinstance(version_text, str):
             version_text = ""
         origin = raw.get("origin", "")
         if not isinstance(origin, str):
             origin = ""
+        # A report holds one row per package, resolved version, and origin.
+        # One that repeats a row, as a report written before that held can,
+        # is read as if it did not.
+        row = (ecosystem, canonical_name(ecosystem, name), version_text, origin)
+        if row in seen_rows:
+            continue
+        seen_rows.add(row)
+        # A package published under another name than the one the report
+        # shows it by is keyed on the published name.
+        registry_name = raw.get("registry_name")
+        if isinstance(registry_name, str) and registry_name:
+            name = registry_name
         if not version_text and not origin:
             unscaffoldable.append(f"{ecosystem}:{name}")
             continue

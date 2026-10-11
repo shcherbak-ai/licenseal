@@ -68,7 +68,7 @@
 | `project_license_source` | string | Project-relative path of the manifest that supplied `project_license` (`"pyproject.toml"`, `"package.json"`, `"App.csproj"`, `"Directory.Build.props"`, …). `""` when no manifest in the scanned directory declares a recognised license and `Proprietary` is assumed. |
 | `elapsed_seconds` | number | Wall-clock seconds for the run. |
 | `summary` | object | Verdict counts. |
-| `dependencies` | array of object | Each scanned dependency. Sorted alphabetically by `(ecosystem, name)`. |
+| `dependencies` | array of object | Each scanned dependency. Sorted alphabetically by `(ecosystem, name)`. `(ecosystem, name, resolved_version, origin)` is a key: no two entries agree on all four (see [Per-dependency fields](#per-dependency-fields)). |
 | `diagnostics` | array of object | Manifest read/parse anomalies surfaced during the scan (see [`diagnostics` block](#diagnostics-block)). Empty on a clean scan. |
 
 ## `summary` block
@@ -107,6 +107,8 @@ Each entry is a manifest/lockfile read or parse anomaly surfaced during the scan
 | `severity` | `"gap"` \| `"recovered"` \| `"estimate"` | `gap` = a dependency-bearing file was lost, or part of it could not be read, or a manifest's dependencies were resolved without a lockfile, or the dependency list of a package under it could not be read from a registry (incomplete analysis — counted in `summary.gaps`, fails `--strict`). `recovered` = read with a caveat — a warning, not a gap, and not counted in `summary.gaps`: a text, JSON, or YAML file decoded through the latin-1 fallback, whose ASCII dependency lines survived, or a lockfile that declares a version the parser was not written for (newer, or otherwise not on its list) and was read on a best-effort basis. `estimate` = a manifest whose dependencies no lockfile covers, in a scan run with `--no-require-lockfile`: the versions and transitive dependencies reported for it come from the registry. Not counted in `summary.gaps`, does not fail. The same diagnostic is a `gap` under the default `--require-lockfile`. |
 
 ## Per-dependency fields
+
+One entry per package, resolved version, and origin: no two entries of `dependencies` have the same `ecosystem`, `name`, `resolved_version`, and `origin`, in any scan mode (`--transitive`, `--no-transitive`, `--dev`, `--no-dev`). `name` is compared the way the ecosystem's registry compares names, so in .NET, PHP, Rust, Hex, R, and Python two spellings of one package are one entry, reported under the spelling met first. An empty `resolved_version` counts as a value: every requirement on a registry package that resolved to no version is in the one entry with an empty `resolved_version` and an empty `origin`. Each declared constraint is still resolved, and its dependencies walked, on its own; entries are merged only when what they resolved to is the same. A merged entry is `prod` when any of the declarations is, direct when any is, and carries the `source` of the first direct declaration; a merged transitive lists the `direct_ancestors` of all.
 
 | Field | Type | Description |
 | --- | --- | --- |
