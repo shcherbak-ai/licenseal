@@ -205,8 +205,8 @@ def _normalize_reviewed_license(raw_license: str, label: str) -> str:
         raise click.ClickException(
             f"Invalid {REVIEW_FILE_NAME}: the license of the review entry for "
             f"{_printable(label)} holds a comma or a slash, so it is not a license expression. "
-            "A list does not say whether its licenses are alternatives: write the expression "
-            "with `OR` or `AND`."
+            "Write SPDX identifiers, joined with `OR` or `AND` when there are several: a list "
+            "does not say whether its licenses are alternatives."
         )
     normalized = normalize_license(raw_license)
     if normalized == "UNKNOWN":
@@ -377,15 +377,16 @@ def apply_reviewed_licenses(
             + _shown_keys(unmatched)
             + "\nHint: a dependency upgrade likely moved past the pin. Open "
             "`licenseal.review.toml` and update the `version` field on the "
-            "stale stanza(s) above to the new resolved version — but ONLY if "
-            "the new version still reports the same `license` as the original "
-            "review. Licenses may change between versions, so verify against "
-            "the latest scan first. If the license changed, or the dep is no "
-            "longer in the dependency tree, delete the stanza so the next "
-            "scan re-flags the dep for fresh review. A stanza with a `source` "
+            "stale entry or entries above to the new resolved version, but only "
+            "if the new version has the same `license` as the original review. "
+            "Licenses may change between versions, and no report is written "
+            "while a stale entry is present: to see what the new version "
+            "reports, or if the dep is no longer in the dependency tree, "
+            "delete the entry and scan again, so the dep is flagged for fresh "
+            "review. An entry with a `source` "
             "key applies only to that exact source: when the commit, ref, "
             "URL, or path the dependency comes from has changed, review the "
-            "new source and update `source` (and `version`, when the stanza "
+            "new source and update `source` (and `version`, when the entry "
             "has one). `package` is compared the way the registry compares "
             "names: for go, java, npm, and ruby it must be spelled exactly as "
             "the report shows the dependency, upper and lower case included; "

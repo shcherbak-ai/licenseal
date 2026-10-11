@@ -29,8 +29,8 @@ _NOT_A_LICENSE = (
 )
 _IS_A_LIST = (
     "Error: Invalid licenseal.review.toml: the license of the review entry for {} holds a comma "
-    "or a slash, so it is not a license expression. A list does not say whether its licenses "
-    "are alternatives: write the expression with `OR` or `AND`."
+    "or a slash, so it is not a license expression. Write SPDX identifiers, joined with `OR` "
+    "or `AND` when there are several: a list does not say whether its licenses are alternatives."
 )
 
 
