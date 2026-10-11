@@ -115,7 +115,7 @@ Each entry is a manifest/lockfile read or parse anomaly surfaced during the scan
 | `ecosystem` | `"python"` \| `"npm"` \| `"rust"` \| `"go"` \| `"java"` \| `"dotnet"` \| `"php"` \| `"ruby"` \| `"hex"` \| `"r"` | Origin ecosystem. |
 | `group` | `"prod"` \| `"dev"` | Production or development. Reachability-based for transitives. |
 | `depth` | int | `0` for direct deps, `1` for transitives. A binary direct/transitive signal, not a tree level. |
-| `direct_ancestors` | array of string | Depth-0 dependencies that pull this entry in (sorted). Empty for direct deps. |
+| `direct_ancestors` | array of string | Depth-0 dependencies that pull this entry in (sorted). Empty for direct deps, and for a transitive whose ancestors the lockfile does not tell: a package no direct dependency reaches, a `Pipfile.lock` or `rebar.lock` transitive, and a locked version of a declared package that no manifest declares at that version (see [Transitive scanning](USAGE.md#transitive-scanning)). |
 | `is_transitive` | bool | Equivalent to `depth > 0`. |
 | `source` | string | Project-relative path to the manifest file the direct dep was declared in (e.g. `pyproject.toml`, `requirements-dev.txt`, `packages/foo/Cargo.toml`, `MCP/requirements.txt`). Uses forward slashes on all platforms. Empty for transitives. Disambiguates same-named manifests at different paths in monorepo layouts. |
 | `source_url` | string | Project-relative URL form of `source` for clickable rendering. Empty when `source` is empty. |

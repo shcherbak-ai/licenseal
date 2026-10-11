@@ -2,9 +2,10 @@
 
 Two layers. The first reads constraints: :func:`satisfies` tells whether a
 version meets a constraint the way the constraint's own ecosystem reads both,
-for all ten ecosystems. The second picks versions: :func:`select_version`
-returns the published version a constraint resolves to, and the per-registry
-helpers above it (PyPI, npm) do the same against the response shapes those
+for all ten ecosystems, and :func:`is_prerelease` whether a version is a
+prerelease. The second picks versions: :func:`select_version` returns the
+published version a constraint resolves to, and the per-registry helpers
+above it (PyPI, npm) do the same against the response shapes those
 registries serve.
 """
 
@@ -883,6 +884,19 @@ def satisfies(ecosystem: Ecosystem, version: str, constraint: str) -> bool | Non
     if parsed is None or matcher is None:
         return None
     return matcher(parsed)
+
+
+def is_prerelease(ecosystem: Ecosystem, version: str) -> bool:
+    """Whether ``version`` is a prerelease, as ``ecosystem`` reads versions.
+
+    False for a release, and for text that is not a version of that
+    ecosystem. A caller that got ``False`` from :func:`satisfies` uses this
+    to tell a version outside the range from one a resolver may or may not
+    take, depending on settings the constraint does not show.
+    """
+    grammar = _GRAMMARS[ecosystem]
+    parsed = grammar.version(version)
+    return parsed is not None and grammar.prerelease(parsed)
 
 
 def select_version(

@@ -3048,14 +3048,14 @@ class TestDedupe:
         assert result[0].depth == 0
 
     def test_python_pep503_drops_phantom_when_pinned_spelling_differs(self):
-        # A discovery-emitted unresolved entry spelled with an underscore
-        # must be dropped when the lockfile pinned the same distribution
-        # spelled with a dash (and vice versa) — PEP 503 folds them.
+        # An unresolved requirement spelled with an underscore must be
+        # dropped when another path resolved the same distribution spelled
+        # with a dash (and vice versa) — PEP 503 folds them.
         unresolved = Dependency(
             name="mypy_extensions",
             version_constraint=">=1.0",
             ecosystem=Ecosystem.PYTHON,
-            depth=0,
+            depth=1,
         )
         pinned = Dependency(
             name="mypy-extensions",
@@ -7247,9 +7247,9 @@ class TestResolveDotnetTransitiveEdgeBranches:
                 deps_fetcher=lambda *a, **kw: ([], [], []),
             )
         assert {(d.name, d.version_constraint) for d in out} == {
-            ("Shared", "1.0"),
-            ("Shared", "2.0"),
-            ("OnlyPaket", "3.0"),
+            ("Shared", "==1.0"),
+            ("Shared", "==2.0"),
+            ("OnlyPaket", "==3.0"),
         }
 
     def test_subgraph_node_overlapping_direct_skipped(self, tmp_path):
@@ -7743,10 +7743,10 @@ class TestPaketLockfile:
         assert len(lines) == 219
         assert len({name for _, name, _, _ in lines}) == 159
         assert sum(1 for *_, options in lines if options) == 136
-        pins = {(name, version) for _, name, version, _ in lines}
+        pins = {(name, f"=={version}") for _, name, version, _ in lines}
         # No line repeats another: a package in two groups is pinned differently.
         assert len(pins) == 219
-        main_pins = {(name, version) for group, name, version, _ in lines if group == "Main"}
+        main_pins = {(name, f"=={version}") for group, name, version, _ in lines if group == "Main"}
         assert len(main_pins) == 120
 
         def rows(deps: list[Dependency]) -> set[tuple[str, str]]:
@@ -7791,16 +7791,16 @@ class TestPaketLockfile:
         )
         prod_only = self._resolve(tmp_path, include_dev=False)
         assert {(d.name, d.version_constraint, d.group) for d in prod_only} == {
-            ("Alpha.Lib", "1.0.0", DependencyGroup.PROD),
-            ("Zeta.Lib", "6.0.5", DependencyGroup.PROD),
+            ("Alpha.Lib", "==1.0.0", DependencyGroup.PROD),
+            ("Zeta.Lib", "==6.0.5", DependencyGroup.PROD),
         }
         with_dev = self._resolve(tmp_path, include_dev=True)
         assert {(d.name, d.version_constraint, d.group) for d in with_dev} == {
-            ("Alpha.Lib", "1.0.0", DependencyGroup.PROD),
-            ("Zeta.Lib", "6.0.5", DependencyGroup.PROD),
-            ("Test.Lib", "2.0.0", DependencyGroup.DEV),
+            ("Alpha.Lib", "==1.0.0", DependencyGroup.PROD),
+            ("Zeta.Lib", "==6.0.5", DependencyGroup.PROD),
+            ("Test.Lib", "==2.0.0", DependencyGroup.DEV),
             # The Test group's own pin of Zeta.Lib is a row of its own.
-            ("Zeta.Lib", "8.0.1", DependencyGroup.DEV),
+            ("Zeta.Lib", "==8.0.1", DependencyGroup.DEV),
         }
 
     @respx.mock
@@ -7843,7 +7843,7 @@ class TestPaketLockfile:
 
         deps = {d.name: d for d in self._resolve(tmp_path, include_dev=False)}
         assert {name: (d.version_constraint, d.depth, d.source) for name, d in deps.items()} == {
-            "Host.Lib": ("1.0.0", 0, "paket.dependencies"),
+            "Host.Lib": ("==1.0.0", 0, "paket.dependencies"),
             "EdgeOnly.Lib": ("==2.0.0", 0, "paket.dependencies"),
             "Edge.Child": ("==3.0.0", 1, ""),
         }

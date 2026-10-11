@@ -122,7 +122,7 @@ uv add --dev licenseal
 pip install licenseal
 ```
 
-The exit code is non-zero when there are unreviewed violations, warnings, unknown licenses, or analysis gaps. A manifest with no lockfile is an analysis gap: commit a lockfile, or pass `--no-require-lockfile` to accept versions estimated from the registry. See [USAGE.md](USAGE.md) for every flag and report format.
+The exit code is non-zero when there are unreviewed violations, warnings, unknown licenses, or analysis gaps. A manifest with no lockfile, or with a lockfile that does not hold the versions it declares, is an analysis gap: commit an up-to-date lockfile, or pass `--no-require-lockfile` to accept versions estimated from the registry. See [USAGE.md](USAGE.md) for every flag and report format.
 
 ## 🤖 Claude Code Review Skill
 

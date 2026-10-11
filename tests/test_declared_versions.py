@@ -349,9 +349,9 @@ class TestDeclarationOfALockedRow:
         # Nothing is met: the unreadable constraint may still be the one.
         assert _declaration_for(self._row("==1.0"), declared).source == "a"
 
-    def test_no_declaration_met_falls_back_to_the_first(self):
+    def test_no_declaration_met_is_no_declaration(self):
         declared = self._declared(("==1.0", "a"), ("==2.0", "b"))
-        assert _declaration_for(self._row("==3.0"), declared).source == "a"
+        assert _declaration_for(self._row("==3.0"), declared) is None
 
     def test_row_without_a_version_takes_the_first(self):
         declared = self._declared(("==1.0", "a"), ("==2.0", "b"))
@@ -602,13 +602,13 @@ class TestPaketGroups:
         with_dev = scan(True)
 
         prod, dev = DependencyGroup.PROD, DependencyGroup.DEV
-        assert without_dev == {("Shared.Lib", "2.0.0"): prod, ("Same.Pin", "4.0.0"): prod}
+        assert without_dev == {("Shared.Lib", "==2.0.0"): prod, ("Same.Pin", "==4.0.0"): prod}
         assert with_dev == {
-            ("Shared.Lib", "1.0.0"): dev,
-            ("Shared.Lib", "2.0.0"): prod,
-            ("Test.Only", "5.0.0"): dev,
+            ("Shared.Lib", "==1.0.0"): dev,
+            ("Shared.Lib", "==2.0.0"): prod,
+            ("Test.Only", "==5.0.0"): dev,
             # Pinned alike in a dev-class and a production group: it ships.
-            ("Same.Pin", "4.0.0"): prod,
+            ("Same.Pin", "==4.0.0"): prod,
         }
         assert {key for key, group in with_dev.items() if group == prod} == set(without_dev)
 

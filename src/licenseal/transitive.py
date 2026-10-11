@@ -188,6 +188,7 @@ from licenseal.resolvers.rubygems import (
     _select_version as _select_ruby_version,  # noqa: PLC2701
 )
 from licenseal.resolvers.version_selection import (
+    is_prerelease,
     resolve_npm_spec,
     satisfies,
     select_python_version,
@@ -268,33 +269,70 @@ def _declarations(direct_deps: list[Dependency]) -> _Declarations:
     return declared
 
 
+def _meets(row: Dependency, declared: Dependency) -> bool | None:
+    """Whether the version a resolved row holds satisfies a declaration of its package.
+
+    ``declared`` is a direct dep, or an unresolved requirement on the
+    package. None when the two cannot be compared: the constraint is not one
+    the ecosystem's grammar reads (a branch, a dist-tag, an unresolved
+    property), the row holds no version, or the declaration has an origin
+    and so takes its version from that source, not from a constraint.
+
+    A prerelease that fails the constraint is not told apart either. Whether
+    a resolver takes one depends on settings the constraint does not show (a
+    minimum stability, a prerelease flag), and a lockfile that holds it is
+    the evidence that the resolver did.
+    """
+    if declared.origin:
+        return None
+    version = row.version_constraint.removeprefix("==").strip()
+    verdict = satisfies(row.ecosystem, version, declared.version_constraint)
+    if verdict is False and is_prerelease(row.ecosystem, version):
+        return None
+    return verdict
+
+
 def _declaration_for(row: Dependency, declarations: _Declarations) -> Dependency | None:
     """The direct dep under whose manifest a lockfile's row for its package is reported.
 
     A lockfile parser builds its rows from scratch and does not know which
     manifest declares a package, and several manifests can declare one. The
     row belongs to the first declaration its version satisfies; failing
-    that, to the first whose constraint cannot be compared with it (a
-    branch, an unresolved property, a row with no version); failing that, to
-    the first declaration. An off-registry row is matched among the
-    declarations that have an origin, a registry row among those that have
-    none, when the package has a declaration of that kind.
+    that, to the first it cannot be compared with (:func:`_meets`). An
+    off-registry row is matched among the declarations that have an origin,
+    a registry row among those that have none, when the package has a
+    declaration of that kind.
 
-    None when no manifest declares the package.
+    None when no declaration admits the row's version: no manifest declares
+    the package, or every one that does asks for another version.
     """
     declared = declarations.get((row.ecosystem, row.identity), [])
     candidates = [d for d in declared if bool(d.origin) == bool(row.origin)] or declared
-    version = row.version_constraint.removeprefix("==").strip()
-    verdicts = [satisfies(row.ecosystem, version, d.version_constraint) for d in candidates]
+    verdicts = [_meets(row, d) for d in candidates]
     for wanted in (True, None):
         for verdict, candidate in zip(verdicts, candidates, strict=True):
             if verdict is wanted:
                 return candidate
-    return candidates[0] if candidates else None
+    return None
+
+
+def _stamped(row: Dependency, declared: Dependency | None) -> Dependency:
+    """``row`` with the manifest of ``declared`` as its source, when it names one."""
+    if declared is None or not declared.source:
+        return row
+    return replace(row, source=declared.source)
 
 
 def _with_declared_source(row: Dependency, declarations: _Declarations) -> Dependency:
-    """Give a lockfile's row for a direct dep the manifest that declares it.
+    """Settle whether a lockfile's depth-0 row is the direct dep a manifest declares.
+
+    An edge-aware lockfile parser makes every version of a package a direct
+    dep when some manifest declares the package. Only a version that a
+    declaration admits is that direct dep, and it takes the declaring
+    manifest as its source. Any other version of a declared package is a
+    transitive: depth 1, with no source and no ancestors of its own, like a
+    ``go.sum`` row for another version of a required module. The declaration
+    it does not satisfy is not covered by it (:func:`_uncovered_by`).
 
     A transitive row, and a row whose package no manifest declares, is
     returned as it is.
@@ -302,9 +340,42 @@ def _with_declared_source(row: Dependency, declarations: _Declarations) -> Depen
     if row.depth != 0:
         return row
     declared = _declaration_for(row, declarations)
-    if declared is None or not declared.source:
-        return row
-    return replace(row, source=declared.source)
+    if declared is None and (row.ecosystem, row.identity) in declarations:
+        return replace(row, depth=1, direct_ancestors=())
+    return _stamped(row, declared)
+
+
+def _uncovered_by(
+    locked: Iterable[Dependency],
+    direct_deps: Iterable[Dependency],
+    also_named: Container[str] = frozenset(),
+) -> list[Dependency]:
+    """The deps of ``direct_deps`` that the lockfile rows ``locked`` do not cover.
+
+    A lockfile covers a declaration when it holds the package at a version
+    the declaration admits, or at one that cannot be compared with it
+    (:func:`_meets`). Holding the package at another version is not
+    coverage: a sub-project that pins ``shared==2.0`` is not covered by a
+    root lockfile whose ``shared`` is 1.0, and a manifest is not covered by
+    a lockfile it has moved ahead of.
+
+    ``also_named`` holds the identity keys of the packages a lockfile lists
+    without a row, such as the project's own path packages. Those are
+    covered by name: there is no version to compare.
+    """
+    held: dict[tuple[Ecosystem, str], list[Dependency]] = {}
+    for row in locked:
+        held.setdefault((row.ecosystem, row.identity), []).append(row)
+    uncovered: list[Dependency] = []
+    for dep in direct_deps:
+        rows = held.get((dep.ecosystem, dep.identity))
+        if rows is None:
+            covered = dep.identity in also_named
+        else:
+            covered = any(_meets(row, dep) is not False for row in rows)
+        if not covered:
+            uncovered.append(dep)
+    return uncovered
 
 
 def _manifest_path(project_path: Path, source: str) -> Path | None:
@@ -381,33 +452,34 @@ def resolve_transitive(
 
     # --- lockfile-first ---
 
-    # When a lockfile covers an ecosystem we still need to walk direct deps
-    # the lockfile didn't include (typically nested manifests in subdirs that
-    # weren't part of the root install workspace — e.g. ``container/x/package.json``
-    # alongside a root-only ``pnpm-lock.yaml``). The lockfile gives the precise
+    # When a lockfile covers an ecosystem we still need to walk the direct
+    # deps it does not cover (:func:`_uncovered_by`): a nested manifest in a
+    # subdir that isn't part of the root install workspace (e.g.
+    # ``container/x/package.json`` alongside a root-only ``pnpm-lock.yaml``),
+    # one that pins another version than the lockfile holds, or a manifest
+    # its own lockfile has fallen behind. The lockfile gives the precise
     # resolved graph for what's in it; the registry walk fills in what's not.
     #
     # ``lockfile_names`` is the union of every name the lockfile mentions,
-    # registry-sourced or not. For Rust this includes ``[patch.crates-io]``
-    # overrides (git/path-sourced deps) — they're in the lockfile but
-    # can't be license-resolved here. Treating them as uncovered would
-    # cause the registry walker to fetch the unpatched crates.io version
-    # and walk its different transitive set (phantom-version bug — see
-    # ``parse_cargo_lock`` docstring). Anything actually in the lockfile,
-    # registry or not, is considered covered.
+    # with a row or not. A Rust path crate of the project and a Composer
+    # path package have no row and no version to compare, so they are
+    # covered by name: walking one would fetch a registry package of the
+    # same name and its different transitive set (phantom-version bug — see
+    # ``parse_cargo_lock`` docstring).
     def _walk_uncovered(
         ecosystem: Ecosystem,
         lockfile_output: list[Dependency],
         lockfile_names: set[str],
         origins: Mapping[str, str | None] | None = None,
     ) -> list[Dependency]:
-        covered = lockfile_names | {d.identity for d in lockfile_output if d.depth == 0}
         uncovered = [
             d
-            for d in direct_deps
-            if d.ecosystem == ecosystem
-            and d.identity not in covered
-            and (include_dev or d.group != DependencyGroup.DEV)
+            for d in _uncovered_by(
+                lockfile_output,
+                (d for d in direct_deps if d.ecosystem == ecosystem),
+                lockfile_names,
+            )
+            if include_dev or d.group != DependencyGroup.DEV
         ]
         if not uncovered:
             return []
@@ -1029,22 +1101,30 @@ def _resolve_r_transitive(
             )
         )
 
-    # Direct deps no lock covered (manifest-only project, or a nested DESCRIPTION
-    # beside a root-only lock): walk their closure over the CRAN index.
-    covered = {d.identity for d in out}
+    # Direct deps no lock covered (manifest-only project, a nested DESCRIPTION
+    # beside a root-only lock, a requirement the locked version does not
+    # meet): walk their closure over the CRAN index.
     uncovered = [
         d
-        for d in direct_r_deps
-        if d.identity not in covered
-        and d.identity not in r_workspace
-        and (include_dev or d.group != DependencyGroup.DEV)
+        for d in _uncovered_by(out, direct_r_deps)
+        if d.identity not in r_workspace and (include_dev or d.group != DependencyGroup.DEV)
     ]
     if uncovered:
         # Manifest-only / lock-uncovered closure walks the CRAN index locally;
         # fetch + parse it lazily (only when there's something to walk).
         _record_missing_lockfiles(project_path, uncovered)
         cran_index = fetch_cran_index(client, fetcher=fetcher)
-        out.extend(_attach_and_filter(_r_index_closure(uncovered, cran_index, include_dev)))
+        # A depth-0 row of the closure is the row of the uncovered dep it was
+        # seeded from, whatever version the index holds: it takes that dep's
+        # manifest, the first one's when several declare the package.
+        seeds: dict[str, Dependency] = {}
+        for dep in uncovered:
+            seeds.setdefault(dep.identity, dep)
+        out.extend(
+            _stamped(d, seeds.get(d.identity)) if d.depth == 0 else d
+            for d in _r_index_closure(uncovered, cran_index, include_dev)
+            if d.identity not in r_workspace
+        )
     return out
 
 
@@ -1215,8 +1295,15 @@ def _resolve_dotnet_transitive(
 
     declarations = _declarations(direct_dotnet_deps)
 
+    def _as_locked(dep: Dependency) -> Dependency:
+        # Both lockfile parsers give the bare version. A lockfile entry is
+        # one exact version, written here as every other lockfile's is, so
+        # that it is the same row as the nuspec walk's for that version and
+        # is never read as an unresolved requirement.
+        version = dep.version_constraint
+        return replace(dep, version_constraint=f"=={version}") if version else dep
+
     out: list[Dependency] = []
-    covered_names: set[str] = set()
 
     # ---- NuGet lockfile path ----
     # Each lockfile is attributed on its own edges, against the direct deps of
@@ -1233,30 +1320,29 @@ def _resolve_dotnet_transitive(
         ):
             if dep.identity in workspace_local_lower:
                 continue
-            covered_names.add(dep.identity)
-            out.append(_with_declared_source(dep, declarations))
+            out.append(_with_declared_source(_as_locked(dep), declarations))
 
     # ---- Paket lockfile path ----
     # Every entry is a row, at its pinned version and in its own group. The
     # same package at the same version in two groups, or in a NuGet lockfile
-    # too, is one row after ``_dedupe``, PROD when any of them is. A row
-    # keeps the lockfile as its source unless ``paket.dependencies`` (or a
-    # project file) declares the package.
+    # too, is one row after ``_dedupe``, PROD when any of them is. The file
+    # lists its packages without telling direct from transitive, so a row
+    # stays as listed, with the lockfile as its source, unless a declaration
+    # in ``paket.dependencies`` (or a project file) admits its version.
     for paket_lock in find_paket_lockfiles(project_path, exclude_paths=exclude_paths):
         for dep in parse_paket_lock(paket_lock, project_path=project_path):
             if dep.identity in workspace_local_lower:
                 continue
             if not include_dev and dep.group == DependencyGroup.DEV:
                 continue
-            covered_names.add(dep.identity)
-            out.append(_with_declared_source(dep, declarations))
+            row = _as_locked(dep)
+            out.append(_stamped(row, _declaration_for(row, declarations)))
 
-    # ---- deps.dev :dependencies path for uncovered directs ----
+    # ---- nuspec walk for the directs no lockfile covers ----
     direct_uncovered = [
         d
-        for d in direct_dotnet_deps
-        if d.identity not in covered_names
-        and d.identity not in workspace_local_lower
+        for d in _uncovered_by(out, direct_dotnet_deps)
+        if d.identity not in workspace_local_lower
         and (include_dev or d.group != DependencyGroup.DEV)
     ]
     if not direct_uncovered:
@@ -1778,23 +1864,22 @@ def _resolve_java_transitive(
     declarations = _declarations(direct_java_deps)
 
     out: list[Dependency] = []
-    covered_names: set[str] = set()
 
     # ---- Gradle lockfile path ----
+    # The file lists coordinates without telling direct from transitive, so
+    # a row stays as listed unless a declaration admits its version, and
+    # then takes that declaration's build file as its source.
     for lockfile in find_gradle_lockfiles(project_path, exclude_paths=exclude_paths):
         for dep in parse_gradle_lockfile(lockfile, include_dev=include_dev):
             if dep.name in workspace_local:
                 continue
-            covered_names.add(dep.identity)
-            out.append(_with_declared_source(dep, declarations))
+            out.append(_stamped(dep, _declaration_for(dep, declarations)))
 
     # ---- deps.dev :dependencies path for uncovered directs ----
     direct_uncovered = [
         d
-        for d in direct_java_deps
-        if d.identity not in covered_names
-        and d.name not in workspace_local
-        and (include_dev or d.group != DependencyGroup.DEV)
+        for d in _uncovered_by(out, direct_java_deps)
+        if d.name not in workspace_local and (include_dev or d.group != DependencyGroup.DEV)
     ]
     # A dependency with an origin is a local file: it is a row as it stands,
     # with no managed version to look up and no subgraph to walk.
@@ -2427,14 +2512,12 @@ def _dedupe(deps: list[Dependency]) -> list[Dependency]:
     A version is estimated only when every duplicate is: a lockfile entry or
     an exact pin for the same version fixes it, whichever entry came first.
 
-    When the same (ecosystem, name) appears with both resolved (``==X.Y.Z``)
-    and unresolved specs, the unresolved variants are dropped. They arise
-    when the registry walker resolves one occurrence successfully (e.g. from
-    a manifest with ``^4.17.21``) but fails on a parallel occurrence (e.g.
-    from a peerDep with ``^4 || ^5`` the registry returned a 404 for); the
-    unresolved entry is a phantom of the resolved one, not a distinct package.
-    Ancestors from any dropped unresolved entries are still merged into the
-    surviving resolved entries so reachability info isn't lost.
+    An unresolved transitive requirement that a resolved row (``==X.Y.Z``)
+    of the same package satisfies is dropped first, and its ancestors merged
+    into that row (:func:`_drop_phantom_unresolved`). It arises when the
+    registry walker resolves one occurrence successfully (e.g. from a
+    manifest with ``^4.17.21``) but fails on a parallel occurrence (e.g.
+    from a peerDep with ``^4 || ^5`` the registry returned a 404 for).
     """
     filtered = _drop_phantom_unresolved(deps)
 
@@ -2473,51 +2556,56 @@ def _dedupe(deps: list[Dependency]) -> list[Dependency]:
 
 
 def _drop_phantom_unresolved(deps: list[Dependency]) -> list[Dependency]:
-    """For each (ecosystem, name), if any entry is pinned (``==X.Y.Z``),
-    drop entries that aren't pinned and merge their ancestors into the
-    surviving resolved entries.
+    """Drop an unresolved transitive requirement that a resolved row of its package satisfies.
 
-    Name normalization is PEP 503 for Python (so dash/underscore/dot
-    variants of the same distribution name collide) — a discovery-side
-    unresolved entry can then phantom-drop against a lockfile-side pinned
-    entry even if they spell the name differently.
+    A registry walk can resolve one requirement on a package and fail on
+    another (a spec the registry answers 404 for, a range the grammar does
+    not read). When a resolved row (``==X.Y.Z``) of the package has a version
+    the unresolved requirement admits, or one it cannot be compared with
+    (:func:`_meets`), the requirement is that row seen from another path: it
+    is dropped, and its ancestors go to the rows that satisfy it.
 
-    An entry with an origin is neither: it is not the registry package of its
-    name, so it is never dropped in favour of a pinned one and never makes an
-    unpinned registry entry a phantom.
+    Everything else is kept, because it is not the resolved package:
+
+    - a requirement no resolved version satisfies (``>=2,<3`` beside a
+      resolved 1.0) is a version of the package the scan never saw;
+    - a direct dep is what a manifest declares, resolved or not;
+    - a row with an origin is not the registry package of its name, so it is
+      never dropped in favour of a resolved row and never satisfies an
+      unresolved registry requirement.
+
+    Names are compared by the ecosystem's identity rule, so for Python a
+    requirement spelled ``foo_bar`` meets a row spelled ``foo-bar``.
     """
-    resolved_names: set[tuple[Ecosystem, str]] = {
-        (d.ecosystem, d.identity)
-        for d in deps
-        if d.version_constraint.startswith("==") and not d.origin
-    }
+    resolved: dict[tuple[Ecosystem, str], list[Dependency]] = {}
+    for dep in deps:
+        if dep.version_constraint.startswith("==") and not dep.origin:
+            resolved.setdefault((dep.ecosystem, dep.identity), []).append(dep)
 
-    phantom_ancestors: dict[tuple[Ecosystem, str], set[str]] = {}
+    # Ancestors of the dropped requirements, by the resolved row they go to.
+    inherited: dict[tuple[Ecosystem, str, str], set[str]] = {}
     survivors: list[Dependency] = []
     for dep in deps:
         key = (dep.ecosystem, dep.identity)
-        is_pinned = dep.version_constraint.startswith("==")
-        if not is_pinned and not dep.origin and key in resolved_names:
-            phantom_ancestors.setdefault(key, set()).update(dep.direct_ancestors)
+        satisfied_by: list[Dependency] = []
+        if dep.depth > 0 and not dep.origin and not dep.version_constraint.startswith("=="):
+            satisfied_by = [row for row in resolved.get(key, []) if _meets(row, dep) is not False]
+        if not satisfied_by:
+            survivors.append(dep)
             continue
-        survivors.append(dep)
+        for row in satisfied_by:
+            inherited.setdefault((*key, row.version_constraint), set()).update(dep.direct_ancestors)
 
-    if not phantom_ancestors:
+    if not inherited:
         return survivors
 
-    return [
-        replace(
-            d,
-            direct_ancestors=tuple(
-                sorted(
-                    set(d.direct_ancestors)
-                    | phantom_ancestors.get((d.ecosystem, d.identity), set())
-                )
-            ),
-        )
-        if d.version_constraint.startswith("==")
-        and not d.origin
-        and (d.ecosystem, d.identity) in phantom_ancestors
-        else d
-        for d in survivors
-    ]
+    out: list[Dependency] = []
+    for dep in survivors:
+        extra = inherited.get((dep.ecosystem, dep.identity, dep.version_constraint))
+        if extra is None or dep.origin:
+            out.append(dep)
+        else:
+            out.append(
+                replace(dep, direct_ancestors=tuple(sorted(set(dep.direct_ancestors) | extra)))
+            )
+    return out
