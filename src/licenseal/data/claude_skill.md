@@ -196,6 +196,8 @@ The general pattern is: state the obligation, anchor it to the user's project co
 
 ### 5. Scaffold (or extend) the review file
 
+Always pass `--from-report "$SCAN_FILE"`: the scaffold then covers exactly the rows of the scan you walked the user through. Without `--from-report` the command runs a scan of its own, the one `check` runs with its default options (lockfile-first, transitive dependencies included, `--no-dev` unless `--dev` is passed). That scaffolds the same flagged deps under the same keys when step 1 used those options, at the cost of resolving everything again.
+
 **First check whether `licenseal.review.toml` already exists at the project root.** `init-review-file` refuses to clobber an existing file, so the invocation differs:
 
 - **No review file yet** — scaffold a fresh one:

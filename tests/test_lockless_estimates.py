@@ -1027,7 +1027,10 @@ class TestInitReviewFile:
         _mock_npm("odd", "")
         result = CliRunner().invoke(main, ["init-review-file", "--path", str(tmp_path)])
         assert result.exit_code == 0
-        assert "no lockfile covers" not in result.output
+        # The scan is the one `check` runs, so the manifest is named as
+        # lacking a lockfile. That is said once and fails nothing here.
+        assert result.output.count(f"Warning: package.json: {_MISSING}") == 1
+        assert "could not be fully analyzed" not in result.output
         assert 'package = "odd"' in (tmp_path / "licenseal.review.toml").read_text()
 
     @respx.mock

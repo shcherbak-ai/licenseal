@@ -30,7 +30,7 @@ licenseal install-skill         # install the Claude Code review skill into the 
 
 | Flag | Default | Notes |
 |---|---|---|
-| `--path PATH`, `-p PATH` | `.` | Project directory |
+| `--path PATH`, `-p PATH` | `.` | Project directory. Without `--from-report` it is scanned as `check` scans it by default: lockfile-first, transitive dependencies included |
 | `--dev / --no-dev` | `--no-dev` | Include dev dependencies |
 | `--from-report PATH` | — | Read flagged deps from a saved JSON report (offline, no registry round-trip) |
 | `--merge` | — | Add new flagged entries to an existing review file (preserves existing entries) |
@@ -214,6 +214,8 @@ Workflow:
 3. Fill in `license` (and optionally `note`) for each entry
 4. `licenseal check` again — overrides apply
 
+`licenseal init-review-file` without `--from-report` does steps 1 and 2 in one go: it runs the scan `check` runs by default and scaffolds an entry for each flagged dependency, direct or transitive.
+
 An [off-registry dependency](#off-registry-dependencies) has no registry version to key a review on, so its entry is keyed on its source. The stanza carries a `source` key holding the row's `origin` string, and `version` is optional:
 
 ```toml
@@ -241,7 +243,7 @@ Rules at a glance:
 - The match key is the resolved `ecosystem:name@version`. `package` is compared the way the ecosystem's registry compares names: exactly, upper and lower case included, for Go, Java, npm, and Ruby (`example.org/Foo` and `example.org/foo` are two packages, each with its own entry); without regard to case for .NET, PHP, Rust, Hex, and R; with PEP 503 normalization for Python. A Hex dependency that `mix.exs` gives another name than the package it is published as (`{:my_alias, "~> 1.0", hex: :real_pkg}`) is matched on the hex.pm package (`package = "real_pkg"`), so its entry stops matching when the local name is pointed at another package; `init-review-file` writes that name, and the JSON report carries it as `registry_name`. Rows that share a match key (two local names for one hex.pm package at one version) share one entry, and `init-review-file` writes it once.
 - An entry with a `source` key matches on ecosystem, package, and `source` instead, compared with the row's `origin` exactly. When it also has a `version`, the row's version must equal it. An entry without `source` never matches an off-registry row, and an entry with `source` never matches a registry row, so two commits of one repository that declare the same version cannot share a review. Messages name such an entry as `off-registry <ecosystem>:<name> from <source>`.
 - A review keyed on a commit applies to that commit only. A review keyed on a **branch or a tag** (`git+<url>@main`, which is all a manifest without a lockfile can say) keeps applying when the branch or tag moves to other code, and one keyed on a bare repository URL, a URL without a hash, or a path applies to whatever is there. Pin a commit in the manifest, or commit a lockfile, to get an immutable key. When the origin of a reviewed dependency changes, its entry no longer matches and `check` fails until the new source is reviewed.
-- A live `init-review-file` scan reads manifests and does not read lockfiles, so for a project with a lockfile it scaffolds the source as the manifest declares it, where `check` reports the locked commit. Scaffold from a report (`--from-report`) to get the keys `check` uses.
+- A live `init-review-file` scan (one without `--from-report`) resolves the project exactly as `check` does with its default options: lockfiles first, the transitive graph down to `--max-depth 50`, and the same `--dev` and `--exclude-dirs` handling. It writes a stanza for every row `check` flags, transitive dependencies included, keyed as `check` reports the row: a registry package at its locked version, an off-registry dependency by the origin its lockfile records (the locked commit, not the branch the manifest names). Filling in the stanzas is therefore enough for the next `check` to apply them. A manifest whose dependencies no lockfile covers is named in a `Warning:`, as `check` names it, and its stanzas carry the versions estimated from the registry; the command does not fail for it. For a `check` run with other options (`--no-transitive`, another `--max-depth`), scaffold from that run's report with `--from-report`: a live scan would also write stanzas for rows that run does not report, and a filled-in entry that matches no row fails the command.
 - Reviews can only override flagged dependencies, never compatible ones.
 - Unmatched, incomplete, or invalid entries fail the command — they are never silently ignored.
 - `licenseal.review.toml` and the report passed to `--from-report` must be UTF-8. A file in another encoding (UTF-16 from a Windows shell redirect, for example) ends the command with an error that names the file; write the report with `-o report.json` rather than `>`.

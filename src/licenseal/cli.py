@@ -103,6 +103,7 @@ from licenseal.transitive import flag_version_estimate, resolve_transitive
 _STDERR_CONSOLE = Console(stderr=True)
 
 _DEFAULT_MAX_WORKERS = 16
+_DEFAULT_MAX_DEPTH = 50
 _REGISTRY_HOSTS = [
     "pypi.org:443",
     "files.pythonhosted.org:443",
@@ -373,19 +374,6 @@ def _detect_project_license(project_path: Path, exclude_paths: frozenset[Path]) 
     return detected
 
 
-def _discover_dependencies(
-    project_path: Path,
-    include_dev: bool,
-    *,
-    exclude_paths: frozenset[Path] = frozenset(),
-) -> list[Dependency]:
-    """Discover project dependencies and apply dev filtering."""
-    deps, _ = discover_all_dependencies(project_path, exclude_paths=exclude_paths)
-    if not include_dev:
-        return [dep for dep in deps if dep.group != DependencyGroup.DEV]
-    return deps
-
-
 def _read_diagnostics_view(
     diagnostics: list[ReadDiagnostic], project_path: Path, *, require_lockfile: bool = True
 ) -> list[ReportDiagnostic]:
@@ -535,13 +523,13 @@ def _resolve_license_infos(
     max_workers: int,
     command_name: str,
     *,
-    transitive: bool = False,
-    project_path: Path | None = None,
-    include_dev: bool = False,
-    max_depth: int = 50,
-    all_direct_deps: list[Dependency] | None = None,
-    exclude_paths: frozenset[Path] = frozenset(),
-    timings: _PhaseTimings | None = None,
+    transitive: bool,
+    project_path: Path,
+    include_dev: bool,
+    max_depth: int,
+    all_direct_deps: list[Dependency],
+    exclude_paths: frozenset[Path],
+    timings: _PhaseTimings,
 ) -> list[LicenseInfo]:
     """Resolve dependency licenses from registries.
 
@@ -556,11 +544,9 @@ def _resolve_license_infos(
     registry calls are policy-checked too.
 
     ``timings`` collects per-phase wall-clock for the caller's end-of-scan
-    summary; when omitted, phases are recorded into a discarded instance.
+    summary.
     """
-    if timings is None:
-        timings = _PhaseTimings()
-    if not deps and not (transitive and project_path is not None):
+    if not deps and not transitive:
         # No direct deps AND no transitive walk possible → skip the
         # tethered.scope / progress / threadpool setup entirely. When a
         # transitive walk IS possible we proceed even with zero direct deps:
@@ -598,7 +584,7 @@ def _resolve_license_infos(
             # wave of fetches into in-memory dict lookups. See
             # `licenseal.resolvers.http.RegistryCache`.
             registry_cache = RegistryCache(on_rate_limit_pause=_echo_rate_limit_pause)
-            if transitive and project_path is not None:
+            if transitive:
                 # Indeterminate progress: BFS frontier is open-ended, total
                 # only known once the walk terminates. Single in-place line.
                 with (
@@ -625,7 +611,7 @@ def _resolve_license_infos(
                     # once per ecosystem (same regression the discovery phase had).
                     with shared_walk_cache():
                         deps = resolve_transitive(
-                            all_direct_deps if all_direct_deps is not None else deps,
+                            all_direct_deps,
                             project_path,
                             include_dev=include_dev,
                             max_depth=max_depth,
@@ -700,9 +686,8 @@ def _resolve_license_infos(
             # RubyGems), and Packagist has no batch endpoint — the lockfile
             # map is the equivalent batch-style pre-pass for PHP.
             php_lockfile_licenses: LockfileLicenseMap = {}
-            if project_path is not None:
-                for lockfile in find_composer_lockfiles(project_path, exclude_paths=exclude_paths):
-                    php_lockfile_licenses.update(extract_composer_lock_licenses(lockfile))
+            for lockfile in find_composer_lockfiles(project_path, exclude_paths=exclude_paths):
+                php_lockfile_licenses.update(extract_composer_lock_licenses(lockfile))
 
             # R / CRAN license pre-pass. CRAN publishes the official PACKAGES
             # index (License + dependency edges for every current package);
@@ -960,6 +945,86 @@ def _resolve_license_infos(
         ) from exc
 
 
+def _scan_licenses(
+    project_path: Path,
+    command_name: str,
+    *,
+    include_dev: bool,
+    max_workers: int,
+    exclude_paths: frozenset[Path],
+    transitive: bool = True,
+    max_depth: int = _DEFAULT_MAX_DEPTH,
+    timings: _PhaseTimings | None = None,
+) -> tuple[ProjectLicense, list[LicenseInfo]]:
+    """Detect the project license, discover the dependencies, and resolve their licenses.
+
+    The scan behind ``check``, and behind a live ``init-review-file``, which
+    runs it with the defaults ``check`` has for ``transitive`` and
+    ``max_depth``. Both commands therefore see the same rows under the same
+    review keys: versions and origins as the lockfiles record them, the
+    transitive graph, the same dev filter and exclusions.
+
+    Says on stderr what it found. Call it inside
+    :func:`collect_read_diagnostics`: discovery and the transitive walk both
+    record on that sink. ``shared_walk_cache`` wraps only discovery (the
+    transitive layer manages its own walk cache internally).
+    """
+    if timings is None:
+        timings = _PhaseTimings()
+    with timings.phase("discovery"), shared_walk_cache():
+        project_license = _detect_project_license(project_path, exclude_paths)
+        # A direct-only scan reads no lockfile.
+        all_deps, local_filter_counts = discover_all_dependencies(
+            project_path, exclude_paths=exclude_paths, lockfiles_read=transitive
+        )
+    deps = all_deps if include_dev else [d for d in all_deps if d.group != DependencyGroup.DEV]
+
+    # Data-driven over the full Ecosystem enum (not a hardcoded subset):
+    # every ecosystem with a workspace-local filter count surfaces here, so
+    # the echo can't silently drop one when a new ecosystem is added.
+    # ``.label`` is the human-readable name; ``local_filter_counts`` is
+    # keyed by enum value.
+    for ecosystem in Ecosystem:
+        filtered = local_filter_counts.get(ecosystem.value, 0)
+        if filtered:
+            click.echo(
+                f"Excluded {filtered} local {ecosystem.label} workspace package "
+                "reference(s) from resolution (not published to the registry).",
+                err=True,
+            )
+
+    if deps:
+        if transitive:
+            click.echo(
+                f"Found {len(deps)} direct dependencies. Resolving transitive graph...",
+                err=True,
+            )
+        else:
+            click.echo(f"Found {len(deps)} dependencies. Resolving licenses...", err=True)
+    license_infos = _resolve_license_infos(
+        deps,
+        max_workers,
+        command_name,
+        transitive=transitive,
+        project_path=project_path,
+        include_dev=include_dev,
+        max_depth=max_depth,
+        all_direct_deps=all_deps,
+        exclude_paths=exclude_paths,
+        timings=timings,
+    )
+    if not license_infos:
+        # Nothing declared in a manifest and nothing in a lockfile —
+        # common for stdlib-only libraries or `--no-dev` against a project
+        # with only dev-group deps. The caller still gets the project license,
+        # so `check -f json` renders a valid (empty-but-well-formed) document
+        # and the detected project license isn't silently dropped. Said
+        # after resolution: zero direct deps is not yet zero deps, since a
+        # lockfile is read even when no manifest declares anything.
+        click.echo("No dependencies to resolve.", err=True)
+    return project_license, license_infos
+
+
 @main.command()
 @click.option(
     "--path",
@@ -1036,7 +1101,7 @@ def _resolve_license_infos(
 @click.option(
     "--max-depth",
     type=click.IntRange(1, 100),
-    default=50,
+    default=_DEFAULT_MAX_DEPTH,
     show_default=True,
     help="Maximum transitive depth (only meaningful with --transitive).",
 )
@@ -1079,61 +1144,19 @@ def check(
 
     # The read-diagnostics sink spans BOTH discovery and the transitive walk —
     # a manifest or lockfile skipped/decoded-via-fallback in either phase is
-    # surfaced rather than silently dropped. ``shared_walk_cache`` wraps only
-    # discovery (the transitive layer manages its own walk cache internally).
+    # surfaced rather than silently dropped.
     with collect_read_diagnostics() as read_diags:
-        with timings.phase("discovery"), shared_walk_cache():
-            project_license = _detect_project_license(project_path, exclude_paths)
-            detected_license = project_license.license
-            # A direct-only scan reads no lockfile.
-            all_deps, local_filter_counts = discover_all_dependencies(
-                project_path, exclude_paths=exclude_paths, lockfiles_read=transitive
-            )
-        deps = all_deps if include_dev else [d for d in all_deps if d.group != DependencyGroup.DEV]
-
-        # Data-driven over the full Ecosystem enum (not a hardcoded subset):
-        # every ecosystem with a workspace-local filter count surfaces here, so
-        # the echo can't silently drop one when a new ecosystem is added.
-        # ``.label`` is the human-readable name; ``local_filter_counts`` is
-        # keyed by enum value.
-        for ecosystem in Ecosystem:
-            filtered = local_filter_counts.get(ecosystem.value, 0)
-            if filtered:
-                click.echo(
-                    f"Excluded {filtered} local {ecosystem.label} workspace package "
-                    "reference(s) from resolution (not published to the registry).",
-                    err=True,
-                )
-
-        if deps:
-            if transitive:
-                click.echo(
-                    f"Found {len(deps)} direct dependencies. Resolving transitive graph...",
-                    err=True,
-                )
-            else:
-                click.echo(f"Found {len(deps)} dependencies. Resolving licenses...", err=True)
-        license_infos = _resolve_license_infos(
-            deps,
-            max_workers,
+        project_license, license_infos = _scan_licenses(
+            project_path,
             "check",
-            transitive=transitive,
-            project_path=project_path,
             include_dev=include_dev,
-            max_depth=max_depth,
-            all_direct_deps=all_deps,
+            max_workers=max_workers,
             exclude_paths=exclude_paths,
+            transitive=transitive,
+            max_depth=max_depth,
             timings=timings,
         )
-        if not license_infos:
-            # Nothing declared in a manifest and nothing in a lockfile —
-            # common for stdlib-only libraries or `--no-dev` against a project
-            # with only dev-group deps. The report is still rendered so callers
-            # asking for `-f json` get a valid (empty-but-well-formed) document
-            # and the detected project license isn't silently dropped. Said
-            # after resolution: zero direct deps is not yet zero deps, since a
-            # lockfile is read even when no manifest declares anything.
-            click.echo("No dependencies to resolve.", err=True)
+    detected_license = project_license.license
 
     # Companion line to the per-host traffic summary above it: phases, not
     # hosts. Always at least the discovery entry, so never an empty line.
@@ -1313,7 +1336,11 @@ def init_review_file(
     merge: bool,
     exclude_dirs: tuple[str, ...],
 ) -> None:
-    """Generate or extend `licenseal.review.toml` for flagged dependencies."""
+    """Generate or extend `licenseal.review.toml` for flagged dependencies.
+
+    Without --from-report the project is scanned as `check` scans it with its
+    default options: lockfiles first, transitive dependencies included.
+    """
     if from_report is not None:
         ctx = click.get_current_context()
         inert = [
@@ -1339,16 +1366,16 @@ def init_review_file(
     if from_report is not None:
         flagged, unscaffoldable = flagged_entries_from_json_report(from_report)
     else:
+        # The scan `check` runs with its default options, so that each stanza
+        # is keyed as `check` reports the row it is for.
         with collect_read_diagnostics() as read_diags:
-            project_license = _detect_project_license(project_path, exclude_paths)
-            deps = _discover_dependencies(project_path, include_dev, exclude_paths=exclude_paths)
-            if deps:
-                click.echo(f"Found {len(deps)} dependencies. Resolving licenses...", err=True)
-            else:
-                # Zero deps → zero flagged entries → second early-return
-                # below fires with the proper "nothing to review" message.
-                click.echo("No dependencies to resolve.", err=True)
-            license_infos = _resolve_license_infos(deps, max_workers, "init-review-file")
+            project_license, license_infos = _scan_licenses(
+                project_path,
+                "init-review-file",
+                include_dev=include_dev,
+                max_workers=max_workers,
+                exclude_paths=exclude_paths,
+            )
             report = analyze(project_license.license, license_infos)
             flagged, unscaffoldable = flagged_entries_from_results(report.results)
         _echo_read_diagnostics(_read_diagnostics_view(read_diags, project_path))

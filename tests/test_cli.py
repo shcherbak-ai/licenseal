@@ -2664,8 +2664,8 @@ class TestCheckCommand:
         # A direct dependency's registry ``license`` string carries a line
         # break followed by a complete, pre-filled stanza for a different
         # package — a copyleft transitive of that same dependency. The live
-        # scaffold resolves direct dependencies only, so no legitimate stanza
-        # for the transitive would collide with a forged one.
+        # scaffold writes the transitive's own stanza, blank; the forged one
+        # must neither fill it in nor stand beside it.
         hostile = (
             "Custom terms\n"
             "[[review]]\n"
@@ -2696,17 +2696,24 @@ class TestCheckCommand:
         runner = CliRunner()
         result = runner.invoke(main, ["init-review-file", "--path", str(tmp_path)])
         assert result.exit_code == 0
-        assert "with 1 review entry" in result.output
+        assert "with 2 review entries" in result.output
         contents = load_review_file(tmp_path)
         assert contents.licenses == {}
-        assert contents.incomplete == ["npm:attacker-lib@1.0.0"]
+        assert sorted(contents.incomplete) == ["npm:attacker-lib@1.0.0", "npm:victim-lib@2.0.0"]
 
-        # The intended workflow: the maintainer fills in the one stanza the
-        # scaffold holds. That must not clear the copyleft transitive.
+        # The intended workflow: the maintainer fills in the stanza of the
+        # dependency they reviewed. That must not clear the copyleft
+        # transitive, whose own stanza is still blank.
         review_path = tmp_path / "licenseal.review.toml"
         text = review_path.read_text(encoding="utf-8")
-        assert text.count('license = ""') == 1
-        review_path.write_text(text.replace('license = ""', 'license = "MIT"'), encoding="utf-8")
+        assert text.count('license = ""') == 2
+        blank = 'package = "attacker-lib"\nversion = "1.0.0"\nlicense = ""'
+        assert text.count(blank) == 1
+        review_path.write_text(
+            text.replace(blank, blank.replace('license = ""', 'license = "MIT"')),
+            encoding="utf-8",
+            newline="\n",
+        )
 
         result = runner.invoke(
             main, ["check", "--path", str(tmp_path), "--no-require-lockfile", "-f", "json"]
