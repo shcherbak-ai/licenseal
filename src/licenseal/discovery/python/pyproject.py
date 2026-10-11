@@ -62,7 +62,7 @@ def _extract_deps(
     """Convert a list of PEP 508 strings to Dependency objects.
 
     A direct reference (``name @ <url>``) is a dependency with an origin; one
-    to a path inside ``scan_root`` is the project's own code and is left out.
+    to a path that the scan reads is the project's own code and is left out.
     """
     deps = []
     for dep_str in dep_list:
@@ -165,7 +165,7 @@ def _parse_pyproject_deps(
     is still read.
 
     Returns ``(deps, own)``. ``own`` names the dependencies that are the
-    project's own code: a path inside ``scan_root``, or a uv workspace
+    project's own code: a path that the scan reads, or a uv workspace
     member. ``inherited_sources`` is the ``[tool.uv.sources]`` table of the
     uv workspace root above this file; this file's own entries override it.
     """
@@ -237,7 +237,7 @@ def _parse_pyproject_deps(
     # uv: [tool.uv.sources] says where a requirement declared above comes
     # from. ``git`` / ``url`` / ``path`` take it off the registry; ``index``
     # leaves it a registry requirement; ``workspace = true`` and a path
-    # inside the scanned directory make it the project's own code.
+    # that the scan reads make it the project's own code.
     sources = (inherited_sources or {}) | _uv_sources(filepath, data)
     if sources:
         declared, deps = deps, []
@@ -305,7 +305,7 @@ def discover_pyproject_dependencies(
     pulling the installed wheel), not a workspace alias — that dep is
     preserved.
 
-    A dependency declared from a path inside the scanned directory, or as
+    A dependency declared from a path that the scan reads, or as
     a uv workspace member, is the project's own code and is not returned.
 
     Returns ``(deps, filtered_count)`` where ``filtered_count`` is the number

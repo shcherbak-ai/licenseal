@@ -206,7 +206,7 @@ licenseal is intentionally narrow:
 - It is a **license compatibility checker**, not a legal approval workflow or policy-exception manager.
 - It checks **published dependency license metadata**, not vulnerability status, provenance, or SBOM completeness.
 - It reads **manifests, lockfiles, and public registry metadata endpoints** only. It does not honor private registry declarations from scanned manifests, because that would expand the network trust boundary.
-- A dependency installed from a **git repository, a direct URL, or a path outside the scanned directory** has no registry record. It is reported as `UNKNOWN` with its source, nothing is requested or downloaded for it, and a review keyed on that source records its license (see [USAGE.md](USAGE.md#off-registry-dependencies)).
+- A dependency installed from a **git repository, a direct URL, or a path the scan does not read** (outside the scanned directory, an archive, a vendored or excluded directory) has no registry record. It is reported as `UNKNOWN` with its source, nothing is requested or downloaded for it, and a review keyed on that source records its license (see [USAGE.md](USAGE.md#off-registry-dependencies)).
 - It does not infer dependency licenses by pattern-matching local `LICENSE` files or source comments. Free-form license text is easy to misread, spoof, or partially match; missing structured metadata is reported as `UNKNOWN` and routed to manual review instead.
 - It produces Markdown/JSON dependency license reports, but not standards-compliant CycloneDX or SPDX SBOMs; use a dedicated SBOM tool when you need that artifact.
 - Manual review can override flagged findings when a maintainer has better information, but the review file is an audit record, not hidden legal sign-off.

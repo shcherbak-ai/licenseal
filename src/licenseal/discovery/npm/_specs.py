@@ -108,7 +108,7 @@ def npm_resolved_origin(
     layout registries share. A git URL is a repository at the commit in its
     fragment. Any other ``http(s)`` URL is a direct tarball, with
     ``integrity`` as its hash. Anything else is a path, relative to
-    ``lock_dir``: ``None`` when it is inside ``scan_root``.
+    ``lock_dir``: ``None`` when the scan reads it.
     """
     resolved = resolved.strip()
     if not resolved:

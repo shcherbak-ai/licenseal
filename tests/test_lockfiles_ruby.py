@@ -130,16 +130,16 @@ class TestParseGemfileLock:
         assert edge.version_constraint == "==0.0.1"
         assert edge.source == ""
 
-    def test_path_spec_inside_the_scanned_directory_has_no_row(self):
-        # ``PATH remote: vendor/foo`` is the project's own code.
+    def test_path_spec_under_a_skipped_directory_is_a_row(self):
+        # ``PATH remote: vendor/foo``: nothing scans ``vendor/``.
         deps = parse_gemfile_lock(
             _FIXTURES / "simple" / "Gemfile.lock",
             direct_names=_direct_names(),
             dev_direct_names=_dev_direct_names(),
             include_dev=True,
         )
-        assert "vendored" not in {d.name for d in deps}
-        assert all(d.origin == "" for d in deps if d.name != "edge")
+        assert {d.name: d.origin for d in deps}["vendored"] == "vendor/foo"
+        assert all(d.origin == "" for d in deps if d.name not in {"edge", "vendored"})
 
     def test_ecosystem_stamped_as_ruby(self):
         deps = parse_gemfile_lock(

@@ -83,6 +83,7 @@ class TestNpmDiscovery:
         # Same workspace-local guard applied to dependencies/peerDependencies
         # has to apply here too — pnpm/yarn `workspace:` and `file:` specs are
         # not published artifacts.
+        (tmp_path / "local").mkdir()
         (tmp_path / "package.json").write_text(
             json.dumps(
                 {
@@ -222,13 +223,13 @@ class TestWorkspaceFiltering:
         assert "slash5" not in names
 
     def test_skips_workspace_local_specs(self, tmp_path):
-        """``file:``, ``link:``, ``workspace:`` specs are workspace-local —
-        there's no registry artifact to license-check. The local-name filter
-        catches them when the workspace-local package.json is reachable, but
-        when it lives under a fixtures/ or examples/ tree (which the walker
-        skips), the consuming package.json's reference is the only thing
-        left. Skipping at emit prevents a noisy UNKNOWN row per fixture.
-        Real external deps (incl. ``git+`` URLs) are unaffected."""
+        """A ``workspace:`` spec, and a ``file:`` / ``link:`` spec that names
+        a directory the scan walks, is workspace-local: there is no registry
+        artifact to license-check, and that directory's own package.json is
+        read. A ``file:`` directory under a fixtures/ or examples/ tree is
+        one the walker skips, so nothing reads it: it is a dependency with
+        the path as its origin, like a ``git+`` URL."""
+        (tmp_path / "sibling").mkdir()
         self._write(
             tmp_path / "__tests__" / "package.json",
             {
@@ -243,8 +244,11 @@ class TestWorkspaceFiltering:
             },
         )
         deps, _ = discover_npm_dependencies(tmp_path)
-        names = {d.name for d in deps}
-        assert names == {"lodash", "react-fork"}
+        assert {d.name: d.origin for d in deps} == {
+            "lodash": "",
+            "@org/fixture-dep": "./fixtures/dep",
+            "react-fork": "git+https://github.com/foo/react.git",
+        }
 
     def test_workspace_internal_refs_filtered(self, tmp_path):
         """Cross-package workspace deps shouldn't appear as external — they

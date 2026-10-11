@@ -23,7 +23,7 @@ def discover_pipfile_dependencies(
     / ``git`` / ``path`` / ``file``. An entry with ``git`` (or ``hg`` /
     ``svn`` / ``bzr``), ``path``, or ``file`` is not a PyPI package: it is
     returned with an origin and no version constraint, unless its path is
-    inside the scanned directory, which makes it the project's own code.
+    one that the scan reads, which makes it the project's own code.
 
     Pipfile uses ``"*"`` to mean "any version" — treated as an empty
     constraint so downstream resolution falls back to the registry's latest.

@@ -14,7 +14,7 @@ a gem is not a rubygems.org gem and is never looked up there, but emitting it
 keeps its group and direct-ness — so a git-sourced dev tool is still
 attributed DEV and dropped under ``--no-dev`` instead of leaking in as a PROD
 UNKNOWN. ``Gemfile.lock`` carries no group of its own, so the Gemfile is the
-only place that signal exists. A path inside the scanned directory is the
+only place that signal exists. A path that the scan reads is the
 project's own code: a gem declared from one is not emitted. A ``source "…"
 do`` block names another gem server, not a repository or a path; its gems
 stay registry gems.
@@ -217,7 +217,7 @@ def _source_origin(
     ``kind`` is ``git``, one of the hosting shorthands, or ``path``;
     ``value`` the repository or path, ``None`` when it is not a string
     literal; ``options`` the options written beside it, for the revision.
-    ``None`` is a path inside the scanned directory. A source whose value
+    ``None`` is a path that the scan reads. A source whose value
     cannot be read still takes the gem off the registry; its origin then
     says only that the source is not recorded.
     """
@@ -239,7 +239,7 @@ def _gem_origin(rest: str, gemfile_dir: Path, scan_root: Path) -> str | None:
     """Origin a gem line's own options declare.
 
     Empty for a line with no source option, ``None`` for a ``path`` option
-    inside the scanned directory.
+    that the scan reads.
     """
     options = _source_options(rest)
     for kind in ("git", *_HOSTED_GIT_OPTIONS, "path"):

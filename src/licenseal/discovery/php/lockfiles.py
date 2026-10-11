@@ -14,9 +14,9 @@ Edges live in each entry's ``require`` map (transitive children). We extract
 them for ancestor attribution via :func:`_graph.compute_direct_ancestors`,
 matching the Go / npm / Java lockfile paths.
 
-An entry with ``dist.type == "path"`` is a local source reference. Inside the
-scanned directory it is the project's own code (workspace sibling, monorepo
-internal) and gets no row; outside it, it is a row with the path as origin.
+An entry with ``dist.type == "path"`` is a local source reference. A path the
+scan reads is the project's own code (workspace sibling, monorepo internal)
+and gets no row; any other is a row with the path as origin.
 
 An entry Composer took from a version-control repository looks, in the
 lockfile, like one it took from Packagist: both carry a ``source`` (the
@@ -197,7 +197,7 @@ def parse_composer_lockfile(
           included: its keys are the names the lockfile covers.
 
     ``scan_root`` is the scanned directory, the lockfile's own directory when
-    omitted. A path entry inside it gets no row.
+    omitted. A path entry that the scan reads gets no row.
     """
     scan_root = scan_root or path.parent
     data = root_table(path, load_json(path))

@@ -64,6 +64,7 @@ class TestDiscoverMixExsDependencies:
             assert dep.source == "mix.exs"
 
     def test_source_options_in_every_form(self, tmp_path):
+        (tmp_path / "apps" / "inside").mkdir(parents=True)
         (tmp_path / "mix.exs").write_text(
             "defmodule M.MixProject do\n"
             "  defp deps do\n"
@@ -642,8 +643,11 @@ class TestParseDepDef:
         assert self._parse("cp ../elsewhere", tmp_path)[2] == "../elsewhere"
         assert self._parse("ln /opt/elsewhere", tmp_path)[2] == "/opt/elsewhere"
 
-    def test_copied_path_inside_the_scanned_directory_is_own_code(self, tmp_path):
+    def test_copied_directory_the_scan_walks_is_own_code(self, tmp_path):
+        (tmp_path / "local" / "thing").mkdir(parents=True)
         assert self._parse("cp local/thing", tmp_path) == (None, "", None)
+        # One the scan does not walk is a dependency.
+        assert self._parse("cp vendor/thing", tmp_path) == (None, "", "vendor/thing")
 
     def test_method_without_a_source_records_none(self, tmp_path):
         for value in ("", "git", "cp", "git-submodule", "fail unsupported"):
@@ -652,6 +656,8 @@ class TestParseDepDef:
 
 class TestErlangMkOwnCode:
     def test_dep_copied_from_inside_the_tree_is_not_a_dependency(self, tmp_path):
+        for app in ("local_a", "local_b"):
+            (tmp_path / "apps" / app).mkdir(parents=True)
         (tmp_path / "Makefile").write_text(
             "DEPS = cowlib local_a local_b\n"
             "dep_local_a = cp apps/local_a\n"

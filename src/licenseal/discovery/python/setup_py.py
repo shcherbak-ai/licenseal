@@ -266,7 +266,7 @@ def _extract_setup_py(
     """Return ``(deps, license_str)`` extracted from a single setup.py file.
 
     ``scan_root`` is the scanned directory, the file's own directory when
-    omitted: a requirement on a path inside it is the project's own code.
+    omitted: a requirement on a path that the scan reads is the project's own code.
     """
     scan_root = scan_root or path.parent
     tree = _parse_ast(path, record_failure=True)

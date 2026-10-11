@@ -15,7 +15,7 @@ The ``Remotes`` field says where a dependency is installed from when that is
 not CRAN (``user/repo``, ``gitlab::user/repo``, ``git::<url>``, ``url::<url>``,
 ``local::<path>``, ``bioc::<package>``). A dependency it names is emitted with
 an ``origin`` and is never looked up in the CRAN index; a ``local::`` path
-inside the scanned directory is the project's own code and is not a
+that the scan reads is the project's own code and is not a
 dependency.
 """
 
@@ -111,7 +111,7 @@ def _remote_origins(value: str, desc_dir: Path, scan_root: Path) -> dict[str, st
     The package a remote provides is the name written before ``=`` when the
     entry has one, and otherwise the repository, archive, or directory name,
     which is how the field is read when no name is given. An origin of
-    ``None`` is a ``local::`` path inside the scanned directory. An entry of
+    ``None`` is a ``local::`` path that the scan reads. An entry of
     a type that is not a source outside CRAN (``cran::``, or one this parser
     does not know) names nothing.
     """
@@ -160,7 +160,7 @@ def _parse_description_deps(
     """Read the dependency fields of a DESCRIPTION record.
 
     Returns ``(deps, own)``: ``own`` names the dependencies a ``Remotes``
-    entry places inside the scanned directory, which are the project's own
+    entry places at a path that the scan reads, which are the project's own
     code.
     """
     remotes = _remote_origins(record.get("Remotes", ""), desc_dir, scan_root)

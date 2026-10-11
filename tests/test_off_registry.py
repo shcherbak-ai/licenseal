@@ -25,6 +25,7 @@ from licenseal.discovery._origin import (
     strip_credentials,
     url_origin,
 )
+from licenseal.discovery._walk import scan_exclusions
 from licenseal.discovery.npm._specs import npm_spec_origin
 from licenseal.discovery.r.description import _remote_origins
 from licenseal.models import Dependency, Ecosystem, LicenseInfo
@@ -40,7 +41,7 @@ from licenseal.review import (
     review_key,
     source_review_key,
 )
-from tests._helpers import _check_json, _write
+from tests._helpers import _check_json, _dirs, _write
 
 
 def _refuse_everything_else() -> None:
@@ -158,13 +159,44 @@ class TestOriginStrings:
             "git+https://github.com/me/repo@v2"
         )
 
-    def test_path_inside_the_scanned_directory_is_own_code(self, tmp_path):
+    def test_path_to_a_directory_the_scan_walks_is_own_code(self, tmp_path):
         nested = tmp_path / "services" / "api"
-        nested.mkdir(parents=True)
+        _dirs(tmp_path, "services/api/lib/x", "services/shared")
         for written in (".", "./lib", "lib/x", "..", "../shared", "file:../shared", "file:."):
             assert path_origin(written, nested, tmp_path) is None, written
         # An empty path is the directory of the file that holds it.
         assert path_origin("  ", nested, tmp_path) is None
+
+    def test_path_inside_the_scanned_directory_that_the_scan_does_not_read(self, tmp_path):
+        _dirs(tmp_path, "libs", "vendor/kept", "third_party/sub/crate", "tools/env/lib")
+        (tmp_path / "libs" / "pkg-1.0.tar.gz").write_bytes(b"")
+        (tmp_path / "third_party" / "sub" / ".git").write_text("gitdir: elsewhere\n")
+        (tmp_path / "tools" / "env" / "pyvenv.cfg").write_text("")
+        for written in (
+            "libs/pkg-1.0.tar.gz",  # an archive: a file is not scanned
+            "vendor",  # a name the walk skips, and what is under it
+            "vendor/kept",
+            "third_party/sub",  # a nested repository, and what is under it
+            "third_party/sub/crate",
+            "tools/env",  # a virtualenv
+            "tools/env/lib",
+            "libs/missing",  # not there
+        ):
+            assert path_origin(written, tmp_path, tmp_path) == written, written
+        assert path_origin("third_party", tmp_path, tmp_path) is None
+        assert path_origin("tools", tmp_path, tmp_path) is None
+
+    def test_path_into_an_excluded_directory_is_not_own_code(self, tmp_path):
+        _dirs(tmp_path, "generated/client", "kept")
+        assert path_origin("generated/client", tmp_path, tmp_path) is None
+        with scan_exclusions(frozenset({(tmp_path / "generated").resolve()})):
+            assert path_origin("generated/client", tmp_path, tmp_path) == "generated/client"
+            assert path_origin("generated", tmp_path, tmp_path) == "generated"
+            assert path_origin("kept", tmp_path, tmp_path) is None
+        # The exclusions end with the scan they belong to.
+        assert path_origin("generated", tmp_path, tmp_path) is None
+        with scan_exclusions(frozenset({tmp_path.resolve()})):
+            assert path_origin("kept", tmp_path, tmp_path) == "kept"
 
     def test_path_outside_the_scanned_directory_is_reported_as_written(self, tmp_path):
         project = tmp_path / "project"
@@ -237,7 +269,7 @@ class TestNpmSpecOrigin:
 class TestRemotesField:
     def test_every_remote_type(self, tmp_path):
         project = tmp_path / "project"
-        project.mkdir()
+        _dirs(project, "pkgs/inside")
         origins = _remote_origins(
             """
             me/plain,
@@ -892,6 +924,7 @@ class TestRubyGemSources:
     @respx.mock
     def test_gemfile_source_options_without_a_lockfile(self, tmp_path):
         project = tmp_path / "project"
+        _dirs(project, "engines/inside")
         _write(
             project / "Gemfile",
             """\
@@ -940,6 +973,7 @@ class TestRubyGemSources:
     @respx.mock
     def test_lockfile_source_sections(self, tmp_path):
         project = tmp_path / "project"
+        _dirs(project, "engines/inside")
         _write(project / "Gemfile", 'source "https://rubygems.org"\ngem "regular"\n')
         _write(
             project / "Gemfile.lock",
@@ -1089,6 +1123,7 @@ class TestHexOffRegistry:
     @respx.mock
     def test_mix_exs_without_a_lockfile(self, tmp_path):
         project = tmp_path / "project"
+        _dirs(project, "apps/inside")
         _write(
             project / "mix.exs",
             """\
@@ -1256,6 +1291,7 @@ class TestROffRegistry:
     @respx.mock
     def test_description_remotes_without_a_lockfile(self, tmp_path):
         project = tmp_path / "project"
+        _dirs(project, "pkgs/ownpkg")
         _write(
             project / "DESCRIPTION",
             """\
@@ -1472,6 +1508,7 @@ class TestPnpmLockOffRegistry:
         # A lockfile with no manifest beside it: nothing is dropped, and the
         # path, git, and unreadable forms each say what the lockfile records.
         project = tmp_path / "project"
+        _dirs(project, "packages/dir-inside")
         _write(
             project / "pnpm-lock.yaml",
             """\
@@ -1596,6 +1633,7 @@ class TestPythonDirectReferences:
     @pytest.mark.parametrize("flags", [(), ("--no-transitive",)])
     def test_pyproject_pep621_references(self, tmp_path, flags):
         project = tmp_path / "project"
+        _dirs(project, "libs/own-lib")
         _write(
             project / "pyproject.toml",
             """\
@@ -1646,6 +1684,7 @@ class TestPythonDirectReferences:
     @respx.mock
     def test_setup_cfg_and_setup_py_references(self, tmp_path):
         project = tmp_path / "project"
+        _dirs(project, "vendor-src/cfg-own")
         _write(
             project / "setup.cfg",
             """\
@@ -1731,6 +1770,7 @@ class TestPythonSourceTables:
     @respx.mock
     def test_poetry_git_path_and_url_tables(self, tmp_path):
         project = tmp_path / "project"
+        _dirs(project, "libs/path-inside", "tools/dev-inside")
         _write(
             project / "pyproject.toml",
             """\
@@ -1815,6 +1855,7 @@ class TestPythonSourceTables:
     @respx.mock
     def test_uv_sources(self, tmp_path):
         project = tmp_path / "project"
+        _dirs(project, "libs/path-inside")
         _write(
             project / "pyproject.toml",
             """\
@@ -1961,6 +2002,9 @@ class TestPythonRequirementsFiles:
     @respx.mock
     def test_url_vcs_and_path_lines(self, tmp_path):
         project = tmp_path / "project"
+        _dirs(project, "plugins/own-plugin", "vendor-src/own-vendored")
+        # An archive inside the project is not something the scan reads.
+        (project / "local_archive-1.0.tar.gz").write_bytes(b"")
         _write(
             project / "requirements.txt",
             """\
@@ -2027,6 +2071,7 @@ class TestPythonRequirementsFiles:
             "extras-outside": "../extras-outside",
             "outside_wheel": "../wheels/outside_wheel-1.0-py3-none-any.whl",
             "..": "..",
+            "local_archive": "local_archive-1.0.tar.gz",
             "win_wheel": "C:\\wheelhouse\\win_wheel-1.0-py3-none-any.whl",
         }
         rows = _rows(data)
@@ -2052,6 +2097,7 @@ class TestPythonRequirementsFiles:
         # ``../libs/inside`` is inside the project from ``reqs/``; two levels
         # up is not.
         _write(project / "reqs" / "more.txt", "../libs/inside\n../../outside\n")
+        _dirs(project, "libs/inside")
         _refuse_everything_else()
         _, data = _check_json(project, "--no-strict")
         assert [(d["name"], d["origin"], d["source"]) for d in data["dependencies"]] == [
@@ -2063,6 +2109,7 @@ class TestPythonLockfiles:
     @respx.mock
     def test_uv_lock_git_url_path_and_directory_entries(self, tmp_path):
         project = tmp_path / "project"
+        _dirs(project, "libs/dir-inside", "libs/editable-inside")
         names = (
             "regular",
             "mirrored",
@@ -2617,6 +2664,7 @@ class TestRubyGemfileSourceBlocks:
     @respx.mock
     def test_gems_in_a_source_block_are_unknown_without_a_lookup(self, tmp_path):
         project = tmp_path / "project"
+        _dirs(project, "engines")
         _write(project / "Gemfile", self._GEMFILE)
         # rubygems.org owns every one of these names, under another license.
         for name in (*self._FORKS, "path-inside"):
@@ -2759,6 +2807,7 @@ class TestRubyHashRocketSources:
     @respx.mock
     def test_hash_rocket_and_keyword_options_are_read_alike(self, tmp_path):
         project = tmp_path / "project"
+        _dirs(project, "engines/rocket-own")
         _write(
             project / "Gemfile",
             """\
@@ -2825,6 +2874,7 @@ class TestNpmPathSpecs:
     @respx.mock
     def test_file_link_and_bare_path_specs_without_a_lockfile(self, tmp_path):
         project = tmp_path / "project"
+        _dirs(project, "packages/dir-inside", "packages/bare-inside")
         _npm_manifest(
             project,
             {
@@ -2877,6 +2927,8 @@ class TestNpmLockfilesOffRegistry:
 
     def _project(self, tmp_path: Path, **specs: str) -> Path:
         project = tmp_path / "project"
+        _dirs(project, "packages/dir-inside", "packages/portal-inside", "vendor-tgz")
+        (project / "vendor-tgz" / "tgz-inside-0.4.0.tgz").write_bytes(b"")
         _npm_manifest(project, self._SPECS | specs)
         # The public registry owns every one of the fork names.
         for name in (*self._FORKS, "dir-inside", *specs):
@@ -2980,8 +3032,10 @@ class TestNpmLockfilesOffRegistry:
             # the directory's own entry.
             "dir-outside": ("../dir-outside", "0.1.0"),
             "tgz-outside": ("../tgz-outside-0.3.0.tgz", "0.3.0"),
+            # An archive is not scanned, wherever it lies.
+            "tgz-inside": ("vendor-tgz/tgz-inside-0.4.0.tgz", "0.4.0"),
         }
-        self._assert_forks_unknown_and_unrequested(data, "tgz-outside")
+        self._assert_forks_unknown_and_unrequested(data, "tgz-outside", "tgz-inside")
         assert _requests_mentioning("tgz-inside", "untargeted") == []
 
     @respx.mock
@@ -3040,6 +3094,7 @@ class TestNpmLockfilesOffRegistry:
 
     @respx.mock
     def test_package_lock_v1_with_only_the_projects_own_code_is_not_a_gap(self, tmp_path):
+        _dirs(tmp_path, "packages/dir-inside")
         _npm_manifest(tmp_path, {"dir-inside": "file:packages/dir-inside"})
         (tmp_path / "package-lock.json").write_text(
             json.dumps(
@@ -3366,6 +3421,7 @@ class TestCargoManifestSources:
     @staticmethod
     def _project(tmp_path: Path) -> Path:
         project = tmp_path / "project"
+        _dirs(project, "crates/dir-inside")
         _write(
             project / "Cargo.toml",
             """\
@@ -3449,6 +3505,7 @@ class TestCargoManifestSources:
     @respx.mock
     def test_patch_and_replace_redirect_registry_crates(self, tmp_path):
         project = tmp_path / "project"
+        _dirs(project, "crates/local-patch", "crates/own-deep")
         _write(
             project / "Cargo.toml",
             """\
@@ -3466,9 +3523,9 @@ class TestCargoManifestSources:
 
             [patch.crates-io]
             patched = { git = "https://git.example.org/team/patched", branch = "fix" }
-            local-patch = { path = "vendor/local-patch" }
+            local-patch = { path = "crates/local-patch" }
             deep-patch = { git = "https://git.example.org/team/deep-patch" }
-            own-deep = { path = "vendor/own-deep" }
+            own-deep = { path = "crates/own-deep" }
             repinned = { version = "1.0.5", registry = "internal" }
 
             [replace]
@@ -3493,8 +3550,8 @@ class TestCargoManifestSources:
             "patched": f"git+{_TEAM}/patched@fix",
             "replaced": "../replaced",
             # Redirected wherever it appears in the graph, not only where it
-            # is declared. A redirect to a path inside the scanned directory
-            # is the project's own code: no row.
+            # is declared. A redirect to a directory the scan walks is the
+            # project's own code: no row.
             "deep-patch": f"git+{_TEAM}/deep-patch",
         }
         rows = _rows(data)
@@ -3525,6 +3582,7 @@ class TestCargoLockSources:
 
     def _project(self, tmp_path: Path) -> Path:
         project = tmp_path / "project"
+        _dirs(project, "crates/dir-inside")
         _write(
             project / "Cargo.toml",
             """\
@@ -3695,6 +3753,7 @@ _COMPOSER_REQUIRE = {
 def _composer_project(tmp_path: Path, repositories: object = None) -> Path:
     """A composer.json that takes packages from every kind of repository."""
     project = tmp_path / "project"
+    _dirs(project, "lib/inline-own")
     manifest = {
         "name": "acme/app",
         "license": "MIT",
@@ -3948,6 +4007,7 @@ class TestComposerLockSources:
     @respx.mock
     def test_lockfile_without_a_manifest_beside_it(self, tmp_path):
         project = tmp_path / "project"
+        _dirs(project, "lib/inline-own", "packages/own-lib")
         _write(project / "composer.lock", json.dumps(self._lock()))
         _refuse_everything_else()
         _result, data = _check_json(project, "--no-strict")
@@ -4085,8 +4145,9 @@ class TestMavenSystemScope:
 
     _LOCAL = {
         "com.vendor:outside-jar": "${libs.dir}/outside-jar-3.1.jar",
-        # A property the POM does not define: not shown to be inside.
         "com.vendor:jdk-tools": "${java.home}/../lib/tools.jar",
+        # A JAR is not something the scan reads, wherever it lies.
+        "com.vendor:inside-jar": "${basedir}/lib/inside-jar-2.0.jar",
         "com.vendor:pathless": "unrecorded source",
     }
 
@@ -4179,3 +4240,134 @@ class TestMavenSystemScope:
         assert result.exit_code == 0
         assert _origins(data) == {"org.example:regular": ""}
         assert _requests_mentioning("vendor", "-jar", "jdk-tools", "pathless") == []
+
+
+# ------------------------------- paths inside the scan that nothing reads
+
+
+class TestPathsInsideTheScanThatNothingReads:
+    """A path dependency is the project's own code only when the scan reads it.
+
+    That is a directory inside the scanned directory that the walk enters.
+    An archive, a directory under a name the walk skips, a nested
+    repository, an excluded directory, and a path that is not there are
+    dependencies like a path outside the scanned directory.
+    """
+
+    _UNREAD = {
+        "wheel-own": "./wheels/wheel_own-1.0-py3-none-any.whl",
+        "vendored-py": "./vendor/vendored-py",
+        "submodule-py": "./third_party/submodule-py",
+        "missing-py": "./libs/missing-py",
+        "sdist_own": "./sdists/sdist_own-2.0.tar.gz",
+        "tgz-own": "./tarballs/tgz-own-1.0.0.tgz",
+        "vendored-node": "./vendor/vendored-node",
+        "vendored-gem": "vendor/gems/vendored-gem",
+    }
+    _OWN = ("walked-py", "generated-py", "walked-node", "walked-gem")
+
+    def _project(self, tmp_path: Path) -> Path:
+        project = tmp_path / "project"
+        _dirs(
+            project,
+            "wheels",
+            "sdists",
+            "tarballs",
+            "vendor/vendored-py",
+            "vendor/vendored-node",
+            "vendor/gems/vendored-gem",
+            "third_party/submodule-py",
+            "libs/walked-py",
+            "generated/generated-py",
+            "packages/walked-node",
+            "components/walked-gem",
+        )
+        (project / "wheels" / "wheel_own-1.0-py3-none-any.whl").write_bytes(b"")
+        (project / "sdists" / "sdist_own-2.0.tar.gz").write_bytes(b"")
+        (project / "tarballs" / "tgz-own-1.0.0.tgz").write_bytes(b"")
+        (project / "third_party" / "submodule-py" / ".git").write_text("gitdir: elsewhere\n")
+        _write(
+            project / "pyproject.toml",
+            """\
+            [project]
+            name = "app"
+            version = "1.0"
+            license = "MIT"
+            dependencies = [
+                "regular>=1.0",
+                "wheel-own @ file:./wheels/wheel_own-1.0-py3-none-any.whl",
+                "vendored-py @ file:./vendor/vendored-py",
+                "submodule-py @ file:./third_party/submodule-py",
+                "missing-py @ file:./libs/missing-py",
+                "walked-py @ file:./libs/walked-py",
+                "generated-py @ file:./generated/generated-py",
+            ]
+            """,
+        )
+        _write(project / "requirements.txt", "./sdists/sdist_own-2.0.tar.gz\n")
+        _npm_manifest(
+            project,
+            {
+                "tgz-own": "file:./tarballs/tgz-own-1.0.0.tgz",
+                "vendored-node": "file:./vendor/vendored-node",
+                "walked-node": "file:./packages/walked-node",
+            },
+        )
+        _write(
+            project / "Gemfile",
+            """\
+            source "https://rubygems.org"
+            gem "vendored-gem", path: "vendor/gems/vendored-gem"
+            gem "walked-gem", path: "components/walked-gem"
+            """,
+        )
+        # The registries own every one of these names, under another license.
+        for name in (*self._UNREAD, *self._OWN):
+            _mock_pypi_release(name, "9.9.9", "GPL-3.0-only")
+            _mock_npm_package(name, "9.9.9", "GPL-3.0-only")
+            _mock_gem_latest(name, "9.9.9", "GPL-3.0-only")
+        _mock_pypi_release("regular", "1.0.0")
+        _refuse_everything_else()
+        return project
+
+    @respx.mock
+    def test_archives_skipped_directories_and_missing_paths_are_unknown_rows(self, tmp_path):
+        project = self._project(tmp_path)
+        result, data = _check_json(project, "--no-strict")
+        assert result.exit_code == 0
+        assert _origins(data) == {"regular": "", **self._UNREAD}
+        rows = _rows(data)
+        assert all(rows[name]["license"] == "UNKNOWN" for name in self._UNREAD)
+        assert _requests_mentioning(*self._UNREAD, *self._OWN) == []
+
+    @respx.mock
+    def test_path_into_an_excluded_directory_is_an_unknown_row(self, tmp_path):
+        project = self._project(tmp_path)
+        result, data = _check_json(project, "--no-strict", "--exclude-dirs", "generated")
+        assert result.exit_code == 0
+        assert _origins(data) == {
+            "regular": "",
+            **self._UNREAD,
+            "generated-py": "./generated/generated-py",
+        }
+        assert _requests_mentioning(*self._UNREAD, *self._OWN) == []
+
+    @respx.mock
+    def test_such_a_row_fails_a_strict_scan_until_it_is_reviewed(self, tmp_path):
+        project = self._project(tmp_path)
+        result, data = _check_json(project)
+        assert result.exit_code == 1
+        report = project / "report.json"
+        result = CliRunner().invoke(
+            main, ["init-review-file", "--path", str(project), "--from-report", str(report)]
+        )
+        assert result.exit_code == 0
+        scaffold = (project / REVIEW_FILE_NAME).read_text(encoding="utf-8")
+        assert 'source = "./wheels/wheel_own-1.0-py3-none-any.whl"\n' in scaffold
+        (project / REVIEW_FILE_NAME).write_text(
+            scaffold.replace('license = ""', 'license = "MIT"'), encoding="utf-8", newline="\n"
+        )
+        result, data = _check_json(project)
+        assert result.exit_code == 0
+        assert data["summary"]["reviewed"] == len(self._UNREAD)
+        assert _requests_mentioning(*self._UNREAD, *self._OWN) == []

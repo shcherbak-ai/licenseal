@@ -68,11 +68,13 @@ a branch is not read: which branch a build takes is unknown, so its values
 never reach the project's property scope.
 
 ``<ProjectReference>`` elements point at other project files and are NOT
-NuGet dependencies: nothing is looked up for them. One that points inside
-the scanned directory is the project's own code and is no row (the project
-IDs of the in-tree project files are workspace-local sentinels). One that
-leaves the scanned directory is a ``Dependency`` named after the referenced
-project file, with the path as written as its origin. A path that cannot be
+NuGet dependencies: nothing is looked up for them. One that points into a
+directory of the scanned tree that the scan walks is the project's own code
+and is no row (the project IDs of the in-tree project files are
+workspace-local sentinels). Any other one (outside the scanned directory,
+under a directory the walk skips, or not there) is a ``Dependency`` named
+after the referenced project file, with the path as written as its origin.
+A path that cannot be
 located, because it holds a ``$(Property)`` the project file does not
 define, is the project's own code when the scanned tree has a project file
 of that name.
@@ -415,11 +417,12 @@ def _project_reference_dependencies(
     source: str,
     local_file_names: set[str],
 ) -> list[Dependency]:
-    """One dependency per ``<ProjectReference>`` that leaves the scanned directory.
+    """One dependency per ``<ProjectReference>`` to a project the scan does not read.
 
-    A referenced project inside ``scan_root`` is the project's own code and
-    is skipped. The path is read with the project's own ``$(Property)``
-    values filled in. One that still holds a ``$(…)`` token cannot be
+    A referenced project file in a directory of ``scan_root`` that the scan
+    walks is the project's own code and is skipped. The path is read with
+    the project's own ``$(Property)`` values filled in. One that still
+    holds a ``$(…)`` token cannot be
     located: it is the project's own code when ``local_file_names`` (the
     lowercased names of the project files of the scanned tree) has the
     referenced file's name, and is reported otherwise. An ``Include`` can
@@ -435,7 +438,10 @@ def _project_reference_dependencies(
             if "$(" in expanded:
                 inside = PureWindowsPath(expanded).name.lower() in local_file_names
             else:
-                inside = path_origin(expanded, project_file.parent, scan_root) is None
+                # The scan reads the referenced project when it walks the
+                # directory that holds it.
+                directory = str(PureWindowsPath(expanded).parent)
+                inside = path_origin(directory, project_file.parent, scan_root) is None
             if inside:
                 continue
             out.append(
@@ -491,7 +497,7 @@ def discover_csproj_dependencies(
     Walks every ``.csproj``, ``.fsproj``, and ``.vbproj`` in the tree
     (subject to the shared ``exclude_paths`` set), parses each, and emits
     one :class:`Dependency` per ``<PackageReference>``, and one per
-    ``<ProjectReference>`` that leaves the scanned directory. Returns
+    ``<ProjectReference>`` to a project the scan does not read. Returns
     ``(deps, filtered_count)`` where ``filtered_count`` is the number of
     refs dropped because they pointed at an in-tree workspace-local
     project ID (the rare corner case where a NuGet package shares a name

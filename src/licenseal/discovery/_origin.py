@@ -15,14 +15,21 @@ specific as the manifest or lockfile allows:
 Credentials never reach an origin: the user-info part of a URL and its query
 string are removed.
 
-A path that resolves inside the scanned directory is the project's own code
-and gets no row at all; :func:`path_origin` returns ``None`` for it.
+A path the scan reads is the project's own code and gets no row at all;
+:func:`path_origin` returns ``None`` for it. The scan reads a path when it
+resolves to a directory of the scanned tree that the walk enters: the
+manifests there are read like any other. A path the scan does not read is a
+dependency wherever it is: a path outside the scanned directory, an archive
+file, a directory the walk skips or the user excluded, a path that does not
+exist.
 """
 
 from __future__ import annotations
 
 import re
 from pathlib import Path
+
+from licenseal.discovery._walk import is_walked_directory
 
 # What an origin reads when a lockfile marks a package as not coming from the
 # registry and records nothing that locates it.
@@ -89,9 +96,13 @@ def path_origin(path: str, base_dir: Path, scan_root: Path) -> str | None:
     """Origin of a path dependency, or ``None`` when it is the project's own code.
 
     ``path`` is as written in a file that lives in ``base_dir``; a ``file:``
-    scheme is dropped. A relative path is resolved against ``base_dir``: one
-    that lands inside ``scan_root`` is part of the scanned project and is not
-    a dependency row. Every other path is returned as written.
+    scheme is dropped. A relative path is resolved against ``base_dir``. It
+    is part of the scanned project, and not a dependency row, only when it
+    lands on a directory inside ``scan_root`` that the scan walks. Every
+    other path is returned as written: one outside ``scan_root``, a file (an
+    archive is not scanned), a directory the walk does not enter (a skipped
+    name such as ``vendor``, a nested repository, an excluded directory), and
+    a path that does not exist.
 
     A rooted, drive-qualified, UNC, or home-relative path is never resolved:
     on Windows the first filesystem call on such a path can reach a network
@@ -110,8 +121,10 @@ def path_origin(path: str, base_dir: Path, scan_root: Path) -> str | None:
         return written
     try:
         resolved = (base_dir / normalized).resolve()
-        inside = resolved.is_relative_to(scan_root.resolve())
+        root = scan_root.resolve()
+        own = resolved.is_relative_to(root) and is_walked_directory(resolved, root)
     except (OSError, ValueError, RuntimeError):
-        # A link loop or a name the filesystem rejects: not shown to be inside.
+        # A link loop or a name the filesystem rejects: not shown to be the
+        # project's own code.
         return written
-    return None if inside else written
+    return None if own else written

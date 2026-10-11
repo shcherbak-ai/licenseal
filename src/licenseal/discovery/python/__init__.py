@@ -247,7 +247,7 @@ def source_table_origin(
 
     Empty when the table names no source outside the registry (a version, an
     alternate index). ``None`` when it names the project's own code: a uv
-    ``workspace = true`` member, or a path inside ``scan_root``. A source key
+    ``workspace = true`` member, or a path that the scan reads. A source key
     whose value is not a string is recorded as a gap on ``path``, named
     ``what``; the dependency is then off the registry with no recorded source.
     """

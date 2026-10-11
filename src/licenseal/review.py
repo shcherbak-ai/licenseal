@@ -5,7 +5,7 @@ the resolver could not classify cleanly. Each entry is keyed on the resolved
 ecosystem+package@version triple, so reviews never apply across versions.
 
 A dependency that does not come from a registry (a git repository, a direct
-URL, a path outside the scanned directory) is keyed on ecosystem, package, and
+URL, a path that the scan does not read) is keyed on ecosystem, package, and
 its origin instead: the entry carries a ``source`` key holding the origin
 string. The two kinds of key never match each other's rows.
 """

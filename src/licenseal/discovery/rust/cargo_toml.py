@@ -1,12 +1,12 @@
 """Discover Rust dependencies from Cargo.toml files.
 
-A dependency declared with ``git``, or with a ``path`` outside the scanned
-directory, is not a crates.io release: it is emitted with an origin and is
+A dependency declared with ``git``, or with a ``path`` that the scan does not
+read, is not a crates.io release: it is emitted with an origin and is
 never looked up. So is a registry dependency that a ``[patch]`` or
-``[replace]`` entry redirects to git or to such a path. A ``path`` inside the
-scanned directory is the project's own code and is not a dependency. A
-``registry = "…"`` key names another registry: that dependency stays a
-registry one.
+``[replace]`` entry redirects to git or to such a path. A ``path`` the scan
+reads (a directory of the scanned tree that the walk enters) is the project's
+own code and is not a dependency. A ``registry = "…"`` key names another
+registry: that dependency stays a registry one.
 """
 
 from __future__ import annotations
@@ -105,7 +105,7 @@ def _emit_off_registry(
 ) -> None:
     """Emit a git / path dependency with its origin, or record it as own code.
 
-    A path inside ``scan_root`` is a crate of the project: its name and
+    A path that the scan reads is a crate of the project: its name and
     group go to ``own`` and it is not a dependency.
     """
     crate = _canonical_crate_name(name, spec)
@@ -143,8 +143,8 @@ def _emit_deps(
     ``ws_refs`` (alias name + table group) for the caller to stitch against
     the catalog.
 
-    A git entry, and a path entry outside ``scan_root``, is emitted with its
-    origin. A path entry inside it is recorded in ``own``.
+    A git entry, and a path entry that the scan does not read, is emitted
+    with its origin. A path entry that it reads is recorded in ``own``.
     """
     if not isinstance(section, dict):
         return
@@ -175,11 +175,11 @@ def _parse_cargo_deps(
     """Extract dependencies and workspace-catalog references from one Cargo.toml.
 
     Returns ``(deps, ws_refs, own)``: the dependencies (registry ones with
-    their version, git and out-of-tree path ones with their origin), the
+    their version, git ones and unread path ones with their origin), the
     ``{ workspace = true }`` references this file makes into its workspace's
     ``[workspace.dependencies]`` catalog (stitched by the caller), and the
-    crate name and group of each path dependency inside the scanned
-    directory.
+    crate name and group of each path dependency that the scan
+    reads.
     """
     deps: list[Dependency] = []
     ws_refs: list[tuple[str, DependencyGroup]] = []
@@ -214,7 +214,7 @@ def _patch_origins(
     """Crates this manifest redirects to git or a path, with the origin of each.
 
     Reads ``[patch.<registry>]`` and ``[replace]``. The origin is ``None``
-    for a path inside ``scan_root``: that crate is the project's own code.
+    for a path that the scan reads: that crate is the project's own code.
     An entry that only pins another registry version is not a redirect.
     """
     tables: list[dict[str, Any]] = []
@@ -285,9 +285,9 @@ def _stitch_workspace_refs(
     Group attribution comes from the referencing tables: referenced from any
     prod-side table → PROD, referenced only from dev-dependencies → DEV.
 
-    A referenced git catalog entry, and a path one outside the scanned
-    directory, is emitted with its origin; a catalog path is relative to the
-    catalog's own directory. A path entry inside the scanned directory is
+    A referenced git catalog entry, and a path one that the scan does not
+    read, is emitted with its origin; a catalog path is relative to the
+    catalog's own directory. A path entry that the scan reads is
     appended to ``own``.
     """
     chosen: dict[tuple[Path, str], DependencyGroup] = {}
@@ -334,7 +334,7 @@ def discover_cargo_toml_dependencies(
 
     Cargo workspaces declare `[workspace] members = [...]` at the root and
     per-crate deps in nested Cargo.toml files. Walk the tree, parse each,
-    and filter workspace-internal references (a path dep inside the tree is
+    and filter workspace-internal references (a path dep the scan reads is
     never emitted; this catches version-bare crate-name refs that match a
     local crate `[package].name`).
 
@@ -358,14 +358,14 @@ def discover_cargo_toml_dependencies(
 class CargoSources(NamedTuple):
     """What the Cargo.toml files say about crates that are not registry releases."""
 
-    # Lowercased names of the path dependencies inside the scanned directory
-    # whose own Cargo.toml the scan does not read, by the table that
-    # declares them. They have no row, and are roots of a Cargo.lock graph.
+    # Lowercased names of the path dependencies on a directory the scan
+    # walks that holds no Cargo.toml of a crate of that name, by the table
+    # that declares them. They have no row, and are roots of a Cargo.lock
+    # graph.
     prod_roots: set[str]
     dev_roots: set[str]
     # Lowercased crate name → origin, for every crate declared from, or
-    # redirected to, git or a path. ``None`` for a path inside the scanned
-    # directory.
+    # redirected to, git or a path. ``None`` for a path that the scan reads.
     origins: dict[str, str | None]
     # The subset a ``[patch]`` or ``[replace]`` entry redirects: these apply
     # to a crate wherever it appears in the graph, not only where it is
@@ -383,8 +383,8 @@ def cargo_sources(
     A Cargo.lock records no location for a crate that is built from a path,
     and a registry walk knows nothing of a ``[patch]``; both read it here.
 
-    ``prod_roots`` / ``dev_roots``: a path dependency inside the scanned
-    directory is the project's own code and has no row, but the Cargo.lock
+    ``prod_roots`` / ``dev_roots``: a path dependency that the scan
+    reads is the project's own code and has no row, but the Cargo.lock
     records the registry crates it pulls in. The lockfile pass takes its
     name as a root beside the discovered direct deps, so that closure is
     attributed instead of dropped as unreachable. A path dependency on a
@@ -415,8 +415,8 @@ def _scan_cargo_tomls(
     Returns ``(deps, own, patches, local_names)``: the dependencies
     (workspace-catalog references stitched, ``[patch]`` / ``[replace]``
     redirects applied, workspace-local names not yet filtered); the crate
-    name and group of each dependency that is a path inside the scanned
-    directory; the crates some manifest redirects to git or a path, with
+    name and group of each dependency that is a path that the scan
+    reads; the crates some manifest redirects to git or a path, with
     the origin of each; and the ``[package].name`` of every crate in the
     tree.
     """

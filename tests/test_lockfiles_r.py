@@ -170,8 +170,12 @@ class TestRenvEntryOrigin:
             "../pkgs/a_1.0.tar.gz"
         )
 
-    def test_local_path_inside_the_scanned_directory_is_own_code(self, tmp_path):
-        assert self._origin(tmp_path, Source="Local", RemoteUrl="renv/local/a_1.0.tar.gz") is None
+    def test_local_directory_the_scan_walks_is_own_code(self, tmp_path):
+        (tmp_path / "pkgs" / "a").mkdir(parents=True)
+        assert self._origin(tmp_path, Source="Local", RemoteUrl="pkgs/a") is None
+        # A source archive is not scanned, wherever it lies.
+        archive = "renv/local/a_1.0.tar.gz"
+        assert self._origin(tmp_path, Source="Local", RemoteUrl=archive) == archive
 
     def test_source_with_no_locator_keeps_its_label(self, tmp_path):
         assert self._origin(tmp_path, Source="unknown") == "unknown"
@@ -236,6 +240,7 @@ class TestParseRenvLock:
                 "cli": {"Package": "cli", "Version": "3.6.0", "Source": "Repository"},
             }
         }
+        (tmp_path / "pkgs" / "own").mkdir(parents=True)
         (tmp_path / "renv.lock").write_text(json.dumps(lock), encoding="utf-8")
         deps = parse_renv_lock(
             tmp_path / "renv.lock", direct_names=set(), dev_direct_names=set(), include_dev=True
@@ -376,6 +381,7 @@ class TestParsePackratLock:
 
     def test_origins(self, tmp_path):
         (tmp_path / "packrat").mkdir()
+        (tmp_path / "local" / "inside").mkdir(parents=True)
         lock = tmp_path / "packrat" / "packrat.lock"
         lock.write_text(
             textwrap.dedent(

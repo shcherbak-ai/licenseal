@@ -59,9 +59,8 @@ Scope-to-group mapping (per the Maven scope semantics):
   ``<dependencyManagement>``; not a real dependency)
 
 A ``system``-scoped dependency is a JAR on the local filesystem, named by
-``<systemPath>``; no repository is asked for it. It is emitted with that
-path as its origin when the path leaves the scanned directory, and is not a
-dependency when the path is inside it.
+``<systemPath>``; no repository is asked for it, and a JAR is not scanned
+wherever it lies. It is emitted with that path, as written, as its origin.
 
 Profiles are unioned, not evaluated. A ``<dependency>`` declared under
 ``<profiles><profile><dependencies>`` is emitted like a top-level one,
@@ -88,7 +87,7 @@ from pathlib import Path
 
 from defusedxml import ElementTree as DefusedET
 
-from licenseal.discovery._origin import UNRECORDED, path_origin
+from licenseal.discovery._origin import UNRECORDED
 from licenseal.discovery._read import read_xml_bytes, record_parse_failure
 from licenseal.discovery._walk import walk_project_files
 from licenseal.models import Dependency, DependencyGroup, Ecosystem
@@ -463,26 +462,6 @@ def _expand_properties(value: str, props: dict[str, str]) -> str:
     return value
 
 
-def _system_path_origin(
-    system_path: str, props: dict[str, str], pom_dir: Path, scan_root: Path
-) -> str | None:
-    """Origin of a ``system``-scoped dependency: its ``<systemPath>`` as written.
-
-    ``None`` when the path is inside ``scan_root``: that file is part of the
-    scanned project. ``${project.basedir}`` and ``${basedir}`` are the POM's
-    own directory. A path that still holds a ``${…}`` token after expansion
-    cannot be located and is reported; an entry with no ``<systemPath>`` has
-    an unrecorded source.
-    """
-    written = system_path.strip()
-    if not written:
-        return UNRECORDED
-    expanded = _expand_properties(written, {"project.basedir": ".", "basedir": ".", **props})
-    if "${" in expanded:
-        return written
-    return None if path_origin(expanded, pom_dir, scan_root) is None else written
-
-
 def _scope_to_group(scope: str) -> DependencyGroup:
     """Map a Maven dependency scope to ``DependencyGroup``.
 
@@ -594,8 +573,8 @@ def discover_pom_xml_dependencies(
     * BOM-import filter (``<scope>import</scope>`` + ``<type>pom</type>`` skipped)
     * Workspace-local filter (sibling-artifact coordinates dropped, count
       surfaced in ``filtered_count``)
-    * ``system`` scope: emitted with the ``<systemPath>`` as its origin and no
-      version, or skipped when that path is inside the scanned directory
+    * ``system`` scope: emitted with the ``<systemPath>``, as written, as its
+      origin and no version
 
     Coordinate format on ``Dependency.name`` is ``"groupId:artifactId"``
     (Maven canonical, colon-joined). Matches the ``api.deps.dev`` ``name``
@@ -662,13 +641,9 @@ def discover_pom_xml_dependencies(
                 continue
             origin = ""
             if dep.scope == "system":
-                # A JAR on the local filesystem, never a repository artifact.
-                located = _system_path_origin(
-                    dep.system_path, dep_props, pom_path.parent, project_path
-                )
-                if located is None:
-                    continue
-                origin, version = located, ""
+                # A JAR on the local filesystem, never a repository artifact,
+                # and not something the scan reads wherever it lies.
+                origin, version = dep.system_path.strip() or UNRECORDED, ""
             out.append(
                 Dependency(
                     name=coord,

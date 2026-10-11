@@ -477,12 +477,16 @@ class TestCargoSources:
             "real-crate": ("", "git+https://example.org/real.git", DependencyGroup.PROD)
         }
 
-    def test_path_dependency_inside_the_scanned_directory_is_not_a_dependency(self, tmp_path):
-        # ``core`` is scanned through its own Cargo.toml. ``vendored`` is in
-        # the tree but under a directory the scan skips, so nothing declares
-        # its dependencies: it is a root of the lockfile graph, with no row.
+    def test_path_dependency_inside_the_scanned_directory(self, tmp_path):
+        # ``core`` is scanned through its own Cargo.toml. ``unscanned`` is a
+        # directory the scan walks that holds no Cargo.toml: the project's
+        # own code all the same, and a root of the lockfile graph with no
+        # row. ``vendored`` is under a directory the scan skips and
+        # ``missing`` is not there: nothing reads either, so each is a
+        # dependency like ``elsewhere``.
         project = tmp_path / "project"
-        project.mkdir()
+        for directory in ("crates/unscanned", "crates/dev-unscanned", "vendor/vendored"):
+            (project / directory).mkdir(parents=True)
         _write(
             project,
             """\
@@ -491,11 +495,13 @@ class TestCargoSources:
 
             [dependencies]
             core = { path = "core" }
+            unscanned = { path = "crates/unscanned" }
             vendored = { path = "vendor/vendored" }
+            missing = { path = "crates/missing" }
             elsewhere = { path = "../elsewhere" }
 
             [dev-dependencies]
-            dev-vendored = { path = "vendor/dev-vendored" }
+            dev-unscanned = { path = "crates/dev-unscanned" }
             """,
         )
         (project / "core").mkdir()
@@ -503,12 +509,18 @@ class TestCargoSources:
             '[package]\nname = "core"\n\n[dependencies]\ncore-dep = "1.0"\n'
         )
         assert self._rows(project) == {
+            "vendored": ("", "vendor/vendored", DependencyGroup.PROD),
+            "missing": ("", "crates/missing", DependencyGroup.PROD),
             "elsewhere": ("", "../elsewhere", DependencyGroup.PROD),
             "core-dep": ("1.0", "", DependencyGroup.PROD),
         }
         sources = cargo_sources(project)
-        assert (sources.prod_roots, sources.dev_roots) == ({"vendored"}, {"dev-vendored"})
-        assert sources.origins == {"elsewhere": "../elsewhere"}
+        assert (sources.prod_roots, sources.dev_roots) == ({"unscanned"}, {"dev-unscanned"})
+        assert sources.origins == {
+            "vendored": "vendor/vendored",
+            "missing": "crates/missing",
+            "elsewhere": "../elsewhere",
+        }
 
     def test_workspace_catalog_entries_referenced_by_a_member(self, tmp_path):
         project = tmp_path / "project"
@@ -525,12 +537,13 @@ class TestCargoSources:
             renamed = { git = "https://example.org/real.git", package = "real-crate" }
             unused-fork = { git = "https://example.org/unused.git" }
             shared = { path = "../shared" }
-            inner = { path = "vendor/inner" }
+            inner = { path = "crates/inner" }
             no-source = { features = ["x"] }
             serde = "1.0"
             """,
         )
         (project / "crates" / "member").mkdir(parents=True)
+        (project / "crates" / "inner").mkdir()
         (project / "crates" / "member" / "Cargo.toml").write_text(
             textwrap.dedent("""\
                 [package]
@@ -563,7 +576,7 @@ class TestCargoSources:
 
     def test_patch_and_replace_redirect_a_registry_dependency(self, tmp_path):
         project = tmp_path / "project"
-        project.mkdir()
+        (project / "patches" / "own-fix").mkdir(parents=True)
         _write(
             project,
             """\
@@ -606,8 +619,8 @@ class TestCargoSources:
             "already-git": ("", "git+https://example.org/already.git", prod),
         }
         sources = cargo_sources(project)
-        # A crate patched to a path inside the tree is the project's own
-        # code: no row, and a root of the lockfile graph.
+        # A crate patched to a directory the scan walks is the project's
+        # own code: no row, and a root of the lockfile graph.
         assert sources.prod_roots == {"own-fix"}
         assert sources.patches == {
             "serde": "git+https://example.org/serde.git@fix",

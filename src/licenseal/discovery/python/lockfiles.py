@@ -25,10 +25,10 @@ the section the entry lives in: ``default`` is PROD, ``develop`` is DEV.
 Without edges, transitive ancestors stay empty for that format.
 
 A package a lockfile takes from a git repository, a direct URL, or a path
-outside the scanned directory is not a PyPI release. Its row carries an
+that the scan does not read is not a PyPI release. Its row carries an
 ``origin`` (the repository and the locked commit, the URL and its hash, the
 path) and is never looked up. A package pinned to an alternate index is still
-a registry row. A path inside the scanned directory is the project's own
+a registry row. A path that the scan reads is the project's own
 code: it stays in the edge graph and gets no row.
 """
 
@@ -113,8 +113,8 @@ def parse_python_lockfile(
     """Dispatch to the appropriate parser based on filename.
 
     ``scan_root`` is the scanned directory, the lockfile's own directory when
-    omitted. A package the lockfile takes from a path inside it is the
-    project's own code and gets no row.
+    omitted. A package the lockfile takes from a path that the scan reads is
+    the project's own code and gets no row.
     """
     scan_root = scan_root or path.parent
     if path.name == "uv.lock":
@@ -256,7 +256,7 @@ def _uv_source_origin(
     with no source table. ``git`` is the repository plus the commit uv
     writes as the URL fragment; ``url`` the URL plus the artifact's hash;
     ``path`` / ``directory`` / ``editable`` a path, ``None`` when it is
-    inside ``scan_root``. ``virtual`` is always the project itself.
+    that the scan reads. ``virtual`` is always the project itself.
     """
     if "virtual" in source:
         return None
@@ -294,9 +294,9 @@ def parse_uv_lock(
 
     A package whose ``source`` is ``git``, ``url``, or a path outside
     ``scan_root`` is a row with an origin, at the version the lock records
-    for it. The project itself and the packages under ``scan_root``
-    (``virtual``, and ``editable`` / ``directory`` / ``path`` inside it) are
-    not rows.
+    for it. The project itself and its own packages (``virtual``, and an
+    ``editable`` / ``directory`` / ``path`` that the scan reads) are not
+    rows.
     """
     scan_root = scan_root or path.parent
     prod_root_names = {_canon_name(n) for n in prod_root_names}
@@ -401,7 +401,7 @@ def _poetry_source_origin(path: Path, pkg: dict[str, Any], scan_root: Path) -> s
     index). ``git`` is the repository plus ``resolved_reference`` (the locked
     commit), or ``reference`` when no commit is recorded. ``url`` is the URL
     plus the hash of the package's one file. ``directory`` and ``file`` are a
-    path, ``None`` when it is inside ``scan_root``. Any other type is not a
+    path, ``None`` when the scan reads it. Any other type is not a
     registry and records only its URL.
     """
     source = typed_field(path, pkg, "source", dict, _PACKAGE_ENTRY) or {}
@@ -441,7 +441,7 @@ def parse_poetry_lock(
 
     A package whose ``[package.source]`` is ``git``, ``url``, or a
     ``directory`` / ``file`` outside ``scan_root`` is a row with an origin.
-    One inside ``scan_root`` stays in the edge graph and is not a row.
+    One that the scan reads stays in the edge graph and is not a row.
     """
     scan_root = scan_root or path.parent
     prod_root_names = {_canon_name(n) for n in prod_root_names}

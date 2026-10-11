@@ -749,11 +749,15 @@ class TestRequirementsDiscovery:
             ("real-dep", ""),
         ]
 
-    def test_local_path_lines_inside_the_project_yield_no_dependency(self, tmp_path):
-        # A local wheel, archive, or directory path inside the scanned
-        # directory is the project's own code, and its first path segment
-        # must not be reported as a package name. The drive-qualified paths
-        # are outside it: each is one dependency, named after the wheel.
+    def test_local_path_lines_inside_the_project(self, tmp_path):
+        # A directory the scan walks is the project's own code. A wheel or an
+        # archive is not something the scan reads, wherever it lies: each is
+        # one dependency, named after the file and never after its first
+        # path segment. So is each drive-qualified path.
+        for directory in ("libs/local_pkg", "relative/local_pkg", "wheelhouse/wheels", "downloads"):
+            (tmp_path / directory).mkdir(parents=True)
+        (tmp_path / "wheelhouse" / "wheels" / "local_pkg-1.0-py3-none-any.whl").write_bytes(b"")
+        (tmp_path / "downloads" / "local_pkg-1.0.tar.gz").write_bytes(b"")
         (tmp_path / "requirements.txt").write_text(
             textwrap.dedent("""\
             wheelhouse/wheels/local_pkg-1.0-py3-none-any.whl
@@ -769,6 +773,9 @@ class TestRequirementsDiscovery:
         )
         deps, _ = discover_all_dependencies(tmp_path)
         assert [(d.name, d.version_constraint, d.origin) for d in deps] == [
+            ("local_pkg", "", "wheelhouse/wheels/local_pkg-1.0-py3-none-any.whl"),
+            ("local_pkg", "", "downloads/local_pkg-1.0.tar.gz"),
+            ("local_pkg", "", "wheelhouse\\wheels\\local_pkg-1.0-py3-none-any.whl"),
             ("local_pkg", "", "C:\\wheelhouse\\local_pkg-1.0-py3-none-any.whl"),
             ("local_pkg", "", "C:/wheelhouse/local_pkg-1.0-py3-none-any.whl"),
             ("real-dep", "==1.0", ""),
@@ -1221,7 +1228,10 @@ class TestPipfileDiscovery:
         deps = discover_pipfile_dependencies(tmp_path)
         assert deps[0].version_constraint == ""
 
-    def test_git_source_carries_an_origin_and_local_paths_are_own_code(self, tmp_path):
+    def test_git_source_and_archive_carry_an_origin_and_a_local_directory_is_own_code(
+        self, tmp_path
+    ):
+        (tmp_path / "local").mkdir()
         (tmp_path / "Pipfile").write_text(
             textwrap.dedent("""\
             [packages]
@@ -1234,6 +1244,7 @@ class TestPipfileDiscovery:
         deps = discover_pipfile_dependencies(tmp_path)
         assert [(d.name, d.version_constraint, d.origin) for d in deps] == [
             ("from-git", "", "git+https://example.com/repo.git"),
+            ("from-file", "", "./dist/pkg.tar.gz"),
             ("real", ">=1", ""),
         ]
 

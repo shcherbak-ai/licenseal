@@ -172,11 +172,12 @@ class TestPnpmLock:
             lockfileVersion: '9.0'
             packages:
               a@link:../a: {}
-              d@file:local/d.tgz: {resolution: {tarball: file:local/d.tgz}}
+              d@file:local/d: {resolution: {directory: local/d, type: directory}}
             """,
         )
-        # A linked package and an archive inside the scanned directory are the
-        # project's own code: read, and no rows.
+        (tmp_path / "local" / "d").mkdir(parents=True)
+        # A linked package and a directory the scan walks are the project's
+        # own code: read, and no rows.
         rows, diags = _resolve(tmp_path)
         assert rows == _NPM_UNPINNED
         assert diags == []
@@ -281,6 +282,7 @@ class TestPackageLock:
         ids=["empty", "own-project-only", "workspace-links-only"],
     )
     def test_lockfile_with_no_registry_package_is_clean(self, tmp_path: Path, packages):
+        (tmp_path / "packages" / "link").mkdir(parents=True)
         _npm(
             tmp_path, "package-lock.json", json.dumps({"lockfileVersion": 3, "packages": packages})
         )
@@ -905,6 +907,7 @@ class TestComposerLock:
 
     def test_only_local_path_packages_is_clean(self, tmp_path: Path):
         path = {"type": "path", "url": "packages/a"}
+        (tmp_path / "packages" / "a").mkdir(parents=True)
         self._project(
             tmp_path, {"packages": [{"name": "a/a", "version": "dev-main", "dist": path}]}
         )

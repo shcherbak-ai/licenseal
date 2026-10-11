@@ -126,8 +126,9 @@ class TestParseComposerLockfile:
         assert all(d.ecosystem == Ecosystem.PHP for d in deps)
 
     def test_path_source_filtered(self, tmp_path):
-        # A ``dist.type == "path"`` entry inside the scanned directory is
-        # workspace-local — filter out.
+        # A ``dist.type == "path"`` entry that points at a directory the scan
+        # walks is workspace-local — filter out.
+        (tmp_path / "packages" / "sibling").mkdir(parents=True)
         (tmp_path / "composer.lock").write_text(
             json.dumps(
                 {
@@ -417,9 +418,10 @@ class TestParseEdgeCases:
 
     def test_source_path_type_also_filtered(self, tmp_path):
         # ``source.type == "path"`` (rather than dist.type) — both shapes
-        # signal a local path. Inside the scanned directory it is
+        # signal a local path. A directory the scan walks is
         # workspace-local. A path entry that records no path is not shown to
-        # be inside it: it is a row.
+        # be one: it is a row.
+        (tmp_path / "sib").mkdir()
         (tmp_path / "composer.lock").write_text(
             json.dumps(
                 {

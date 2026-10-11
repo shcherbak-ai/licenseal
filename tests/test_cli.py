@@ -7318,6 +7318,8 @@ class TestCargoOffRegistryDependencyClosure:
 
     @staticmethod
     def _write_project(tmp_path, forked_declaration: str, forked_source: str | None) -> None:
+        # A directory the scan walks, with no Cargo.toml of its own.
+        (tmp_path / "crates" / "forked").mkdir(parents=True)
         (tmp_path / "Cargo.toml").write_text(
             TestCargoOffRegistryDependencyClosure._MANIFEST + forked_declaration, encoding="utf-8"
         )
@@ -7363,10 +7365,16 @@ class TestCargoOffRegistryDependencyClosure:
                 None,
                 {("forked", "0.3.0"): ("prod", "unknown")},
             ),
-            # A path inside the scanned directory is the project's own code.
-            ('forked = { path = "vendor/forked" }\n', None, {}),
+            # A directory the scan walks is the project's own code.
+            ('forked = { path = "crates/forked" }\n', None, {}),
+            # One it skips is not: nothing reads what is vendored there.
+            (
+                'forked = { path = "vendor/forked" }\n',
+                None,
+                {("forked", "0.3.0"): ("prod", "unknown")},
+            ),
         ],
-        ids=["git", "path-outside", "path-inside"],
+        ids=["git", "path-outside", "path-walked", "path-vendored"],
     )
     def test_copyleft_crate_behind_an_off_registry_dependency_fails_the_check(
         self, tmp_path, forked_declaration, forked_source, forked_row
@@ -7426,10 +7434,10 @@ class TestCargoOffRegistryDependencyClosure:
     def test_report_lists_each_crate_once_when_an_ancestor_has_no_row(
         self, tmp_path, output_format
     ):
-        # ``forked`` is the first ancestor of three rows and, being a path
-        # inside the scanned directory, has no row of its own. Each crate is
+        # ``forked`` is the first ancestor of three rows and, being a
+        # directory the scan walks, has no row of its own. Each crate is
         # still listed exactly once.
-        self._write_project(tmp_path, 'forked = { path = "vendor/forked" }\n', None)
+        self._write_project(tmp_path, 'forked = { path = "crates/forked" }\n', None)
         out = tmp_path / "report.out"
         result = CliRunner().invoke(
             main, ["check", "--path", str(tmp_path), "-f", output_format, "-o", str(out)]

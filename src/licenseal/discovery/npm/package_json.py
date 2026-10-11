@@ -45,7 +45,7 @@ def _spec_origin(spec: str, manifest_dir: Path, scan_root: Path) -> str | None:
     """Origin a dependency spec declares.
 
     Empty for a registry spec; ``None`` for the project's own code, which is a
-    ``workspace:`` spec or a path inside ``scan_root``.
+    ``workspace:`` spec or a path that the scan reads.
     """
     if spec.startswith(_WORKSPACE_PREFIX):
         return None

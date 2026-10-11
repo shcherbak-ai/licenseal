@@ -90,7 +90,7 @@ def parse_packrat_lock(
     """Parse ``packrat.lock`` into Dependencies with edge-aware group attribution.
 
     ``scan_root`` is the scanned directory, the lockfile's own directory when
-    omitted. A local package that resolves inside it gets no row.
+    omitted. A local package at a path that the scan reads gets no row.
     """
     text = decode_lockfile_text(path)
     if text is None:

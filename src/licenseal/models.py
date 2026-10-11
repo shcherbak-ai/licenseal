@@ -98,7 +98,7 @@ class Dependency:
     direct_ancestors: tuple[str, ...] = ()
     source: str = ""
     # Where the dependency comes from when that is not the registry: a git
-    # repository, a direct URL, or a path outside the scanned directory, as
+    # repository, a direct URL, or a path that the scan does not read, as
     # one normalized string (see `licenseal.discovery._origin`). Empty for a
     # registry package. A dependency with an origin is never looked up on a
     # registry: its license is UNKNOWN until a review keyed on the origin

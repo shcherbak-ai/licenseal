@@ -40,7 +40,7 @@ from licenseal.discovery._read import (
     record_parse_failure,
     record_unlisted_dependencies,
 )
-from licenseal.discovery._walk import walk_project_files
+from licenseal.discovery._walk import walk_project_files, with_scan_exclusions
 from licenseal.discovery.dotnet import (
     find_nuget_lockfiles,
     find_paket_lockfiles,
@@ -180,6 +180,7 @@ from licenseal.resolvers.version_selection import (
 )
 
 
+@with_scan_exclusions
 def resolve_transitive(
     direct_deps: list[Dependency],
     project_path: Path,
@@ -332,7 +333,7 @@ def resolve_transitive(
         locked = []
         rust_known_names: set[str] = set()
         for rust_lock in rust_locks:
-            # A path dependency inside the scanned directory has no row, but
+            # A path dependency that the scan reads has no row, but
             # the lockfile records the registry crates it pulls in. It is a
             # root of the lockfile graph all the same; without it those
             # crates are unreachable and dropped as orphans.

@@ -1118,7 +1118,10 @@ class TestParsePipfileLock:
         )
         assert {d.name for d in deps} == {"click"}
 
-    def test_git_source_carries_an_origin_and_local_paths_are_own_code(self, tmp_path):
+    def test_git_source_and_archive_carry_an_origin_and_a_local_directory_is_own_code(
+        self, tmp_path
+    ):
+        (tmp_path / "local").mkdir()
         path = self._write(
             tmp_path,
             """\
@@ -1137,6 +1140,7 @@ class TestParsePipfileLock:
         )
         assert [(d.name, d.version_constraint, d.origin) for d in deps] == [
             ("git-dep", "", "git+https://example.com/repo.git@abc"),
+            ("file-dep", "", "./dist/pkg.tar.gz"),
             ("real", "==1.0.0", ""),
         ]
 

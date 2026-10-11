@@ -76,7 +76,7 @@ def _entry_origin(entry: dict[str, str], lock_dir: Path, scan_root: Path) -> str
     """Origin of a renv ``Packages`` entry; empty when it resolves against the CRAN index.
 
     ``entry`` holds the entry's string fields, stripped. ``None`` is a
-    ``Local`` package inside the scanned directory.
+    ``Local`` package that the scan reads.
     """
     source = entry["Source"]
     repo = entry["Repository"]
@@ -117,7 +117,7 @@ def parse_renv_lock(
     without a usable ``Source`` is not a CRAN package.
 
     ``scan_root`` is the scanned directory, the lockfile's own directory when
-    omitted. A ``Local`` package that resolves inside it gets no row.
+    omitted. A ``Local`` package at a path that the scan reads gets no row.
     """
     data = root_table(path, load_json(path))
     if data is None:

@@ -15,7 +15,7 @@ child-dependency edges are the bracketed list of ``{:child, "req", [opts]}``
 tuples (the second ``[...]`` element, after the ``[:mix]`` build-tools list).
 Any other tuple (``:git``, ``:path``, another SCM) is not a hex.pm package: it
 is emitted with an ``origin`` (the repository URL plus the locked commit for
-``:git``) and is never looked up. A ``:path`` inside the scanned directory is
+``:git``) and is never looked up. A ``:path`` that the scan reads is
 the project's own code and gets no row.
 
 ``mix.lock`` carries no license and no dev/prod env — both live in ``mix.exs``.
@@ -183,7 +183,7 @@ def _parse_lock_tuple(
     Any other tuple has no registry version or edges. ``{:git, "url", "sha",
     ...}`` → the repository and the locked commit; another SCM atom is read
     the same way under its own name. ``{:path, "dir", ...}`` → the path, or
-    ``None`` when it is inside the scanned directory.
+    ``None`` when the scan reads it.
     """
     elements = _split_top_level(body)
     if not elements:
@@ -236,7 +236,7 @@ def parse_mix_lock(
     ``include_dev=False`` the DEV-attributed entries are filtered out.
 
     ``scan_root`` is the scanned directory, the lockfile's own directory when
-    omitted. A ``:path`` entry that resolves inside it gets no row.
+    omitted. A ``:path`` entry that the scan reads gets no row.
     """
     text = decode_lockfile_text(path)
     if text is None:

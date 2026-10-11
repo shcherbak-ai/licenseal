@@ -1141,6 +1141,7 @@ _NO_DEPENDENCY_PROJECTS = {
         "App/packages.lock.json": json.dumps(
             {"version": 1, "dependencies": {"net8.0": {"lib": {"type": "Project"}}}}
         ),
+        "Lib/Lib.csproj": '<Project Sdk="Microsoft.NET.Sdk" />\n',
     },
     "bundler gem": {
         "Gemfile": 'source "https://rubygems.org"\ngemspec\n',

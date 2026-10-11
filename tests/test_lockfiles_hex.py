@@ -147,14 +147,14 @@ class TestParseMixLock:
 
     def test_path_entry_outside_the_scanned_directory_is_a_row(self, tmp_path):
         project = tmp_path / "project"
-        project.mkdir()
+        (project / "apps" / "own").mkdir(parents=True)
         (project / "mix.lock").write_text(
             '%{\n  "elsewhere": {:path, "../elsewhere"},\n  "own": {:path, "apps/own"},\n}\n'
         )
         deps = parse_mix_lock(
             project / "mix.lock", direct_names=set(), dev_direct_names=set(), include_dev=True
         )
-        # ``apps/own`` is inside the scanned directory: the project's own code.
+        # ``apps/own`` is a directory the scan walks: the project's own code.
         assert [(d.name, d.origin) for d in deps] == [("elsewhere", "../elsewhere")]
 
     def test_ecosystem_stamped_as_hex(self):

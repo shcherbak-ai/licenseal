@@ -18,7 +18,7 @@ package index — for our purposes a hex package looked up by name. ``hex VER``
 pins an exact version (``==VER``). Every other fetch method is not a hex.pm
 package: the dep is emitted with an ``origin`` (the repository URL plus the
 commit-ish for ``git``, the path for ``cp`` / ``ln``) and never looked up. A
-``cp`` / ``ln`` path inside the scanned directory is the project's own code.
+``cp`` / ``ln`` path that the scan reads is the project's own code.
 There is no erlang.mk lockfile, so resolution is manifest-only (the registry
 walk against hex.pm). All deps are :class:`~licenseal.models.Ecosystem.HEX`.
 """
@@ -92,7 +92,7 @@ def _parse_dep_def(
     """A ``dep_X`` value → (hex_name_override | None, version, origin).
 
     The origin is empty for a ``hex`` dep and ``None`` for a ``cp`` / ``ln``
-    path inside the scanned directory. A value in the legacy
+    path that the scan reads. A value in the legacy
     ``<repository> <commit>`` form, with no fetch method, is a git
     repository. Anything else (``git-submodule``, ``fail``, a computed or
     empty value) is not resolvable against hex.pm and records no source.
@@ -119,7 +119,7 @@ def _parse_makefile_text(
     """Extract direct Dependencies from an erlang.mk project Makefile.
 
     Returns ``(deps, own)``: ``own`` names the deps copied or linked from a
-    path inside the scanned directory, which are the project's own code.
+    path that the scan reads, which are the project's own code.
     """
     if not _is_erlang_mk(text):
         return [], []

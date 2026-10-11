@@ -386,6 +386,7 @@ class TestChooseBranchesAndReferenceMetadata:
         # Branch conditions are not evaluated: each branch's references are
         # emitted, a nested <Choose> included, with the project's properties
         # and the per-reference DEV rules applied as outside a <Choose>.
+        (tmp_path / "Sibling").mkdir()
         _write(
             tmp_path / "App.csproj",
             """<Project Sdk="Microsoft.NET.Sdk">

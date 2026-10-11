@@ -113,7 +113,7 @@ def _parse_dep_line(
     """Parse a single dependency line from setup.cfg.
 
     A direct reference (``name @ <url>``) is a dependency with an origin; one
-    to a path inside ``scan_root`` is the project's own code and yields None.
+    to a path that the scan reads is the project's own code and yields None.
     """
     if not line or line.startswith("#"):
         return None

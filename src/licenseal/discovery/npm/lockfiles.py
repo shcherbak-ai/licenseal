@@ -12,10 +12,10 @@ ancestors.
 `pnpm-lock.yaml` is YAML with importer-scoped packages map.
 
 A package a lockfile records as fetched from a git repository, a tarball URL
-that is not a registry's, or a path outside the scanned directory is not a
+that is not a registry's, or a path that the scan does not read is not a
 registry release. Its row carries an ``origin`` and is never looked up. A
 package fetched from another registry is still a registry row. A workspace
-member, and a path inside the scanned directory, is the project's own code:
+member, and a path that the scan reads, is the project's own code:
 it stays in the edge graph and gets no row.
 """
 
@@ -111,8 +111,8 @@ def parse_npm_lockfile(
     """Dispatch to the appropriate parser based on filename.
 
     ``scan_root`` is the scanned directory, the lockfile's own directory when
-    omitted. A package the lockfile takes from a path inside it is the
-    project's own code and gets no row.
+    omitted. A package the lockfile takes from a path that the scan reads is
+    the project's own code and gets no row.
     """
     scan_root = scan_root or path.parent
     if path.name == "package-lock.json":
@@ -336,10 +336,10 @@ def parse_package_lock_json(
         resolved = typed_field(path, meta, "resolved", str, _PACKAGES_ENTRY) or ""
         origin: str | None
         if "link" in meta:
-            # ``node_modules/<name>`` linked to a directory. Inside the
-            # scanned directory that is a workspace member: read, and not a
-            # row. Outside it, it is a path dependency, at the version the
-            # directory's own entry records.
+            # ``node_modules/<name>`` linked to a directory. One the scan
+            # reads is a workspace member: read, and not a row. Any other is
+            # a path dependency, at the version the directory's own entry
+            # records.
             read += 1
             origin = path_origin(resolved, path.parent, scan_root) if resolved else None
             target = packages.get(resolved)
@@ -506,7 +506,7 @@ def parse_pnpm_lock(
     A package that does not come from the registry (a git repository, a
     tarball URL, a directory or archive outside ``scan_root``) is a row with
     an origin, read from its ``resolution``; it is never looked up. One
-    inside ``scan_root``, or linked from the workspace, is the project's own
+    that the scan reads, or linked from the workspace, is the project's own
     code and gets no row.
     """
     scan_root = scan_root or path.parent
@@ -766,7 +766,7 @@ def _yarn_spec_origin(spec: str, lock_dir: Path, scan_root: Path) -> str | None:
     """Origin the spec of a Yarn Classic descriptor declares.
 
     Empty for a registry spec (a range, a tag, an ``npm:`` alias); ``None``
-    for a path inside ``scan_root``.
+    for a path that the scan reads.
     """
     spec_path = path_spec(spec)
     if spec_path is not None:
@@ -908,7 +908,7 @@ def _parse_yarn_berry(
 
         # ``name@workspace:path`` is one of the project's own packages, not a
         # registry package: its edges stay in the graph, but it is no row.
-        # So is a package resolved from a path inside the scanned directory.
+        # So is a package resolved from a path that the scan reads.
         resolution = typed_field(path, meta, "resolution", str, entry) or first
         checksum = typed_field(path, meta, "checksum", str, entry) or ""
         origin = (
@@ -1157,7 +1157,7 @@ def parse_bun_lock(
     For a package that is not a registry release, what follows ``name@`` is
     the spec it was installed from (``github:user/repo#<commit>``, a git or
     tarball URL, ``file:../dir``): that entry is a row with an origin and no
-    version, or no row when the path is inside ``scan_root``.
+    version, or no row when the scan reads the path.
     """
     scan_root = scan_root or path.parent
     raw_text = decode_text(path)
@@ -1203,7 +1203,7 @@ def parse_bun_lock(
 
         # ``name@workspace:path`` is one of the project's own packages, not a
         # registry package: its edges stay in the graph, but it is no row.
-        # So is a package installed from a path inside the scanned directory.
+        # So is a package installed from a path that the scan reads.
         origin: str | None
         spec_path = path_spec(version)
         if version.startswith("workspace:"):

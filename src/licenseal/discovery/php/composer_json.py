@@ -23,12 +23,12 @@ What composer.json alone lets us determine:
 * a ``package`` repository defines a package inline, with its ``source`` or
   ``dist``: a requirement of that name is not a Packagist package and is
   emitted with that origin;
-* a ``path`` repository inside the scanned directory holds the project's own
+* a ``path`` repository that the scan reads holds the project's own
   packages: a requirement that names one (by the ``name`` of a composer.json
   found there) is not a dependency.
 
 What it does not: which requirements a ``vcs`` repository, or a ``path``
-repository outside the scanned directory, provides. Composer learns that by
+repository that the scan does not read, provides. Composer learns that by
 reading the repository. Those names are looked up on Packagist unless a
 composer.lock says where each package came from. A ``composer`` repository
 is another registry: its packages are looked up on Packagist by name.
@@ -140,7 +140,7 @@ def package_origin(package: dict[str, Any], base_dir: Path, scan_root: Path) -> 
     ``package`` is a composer.lock entry or an inline ``package`` repository
     definition. ``source`` is the repository plus its ``reference`` (the
     locked commit in a lockfile). Without one, ``dist`` is a path
-    (``None`` when it is inside ``scan_root``) or a download URL plus its
+    (``None`` when the scan reads it) or a download URL plus its
     ``shasum``.
     """
     source = package.get("source")

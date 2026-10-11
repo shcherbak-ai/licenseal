@@ -454,7 +454,7 @@ def _off_registry_license_info(dep: Dependency) -> LicenseInfo:
     """UNKNOWN for a dependency that does not come from a registry.
 
     A dependency with an ``origin`` (a git repository, a direct URL, a path
-    outside the scanned directory) has no registry record, and a registry
+    that the scan does not read) has no registry record, and a registry
     package of the same name is a different package. Nothing is requested
     for it. ``resolved_version`` is the version a lockfile records for it,
     empty otherwise.

@@ -9,7 +9,7 @@ is a row with the repository and the locked commit as its origin. A crate
 built from a path has no `source` field at all, and neither have the crates
 of the scanned workspace; the lockfile does not say which is which, so such a
 crate is a row only when a Cargo.toml of the scan declares it from a path
-outside the scanned directory. Every crate stays in the edge graph, row or
+that the scan does not read. Every crate stays in the edge graph, row or
 not, so the registry crates only it pulls in are attributed to it.
 """
 
@@ -106,15 +106,15 @@ def parse_cargo_lock(
     ancestors per crate. A crate no root reaches is dropped, unless the
     lockfile contains none of the roots at all: then every crate with a row
     is kept as PROD with no ancestors. A root need not have a row: a path
-    dependency inside the scanned directory has none, and the registry
+    dependency that the scan reads has none, and the registry
     crates it reaches name it in ``direct_ancestors``.
 
     ``origins`` maps a lowercased crate name to the origin a Cargo.toml of
     the scan declares for it (see ``cargo_sources``). It decides the crates
     the lockfile gives no ``source``: one it maps to a path is a row with
     that origin, and any other one (a crate of the scanned workspace, a path
-    inside the scanned directory, a path dependency of a crate outside it)
-    is no row.
+    that the scan reads, a path dependency of a crate it does not read) is no
+    row.
 
     ``all_known_names`` is the lowercased names of every package in the
     lockfile, registry-sourced or not. Callers in ``transitive.py`` use
@@ -183,8 +183,8 @@ def parse_cargo_lock(
 
         origin: str | None
         if not source:
-            # Built from a path: a row only when a manifest says the path is
-            # outside the scanned directory.
+            # Built from a path: a row only when a manifest declares that
+            # path and the scan does not read it.
             origin = (origins or {}).get(normalized)
         elif source.startswith(_REGISTRY_PREFIXES):
             origin = ""

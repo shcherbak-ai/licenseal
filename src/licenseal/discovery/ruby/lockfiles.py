@@ -40,10 +40,10 @@ source" (GIT/PATH); the resolved spec lives in its corresponding source
 section. Platform-suffixed versions (``nokogiri (1.16.0-x86_64-linux)``)
 canonicalize to the base version.
 
-A GIT or PLUGIN SOURCE spec, and a PATH spec outside the scanned directory,
+A GIT or PLUGIN SOURCE spec, and a PATH spec that the scan does not read,
 is not a rubygems.org gem: it is emitted with an ``origin`` (``remote`` plus
 ``revision`` for GIT, the path for PATH) and is never looked up. A PATH spec
-inside the scanned directory is the project's own code: it stays in the edge
+that the scan reads is the project's own code: it stays in the edge
 graph and gets no row.
 
 Group attribution is the load-bearing reason for the ``dev_direct_names``
@@ -161,7 +161,7 @@ def parse_gemfile_lock(
     (mirrors the PHP / Python posture).
 
     ``scan_root`` is the scanned directory, the lockfile's own directory when
-    omitted. A PATH spec that resolves inside it gets no row.
+    omitted. A PATH spec that the scan reads gets no row.
     """
     text = decode_lockfile_text(path)
     if text is None:

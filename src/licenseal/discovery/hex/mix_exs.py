@@ -8,7 +8,7 @@ pieces:
   (direct dependencies), with ``only: :dev|:test`` marking dev/test deps and
   ``git:`` / ``github:`` / ``path:`` marking non-hex.pm sources, which are
   emitted with an ``origin`` and never looked up; ``in_umbrella: true`` and a
-  ``path:`` inside the scanned directory are the project's own apps and are
+  ``path:`` that the scan reads are the project's own apps and are
   not dependencies;
 * the ``package`` config's ``licenses: ["X", "Y"]`` (the project's own license);
 * each project's ``app: :name`` atom (for the umbrella workspace-internal filter).
@@ -126,7 +126,7 @@ def _dep_origin(entry: str, mix_dir: Path, scan_root: Path) -> str | None:
     """Origin a dep tuple's own options declare.
 
     Empty for a hex.pm package; ``None`` for one of the project's own apps
-    (``in_umbrella: true``, or a ``path:`` inside the scanned directory). A
+    (``in_umbrella: true``, or a ``path:`` that the scan reads). A
     source option whose value is not a string literal still takes the dep off
     the registry; its origin then says only that the source is not recorded.
     """

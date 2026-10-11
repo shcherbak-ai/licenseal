@@ -11,11 +11,16 @@ from __future__ import annotations
 
 import contextlib
 import contextvars
+import functools
 import os
 from collections.abc import Callable, Iterator
 from pathlib import Path
+from typing import ParamSpec, TypeVar, cast
 
 from licenseal.discovery._read import record_walk_error
+
+_P = ParamSpec("_P")
+_T = TypeVar("_T")
 
 # Names auto-skipped at every depth during discovery. Unified across all
 # ecosystems so a name like ``vendor`` or ``build`` is treated consistently
@@ -96,6 +101,81 @@ def shared_walk_cache() -> Iterator[None]:
         _WALK_CACHE.reset(token)
 
 
+# The ``exclude_paths`` of the scan in progress. A path dependency is the
+# project's own code only when the walk enters its directory, and the parsers
+# that decide it are handed the scan root, not the exclusions.
+_EXCLUDED: contextvars.ContextVar[frozenset[Path]] = contextvars.ContextVar(
+    "_EXCLUDED", default=frozenset()
+)
+
+
+@contextlib.contextmanager
+def scan_exclusions(exclude_paths: frozenset[Path]) -> Iterator[None]:
+    """Make ``exclude_paths`` the exclusions :func:`is_walked_directory` applies.
+
+    ``exclude_paths`` holds pre-resolved absolute paths, as for the walk.
+    Outside this context no directory is excluded.
+    """
+    token = _EXCLUDED.set(exclude_paths)
+    try:
+        yield
+    finally:
+        _EXCLUDED.reset(token)
+
+
+def with_scan_exclusions(func: Callable[_P, _T]) -> Callable[_P, _T]:
+    """Run ``func`` with its ``exclude_paths`` keyword argument as the scan's exclusions."""
+
+    @functools.wraps(func)
+    def wrapper(*args: _P.args, **kwargs: _P.kwargs) -> _T:
+        """Call ``func`` with its exclusions current."""
+        excluded = cast("frozenset[Path]", kwargs.get("exclude_paths", frozenset()))
+        with scan_exclusions(excluded):
+            return func(*args, **kwargs)
+
+    return wrapper
+
+
+def _is_skipped(child: Path, exclude_paths: frozenset[Path]) -> bool:
+    """True when a walk does not enter the directory ``child``.
+
+    Skipped: a name in ``BASE_SKIP_DIRS``; a symlinked directory; a
+    directory with its own ``.git`` (file or dir: a nested repository or a
+    submodule, which scanned as part of the parent almost always produces
+    noise); a directory with a ``pyvenv.cfg`` (the PEP 405 marker every
+    virtualenv carries at its root, so ``.venv/``, ``venv/``, ``env-3.11/``
+    are caught by marker rather than by name); and a directory whose
+    resolved path is in ``exclude_paths``.
+    """
+    if child.name in BASE_SKIP_DIRS or child.is_symlink():
+        return True
+    if (child / ".git").exists() or (child / "pyvenv.cfg").exists():
+        return True
+    return bool(exclude_paths) and child.resolve() in exclude_paths
+
+
+def is_walked_directory(directory: Path, project_path: Path) -> bool:
+    """True when ``directory`` exists and a walk of ``project_path`` enters it.
+
+    Both are resolved paths, and ``directory`` is ``project_path`` or below
+    it. The manifests of such a directory are read by the scan. A file, a
+    path that does not exist, and a directory under one the walk skips (see
+    :func:`_is_skipped`; the exclusions are those of the active
+    :func:`scan_exclusions`) are not.
+    """
+    if not directory.is_dir():
+        return False
+    exclude_paths = _EXCLUDED.get()
+    if project_path in exclude_paths:
+        return False
+    current = project_path
+    for part in directory.relative_to(project_path).parts:
+        current /= part
+        if _is_skipped(current, exclude_paths):
+            return False
+    return True
+
+
 def _cached_project_files(
     project_path: Path,
     exclude_paths: frozenset[Path],
@@ -125,14 +205,12 @@ def _walk(
 ) -> list[Path]:
     """Walk ``project_path`` returning every file whose name matches ``predicate``.
 
-    Skips ``BASE_SKIP_DIRS``, symlinked directories, any subdirectory that
-    contains its own ``.git`` (file or dir — handles regular nested repos
-    and submodules alike), any subdirectory that contains a ``pyvenv.cfg``
-    (PEP 405 virtualenv marker — catches arbitrary venv names without
-    blacklisting), and any directory whose resolved path is in
-    ``exclude_paths``. ``exclude_paths`` must contain pre-resolved absolute
-    paths; the CLI handler is responsible for resolving relative user input
-    against ``--path``.
+    Does not enter the directories :func:`_is_skipped` names:
+    ``BASE_SKIP_DIRS``, symlinked directories, any subdirectory that
+    contains its own ``.git`` or a ``pyvenv.cfg``, and any directory whose
+    resolved path is in ``exclude_paths``. ``exclude_paths`` must contain
+    pre-resolved absolute paths; the CLI handler is responsible for
+    resolving relative user input against ``--path``.
     """
     if exclude_paths and project_path.resolve() in exclude_paths:
         return []
@@ -150,26 +228,7 @@ def _walk(
         except PermissionError:
             break
 
-        kept: list[str] = []
-        for name in dirnames:
-            if name in BASE_SKIP_DIRS:
-                continue
-            child = Path(dirpath, name)
-            if child.is_symlink():
-                continue
-            # A child with its own `.git` is a separate repo (cloned dep,
-            # vendored fork, submodule) — scanning it as part of the parent
-            # almost always produces noise.
-            if (child / ".git").exists():
-                continue
-            # PEP 405: every venv/virtualenv-created environment carries a
-            # ``pyvenv.cfg`` at its root. Detect by marker rather than name
-            # so we catch `.venv/`, `venv/`, `env/`, `env-3.11/`, etc.
-            if (child / "pyvenv.cfg").exists():
-                continue
-            if exclude_paths and child.resolve() in exclude_paths:
-                continue
-            kept.append(name)
+        kept = [name for name in dirnames if not _is_skipped(Path(dirpath, name), exclude_paths)]
         dirnames[:] = sorted(kept)
         # readdir order is filesystem-dependent (hash order on ext4, stable on
         # APFS) — sort so first-match-wins consumers (project-license

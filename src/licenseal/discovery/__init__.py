@@ -9,7 +9,11 @@ from pathlib import Path
 
 from licenseal.analysis.compatibility import is_recognised_project_license
 from licenseal.analysis.spdx import normalize_license, normalize_r_license
-from licenseal.discovery._walk import shared_walk_cache, walk_project_files_matching
+from licenseal.discovery._walk import (
+    scan_exclusions,
+    shared_walk_cache,
+    walk_project_files_matching,
+)
 from licenseal.discovery.dotnet import (
     closest_build_props,
     detect_project_license_csproj,
@@ -204,7 +208,7 @@ def discover_all_dependencies(
     wrapping them in :func:`shared_walk_cache` collapses the ~25 walks into a
     single one, so scan time no longer grows linearly with ecosystem count.
     """
-    with shared_walk_cache():
+    with shared_walk_cache(), scan_exclusions(exclude_paths):
         return _discover_all_dependencies(project_path, exclude_paths=exclude_paths)
 
 

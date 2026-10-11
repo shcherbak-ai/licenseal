@@ -75,6 +75,12 @@ def _record_path_io(monkeypatch: pytest.MonkeyPatch, marker: str) -> list[tuple[
     return calls
 
 
+def _dirs(root: Path, *relative: str) -> None:
+    """Create directories under ``root``: the path dependencies a scan walks."""
+    for directory in relative:
+        (root / directory).mkdir(parents=True, exist_ok=True)
+
+
 def _write(path: Path, content: str) -> Path:
     """Write dedented ``content`` to ``path`` with LF line endings; return ``path``."""
     path.parent.mkdir(parents=True, exist_ok=True)

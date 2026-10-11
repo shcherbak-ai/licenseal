@@ -53,12 +53,18 @@ class TestDiscoverGemfileDependencies:
         assert origins == {
             "edge": "git+https://github.com/example/edge.git@main",
             "shorthand": "git+https://github.com/example/shorthand.git",
+            # ``path: "vendor/foo"``: nothing scans ``vendor/``, so the gem
+            # is a dependency with that path as its origin.
+            "vendored": "vendor/foo",
         }
 
-    def test_path_gem_inside_the_scanned_directory_is_not_a_dependency(self):
-        # ``path: "vendor/foo"`` is the project's own code.
-        deps, filtered = discover_gemfile_dependencies(_FIXTURES / "simple")
-        assert "vendored" not in {d.name for d in deps}
+    def test_path_gem_in_a_directory_the_scan_walks_is_not_a_dependency(self, tmp_path):
+        (tmp_path / "components" / "own").mkdir(parents=True)
+        (tmp_path / "Gemfile").write_text(
+            'source "https://rubygems.org"\ngem "own", path: "components/own"\ngem "rack"\n'
+        )
+        deps, filtered = discover_gemfile_dependencies(tmp_path)
+        assert [d.name for d in deps] == ["rack"]
         assert filtered == 0
 
     def test_ecosystem_and_source_stamped(self):
