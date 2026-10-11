@@ -206,7 +206,7 @@ def load_review_file(project_path: Path) -> ReviewFileContents:
             label = f"{ecosystem}:{package}@{version_text}"
         else:
             key = source_review_key(ecosystem, package, source)
-            label = f"{ecosystem}:{package} from {source}"
+            label = f"off-registry {ecosystem}:{package} from {source}"
         if key in seen:
             raise click.ClickException(
                 f"Invalid {REVIEW_FILE_NAME}: duplicate review entry for {label}."

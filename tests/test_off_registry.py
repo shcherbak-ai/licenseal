@@ -486,7 +486,12 @@ class TestLoadReviewFileWithSource:
         _review_file(tmp_path, stanza + stanza.replace('license = "MIT"', 'version = "2.0"'))
         with pytest.raises(click.ClickException) as raised:
             load_review_file(tmp_path)
-        assert f"duplicate review entry for ruby:edge from {_ORIGIN}." in raised.value.message
+        # The entry is named as every other message about it names it.
+        label = source_review_key("ruby", "edge", _ORIGIN)
+        assert label == f"off-registry ruby:edge from {_ORIGIN}"
+        assert raised.value.message == (
+            f"Invalid {REVIEW_FILE_NAME}: duplicate review entry for {label}."
+        )
 
     def test_same_package_from_two_sources_and_from_the_registry(self, tmp_path):
         _review_file(

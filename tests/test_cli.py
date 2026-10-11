@@ -4,10 +4,13 @@ from __future__ import annotations
 
 import io
 import json
+import re
 import textwrap
 import time
 from importlib.metadata import PackageNotFoundError
+from pathlib import Path
 from unittest.mock import patch
+from urllib.parse import urlsplit
 
 import click
 import httpx
@@ -19,6 +22,9 @@ from rich.console import Console
 
 from licenseal import __version__
 from licenseal.cli import (
+    _PROJECT_URL,
+    _REGISTRY_HOSTS,
+    _TETHERED_HINT,
     _echo_missing_lockfiles,
     _echo_read_diagnostics,
     _http_headers,
@@ -3589,6 +3595,29 @@ class TestTetheredIntegration:
             assert "dl.google.com:443" in kwargs["hint"]
             assert "repo.jenkins-ci.org:443" in kwargs["hint"]
             assert "api.nuget.org:443" in kwargs["hint"]
+
+    def test_hint_links_to_the_section_that_lists_the_allowed_hosts(self):
+        """The link at the end of the hint names a document of this repository
+        and a heading in it, under which every allowed host is listed."""
+        link = urlsplit(_TETHERED_HINT.rsplit(" ", 1)[-1])
+        blob = urlsplit(_PROJECT_URL).path + "/blob/main/"
+        assert link.netloc == "github.com"
+        assert link.path.startswith(blob)
+        document = Path(__file__).parent.parent / link.path.removeprefix(blob)
+        lines = document.read_text(encoding="utf-8").splitlines()
+
+        def anchor(heading: str) -> str:
+            # The anchor GitHub gives a heading: lower case, punctuation
+            # dropped, spaces as hyphens.
+            text = heading.lstrip("#").strip().lower()
+            return re.sub(r"[^\w\- ]", "", text).replace(" ", "-")
+
+        headings = [index for index, line in enumerate(lines) if line.startswith("#")]
+        named = [index for index in headings if anchor(lines[index]) == link.fragment]
+        assert len(named) == 1, f"no single heading for #{link.fragment} in {document.name}"
+        end = next((index for index in headings if index > named[0]), len(lines))
+        section = "\n".join(lines[named[0] : end])
+        assert [host for host in _REGISTRY_HOSTS if f"`{host}`" not in section] == []
 
     @respx.mock
     def test_runs_under_host_activate_policy(self, tmp_path):

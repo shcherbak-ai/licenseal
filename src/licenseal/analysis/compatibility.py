@@ -591,14 +591,17 @@ def _check_compat(
             risk_level=dep_risk,
             verdict=CompatibilityVerdict.UNKNOWN,
             reason=(
-                _unread_exception_reason(license_info, exception)
+                _unread_exception_reason(license_info, [exception])
                 if exception
                 else _unresolved_and_reason(license_info, outcome.unresolved)
             ),
         )
 
-    if exception and verdict == CompatibilityVerdict.UNKNOWN and not pair_fragment:
-        reason = _unread_exception_reason(license_info, exception)
+    # What nobody read in a term that is otherwise a known license: the
+    # exception of a lone term, or those of the operands a compound binds.
+    unread = [exception] if exception else _unread_operand_exceptions(outcome.unresolved)
+    if unread and verdict == CompatibilityVerdict.UNKNOWN and not pair_fragment:
+        reason = _unread_exception_reason(license_info, unread)
     elif pair_fragment:
         reason = _pair_conflict_reason(license_info, pair_fragment, is_dev)
     else:
@@ -648,13 +651,29 @@ def _unread_exception(dep_license: str) -> str:
     return ""
 
 
-def _unread_exception_reason(license_info: LicenseInfo, exception: str) -> str:
-    """Reason for a license that would pass but carries an exception nobody read."""
+def _unread_operand_exceptions(unresolved: list[str]) -> list[str]:
+    """The unrecognized ``WITH`` exceptions among the unresolved operands of a compound.
+
+    Only an exception on a license whose own class is known counts, as in
+    :func:`_unread_exception`. Each exception is listed once, in the order
+    of the operands.
+    """
+    return list(dict.fromkeys(filter(None, map(_unread_exception, unresolved))))
+
+
+def _unread_exception_reason(license_info: LicenseInfo, exceptions: list[str]) -> str:
+    """Reason for a license that would pass but carries exceptions nobody read."""
     name = license_info.dependency.name
     dep_license = license_info.effective_license_id
+    if len(exceptions) == 1:
+        return (
+            f"{name} uses {dep_license} — '{exceptions[0]}' is not an exception licenseal "
+            f"recognizes, so the terms it adds were not evaluated; manual review required"
+        )
+    named = ", ".join(f"'{exception}'" for exception in exceptions)
     return (
-        f"{name} uses {dep_license} — '{exception}' is not an exception licenseal "
-        f"recognizes, so the terms it adds were not evaluated; manual review required"
+        f"{name} uses {dep_license} — {named} are not exceptions licenseal recognizes, "
+        f"so the terms they add were not evaluated; manual review required"
     )
 
 

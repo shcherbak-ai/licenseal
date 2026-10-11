@@ -153,7 +153,7 @@ _TETHERED_HINT = (
     f"dl.google.com:443, repo.jenkins-ci.org:443, api.nuget.org:443, "
     f"repo.packagist.org:443, rubygems.org:443, hex.pm:443, and "
     f"cran.r-project.org:443. "
-    f"See {_PROJECT_URL}#security-model"
+    f"See {_PROJECT_URL}/blob/main/SECURITY.md#network-egress"
 )
 
 

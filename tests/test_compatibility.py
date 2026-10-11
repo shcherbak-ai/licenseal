@@ -1240,6 +1240,81 @@ class TestWithExceptionVerdicts:
         assert copyleft.verdict == CompatibilityVerdict.UNKNOWN
         assert "cannot avoid Apache-2.0 WITH Commons-Clause" in copyleft.reason
 
+    _ONE_UNREAD = (
+        "'{}' is not an exception licenseal recognizes, so the terms it adds were not "
+        "evaluated; manual review required"
+    )
+    _SEVERAL_UNREAD = (
+        "{} are not exceptions licenseal recognizes, so the terms they add were not "
+        "evaluated; manual review required"
+    )
+
+    @pytest.mark.parametrize(
+        "license_id, exceptions",
+        [
+            ("MIT AND Apache-2.0 WITH Commons-Clause", ["Commons-Clause"]),
+            ("Apache-2.0 WITH Commons-Clause AND MIT", ["Commons-Clause"]),
+            # On a weak-copyleft license, whose class the term does not keep.
+            ("LGPL-2.1-only WITH Qwt-exception-1.0 AND MIT", ["Qwt-exception-1.0"]),
+            # A choice with no arm that is fully read.
+            (
+                "Apache-2.0 WITH Commons-Clause OR MIT WITH Other-Rider",
+                ["Commons-Clause", "Other-Rider"],
+            ),
+            (
+                "MIT WITH Other-Rider AND Apache-2.0 WITH Commons-Clause AND BSD-3-Clause",
+                ["Other-Rider", "Commons-Clause"],
+            ),
+            # One exception on two operands is named once.
+            (
+                "(Apache-2.0 WITH Commons-Clause AND MIT) OR BSD-3-Clause WITH Commons-Clause",
+                ["Commons-Clause"],
+            ),
+            # Beside an operand that is not a recognized license at all.
+            ("SomeCustomLicense AND Apache-2.0 WITH Commons-Clause", ["Commons-Clause"]),
+        ],
+    )
+    def test_compound_names_the_exception_that_was_not_evaluated(self, license_id, exceptions):
+        named = (
+            self._ONE_UNREAD.format(exceptions[0])
+            if len(exceptions) == 1
+            else self._SEVERAL_UNREAD.format(", ".join(f"'{e}'" for e in exceptions))
+        )
+        for project in ("MIT", "MPL-2.0"):
+            result = self._check(project, license_id)
+            assert result.verdict == CompatibilityVerdict.UNKNOWN, project
+            assert result.risk_level == RiskLevel.UNKNOWN
+            assert result.reason == f"dep uses {license_id} — {named}"
+
+    def test_compound_reasons_that_do_not_come_from_an_unread_exception_are_kept(self):
+        # The license before ``WITH`` is itself unrecognized: nothing to name.
+        unrecognized = self._check("MIT", "MIT AND SomeCustomLicense WITH Commons-Clause")
+        assert unrecognized.verdict == CompatibilityVerdict.UNKNOWN
+        assert unrecognized.reason == (
+            "dep uses MIT AND SomeCustomLicense WITH Commons-Clause — could not determine "
+            "compatibility with MIT"
+        )
+        # A violation beside the term is reported as the violation.
+        violation = self._check("MIT", "GPL-3.0-only AND Apache-2.0 WITH Commons-Clause")
+        assert violation.verdict == CompatibilityVerdict.INCOMPATIBLE
+        assert violation.reason == (
+            "dep uses GPL-3.0-only AND Apache-2.0 WITH Commons-Clause (strong copyleft license "
+            "— derivative works must be released under the same (or a compatible) license), "
+            "which is incompatible with your MIT project license"
+        )
+        # A choice the project can take whole is taken.
+        electable = self._check("MIT", "MIT OR Apache-2.0 WITH Commons-Clause")
+        assert electable.verdict == CompatibilityVerdict.COMPATIBLE
+        assert electable.reason == "MIT OR Apache-2.0 WITH Commons-Clause is permissive license"
+        # The operand a copyleft project cannot avoid is named as before.
+        bound = self._check("GPL-3.0-only", "GPL-3.0-only AND Apache-2.0 WITH Commons-Clause")
+        assert bound.verdict == CompatibilityVerdict.UNKNOWN
+        assert bound.reason == (
+            "dep uses GPL-3.0-only AND Apache-2.0 WITH Commons-Clause; the consumer cannot "
+            "avoid Apache-2.0 WITH Commons-Clause, which did not resolve to a recognized "
+            "license — manual review required"
+        )
+
     @pytest.mark.parametrize(
         "project, with_term, bare",
         [
@@ -1529,6 +1604,30 @@ class TestWithExceptionDrivesTheExitCode:
         assert dependency["license"] == declared
         assert dependency["verdict"] == verdict
         assert dependency["risk"] == risk
+
+    @respx.mock
+    def test_report_reason_names_the_exception_of_a_compound(self, tmp_path):
+        (tmp_path / "package.json").write_text(
+            json.dumps({"name": "app", "license": "MIT", "dependencies": {"some-lib": "1.0.0"}})
+        )
+        respx.get("https://registry.npmjs.org/some-lib/1.0.0").mock(
+            return_value=httpx.Response(
+                200,
+                json={"version": "1.0.0", "license": "MIT AND Apache-2.0 WITH Commons-Clause"},
+            )
+        )
+        result = CliRunner().invoke(
+            main,
+            ["check", "--path", str(tmp_path), "-f", "json", "--no-require-lockfile"],
+        )
+        assert result.exit_code == 1
+        dependency = json.loads(result.output[result.output.index("{") :])["dependencies"][0]
+        assert (dependency["verdict"], dependency["risk"]) == ("unknown", "unknown")
+        assert dependency["reason"] == (
+            "some-lib uses Apache-2.0 WITH Commons-Clause AND MIT — 'Commons-Clause' is not an "
+            "exception licenseal recognizes, so the terms it adds were not evaluated; manual "
+            "review required"
+        )
 
 
 class TestDeprecatedIdBeforeWithInTheReport:
