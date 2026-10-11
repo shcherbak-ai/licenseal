@@ -83,6 +83,12 @@ def detect_project_license_setup_cfg(setup_cfg: Path) -> str:
     Reads ``[metadata] license`` (a raw SPDX-ish string) and falls back to
     the first ``License :: OSI Approved :: *`` trove classifier in
     ``[metadata] classifiers`` if the bare license field is empty.
+
+    A value is interpolated when it is read, as setuptools reads it. One that
+    cannot be (a stray ``%``, as in ``license = 100% free``, or a reference
+    to an option that is not there) declares no usable license. Nothing is
+    recorded for it: dependency discovery reads the same file, and records a
+    gap when a value it needs cannot be read.
     """
     text = decode_text(setup_cfg)
     if text is None:
@@ -94,11 +100,13 @@ def detect_project_license_setup_cfg(setup_cfg: Path) -> str:
         record_parse_failure(setup_cfg, "INI")
         return ""
 
-    license_val = config.get("metadata", "license", fallback="").strip()
-    if license_val:
-        return license_val
-
-    classifiers = config.get("metadata", "classifiers", fallback="")
+    try:
+        license_val = config.get("metadata", "license", fallback="").strip()
+        if license_val:
+            return license_val
+        classifiers = config.get("metadata", "classifiers", fallback="")
+    except configparser.InterpolationError:
+        return ""
     for line in classifiers.splitlines():
         line = line.strip()
         if line.startswith("License :: OSI Approved ::"):

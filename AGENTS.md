@@ -33,7 +33,7 @@ src/licenseal/
     python/
       pyproject.py            PEP 621 / Poetry / PEP 735 (direct references, Poetry `git` / `url` / `path` tables, and `[tool.uv.sources]` → `origin`; `workspace = true` and paths the scan reads → not a dependency)
       requirements.py         requirements*.txt (pip-style comment stripping; `-r` / `--requirement` includes followed inside the scan root, cycle-safe, with the including file's dev/prod group; `-c` constraints never read; URL / VCS / local-path lines, `-e` included → `origin`, a path the scan reads → not a dependency; other option lines skipped)
-      setup_cfg.py            setup.cfg (dependencies from every file in the tree; project license from the root file only)
+      setup_cfg.py            setup.cfg (dependencies from every file in the tree; project license from the root file only; values are interpolated when read, so every `config.get` / `config.items` sits inside the `configparser` error handling — a stray `%` is a gap for a dependency value and "no license declared" for a license value)
       setup_py.py             setup.py (static `ast.parse`, never executed; literal `setup(...)` license / install_requires / extras_require args; a file the parser rejects is an analysis gap)
       pipfile.py              Pipfile (Pipenv manifest; `git` / `path` / `file` entries → `origin`)
       lockfiles.py            uv.lock, poetry.lock, Pipfile.lock parsers (transitive; edge-aware for uv/poetry, section-based for Pipfile; git / url sources and path sources the scan does not read → `origin`, alternate-index sources stay registry rows; a lockfile in a declared version the parser does not list is still read, with a non-gap diagnostic)

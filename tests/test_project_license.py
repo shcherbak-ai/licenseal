@@ -20,7 +20,7 @@ from click.testing import CliRunner
 from licenseal.cli import main
 from licenseal.discovery import ProjectLicense, detect_project_license
 from licenseal.discovery._read import collect_read_diagnostics
-from tests._helpers import _check_json, _mock_npm
+from tests._helpers import _check_json, _file_diagnostics, _mock_npm, _mock_pypi
 
 _MIX_EXS = """\
 defmodule App.MixProject do
@@ -409,3 +409,116 @@ class TestInitReviewFileProjectLicense:
         assert "Project license: GPL-3.0-only (from package.json)." in result.stderr.splitlines()
         assert "No reviewable flagged dependencies found." in result.stderr
         assert not (tmp_path / "tools" / "licenseal.review.toml").exists()
+
+
+def _setup_cfg(tmp_path: Path, metadata: str, requirement: str = "gpl-lib==1.0.0") -> Path:
+    """A root ``setup.cfg`` with the given ``[metadata]`` lines and one requirement."""
+    return _write(
+        tmp_path / "setup.cfg",
+        f"[metadata]\nname = app\n{metadata}\n[options]\ninstall_requires =\n    {requirement}\n",
+    )
+
+
+class TestSetupCfgValueThatCannotBeInterpolated:
+    """A ``[metadata]`` value configparser cannot read declares no usable license.
+
+    ``setup.cfg`` values are interpolated when read, so a stray ``%`` in one
+    is an error that surfaces only when that value is asked for.
+    """
+
+    @pytest.mark.parametrize(
+        "metadata",
+        [
+            "license = 100% free\n",
+            # The license value is the one asked for first: a classifier
+            # that could be read does not stand in for it.
+            "license = 100% free\nclassifiers =\n    License :: OSI Approved :: MIT License\n",
+            "classifiers =\n    Topic :: 100% done\n    License :: OSI Approved :: MIT License\n",
+            "license = %(spdx)s\n",
+        ],
+        ids=["license", "license-beside-a-classifier", "classifiers", "missing-option"],
+    )
+    @respx.mock
+    def test_scan_runs_and_judges_the_project_as_proprietary(self, tmp_path: Path, metadata):
+        _setup_cfg(tmp_path, metadata)
+        _mock_pypi("gpl-lib", "GPL-3.0-only")
+
+        result, data = _check_json(tmp_path, _NO_LOCKFILE)
+        # Not a crash: the GPL dependency is a violation for a Proprietary project.
+        assert result.exit_code == 1
+        assert (data["project_license"], data["project_license_source"]) == ("Proprietary", "")
+        assert _verdicts(data) == {"gpl-lib": "incompatible"}
+        assert _ASSUMED in result.stderr.splitlines()
+        # The requirement in the same file was read, and nothing about the
+        # file is reported: the value that cannot be read is not one the
+        # dependencies come from.
+        assert _file_diagnostics(data) == []
+
+    @respx.mock
+    def test_file_whose_requirements_cannot_be_read_either_is_one_gap(self, tmp_path: Path):
+        # Dependency discovery records the file. License detection adds no
+        # second entry for it.
+        _setup_cfg(tmp_path, "license = 100% free\n", requirement="gpl-lib==1.0.0 ; 100% sure")
+        _write(tmp_path / "requirements.txt", "mit-lib==1.0.0\n")
+        _mock_pypi("mit-lib", "MIT")
+
+        result, data = _check_json(tmp_path, _NO_LOCKFILE, "--no-strict")
+        assert result.exit_code == 0
+        assert data["project_license"] == "Proprietary"
+        assert _verdicts(data) == {"mit-lib": "compatible"}
+        assert _file_diagnostics(data) == [
+            {"path": "setup.cfg", "reason": "is not valid INI; skipped", "severity": "gap"}
+        ]
+        assert result.stderr.count("Warning: setup.cfg:") == 1
+
+    def test_detection_records_nothing_and_the_next_manifest_decides(self, tmp_path: Path):
+        _setup_cfg(tmp_path, "license = 100% free\n")
+        _write(tmp_path / "package.json", '{"name": "app", "license": "ISC"}')
+        with collect_read_diagnostics() as diags:
+            detected = detect_project_license(tmp_path)
+        assert detected == ProjectLicense(
+            license="ISC", source="package.json", declared=(("package.json", "ISC"),)
+        )
+        assert diags == []
+
+    @pytest.mark.parametrize(
+        ("metadata", "declared", "spdx"),
+        [
+            # Interpolation still applies to a value that can be read.
+            ("license = %(spdx)s\nspdx = MIT\n", "MIT", "MIT"),
+            ("classifiers =\n    License :: OSI Approved :: BSD License\n", "BSD License", None),
+        ],
+        ids=["reference", "classifier"],
+    )
+    def test_value_that_can_be_read_is_still_used(self, tmp_path: Path, metadata, declared, spdx):
+        _setup_cfg(tmp_path, metadata)
+        detected = detect_project_license(tmp_path)
+        assert detected.declared == (("setup.cfg", declared),)
+        if spdx is not None:
+            assert (detected.license, detected.source) == (spdx, "setup.cfg")
+
+    @respx.mock
+    def test_escaped_percent_is_a_declared_value_that_is_not_a_license(self, tmp_path: Path):
+        # ``%%`` is how setup.cfg writes a percent sign. The value is read,
+        # is not a license, and is reported like any other such value.
+        _setup_cfg(tmp_path, "license = 100%% free\n", requirement="mit-lib==1.0.0")
+        _mock_pypi("mit-lib", "MIT")
+
+        result, data = _check_json(tmp_path, _NO_LOCKFILE)
+        assert result.exit_code == 0
+        assert data["project_license"] == "Proprietary"
+        assert (
+            "Warning: setup.cfg declares the license '100% free', which is not a recognised "
+            "license; dependencies are checked against Proprietary."
+        ) in result.stderr.splitlines()
+
+    @respx.mock
+    def test_init_review_file_runs_the_same_detection(self, tmp_path: Path):
+        _setup_cfg(tmp_path, "license = 100% free\n")
+        _mock_pypi("gpl-lib", "GPL-3.0-only")
+
+        result = CliRunner().invoke(main, ["init-review-file", "--path", str(tmp_path)])
+        assert result.exit_code == 0
+        assert _ASSUMED in result.stderr.splitlines()
+        review = (tmp_path / "licenseal.review.toml").read_text(encoding="utf-8")
+        assert 'package = "gpl-lib"' in review
