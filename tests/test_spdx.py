@@ -698,9 +698,10 @@ class TestMalformedExpressionConjunction:
 
 
 class TestUnresolvedOperandExpression:
-    """A string that splits at its operators into operands, not all of them
-    licenses, is judged as the expression those operands form, with
-    ``UNKNOWN`` for each one that is not a license."""
+    """A string that splits at its ``AND`` operators into operands, not all
+    of them licenses, is judged as the conjunction those operands form, with
+    ``UNKNOWN`` for each one that is not a license. A string with a choice
+    at its top level is not read this way."""
 
     @pytest.mark.parametrize(
         "raw, expected",
@@ -734,14 +735,14 @@ class TestUnresolvedOperandExpression:
             ("GPL-3.0-only and see the LICENSE file", "GPL-3.0-only AND UNKNOWN"),
             ("see license in LICENSE.txt and GPL-3.0-only", "GPL-3.0-only AND UNKNOWN"),
             ("GPL-3.0-only and Commercial License", "GPL-3.0-only AND UNKNOWN"),
-            ("GPLv3 or later", "GPL-3.0-only OR UNKNOWN"),
             ("GPL-3.0-only And Some Custom Terms", "GPL-3.0-only AND UNKNOWN"),
-            # ``OR`` splits first, and a group keeps its operands together.
-            ("GPL-3.0-only OR Some Custom Terms", "GPL-3.0-only OR UNKNOWN"),
-            ("MIT OR GPL-3.0-only AND Some Custom Terms", "GPL-3.0-only AND UNKNOWN OR MIT"),
-            ("GPL-3.0-only AND (MIT OR Some Custom Terms)", "(MIT OR UNKNOWN) AND GPL-3.0-only"),
-            ("(GPL-3.0-only AND Some Custom Terms) OR MIT", "GPL-3.0-only AND UNKNOWN OR MIT"),
+            # A group of operands that all apply is read into; a group that
+            # holds a choice is one operand that is not a license.
             ("( GPL-3.0-only AND Some Custom Terms )", "GPL-3.0-only AND UNKNOWN"),
+            ("(GPL-3.0-only AND Some Custom Terms) AND MIT", "GPL-3.0-only AND MIT AND UNKNOWN"),
+            ("GPL-3.0-only AND (MIT OR Some Custom Terms)", "GPL-3.0-only AND UNKNOWN"),
+            ("GPL-3.0-only AND (MIT or Some Custom Terms)", "GPL-3.0-only AND UNKNOWN"),
+            ("GPL-3.0-only AND (MIT OR ISC AND Some Custom Terms)", "GPL-3.0-only AND UNKNOWN"),
             # An operand that is an ID nobody recognizes stays as written.
             ("CustomLicense AND Some Custom Terms", "CustomLicense AND UNKNOWN"),
             # A dangling operator leaves an operand that is not a license.
@@ -786,6 +787,16 @@ class TestUnresolvedOperandExpression:
             "Licensed under the GPL-3.0-only or any later version",
             "Proprietary and confidential",
             "AND",
+            # A choice at the top level, in either case: the operand that is
+            # not a license may be one the consumer could have taken.
+            "GPL-3.0-only OR Some Custom Terms",
+            "Some Custom Terms or GPL-3.0-only",
+            "GPLv3 or later",
+            "GPL or commercial license",
+            "MIT OR GPL-3.0-only AND Some Custom Terms",
+            "GPL-3.0-only AND Some Custom Terms OR MIT",
+            "(GPL-3.0-only AND Some Custom Terms) OR MIT",
+            "(GPL-3.0-only OR Some Custom Terms)",
             # A list separator beside an operator: which of the two binds
             # tighter is not known, so the string has no reading.
             "Some Custom Terms AND MIT/GPL-3.0-only",

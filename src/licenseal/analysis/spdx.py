@@ -1569,62 +1569,72 @@ def _split_tokens(tokens: list[str], separators: frozenset[str]) -> list[list[st
 
 
 def unresolved_operand_expression(raw: str) -> str:
-    """Expression that stands in for a license string with an operand that is not a license.
+    """Conjunction that stands in for a license string with an operand that is not a license.
 
-    A string that splits at its ``AND`` / ``OR`` operators into operands, of
-    which one is several words, a pointer to a bundled file, or a wording
-    that says proprietary, is not an expression :func:`normalize_license`
-    returns: it reads ``UNKNOWN``, or ``Proprietary`` when a rule for the
-    whole string matched first. The operands that are licenses still bind.
-    This returns the expression the operands form, with ``UNKNOWN`` for each
-    one that is not a license, so that the rules for unresolved operands
-    apply to it: in an ``AND`` a violating operand makes it a violation, and
-    in an ``OR`` a choice that did not resolve is never the one taken.
+    A string that splits at its ``AND`` operators into operands, of which
+    one is several words, a pointer to a bundled file, or a wording that says
+    proprietary, is not an expression :func:`normalize_license` returns: it
+    reads ``UNKNOWN``, or ``Proprietary`` when a rule for the whole string
+    matched first. The operands that are licenses still bind, whatever the
+    rest says. This returns the conjunction the operands form, with
+    ``UNKNOWN`` for each one that is not a license, so that the rule for an
+    unresolved operand of an ``AND`` applies to it: a violating operand makes
+    it a violation.
 
-    The operators are read in either case, at paren depth 0, ``OR`` before
-    ``AND``. An operand is the whole text between two of them, normalized as
-    one value: it resolves or it does not, and no text is searched for
-    license names.
+    Only ``AND`` is read. In a string with an ``OR`` at its top level the
+    operand that is not a license may be one the consumer could have chosen,
+    so nothing in it binds for certain and it has no reading here. A group
+    that holds an ``OR`` is, as a whole, one operand that is not a license.
+
+    The operators are read in either case and outside parentheses. An
+    operand is the whole text between two of them, normalized as one value:
+    it resolves or it does not, and no text is searched for license names.
 
     The result is in canonical form. It is ``""`` when ``raw`` is a
     well-formed expression, is longer than an expression gets, has no
-    operator, or has no operand that resolves. It is ``""`` as well when an
+    ``AND``, or has no operand that resolves. It is ``""`` as well when an
     operand that does not resolve holds a comma or a slash: whether such a
     list separator binds tighter than the operator is anyone's guess.
     """
     text = _INNER_PAREN_SPACE_RE.sub("", " ".join(raw.split()))
     if len(text) > _MAX_EXPRESSION_LENGTH or _looks_like_spdx(text):
         return ""
-    operands: list[str] = []
-    expression = _operand_expression(text, operands)
-    if expression is None or len(operands) < 2 or all(operand == "UNKNOWN" for operand in operands):
+    if len(_operator_runs(_strip_outer_parens(text).split(), "OR")) > 1:
         return ""
-    return _canon(expression)
+    operands: list[str] = []
+    conjunction = _operand_conjunction(text, operands)
+    if (
+        conjunction is None
+        or len(operands) < 2
+        or all(operand == "UNKNOWN" for operand in operands)
+    ):
+        return ""
+    return _canon(conjunction)
 
 
-def _operand_expression(text: str, operands: list[str]) -> str | None:
-    """Expression for ``text``, split into operands where it does not resolve whole.
+def _operand_conjunction(text: str, operands: list[str]) -> str | None:
+    """Conjunction for ``text``, split at ``AND`` where it does not resolve whole.
 
     Each operand is appended to ``operands`` as the license it resolves to,
     or as ``UNKNOWN``. A value that reads as ``Proprietary`` on its own names
-    no license among other operands, and is unresolved like any other text.
-    ``None`` when an unresolved operand is a list, which has no single
-    reading beside an operator; a URL's slashes separate nothing.
+    no license among other operands, and is unresolved like any other text;
+    so is text with an ``OR`` in it. ``None`` when an unresolved operand is a
+    list, which has no single reading beside an operator; a URL's slashes
+    separate nothing.
     """
     text = _strip_outer_parens(text)
     resolved = _normalize_part(text)
     if resolved in ("UNKNOWN", "Proprietary"):
         tokens = text.split()
-        for operator, join in (("OR", " OR ".join), ("AND", and_join_licenses)):
-            runs = _operator_runs(tokens, operator)
-            if len(runs) > 1:
-                parts: list[str] = []
-                for run in runs:
-                    part = _operand_expression(" ".join(run), operands)
-                    if part is None:
-                        return None
-                    parts.append(part)
-                return join(parts)
+        runs = _operator_runs(tokens, "AND")
+        if len(runs) > 1 and len(_operator_runs(tokens, "OR")) == 1:
+            parts: list[str] = []
+            for run in runs:
+                part = _operand_conjunction(" ".join(run), operands)
+                if part is None:
+                    return None
+                parts.append(part)
+            return and_join_licenses(parts)
         if ("," in text or "/" in text) and "://" not in text:
             return None
         resolved = "UNKNOWN"

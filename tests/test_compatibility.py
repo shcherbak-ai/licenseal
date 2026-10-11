@@ -685,10 +685,12 @@ class TestMalformedExpressionVerdict:
 
 
 class TestOperandThatDidNotResolve:
-    """A license string that splits at its operators into operands, not all
-    of them licenses, is a violation when the operands that are licenses make
-    it one. Anything short of a violation keeps the verdict and the reason
-    the string had, and the license it is reported under never changes."""
+    """A license string that splits at its ``AND`` operators into operands,
+    not all of them licenses, is a violation when an operand that is a
+    license is one: it binds whatever the rest says. A string with a choice
+    at its top level is not read this way. Anything short of a violation
+    keeps the verdict and the reason the string had, and the license it is
+    reported under never changes."""
 
     _PLAIN_UNKNOWN = (
         "dep declares '{}' which did not resolve to a recognized license — manual review required"
@@ -726,12 +728,16 @@ class TestOperandThatDidNotResolve:
             ("GPL-3.0-only AND Commercial License", "GPL-3.0-only AND UNKNOWN", "UNKNOWN"),
             ("GPL-3.0-only and Commercial License", "GPL-3.0-only AND UNKNOWN", "Proprietary"),
             ("GPL-3.0-only and proprietary", "GPL-3.0-only AND UNKNOWN", "Proprietary"),
-            # In an ``OR`` the choice that did not resolve is never taken.
-            ("GPL-3.0-only OR Some Custom Terms", "GPL-3.0-only OR UNKNOWN", "UNKNOWN"),
-            ("GPL-3.0-only or commercial license", "GPL-3.0-only OR UNKNOWN", "Proprietary"),
+            # A group that holds a choice is one operand that is not a
+            # license: the license beside it binds all the same.
             (
                 "GPL-3.0-only AND (MIT OR Some Custom Terms)",
-                "(MIT OR UNKNOWN) AND GPL-3.0-only",
+                "GPL-3.0-only AND UNKNOWN",
+                "UNKNOWN",
+            ),
+            (
+                "(GPL-3.0-only AND Some Custom Terms) AND MIT",
+                "GPL-3.0-only AND MIT AND UNKNOWN",
                 "UNKNOWN",
             ),
         ],
@@ -773,11 +779,6 @@ class TestOperandThatDidNotResolve:
             ("MIT", "Some Custom Terms AND Other Custom Terms"),
             ("GPL-3.0-only", "GPL-3.0-only AND Some Custom Terms"),
             ("GPL-3.0-only", "AGPL-3.0-only AND Some Custom Terms"),
-            # The project can take another choice, so the string is not a
-            # violation; it does not become compatible either.
-            ("MIT", "MIT OR Some Custom Terms"),
-            ("MIT", "MIT OR GPL-3.0-only AND Some Custom Terms"),
-            ("MIT", "LGPL-3.0-only OR GPL-3.0-only AND Some Custom Terms"),
             # A license next to a ``WITH`` nobody can read is not named.
             ("MIT", "GPL-3.0-only WITH Some Custom Exception AND MIT"),
         ],
@@ -788,6 +789,42 @@ class TestOperandThatDidNotResolve:
         assert result.verdict == CompatibilityVerdict.UNKNOWN
         assert result.risk_level == RiskLevel.UNKNOWN
         assert result.reason == self._PLAIN_UNKNOWN.format(raw)
+
+    @pytest.mark.parametrize(
+        "raw, reported",
+        [
+            # The text that cannot be read may be a license the project could
+            # have chosen, so the violating choice beside it is not definite.
+            ("GPL-3.0-only OR Some Custom Terms", "UNKNOWN"),
+            ("Some Custom Terms OR GPL-3.0-only", "UNKNOWN"),
+            ("GPL-2.0 or BSD (dual licensed)", "UNKNOWN"),
+            ("BSD or GPL-2.0 (dual licensed)", "UNKNOWN"),
+            ("GPLv3 or later", "UNKNOWN"),
+            ("GPL-3.0-only or commercial license", "Proprietary"),
+            ("see license in LICENSE.txt or GPL-3.0-only", "Proprietary"),
+            # A choice at the top level, whatever its arms hold.
+            ("MIT OR Some Custom Terms", "UNKNOWN"),
+            ("MIT OR GPL-3.0-only AND Some Custom Terms", "UNKNOWN"),
+            ("GPL-3.0-only AND Some Custom Terms OR AGPL-3.0-only", "UNKNOWN"),
+            ("(GPL-3.0-only AND Some Custom Terms) OR GPL-2.0-only", "UNKNOWN"),
+            ("(GPL-3.0-only OR Some Custom Terms)", "UNKNOWN"),
+        ],
+    )
+    def test_string_with_a_choice_at_its_top_level_is_not_read(self, raw, reported):
+        assert normalize_license(raw) == reported
+        result = self._check("MIT", raw)
+        assert result.verdict == CompatibilityVerdict.UNKNOWN
+        assert result.risk_level == RiskLevel.UNKNOWN
+        assert result.reason == (
+            self._PROPRIETARY if reported == "Proprietary" else self._PLAIN_UNKNOWN.format(raw)
+        )
+
+    def test_well_formed_choice_with_a_one_word_operand_is_the_control(self):
+        # An unrecognized choice of one word is a well-formed expression: it
+        # is never the one taken, and the rule for it is not this one.
+        result = self._check("MIT", "GPL-3.0-only OR CustomLicense")
+        assert result.verdict == CompatibilityVerdict.INCOMPATIBLE
+        assert result.license_info.license_id == "CustomLicense OR GPL-3.0-only"
 
     @pytest.mark.parametrize(
         "raw",
@@ -834,7 +871,6 @@ class TestOperandThatDidNotResolve:
         "raw, judged_as",
         [
             ("GPL-3.0-only and see the LICENSE file for details", "GPL-3.0-only AND UNKNOWN"),
-            ("GPLv3 or later", "GPL-3.0-only OR UNKNOWN"),
             ("Dual MIT and GPL", "GPL-3.0-only AND UNKNOWN"),
         ],
     )
@@ -3142,13 +3178,25 @@ class TestUnreadableOperandDrivesTheExitCode:
                 "strong-copyleft",
                 "UNKNOWN",
             ),
+            # A choice beside text that cannot be read is not a definite
+            # violation: review, which --no-strict passes.
             (
                 "GPL-3.0-only OR Some Custom Terms",
                 ["--no-strict"],
-                1,
-                "incompatible",
-                "strong-copyleft",
+                0,
+                "unknown",
+                "unknown",
                 "UNKNOWN",
+            ),
+            ("GPL-3.0-only OR Some Custom Terms", [], 1, "unknown", "unknown", "UNKNOWN"),
+            ("GPLv3 or later", ["--no-strict"], 0, "unknown", "unknown", "UNKNOWN"),
+            (
+                "GPL or commercial license",
+                ["--no-strict"],
+                0,
+                "unknown",
+                "unknown",
+                "Proprietary",
             ),
             # A one-word operand is a well-formed expression: the control.
             (
