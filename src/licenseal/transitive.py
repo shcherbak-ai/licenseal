@@ -39,6 +39,7 @@ import httpx
 
 from licenseal._concurrency import map_with_context
 from licenseal._graph import compute_direct_ancestors
+from licenseal.discovery._origin import UNRECORDED
 from licenseal.discovery._read import (
     decode_text,
     read_xml_bytes,
@@ -558,6 +559,19 @@ def resolve_transitive(
     cargo = cargo_sources(project_path, exclude_paths=exclude_paths)
     rust_locks = find_rust_lockfiles(project_path, exclude_paths=exclude_paths)
     if rust_locks:
+        # The origin of a crate that a Cargo.lock gives no ``source``: such a
+        # crate is built from a path the lockfile does not record. One that a
+        # manifest declares by version only is located by no manifest of the
+        # scan either, so its source is unrecorded. The project's own path
+        # dependencies have no row, and a crate that a manifest declares
+        # from, or redirects to, git or a path keeps that origin.
+        sourceless: dict[str, str | None] = {
+            **dict.fromkeys(
+                (d.identity for d in direct_deps if d.ecosystem == Ecosystem.RUST), UNRECORDED
+            ),
+            **dict.fromkeys(cargo.prod_roots | cargo.dev_roots),
+            **cargo.origins,
+        }
         locked = []
         rust_known_names: set[str] = set()
         for rust_lock in rust_locks:
@@ -572,12 +586,16 @@ def resolve_transitive(
                 dev_root_names=names_by_group(Ecosystem.RUST, DependencyGroup.DEV)
                 | cargo.dev_roots,
                 include_dev=include_dev,
-                origins=cargo.origins,
+                origins=sourceless,
             )
             locked.extend(_stamp_sources(lock_deps))
             rust_known_names.update(lock_known)
         out.extend(locked)
-        out.extend(_walk_uncovered(Ecosystem.RUST, locked, rust_known_names, cargo.patches))
+        # A crate built from an unrecorded path is covered by name, like the
+        # project's own path crates: crates.io is not asked about it,
+        # whatever version its declaration asks for.
+        compared = [row for row in locked if row.origin != UNRECORDED]
+        out.extend(_walk_uncovered(Ecosystem.RUST, compared, rust_known_names, cargo.patches))
         handled.add(Ecosystem.RUST)
 
     if Ecosystem.JAVA in ecosystems_present or find_gradle_lockfiles(

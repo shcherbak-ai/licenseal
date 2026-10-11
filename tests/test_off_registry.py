@@ -4191,6 +4191,150 @@ class TestCargoLockSources:
         assert _requests_mentioning(*self._OFF_REGISTRY) == []
 
 
+class TestCargoLockCrateWithNoSource:
+    """A crate declared by version only that the Cargo.lock builds from a path.
+
+    The lockfile records no path for it. When its name is a crate of the
+    scanned tree it is the project's own code; otherwise no scanned manifest
+    locates it, and it is a row with an unrecorded source. crates.io is not
+    asked about it either way.
+    """
+
+    _UNSEEN = ("pathbuilt", "member", "deeper")
+
+    @staticmethod
+    def _project(tmp_path: Path, declaration: str = 'pathbuilt = "1"') -> Path:
+        """A crate ``app`` whose manifest ends with ``declaration``, and its lockfile."""
+        project = tmp_path / "project"
+        _write(
+            project / "Cargo.toml",
+            '[package]\nname = "app"\nversion = "0.1.0"\nlicense = "MIT"\n\n'
+            f'[dependencies]\nregular = "1.0"\nmember = "0.2"\n{declaration}\n',
+        )
+        _write(
+            project / "crates" / "member" / "Cargo.toml",
+            '[package]\nname = "member"\nversion = "0.2.0"\n',
+        )
+        (project / "Cargo.lock").write_text(
+            _cargo_lock(
+                ("app", "0.1.0", "", ("regular", "pathbuilt", "member")),
+                ("regular", "1.0.3", _CRATES_IO_INDEX, ()),
+                # Built from a path: no source. It pulls in a registry crate
+                # and another path crate.
+                ("pathbuilt", "1.2.0", "", ("via-child", "deeper")),
+                ("via-child", "0.3.0", _CRATES_IO_INDEX, ()),
+                ("deeper", "0.0.1", "", ()),
+                ("member", "0.2.0", "", ()),
+            ),
+            encoding="utf-8",
+        )
+        _mock_crate("regular", "1.0.3")
+        _mock_crate("via-child", "0.3.0")
+        # crates.io owns the other names too, under another license.
+        _mock_crate("pathbuilt", "1.2.0", "GPL-3.0-only")
+        _mock_crate("member", "0.2.0", "GPL-3.0-only")
+        _mock_crate("deeper", "0.0.1", "GPL-3.0-only")
+        _refuse_everything_else()
+        return project
+
+    @respx.mock
+    def test_crate_no_scanned_manifest_locates_is_an_unknown_row(self, tmp_path):
+        project = self._project(tmp_path)
+        result, data = _check_json(project)
+        assert result.exit_code == 1
+        assert _versions(data) == {
+            "regular": ("", "1.0.3"),
+            "via-child": ("", "0.3.0"),
+            "pathbuilt": ("unrecorded source", "1.2.0"),
+        }
+        rows = _rows(data)
+        assert (rows["pathbuilt"]["license"], rows["pathbuilt"]["source"]) == (
+            "UNKNOWN",
+            "Cargo.toml",
+        )
+        assert rows["pathbuilt"]["estimated"] == []
+        assert rows["via-child"]["direct_ancestors"] == ["pathbuilt"]
+        # ``member`` is a crate of the scanned tree, and ``deeper`` is a path
+        # crate no scanned manifest names: neither is a row.
+        assert _requests_mentioning(*self._UNSEEN) == []
+        assert data["diagnostics"] == []
+
+        _review_file(
+            project,
+            """\
+            [[review]]
+            ecosystem = "rust"
+            package = "pathbuilt"
+            version = "1.2.0"
+            source = "unrecorded source"
+            license = "MIT"
+            """,
+        )
+        reviewed, _ = _check_json(project)
+        assert reviewed.exit_code == 0
+
+    @respx.mock
+    def test_declaration_the_locked_version_does_not_satisfy_is_not_looked_up(self, tmp_path):
+        project = self._project(tmp_path, 'pathbuilt = "2"')
+        result, data = _check_json(project, "--no-strict")
+        assert result.exit_code == 0
+        # One row for the name, the lockfile's: the declaration is not
+        # resolved through the registry beside it.
+        assert sorted(
+            (d["name"], d["origin"], d["resolved_version"]) for d in data["dependencies"]
+        ) == [
+            ("pathbuilt", "unrecorded source", "1.2.0"),
+            ("regular", "", "1.0.3"),
+            ("via-child", "", "0.3.0"),
+        ]
+        assert _requests_mentioning(*self._UNSEEN) == []
+        assert data["diagnostics"] == []
+
+    @respx.mock
+    def test_dev_dependency_follows_the_dev_flag(self, tmp_path):
+        project = self._project(tmp_path, '\n[dev-dependencies]\npathbuilt = "1"')
+        result, data = _check_json(project, "--dev", "--no-strict")
+        assert result.exit_code == 0
+        row = _rows(data)["pathbuilt"]
+        assert (row["origin"], row["group"]) == ("unrecorded source", "dev")
+        without_dev, data = _check_json(project)
+        assert without_dev.exit_code == 0
+        assert set(_rows(data)) == {"regular"}
+        assert _requests_mentioning(*self._UNSEEN) == []
+
+    @respx.mock
+    def test_crate_another_manifest_builds_from_a_directory_of_the_scan_is_no_row(self, tmp_path):
+        # One manifest declares the crate by version, another from a
+        # directory the scan walks, which holds no Cargo.toml.
+        project = tmp_path / "project"
+        _dirs(project, "shared-src")
+        _write(
+            project / "a" / "Cargo.toml",
+            '[package]\nname = "a"\nversion = "0.1.0"\n\n[dependencies]\nshared = "1"\n',
+        )
+        _write(
+            project / "b" / "Cargo.toml",
+            '[package]\nname = "b"\nversion = "0.1.0"\n\n[dependencies]\n'
+            'shared = { path = "../shared-src" }\n',
+        )
+        (project / "Cargo.lock").write_text(
+            _cargo_lock(
+                ("a", "0.1.0", "", ("shared",)),
+                ("b", "0.1.0", "", ("shared",)),
+                ("shared", "1.0.0", "", ("via-child",)),
+                ("via-child", "0.3.0", _CRATES_IO_INDEX, ()),
+            ),
+            encoding="utf-8",
+        )
+        _mock_crate("via-child", "0.3.0")
+        _mock_crate("shared", "1.0.0", "GPL-3.0-only")
+        _refuse_everything_else()
+        result, data = _check_json(project)
+        assert result.exit_code == 0
+        assert _versions(data) == {"via-child": ("", "0.3.0")}
+        assert _requests_mentioning("shared") == []
+
+
 # ---------------------------------------------------------------- PHP: Composer
 
 _VENDOR_GIT = "https://git.example.org/acme"

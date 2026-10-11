@@ -8,9 +8,11 @@ registry row). A git dependency has `source = "git+<url>?<ref>#<commit>"`: it
 is a row with the repository and the locked commit as its origin. A crate
 built from a path has no `source` field at all, and neither have the crates
 of the scanned workspace; the lockfile does not say which is which, so such a
-crate is a row only when a Cargo.toml of the scan declares it from a path
-that the scan does not read. Every crate stays in the edge graph, row or
-not, so the registry crates only it pulls in are attributed to it.
+crate is a row only when the caller names an origin for it: the path a
+Cargo.toml of the scan declares it from, when the scan does not read that
+path, or an unrecorded source when a Cargo.toml declares it by version only
+and none locates it. Every crate stays in the edge graph, row or not, so the
+registry crates only it pulls in are attributed to it.
 """
 
 from __future__ import annotations
@@ -113,12 +115,13 @@ def parse_cargo_lock(
     dependency that the scan reads has none, and the registry
     crates it reaches name it in ``direct_ancestors``.
 
-    ``origins`` maps a lowercased crate name to the origin a Cargo.toml of
-    the scan declares for it (see ``cargo_sources``). It decides the crates
-    the lockfile gives no ``source``: one it maps to a path is a row with
-    that origin, and any other one (a crate of the scanned workspace, a path
-    that the scan reads, a path dependency of a crate it does not read) is no
-    row.
+    ``origins`` maps a lowercased crate name to the origin of that crate
+    when the lockfile gives it no ``source``: what a Cargo.toml of the scan
+    declares for it (see ``cargo_sources``), or an unrecorded source for a
+    crate that is declared by version only. One it maps to an origin is a
+    row with that origin, and any other one (a crate of the scanned
+    workspace, a path that the scan reads, a path dependency of a crate it
+    does not read) is no row.
 
     ``all_known_names`` is the lowercased names of every package in the
     lockfile, registry-sourced or not. Callers in ``transitive.py`` use
