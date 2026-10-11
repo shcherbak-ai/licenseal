@@ -21,7 +21,7 @@ from licenseal.analysis.spdx import all_apply_reading, normalize_license
 from licenseal.discovery.php.lockfiles import LockfileLicenseMap
 from licenseal.models import Dependency, DependencyGroup, Ecosystem, LicenseInfo
 from licenseal.resolvers.http import Fetcher, fetch_registry_json
-from licenseal.resolvers.version_selection import select_php_version
+from licenseal.resolvers.version_selection import composer_version, select_version
 
 _PACKAGIST_REGISTRY_URL = "https://repo.packagist.org/p2"
 
@@ -169,21 +169,36 @@ def _versions_from_response(data: dict, name: str) -> list[dict[str, Any]]:
     return versions
 
 
+def _declares_exact_version(version_constraint: str) -> bool:
+    """Whether the constraint names one version rather than a range.
+
+    True for a lockfile pin and for a bare Composer version (``1.2.3``,
+    ``v2.0.0-beta1``), which Composer reads as exactly that version. Unlike a
+    lockfile pin, a bare version still goes through the published list: the
+    registry may spell it ``1.2.3.0`` or ``v1.2.3``.
+    """
+    spec = version_constraint.strip()
+    if _extract_pinned_version(spec) is not None:
+        return True
+    return composer_version(spec.removeprefix("=")) is not None
+
+
 def _select_version_entry(
     entries: list[dict[str, Any]], spec: str, pinned: str | None
 ) -> dict[str, Any] | None:
-    """Pick the entry matching the dep's version spec.
+    """Pick the entry the dep's version spec resolves to, or None when there is none.
 
     For a pinned ``==X.Y.Z`` spec, match by exact version string (Packagist
-    serves both with and without the ``v`` prefix). For range / wildcard
-    specs, use the npm-shaped selector against the published version list
-    (Composer's ``^`` / ``~`` semantics diverge slightly from npm's for
-    ``~`` — accepted v1 risk because the lockfile path bypasses this code
-    entirely). Falls back to the first entry (highest version) when no
-    spec is provided or selection fails.
+    serves both with and without the ``v`` prefix). Any other spec is read
+    as a Composer constraint and resolves to the highest published version
+    satisfying it; no spec at all is the latest release.
+
+    A pin the response does not list, a constraint that is not a version
+    range (a ``dev-*`` branch), and a range no published version satisfies
+    all select nothing. Selection never falls back to the first entry: its
+    license belongs to another release. The walker and the license resolver
+    both select through here.
     """
-    if not entries:
-        return None
     if pinned is not None:
         target = pinned.lstrip("v")
         for entry in entries:
@@ -198,27 +213,31 @@ def _select_version_entry(
             entry_version = entry.get("version_normalized") or ""
             if isinstance(entry_version, str) and entry_version.lstrip("v") == target:
                 return entry
-        # Pinned but no match — fall back to first entry (best-effort);
-        # the resolver will report the entry's version, the caller will
-        # see the mismatch in resolved_version.
-        return entries[0]
-    if not spec.strip():
-        return entries[0]
-    published_versions: list[str] = []
+        return None
+    by_version: dict[str, dict[str, Any]] = {}
     for entry in entries:
         version = entry.get("version")
         if isinstance(version, str):
-            published_versions.append(version.lstrip("v"))
-    selected = select_php_version(spec, published_versions)
-    if selected is None:
-        return entries[0]
-    for entry in entries:
-        version = entry.get("version")
-        if isinstance(version, str) and version.lstrip("v") == selected:
-            return entry
-    # Defensive: select returns a member of published_versions, so the
-    # for-loop above always finds a match. Kept as a safety net.
-    return entries[0]  # pragma: no cover
+            by_version.setdefault(version, entry)
+    selected = select_version(Ecosystem.PHP, spec, by_version)
+    return None if selected is None else by_version[selected]
+
+
+def _resolve_version(name: str, spec: str, client: httpx.Client, fetcher: Fetcher) -> str | None:
+    """Resolve ``spec`` to a published version of ``name``, or None when there is none.
+
+    The registry walk's version choice. A lockfile pin is returned as it is;
+    anything else is selected from the package's Packagist response the way
+    :func:`resolve_php_license` selects it, so both report the same version.
+    """
+    pinned = _extract_pinned_version(spec)
+    if pinned:
+        return pinned
+    data = fetcher(_packagist_url(name), client)
+    if data is None:
+        return None
+    entry = _select_version_entry(_versions_from_response(data, name), spec, None)
+    return entry["version"].lstrip("v") if entry else None
 
 
 def resolve_php_license(

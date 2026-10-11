@@ -10,12 +10,13 @@ from licenseal.analysis.spdx import all_apply_reading, normalize_license
 from licenseal.models import Dependency, DependencyGroup, Ecosystem, LicenseInfo
 from licenseal.resolvers.deps_dev import resolve_via_deps_dev_stable_get
 from licenseal.resolvers.http import Fetcher, fetch_registry_json, object_field
+from licenseal.resolvers.version_selection import select_version
 
 _CRATES_IO_URL = "https://crates.io/api/v1/crates"
 
 # Cargo exact-pinned form: `=X.Y.Z[-pre][+build]`. Anything else (bare,
-# caret, tilde, range, wildcard) is treated as a range and resolves to the
-# crate's `max_stable_version` from the registry.
+# caret, tilde, range, wildcard) is a range, resolved against the versions
+# the registry lists for the crate.
 _PINNED_VERSION_RE = re.compile(r"^=\s*(\d+(?:\.\d+){0,2}(?:[-+][A-Za-z0-9.+_-]+)?)$")
 
 
@@ -36,16 +37,37 @@ def _extract_pinned_version(version_constraint: str) -> str | None:
     return match.group(1)
 
 
+def _published_versions(data: dict) -> list[str]:
+    """The version numbers a crate response lists, without the yanked ones."""
+    versions = data.get("versions")
+    if not isinstance(versions, list):
+        return []
+    return [
+        entry["num"]
+        for entry in versions
+        if isinstance(entry, dict)
+        and isinstance(entry.get("num"), str)
+        and entry.get("yanked") is not True
+    ]
+
+
 def _resolve_version(
     name: str,
     spec: str,
     client: httpx.Client,
     fetcher: Fetcher,
 ) -> str | None:
-    """Resolve `spec` to a concrete version, or None on failure.
+    """Resolve `spec` to a concrete version, or None when there is none to report.
 
-    For pinned specs (`=X.Y.Z` or `==X.Y.Z`), returns the version verbatim.
-    For everything else, falls back to the crate's `max_stable_version`.
+    A pinned spec (`=X.Y.Z` or `==X.Y.Z`) is returned verbatim. No spec at
+    all is the crate's latest stable release. Any other requirement resolves
+    to the highest version satisfying it among those the crate response
+    lists. That response is the one the latest release is read from, so a
+    range costs no request of its own.
+
+    A requirement that is not Cargo syntax, or that no published version
+    satisfies, resolves to nothing; it never falls back to the latest
+    release. The walker and the license resolver both resolve through here.
     """
     pinned = _extract_pinned_version(spec)
     if pinned:
@@ -54,8 +76,14 @@ def _resolve_version(
     if data is None:
         return None
     crate = object_field(data, "crate")
-    version = crate.get("max_stable_version") or crate.get("newest_version")
-    return version if isinstance(version, str) else None
+    latest = crate.get("max_stable_version") or crate.get("newest_version")
+    if not isinstance(latest, str):
+        latest = None
+    if not spec.strip():
+        return latest
+    # The latest release is a candidate even when the response lists none.
+    published = _published_versions(data) + ([latest] if latest else [])
+    return select_version(Ecosystem.RUST, spec, published)
 
 
 def resolve_rust_license(

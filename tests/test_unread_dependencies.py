@@ -428,9 +428,11 @@ class TestNuspecWalk:
         assert gaps == [("App.csproj", _unread("Root 1.0.0"))]
 
     @respx.mock
-    def test_child_without_a_pinnable_version_is_reported_without_one(self, tmp_path: Path):
+    def test_child_without_a_resolvable_version_is_reported_without_one(self, tmp_path: Path):
         # Not dropped: the package is a row with no version, which resolves
-        # UNKNOWN, and what it requires is recorded as unread.
+        # UNKNOWN, and what it requires is recorded as unread. A floating
+        # version whose version list is not served resolves to nothing, like
+        # a dependency declared with no version at all.
         self._project(tmp_path)
         self._nuspec(
             "Root",
@@ -438,6 +440,7 @@ class TestNuspecWalk:
             '<dependency id="Floating" version="1.*" /><dependency id="Unversioned" />'
             '<dependency id="Pinned" version="3.0.0" />',
         )
+        _missing("https://api.nuget.org/v3-flatcontainer/floating/index.json")
         self._nuspec("Pinned", "3.0.0")
         rows, gaps = _scan(tmp_path)
         assert rows == {"Root": "==1.0.0", "Floating": "", "Unversioned": "", "Pinned": "==3.0.0"}
@@ -445,6 +448,22 @@ class TestNuspecWalk:
             ("App.csproj", _unread("Floating")),
             ("App.csproj", _unread("Unversioned")),
         ]
+
+    @respx.mock
+    def test_child_with_a_floating_version_is_walked_at_the_version_it_resolves_to(
+        self, tmp_path: Path
+    ):
+        self._project(tmp_path)
+        self._nuspec("Root", "1.0.0", '<dependency id="Floating" version="1.*" />')
+        _text(
+            "https://api.nuget.org/v3-flatcontainer/floating/index.json",
+            '{"versions": ["1.0.0", "1.4.0", "2.0.0"]}',
+        )
+        self._nuspec("Floating", "1.4.0", '<dependency id="Leaf" version="5.0.0" />')
+        self._nuspec("Leaf", "5.0.0")
+        rows, gaps = _scan(tmp_path)
+        assert rows == {"Root": "==1.0.0", "Floating": "==1.4.0", "Leaf": "==5.0.0"}
+        assert gaps == []
 
     @respx.mock
     def test_package_at_the_depth_limit_is_a_gap(self, tmp_path: Path, monkeypatch):

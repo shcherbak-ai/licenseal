@@ -28,7 +28,6 @@ from licenseal.resolvers.packagist import (
     fetch_packagist_dependencies,
     resolve_php_license,
 )
-from licenseal.resolvers.version_selection import select_php_version
 
 _FIXTURES = Path(__file__).parent / "fixtures" / "registry-responses" / "packagist"
 
@@ -201,21 +200,27 @@ class TestSelectVersionEntry:
     def test_empty_entries_returns_none(self):
         assert _select_version_entry([], "^1.0", None) is None
 
-    def test_pinned_no_match_falls_back_to_first(self):
-        # Pinned ``==9.9.9`` against entries that don't include 9.9.9 — the
-        # selector returns the first (highest) entry as a best-effort.
+    def test_pinned_no_match_selects_nothing(self):
+        # Pinned ``==9.9.9`` against entries that don't include 9.9.9: the
+        # first entry is another release, with a license of its own.
         entries = [{"version": "3.5.0"}, {"version": "2.9.0"}]
-        assert _select_version_entry(entries, "==9.9.9", "9.9.9") == entries[0]
+        assert _select_version_entry(entries, "==9.9.9", "9.9.9") is None
 
-    def test_empty_spec_returns_first(self):
+    def test_empty_spec_returns_the_latest_release(self):
         entries = [{"version": "3.5.0"}, {"version": "2.9.0"}]
         assert _select_version_entry(entries, "", None) == entries[0]
+        # A prerelease or a branch listed first is not the latest release.
+        entries = [{"version": "dev-main"}, {"version": "4.0.0-beta1"}, {"version": "3.5.0"}]
+        assert _select_version_entry(entries, "", None) == entries[2]
 
-    def test_unparseable_range_falls_back_to_first(self):
-        # ``dev-main`` isn't a published-version range — selector hits the
-        # fall-through-to-first path.
+    def test_branch_constraint_selects_nothing(self):
+        # ``dev-main`` names a branch, not a range of published versions.
+        entries = [{"version": "dev-main"}, {"version": "3.5.0"}, {"version": "2.9.0"}]
+        assert _select_version_entry(entries, "dev-main", None) is None
+
+    def test_unreadable_constraint_selects_nothing(self):
         entries = [{"version": "3.5.0"}, {"version": "2.9.0"}]
-        assert _select_version_entry(entries, "dev-main", None) == entries[0]
+        assert _select_version_entry(entries, "not a constraint", None) is None
 
     def test_pinned_matches_via_version_normalized_fallback(self):
         # Entry only carries ``version_normalized`` (the 4-segment form).
@@ -227,11 +232,19 @@ class TestSelectVersionEntry:
         # ``^3.0`` matches 3.5.0.
         assert _select_version_entry(entries, "^3.0", None) == entries[0]
 
-    def test_range_no_match_falls_back_to_first(self):
-        # ``^4.0`` against entries that only have ``<4.0`` versions —
-        # selector returns first entry as best-effort.
+    def test_range_picks_the_highest_match_not_the_first_entry(self):
+        entries = [{"version": "3.5.0"}, {"version": "2.9.0"}, {"version": "2.1.0"}]
+        assert _select_version_entry(entries, "^2.0", None) == entries[1]
+
+    def test_range_no_match_selects_nothing(self):
+        # ``^4.0`` against entries that only have ``<4.0`` versions.
         entries = [{"version": "3.5.0"}, {"version": "2.9.0"}]
-        assert _select_version_entry(entries, "^4.0", None) == entries[0]
+        assert _select_version_entry(entries, "^4.0", None) is None
+
+    def test_prefixed_version_is_matched_and_returned_as_listed(self):
+        entries = [{"version": "v3.5.0"}, {"version": "v2.9.0"}]
+        assert _select_version_entry(entries, "^2.0", None) == entries[1]
+        assert _select_version_entry(entries, "2.9.0", None) == entries[1]
 
     def test_published_skips_non_string_versions(self):
         # Defensive: skip entries with non-string ``version`` when building
@@ -776,46 +789,6 @@ class TestRegistryCacheTrim:
         assert _trim_packagist({"packages": packages, "minified": {"x": 1}}) == {
             "packages": packages
         }
-
-    def test_select_php_version_picks_highest_matching(self):
-        # Caret range against a descending Packagist version list.
-        published = ["3.5.0", "3.4.0", "2.9.0"]
-        assert select_php_version("^3.0", published) == "3.5.0"
-
-    def test_select_php_version_pinned_match(self):
-        published = ["3.5.0", "3.4.0", "2.9.0"]
-        assert select_php_version("2.9.0", published) == "2.9.0"
-
-    def test_select_php_version_dev_branch_returns_none(self):
-        published = ["3.5.0"]
-        # ``dev-*`` and ``*-dev`` aliases aren't published-version ranges;
-        # caller falls back to latest stable.
-        assert select_php_version("dev-main", published) is None
-        assert select_php_version("1.x-dev", published) is None
-
-    def test_select_php_version_star_returns_none(self):
-        assert select_php_version("*", ["1.0.0"]) is None
-
-    def test_select_php_version_empty_returns_none(self):
-        assert select_php_version("", ["1.0.0"]) is None
-        assert select_php_version("   ", ["1.0.0"]) is None
-
-    def test_select_php_version_strips_v_prefix(self):
-        # Composer publishes ``v3.5.0`` decoratively; matching must work
-        # against the stripped form.
-        published = ["v3.5.0", "v3.4.0"]
-        assert select_php_version("^3.0", published) == "3.5.0"
-
-    def test_select_php_version_strips_v_prefix_from_spec(self):
-        # Composer constraint specs can also carry a ``v`` prefix
-        # (``^v3.0`` is occasionally seen); the selector strips it before
-        # npm-spec parsing so the match still works.
-        published = ["3.5.0", "3.4.0"]
-        assert select_php_version("^v3.0", published) == "3.5.0"
-        # ``~v3.4.0`` after stripping is ``~3.4.0`` which npm interprets
-        # as ``>=3.4.0 <3.5.0`` (this is one of the documented divergences
-        # from Composer's broader ``~3.4`` semantics).
-        assert select_php_version("~v3.4.0", published) == "3.4.0"
 
     @respx.mock
     def test_resolver_works_through_registry_cache(self):

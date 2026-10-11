@@ -1525,8 +1525,26 @@ class TestCratesIoResolver:
             )
         )
         with httpx.Client() as client:
-            info = resolve_rust_license(_rust_dep("preview", "*"), client)
+            info = resolve_rust_license(_rust_dep("preview", ""), client)
         assert info.resolved_version == "0.1.0-alpha"
+
+    @respx.mock
+    def test_wildcard_does_not_select_a_prerelease(self):
+        # Cargo's ``*`` matches releases only, and the crate has none.
+        respx.get("https://crates.io/api/v1/crates/preview").mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "crate": {"newest_version": "0.1.0-alpha"},
+                    "versions": [{"num": "0.1.0-alpha", "yanked": False}],
+                },
+            )
+        )
+        with httpx.Client() as client:
+            info = resolve_rust_license(_rust_dep("preview", "*"), client)
+        assert info.license_id == "UNKNOWN"
+        assert info.resolved_version == ""
+        assert info.from_registry is False
 
     @respx.mock
     def test_resolve_returns_unknown_when_crate_not_found(self):
@@ -5237,25 +5255,31 @@ class TestDependenciesFromNuspec:
         )
         assert _dependencies_from_nuspec(body) == ([("Good", "1.0.0")], False)
 
-    def test_version_that_cannot_be_pinned_is_kept_with_none(self):
+    def test_each_dependency_carries_its_version_as_declared(self):
         from licenseal.resolvers.nuget import _dependencies_from_nuspec
 
-        # Floating versions and MSBuild property tokens have no concrete
-        # pin: the package is emitted with an empty version, once however
-        # many unpinnable forms name it. Bracket ranges ``[1.0,2.0)`` DO
-        # resolve to the lower bound (conservative lockfile-equivalent
-        # behavior — see :func:`_extract_pinned_version_nuget`'s docstring).
+        # The declared text is returned untouched: a floating version, an
+        # MSBuild property token, a bracket range, a bare minimum. Resolving
+        # it to a version is the walk's job. One package declared with the
+        # same text twice (in two framework groups) is listed once.
         body = (
             "<package><metadata><dependencies>"
             '<dependency id="Floating" version="1.*" />'
             '<dependency id="floating" version="*" />'
             '<dependency id="Token" version="$(Var)" />'
-            '<dependency id="Ranged" version="[2.0.0,3.0.0)" />'
+            '<dependency id="Ranged" version=" [2.0.0,3.0.0) " />'
             '<dependency id="Good" version="2.0.0" />'
+            '<dependency id="good" version="2.0.0" />'
             "</dependencies></metadata></package>"
         )
         assert _dependencies_from_nuspec(body) == (
-            [("Floating", ""), ("Token", ""), ("Ranged", "2.0.0"), ("Good", "2.0.0")],
+            [
+                ("Floating", "1.*"),
+                ("floating", "*"),
+                ("Token", "$(Var)"),
+                ("Ranged", "[2.0.0,3.0.0)"),
+                ("Good", "2.0.0"),
+            ],
             True,
         )
 
@@ -5440,8 +5464,9 @@ class TestFetchNugetDependencies:
         from licenseal.resolvers.nuget import fetch_nuget_dependencies
 
         # Root → Broken (nuspec not served), Unparsed (malformed nuspec),
-        # Floating (no version to fetch one for), Fine → Leaf. The readable
-        # branch is walked in full; each of the others is named once.
+        # Floating (its version list is not served, so no version to fetch
+        # a nuspec for), Fine → Leaf. The readable branch is walked in full;
+        # each of the others is named once.
         respx.get(self._nuspec_url("Root", "1.0.0")).respond(
             text=self._nuspec(
                 "Root",
@@ -5451,6 +5476,7 @@ class TestFetchNugetDependencies:
                 ("Fine", "1.0.0"),
             )
         )
+        respx.get("https://api.nuget.org/v3-flatcontainer/floating/index.json").respond(404)
         respx.get(self._nuspec_url("Broken", "1.0.0")).respond(404)
         respx.get(self._nuspec_url("Unparsed", "1.0.0")).respond(text="<package><metadata>")
         respx.get(self._nuspec_url("Fine", "1.0.0")).respond(

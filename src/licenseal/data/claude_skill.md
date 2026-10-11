@@ -214,7 +214,7 @@ The general pattern is: state the obligation, anchor it to the user's project co
 
   **Merge does not reconcile stale entries.** If a previously-reviewed dep changed version, merge appends a *new* empty stanza for the new version and leaves the *old* filled stanza untouched — it can't tell they're the same dep. The old stanza then surfaces on the next `check` (step 7) as a `did not match any resolved package versions` error; resolve that by hand-editing the `version` field on the stale stanza — but only if the new version reports the same license (verify against the fresh scan first; if it changed, delete the stanza so the dep re-flags). Re-merging will not fix a stale pin. A stanza with a `source` line goes stale the same way when the dependency's commit, ref, URL, or path changes: the new source is different code, so ask the user to review it again before updating `source`.
 
-If the command emits a `Note: N flagged dependencies could not be scaffolded (no resolved version) ...` line, surface those names to the user — they signal upstream issues (manifest typo, yanked release, registry miss) that the review file can't paper over.
+If the command emits a `Note: N flagged dependencies could not be scaffolded (no resolved version) ...` line, surface those names to the user — they signal upstream issues (manifest typo, yanked release, registry miss, a declared version range that no published version satisfies) that the review file can't paper over.
 
 ### 6. Fill in the review file
 

@@ -334,7 +334,10 @@ class TestFetchHexDependencies:
 
 class TestRegistryCacheTrim:
     def test_package_keep_set_documented(self):
-        assert frozenset({"meta", "latest_stable_version", "latest_version"}) == _HEX_PACKAGE_KEEP
+        assert (
+            frozenset({"meta", "latest_stable_version", "latest_version", "releases"})
+            == _HEX_PACKAGE_KEEP
+        )
 
     def test_release_keep_set_documented(self):
         assert frozenset({"version", "requirements"}) == _HEX_RELEASE_KEEP
@@ -342,11 +345,21 @@ class TestRegistryCacheTrim:
     def test_trim_package_drops_extra_and_reduces_meta(self):
         raw = json.loads((_FIXTURES / "phoenix" / "package.json").read_text())
         trimmed = _trim_hex_package(raw)
-        assert "releases" not in trimmed
         assert "downloads" not in trimmed
         assert "html_url" not in trimmed
         assert set(trimmed["meta"]) == {"licenses", "links"}
         assert trimmed["latest_stable_version"] == "1.7.14"
+        # The published-version list is what a declared range is matched
+        # against, so it is kept, reduced to the version of each release.
+        assert trimmed["releases"] == [{"version": "1.7.14"}, {"version": "1.7.10"}]
+
+    def test_trim_package_release_list_of_the_wrong_shape(self):
+        # A list that is not a list is cached as given; an entry that is not
+        # an object names no version and is dropped.
+        assert _trim_hex_package({"releases": "wrong"})["releases"] == "wrong"
+        assert _trim_hex_package({"releases": ["wrong", {"version": "1.0.0", "url": "u"}]}) == {
+            "releases": [{"version": "1.0.0"}]
+        }
 
     def test_trim_package_no_meta(self):
         trimmed = _trim_hex_package({"latest_stable_version": "1.0", "downloads": 5})

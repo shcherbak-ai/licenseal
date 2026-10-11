@@ -61,12 +61,20 @@ class TestExtractPinnedVersionNuget:
         # NuGet's ``[1.2.3]`` syntax means "exactly this version".
         assert _extract_pinned_version_nuget("[1.2.3]") == "1.2.3"
 
-    def test_bracket_range_picks_lower_bound(self):
-        # Conservative posture: pick the lower bound rather than guessing
-        # the resolver's actual pick.
+    def test_bracket_range_picks_an_inclusive_lower_bound(self):
+        # NuGet restores the lowest version a range allows, which is the
+        # lower bound when the range includes it.
         assert _extract_pinned_version_nuget("[1.0,2.0)") == "1.0"
-        assert _extract_pinned_version_nuget("(1.0,2.0]") == "1.0"
         assert _extract_pinned_version_nuget("[1.0,)") == "1.0"
+        assert _extract_pinned_version_nuget("[ 1.0 , 2.0 ]") == "1.0"
+
+    def test_bracket_range_without_an_inclusive_lower_bound_names_no_version(self):
+        # The bound is excluded, absent, or outside its own range: the
+        # version comes from the registry's list, never from the bound.
+        assert _extract_pinned_version_nuget("(1.0,2.0]") is None
+        assert _extract_pinned_version_nuget("(1.0,)") is None
+        assert _extract_pinned_version_nuget("(,2.0]") is None
+        assert _extract_pinned_version_nuget("[2.0,1.0]") is None
 
     def test_double_equals_prefix_stripped(self):
         # licenseal-internal pinned form used by the transitive walker.

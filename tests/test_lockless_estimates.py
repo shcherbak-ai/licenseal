@@ -551,16 +551,29 @@ class TestRegistryWalkPerEcosystem:
                 <PackageReference Include="Exact" Version="1.0.0" />
                 <PackageReference Include="Ranged" Version="[2.0.0,3.0.0)" />
                 <PackageReference Include="Floating" Version="1.*" />
+                <PackageReference Include="Unlisted" Version="1.*" />
               </ItemGroup>
             </Project>
             """,
         )
         self._mock_nuspecs()
+        # A floating version is resolved against the package's version list;
+        # with no list served, the row keeps what the project declares.
+        _text(
+            "https://api.nuget.org/v3-flatcontainer/floating/index.json",
+            '{"versions": ["1.0.0", "1.3.0", "2.0.0"]}',
+        )
+        _text(
+            "https://api.nuget.org/v3-flatcontainer/floating/1.3.0/floating.nuspec",
+            "<package><metadata><id>Floating</id><version>1.3.0</version></metadata></package>",
+        )
+        respx.get("https://api.nuget.org/v3-flatcontainer/unlisted/index.json").respond(404)
         rows, missing = _scan(tmp_path)
         assert rows == {
             "Exact": ("==1.0.0", False),
             "Ranged": ("==2.0.0", True),
-            "Floating": ("1.*", True),
+            "Floating": ("==1.3.0", True),
+            "Unlisted": ("1.*", True),
             "Child": ("==1.5.0", True),
         }
         assert missing == ["App.csproj"]

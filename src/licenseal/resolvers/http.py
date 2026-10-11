@@ -927,13 +927,24 @@ _RUBYGEMS_GEM_KEEP = frozenset(
     {"name", "version", "licenses", "homepage_uri", "source_code_uri", "dependencies"}
 )
 
+# RubyGems version-list endpoint (``rubygems.org/api/v1/versions/{name}.json``)
+# answers with a JSON array: one entry per published version and platform,
+# each with the gem's summary, description, authors, and metadata. A declared
+# requirement is resolved against the ``number`` of each entry and nothing
+# else. Requested only for a gem whose latest release is outside the
+# requirement.
+_RUBYGEMS_VERSIONS_KEEP = frozenset({"number"})
+
 # hex.pm package endpoint (``hex.pm/api/packages/{name}``) returns the
-# package-level ``meta`` (with ``licenses`` / ``links``) plus the latest
-# version. Everything else (the full ``releases`` array, ``owners``,
-# ``downloads``, ``security_advisories``, timestamps, …) is heavy and unused.
-_HEX_PACKAGE_KEEP = frozenset({"meta", "latest_stable_version", "latest_version"})
+# package-level ``meta`` (with ``licenses`` / ``links``), the latest version,
+# and the ``releases`` a declared requirement is resolved against. Everything
+# else (``owners``, ``downloads``, ``security_advisories``, timestamps, …) is
+# heavy and unused.
+_HEX_PACKAGE_KEEP = frozenset({"meta", "latest_stable_version", "latest_version", "releases"})
 # Within ``meta`` only the license array and the repo/homepage link map matter.
 _HEX_META_KEEP = frozenset({"licenses", "links"})
+# Of a ``releases`` entry only the version number is read.
+_HEX_PACKAGE_RELEASE_KEEP = frozenset({"version"})
 
 # hex.pm release endpoint (``hex.pm/api/packages/{name}/releases/{version}``)
 # carries no license — only the ``requirements`` edge map for the manifest-only
@@ -1096,16 +1107,46 @@ def _trim_rubygems_gem(data: dict) -> dict:
     return out
 
 
+def _trim_rubygems_versions(data: dict) -> dict:
+    """Strip a RubyGems version-list body to the version numbers.
+
+    Takes and returns the ``{"text": "<JSON array>"}`` shape of
+    :func:`fetch_registry_text`: the endpoint answers with an array, which
+    the JSON fetcher does not take. A body that is not a JSON array is cached
+    as it is, and the resolver reads it as a gem with no version list.
+    """
+    try:
+        entries = json.loads(data.get("text", ""))
+    except (TypeError, ValueError, RecursionError):
+        return data
+    if not isinstance(entries, list):
+        return data
+    kept = [
+        {k: v for k, v in entry.items() if k in _RUBYGEMS_VERSIONS_KEEP}
+        for entry in entries
+        if isinstance(entry, dict)
+    ]
+    return {"text": json.dumps(kept)}
+
+
 def _trim_hex_package(data: dict) -> dict:
     """Strip a hex.pm package response to the license + links + version fields.
 
-    Drops the heavy ``releases`` / ``owners`` / ``downloads`` blocks; reduces
-    the nested ``meta`` to just ``licenses`` and ``links``.
+    Drops the heavy ``owners`` / ``downloads`` blocks; reduces the nested
+    ``meta`` to just ``licenses`` and ``links``, and each ``releases`` entry
+    to its ``version``.
     """
     out = {k: v for k, v in data.items() if k in _HEX_PACKAGE_KEEP}
     meta = out.get("meta")
     if isinstance(meta, dict):
         out["meta"] = {k: v for k, v in meta.items() if k in _HEX_META_KEEP}
+    releases = out.get("releases")
+    if isinstance(releases, list):
+        out["releases"] = [
+            {k: v for k, v in release.items() if k in _HEX_PACKAGE_RELEASE_KEEP}
+            for release in releases
+            if isinstance(release, dict)
+        ]
     return out
 
 
@@ -1220,8 +1261,9 @@ def _trim_for_cache(url: str, data: dict | None) -> dict | None:
     ):
         # The flatcontainer service serves raw ``.nuspec`` XML at
         # ``api.nuget.org/v3-flatcontainer/{id}/{version}/{id}.nuspec``.
-        # Other flatcontainer endpoints (``/index.json``) aren't used by
-        # the resolver, so the ``.nuspec`` suffix check disambiguates.
+        # The package's version list (``{id}/index.json``) is a bare array
+        # of version numbers with nothing to strip, so the ``.nuspec``
+        # suffix check leaves it alone.
         return _trim_nuspec(data)
     if host == "repo.packagist.org" and path.startswith("/p2/"):
         # Packagist v2 metadata — full version history per package, kept
@@ -1237,6 +1279,9 @@ def _trim_for_cache(url: str, data: dict | None) -> dict | None:
         # RubyGems v1 latest-version fallback for unpinned deps; same kept
         # fields modulo ``number`` vs ``version`` for the resolved version.
         return _trim_rubygems_gem(data)
+    if host == "rubygems.org" and path.startswith("/api/v1/versions/"):
+        # RubyGems version list, fetched as text: reduced to version numbers.
+        return _trim_rubygems_versions(data)
     if host == "hex.pm" and path.startswith("/api/packages/"):
         # Two hex.pm endpoints share this prefix: the per-version release
         # (``.../releases/{version}``) carries the transitive requirements;

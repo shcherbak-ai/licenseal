@@ -781,7 +781,12 @@ def _resolve_license_infos(
                     )
                     if cached is not None:
                         return cached
-                    return resolve_ruby_license(dep, client, fetcher=registry_cache.fetch)
+                    return resolve_ruby_license(
+                        dep,
+                        client,
+                        fetcher=registry_cache.fetch,
+                        text_fetcher=registry_cache.fetch_text,
+                    )
                 if dep.ecosystem == Ecosystem.PHP:
                     # Lockfile-first PHP path: when composer.lock carried
                     # an SPDX license for this (name, version) pin, the

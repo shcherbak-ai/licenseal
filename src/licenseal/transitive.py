@@ -127,6 +127,9 @@ from licenseal.resolvers.crates_io import (
     _extract_pinned_version as _extract_rust_pinned_version,  # noqa: PLC2701
 )
 from licenseal.resolvers.crates_io import (
+    _resolve_version as _resolve_rust_version,  # noqa: PLC2701
+)
+from licenseal.resolvers.crates_io import (
     fetch_rust_dependencies,
 )
 from licenseal.resolvers.deps_dev import (
@@ -137,8 +140,10 @@ from licenseal.resolvers.hex import (
 )
 from licenseal.resolvers.hex import (
     _hex_package_url,  # noqa: PLC2701
-    _latest_version,  # noqa: PLC2701
     fetch_hex_dependencies,
+)
+from licenseal.resolvers.hex import (
+    _select_version as _select_hex_version,  # noqa: PLC2701
 )
 from licenseal.resolvers.http import (
     Fetcher,
@@ -161,15 +166,18 @@ from licenseal.resolvers.npm_registry import (
 )
 from licenseal.resolvers.nuget import (
     _declares_exact_version_nuget,
-    _extract_pinned_version_nuget,
     fetch_nuget_dependencies,
 )
-from licenseal.resolvers.packagist import (
-    _extract_pinned_version as _extract_php_pinned_version,  # noqa: PLC2701
+from licenseal.resolvers.nuget import (
+    _resolve_version as _resolve_nuget_version,
 )
 from licenseal.resolvers.packagist import (
-    _packagist_url,  # noqa: PLC2701
-    _versions_from_response,  # noqa: PLC2701
+    _declares_exact_version as _declares_exact_php_version,  # noqa: PLC2701
+)
+from licenseal.resolvers.packagist import (
+    _resolve_version as _resolve_php_version,  # noqa: PLC2701
+)
+from licenseal.resolvers.packagist import (
     fetch_packagist_dependencies,
 )
 from licenseal.resolvers.pypi import (
@@ -185,9 +193,11 @@ from licenseal.resolvers.rubygems import (
     _rubygems_gem_url,  # noqa: PLC2701
     fetch_rubygems_dependencies,
 )
+from licenseal.resolvers.rubygems import (
+    _select_version as _select_ruby_version,  # noqa: PLC2701
+)
 from licenseal.resolvers.version_selection import (
     resolve_npm_spec,
-    select_php_version,
     select_python_version,
 )
 
@@ -201,7 +211,7 @@ _EXACT_VERSION_CHECKS: dict[Ecosystem, Callable[[str], str | bool | None]] = {
     Ecosystem.RUST: _extract_rust_pinned_version,
     Ecosystem.JAVA: _extract_pinned_version_maven,
     Ecosystem.DOTNET: _declares_exact_version_nuget,
-    Ecosystem.PHP: _extract_php_pinned_version,
+    Ecosystem.PHP: _declares_exact_php_version,
     Ecosystem.RUBY: _extract_ruby_pinned_version,
     Ecosystem.HEX: _extract_hex_pinned_version,
     Ecosystem.R: _extract_r_pinned_version,
@@ -372,6 +382,7 @@ def resolve_transitive(
             client=client,
             max_workers=max_workers,
             fetcher=fetcher,
+            text_fetcher=pom_fetcher,
             on_wave=on_wave,
             origins=origins,
         )
@@ -698,6 +709,7 @@ def resolve_transitive(
             client=client,
             max_workers=max_workers,
             fetcher=fetcher,
+            text_fetcher=pom_fetcher,
             on_wave=on_wave,
             origins=cargo.patches if ecosystem == Ecosystem.RUST else None,
         )
@@ -1235,16 +1247,22 @@ def _resolve_dotnet_transitive(
         return out
     _record_missing_lockfiles(project_path, direct_uncovered)
 
-    # Direct deps whose version parses to a concrete NuGet pin can be
-    # walked; ones that don't (unresolved $() tokens, floating versions)
-    # still surface in the output so the license resolver sees them. A
-    # version taken from a range is an estimate; a bare version or
-    # ``[1.2.3]`` is the version NuGet restores.
+    # Direct deps whose declared version resolves to a version can be
+    # walked; ones that don't (unresolved $() tokens, a range nothing
+    # published satisfies) still surface in the output so the license
+    # resolver sees them, and resolves them the same way. A version taken
+    # from a range is an estimate; a bare version or ``[1.2.3]`` is the
+    # version NuGet restores. A dep with an origin is a project reference,
+    # not a NuGet package: nothing is resolved or walked for it.
     walkable: list[tuple[Dependency, str]] = []
     first_direct = len(out)
     for d in direct_uncovered:
         declared = flag_version_estimate(d)
-        pinned = _extract_pinned_version_nuget(d.version_constraint)
+        pinned = (
+            None
+            if d.origin
+            else _resolve_nuget_version(d.name, d.version_constraint, client, fetcher)
+        )
         if pinned is None:
             out.append(declared)
             continue
@@ -1986,6 +2004,7 @@ def _walk_registry(
     client: httpx.Client,
     max_workers: int = 16,
     fetcher: Fetcher,
+    text_fetcher: Fetcher = fetch_registry_text,
     on_wave: Callable[[int], None] | None = None,
     origins: Mapping[str, str | None] | None = None,
 ) -> list[Dependency]:
@@ -2070,7 +2089,9 @@ def _walk_registry(
     progress_total = 0
 
     def _walk_one(snapshot: contextvars.Context, dep: Dependency) -> _WalkResult:
-        result = snapshot.run(_walk_one_inner, dep, ecosystem, max_depth, client, fetcher)
+        result = snapshot.run(
+            _walk_one_inner, dep, ecosystem, max_depth, client, fetcher, text_fetcher
+        )
         if not origins:
             return result
         walked, resolved_version, children, complete = result
@@ -2207,6 +2228,7 @@ def _walk_one_inner(
     max_depth: int,
     client: httpx.Client,
     fetcher: Fetcher,
+    text_fetcher: Fetcher = fetch_registry_text,
 ) -> _WalkResult:
     """Resolve one BFS node: pick a version, then fetch its declared deps.
 
@@ -2220,7 +2242,7 @@ def _walk_one_inner(
     """
     if dep.origin:
         return (dep, "", [], True)
-    resolved_version = _resolve_version(dep, ecosystem, client, fetcher)
+    resolved_version = _resolve_version(dep, ecosystem, client, fetcher, text_fetcher)
     if not resolved_version or dep.depth >= max_depth:
         return (dep, resolved_version, [], True)
     if ecosystem == Ecosystem.PYTHON:
@@ -2291,8 +2313,14 @@ def _resolve_version(
     ecosystem: Ecosystem,
     client: httpx.Client,
     fetcher: Fetcher,
+    text_fetcher: Fetcher = fetch_registry_text,
 ) -> str:
-    """Resolve a dep's version constraint to an exact version (best effort)."""
+    """Resolve a dep's version constraint to an exact version; "" when there is none.
+
+    A constraint that cannot be read, or that no published version satisfies,
+    resolves to no version. ``text_fetcher`` reads the one endpoint that does
+    not answer with a JSON object, the RubyGems version list.
+    """
     spec = dep.version_constraint.strip()
     if ecosystem == Ecosystem.PYTHON:
         pinned = _extract_python_pinned_version(spec)
@@ -2319,62 +2347,36 @@ def _resolve_version(
         )
         return select_python_version(spec, keys) or ""
 
+    # Rust, PHP, Ruby, and Hex resolve through the function their license
+    # resolver uses, so a walk and a ``--no-transitive`` scan report the same
+    # version for the same declaration.
     if ecosystem == Ecosystem.RUST:
-        pinned = _extract_rust_pinned_version(spec)
-        if pinned:
-            return pinned
-        data = fetcher(f"https://crates.io/api/v1/crates/{dep.name}", client)
-        if data is None:
-            return ""
-        crate = object_field(data, "crate")
-        v = crate.get("max_stable_version") or crate.get("newest_version") or ""
-        return v if isinstance(v, str) else ""
+        return _resolve_rust_version(dep.name, spec, client, fetcher) or ""
 
     if ecosystem == Ecosystem.PHP:
-        pinned = _extract_php_pinned_version(spec)
-        if pinned:
-            return pinned.lstrip("v")
-        data = fetcher(_packagist_url(dep.name), client)
-        if data is None:
-            return ""
-        entries = _versions_from_response(data, dep.name)
-        if not entries:
-            return ""
-        if not spec or spec == "*":
-            first_version = entries[0].get("version", "")
-            if isinstance(first_version, str):
-                return first_version.lstrip("v")
-            return ""
-        published_versions: list[str] = []
-        for entry in entries:
-            v = entry.get("version")
-            if isinstance(v, str):
-                published_versions.append(v.lstrip("v"))
-        return select_php_version(spec, published_versions) or ""
+        return _resolve_php_version(dep.name, spec, client, fetcher) or ""
 
     if ecosystem == Ecosystem.RUBY:
         pinned = _extract_ruby_pinned_version(spec)
         if pinned:
             return pinned
-        # Unpinned: ask the v1 latest-version endpoint. RubyGems doesn't
-        # expose a Cargo-style ``max_stable_version`` field, but the v1
-        # ``/gems/{name}.json`` body's top-level ``version`` is exactly that.
+        # Unpinned: the v1 latest-version endpoint, and the gem's version
+        # list when that release is outside the requirement.
         data = fetcher(_rubygems_gem_url(dep.name), client)
         if data is None:
             return ""
-        v = data.get("version", "")
-        return v if isinstance(v, str) else ""
+        return _select_ruby_version(dep.name, spec, data, client, text_fetcher) or ""
 
     if ecosystem == Ecosystem.HEX:
         pinned = _extract_hex_pinned_version(spec)
         if pinned:
             return pinned
-        # Unpinned: read the package endpoint's latest_stable_version, under the
-        # real hex.pm package name for a `hex:`-renamed dep.
+        # Unpinned: resolved against the package endpoint's releases, under
+        # the real hex.pm package name for a `hex:`-renamed dep.
         data = fetcher(_hex_package_url(dep.effective_registry_name), client)
         if not isinstance(data, dict):
             return ""
-        return _latest_version(data)
+        return _select_hex_version(spec, data)
 
     pinned = _extract_npm_pinned_version(spec)
     if pinned:

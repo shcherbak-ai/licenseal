@@ -46,7 +46,7 @@ the on-disk ``.csproj``, is untrusted input.
 
 from __future__ import annotations
 
-import re
+import json
 from typing import cast
 from xml.etree.ElementTree import Element  # nosec B405
 
@@ -57,7 +57,7 @@ from licenseal.analysis.spdx import (
     normalize_license,
     spdx_from_license_url,
 )
-from licenseal.models import Dependency, LicenseInfo
+from licenseal.models import Dependency, Ecosystem, LicenseInfo
 from licenseal.resolvers.deps_dev import (
     _DEPS_DEV_NUGET_VERSION_URL,
     _license_info_from_version_object,
@@ -68,66 +68,35 @@ from licenseal.resolvers.http import (
     fetch_registry_text,
     quote_coordinate,
 )
+from licenseal.resolvers.version_selection import parse_nuget_range, select_version
 
 _NUGET_FLATCONTAINER_URL = "https://api.nuget.org/v3-flatcontainer/{name}/{version}/{name}.nuspec"
-
-# NuGet version syntax. Modern packages use ``MAJOR.MINOR.PATCH[-prerelease][+build]``
-# (SemVer 2.0). Some legacy packages use ``MAJOR.MINOR.PATCH.REVISION`` (4-part)
-# which we accept by allowing arbitrary numeric/dot prefix. We do NOT accept
-# range syntax like ``[1.0,2.0)`` — the lockfile-resolved version is always a
-# concrete pin, and discovery-time .csproj versions that use brackets resolve
-# via the bracket-extraction step below.
-_NUGET_PINNED_VERSION_RE = re.compile(
-    r"^\d+(?:\.\d+)*(?:-[A-Za-z0-9.+_-]+)?(?:\+[A-Za-z0-9.+_-]+)?$"
-)
-
-# NuGet bracket-version notation: ``[1.2.3]`` (exact-pin), ``[1.0,2.0)``
-# (range), ``(1.0,2.0]``, ``[1.0,)``. We pick the lower bound conservatively
-# — picking the latest would diverge from what ``dotnet restore`` actually
-# resolved at the lockfile-emit time, and licenseal stays in lockfile-equivalent
-# semantics rather than re-running NuGet's resolver.
-_NUGET_BRACKET_VERSION_RE = re.compile(r"^[\[\(]\s*([^,\]\)\s]+)(?:\s*,\s*[^)\]]*)?\s*[\]\)]$")
+# The flatcontainer's list of a package's published versions.
+_NUGET_INDEX_URL = "https://api.nuget.org/v3-flatcontainer/{name}/index.json"
 
 
 def _extract_pinned_version_nuget(version_constraint: str) -> str | None:
-    """Return a concrete version string from a NuGet ``<PackageReference>`` Version.
+    """Return the version a NuGet version string names without a registry lookup.
 
-    Accepts:
+    NuGet restores the lowest version a requirement allows, so an inclusive
+    lower bound is the version it restores when that version is published:
 
-    * Bare ``MAJOR.MINOR.PATCH[-prerelease][+build]`` (SemVer) — passthrough.
+    * Bare ``MAJOR.MINOR.PATCH[-prerelease][+build]`` (a minimum) — passthrough.
     * 4-part legacy ``MAJOR.MINOR.PATCH.REVISION`` — passthrough.
     * NuGet bracket syntax ``[1.2.3]`` (exact) — strip brackets.
-    * NuGet bracket range ``[1.0,2.0)`` — pick the lower bound (conservative,
-      matches the resolver's lockfile-equivalent posture).
+    * A range with an inclusive lower bound, ``[1.0,2.0)`` or ``[1.0,)`` —
+      the lower bound.
     * licenseal-internal ``==X.Y.Z`` form — strip the ``==``.
 
-    Returns ``None`` for unresolved ``$(…)`` MSBuild property tokens,
-    floating-version specs (``*``, ``1.*``), or anything else the
-    flatcontainer URL builder couldn't safely consume.
+    Returns ``None`` when no version can be named this way: a range whose
+    lower bound is exclusive or absent (``(1.0,2.0]``, ``(,2.0]``) or lies
+    outside the range, a floating version (``*``, ``1.*``), an unresolved
+    ``$(…)`` MSBuild property token, or anything that is not a NuGet version
+    range. :func:`_resolve_version` resolves the first two against the
+    registry.
     """
-    spec = version_constraint.strip()
-    if not spec:
-        return None
-    if spec.startswith("=="):
-        spec = spec[2:].strip()
-    if not spec:
-        return None
-    # MSBuild property token survived discovery — can't resolve.
-    if "$(" in spec:
-        return None
-    # Floating-version specs are NuGet-resolver-time decisions we don't make.
-    if "*" in spec:
-        return None
-    # Try the bare-pin shape first.
-    if _NUGET_PINNED_VERSION_RE.fullmatch(spec):
-        return spec
-    # Bracket notation: exact pin or range lower-bound.
-    bracket_match = _NUGET_BRACKET_VERSION_RE.fullmatch(spec)
-    if bracket_match:
-        candidate = bracket_match.group(1).strip()
-        if _NUGET_PINNED_VERSION_RE.fullmatch(candidate):
-            return candidate
-    return None
+    parsed = parse_nuget_range(version_constraint)
+    return (parsed.minimum or None) if parsed is not None else None
 
 
 def _declares_exact_version_nuget(version_constraint: str) -> bool:
@@ -137,8 +106,55 @@ def _declares_exact_version_nuget(version_constraint: str) -> bool:
     restores. A bracket range does not, even though
     :func:`_extract_pinned_version_nuget` picks a version for it.
     """
-    return "," not in version_constraint and (
-        _extract_pinned_version_nuget(version_constraint) is not None
+    parsed = parse_nuget_range(version_constraint)
+    return parsed is not None and parsed.exact
+
+
+def _published_versions(package_id: str, client: httpx.Client, fetcher: Fetcher) -> list[str]:
+    """The versions the flatcontainer lists for a package; empty when it lists none.
+
+    ``fetcher`` is the text fetcher the ``.nuspec`` reads use, so the JSON
+    index is parsed here.
+    """
+    url = _NUGET_INDEX_URL.format(name=quote_coordinate(package_id.lower(), safe=""))
+    data = fetcher(url, client)
+    text = data.get("text") if data is not None else None
+    if not isinstance(text, str):
+        return []
+    try:
+        index = json.loads(text)
+    except (ValueError, RecursionError):
+        return []
+    versions = index.get("versions") if isinstance(index, dict) else None
+    if not isinstance(versions, list):
+        return []
+    return [version for version in versions if isinstance(version, str)]
+
+
+def _resolve_version(
+    package_id: str, version_constraint: str, client: httpx.Client, fetcher: Fetcher
+) -> str | None:
+    """Resolve a declared NuGet version to the version to report, or None.
+
+    A requirement with an inclusive lower bound (a bare version, ``[1.2.3]``,
+    ``[1.0,2.0)``) resolves to that bound without a request. Any other range
+    is resolved against the package's published versions, one request: the
+    lowest release inside an interval (``(1.0,2.0]``), the highest release a
+    floating version matches (``1.*``).
+
+    A string that is not a NuGet version range, and a range no published
+    version satisfies, resolve to nothing; never to a bound the range
+    excludes. The transitive walk and the license resolver both resolve
+    through here.
+    """
+    parsed = parse_nuget_range(version_constraint)
+    if parsed is None:
+        return None
+    if parsed.minimum:
+        return parsed.minimum
+    published = _published_versions(package_id, client, fetcher)
+    return select_version(
+        Ecosystem.DOTNET, version_constraint, published, lowest=not parsed.floating
     )
 
 
@@ -193,11 +209,10 @@ def _dependencies_from_nuspec(text: str) -> tuple[list[tuple[str, str]], bool]:
     targets, so the conservative posture is to surface every dep that
     might be reachable in any build configuration.
 
-    Bracket-range versions (``[1.0,)``, ``[1.0,2.0)``) are reduced to
-    their lower-bound pin via :func:`_extract_pinned_version_nuget`. A
-    dependency with no version, or with one that cannot be pinned (an open
-    range, a floating ``*``, an MSBuild property), is emitted with an empty
-    version: the package is known, its version is not.
+    Each dependency is returned with its ``version`` attribute as declared
+    (a minimum, a bracket range, a floating version), or with an empty
+    string when it has none; :func:`_resolve_version` turns that into the
+    version to walk.
 
     Returns ``(dependencies, complete)``. ``complete`` is False when the
     list could not be read in full: malformed XML, no ``<metadata>``, or a
@@ -226,11 +241,11 @@ def _dependencies_from_nuspec(text: str) -> tuple[list[tuple[str, str]], bool]:
         # the publisher's casing in the emitted name (consistent with
         # the rest of the .NET path; the flatcontainer URL lowercases
         # at fetch time).
-        pinned = _extract_pinned_version_nuget(elem.get("version") or "") or ""
-        key = (package_id.lower(), pinned)
+        declared = (elem.get("version") or "").strip()
+        key = (package_id.lower(), declared)
         if key not in seen:
             seen.add(key)
-            out.append((package_id, pinned))
+            out.append((package_id, declared))
         return True
 
     for child in metadata:
@@ -367,10 +382,14 @@ def resolve_nuget_license(
        (typical for ancient packages with only a deprecated nuget.org
        redirect ``licenseUrl``).
 
-    ``fetcher`` is the text-mode fetcher for ``.nuspec`` XML.
-    ``json_fetcher`` is the JSON fetcher for the deps.dev v3 endpoint.
+    ``fetcher`` is the text-mode fetcher for ``.nuspec`` XML and for the
+    package's version list. ``json_fetcher`` is the JSON fetcher for the
+    deps.dev v3 endpoint.
+
+    The declared version is resolved first (:func:`_resolve_version`); a
+    range no published version satisfies is UNKNOWN with no version.
     """
-    pinned = _extract_pinned_version_nuget(dep.version_constraint)
+    pinned = _resolve_version(dep.name, dep.version_constraint, client, fetcher)
     if pinned is None:
         return LicenseInfo(
             dependency=dep,
@@ -442,7 +461,8 @@ def fetch_nuget_dependencies(
     ``(from_id, from_version, to_id, to_version)``. The SELF root is NOT
     emitted as a node (the caller already has the direct dep object) but
     is implicit as the source of the first-level edges. A dependency whose
-    version cannot be pinned is a node with an empty version.
+    declared version resolves to nothing (:func:`_resolve_version`) is a
+    node with an empty version.
 
     ``unread`` lists the packages of the subgraph, the root included, whose
     own dependencies could not be read: the ``.nuspec`` could not be
@@ -469,7 +489,10 @@ def fetch_nuget_dependencies(
         children, complete = _dependencies_from_nuspec(text) if text else ([], False)
         if not complete:
             unread.append((parent_name, parent_version))
-        for child_name, child_version in children:
+        for child_name, declared in children:
+            # A version that cannot be resolved leaves the child a node
+            # without one: reported, and unread in its turn.
+            child_version = _resolve_version(child_name, declared, client, fetcher) or ""
             edges.append((parent_name, parent_version, child_name, child_version))
             key = (child_name.lower(), child_version)
             if key in visited:
