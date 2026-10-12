@@ -26,6 +26,7 @@ from licenseal.analysis.spdx import (
     normalize_license,
     normalize_r_license,
     read_license_array,
+    reads_as_license_list,
     spdx_from_license_url,
     unresolved_list_readings,
     unresolved_operand_expression,
@@ -1651,6 +1652,28 @@ class TestLicenseLists:
 
     def test_file_pointer_to_a_url_keeps_its_routing(self):
         assert normalize_license("SEE LICENSE IN https://example.com/license.txt") == "Proprietary"
+
+    @pytest.mark.parametrize(
+        "raw, is_list",
+        [
+            ("MIT, GPL-3.0-only", True),
+            ("MIT/Apache-2.0", True),
+            ("(MIT, GPL-3.0-only)", True),
+            # A list is a list whatever its entries are.
+            ("MIT, MIT", True),
+            ("GPL-3.0-only, acme internal license", True),
+            # One license whose own name or URL holds a separator.
+            ("Apache License, Version 2.0", False),
+            ("University of Illinois/NCSA Open Source License", False),
+            ("https://opensource.org/licenses/MIT", False),
+            # No separator.
+            ("MIT", False),
+            ("MIT OR GPL-3.0-only", False),
+            ("", False),
+        ],
+    )
+    def test_reads_as_license_list(self, raw, is_list):
+        assert reads_as_license_list(raw) is is_list
 
 
 class TestUnresolvedListReadings:

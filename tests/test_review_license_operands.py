@@ -28,9 +28,10 @@ _NOT_A_LICENSE = (
     "`LicenseRef-` reference."
 )
 _IS_A_LIST = (
-    "Error: Invalid licenseal.review.toml: the license of the review entry for {} holds a comma "
-    "or a slash, so it is not a license expression. Write SPDX identifiers, joined with `OR` "
-    "or `AND` when there are several: a list does not say whether its licenses are alternatives."
+    "Error: Invalid licenseal.review.toml: the license of the review entry for {} is a comma- "
+    "or slash-separated list, not a license expression. Write SPDX identifiers, joined with "
+    "`OR` or `AND` when there are several: a list does not say whether its licenses are "
+    "alternatives."
 )
 
 
@@ -271,18 +272,12 @@ class TestLicenseList:
             "MIT,GPL-3.0-only",
             "MIT/Apache-2.0",
             "GPL-3.0-only / MIT",
-            # Inside parentheses, alone and beside an operator.
+            # Inside parentheses.
             "(MIT, GPL-3.0-only)",
             "(MIT/Apache-2.0)",
-            "(MIT, GPL-3.0-only) AND BSD-3-Clause",
-            "BSD-3-Clause AND (MIT/Apache-2.0)",
             # The list is the error, whatever its entries are.
             "MIT, MTI",
             "not, a license",
-            # A long-form name and a URL hold a separator as well; an entry
-            # names its licenses by their IDs.
-            "Apache License, Version 2.0",
-            "https://opensource.org/licenses/MIT",
         ],
     )
     @respx.mock
@@ -293,6 +288,50 @@ class TestLicenseList:
         assert _IS_A_LIST.format(_ENTRY) in result.stderr.splitlines()
         # No report is written for a scan whose review file is invalid.
         assert result.stdout == ""
+
+    @pytest.mark.parametrize(
+        "license_value, error",
+        [
+            (
+                "(MIT, GPL-3.0-only) AND BSD-3-Clause",
+                "Error: Invalid reviewed license '(MIT, GPL-3.0-only) AND BSD-3-Clause'. "
+                "Use a valid SPDX ID or SPDX expression.",
+            ),
+            (
+                "BSD-3-Clause AND (MIT/Apache-2.0)",
+                _NOT_A_LICENSE.format(_ENTRY, "MIT/Apache-2.0"),
+            ),
+        ],
+    )
+    @respx.mock
+    def test_list_beside_an_operator_is_rejected_as_no_license(
+        self, tmp_path, license_value, error
+    ):
+        _project(tmp_path, _stanza(license_value))
+        result = _check(tmp_path)
+        assert result.exit_code == 1
+        assert error in result.stderr.splitlines()
+        assert result.stdout == ""
+
+    @pytest.mark.parametrize(
+        "license_value, reviewed_as",
+        [
+            # One license whose own name or URL holds a separator.
+            ("Apache License, Version 2.0", "Apache-2.0"),
+            ("University of Illinois/NCSA Open Source License", "NCSA"),
+            ("https://opensource.org/licenses/MIT", "MIT"),
+            # Such a name beside a connector its author wrote.
+            ("Apache License, Version 2.0 or MIT", "Apache-2.0 OR MIT"),
+        ],
+    )
+    @respx.mock
+    def test_license_name_that_holds_a_separator_loads(self, tmp_path, license_value, reviewed_as):
+        _project(tmp_path, _stanza(license_value))
+        result = _check(tmp_path)
+        assert result.exit_code == 0
+        dependency = json.loads(result.stdout)["dependencies"][0]
+        assert dependency["reviewed"] is True
+        assert dependency["reviewed_license"] == reviewed_as
 
     @respx.mock
     def test_entry_keyed_on_a_source_is_named_by_it(self, tmp_path):

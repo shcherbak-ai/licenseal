@@ -32,7 +32,7 @@ from licenseal.analysis.compatibility import (
     _SOURCE_AVAILABLE_PROJECT_PREFIXES,  # noqa: PLC2701
 )
 from licenseal.analysis.risk import DEPRECATED_SPDX_IDS, KNOWN_SPDX_IDS
-from licenseal.analysis.spdx import normalize_license
+from licenseal.analysis.spdx import normalize_license, reads_as_license_list
 from licenseal.models import CompatibilityResult, CompatibilityVerdict, Ecosystem, LicenseInfo
 from licenseal.report import _printable  # noqa: PLC2701
 
@@ -183,11 +183,6 @@ def _operand_that_is_no_license(expression: str) -> str:
     return ""
 
 
-# What separates the entries of a license list. No SPDX license or exception
-# ID holds either character, and neither does a ``LicenseRef-``.
-_LIST_SEPARATORS = (",", "/")
-
-
 def _normalize_reviewed_license(raw_license: str, label: str) -> str:
     """Normalize the ``license`` of the review entry that ``label`` names, or reject it.
 
@@ -199,12 +194,13 @@ def _normalize_reviewed_license(raw_license: str, label: str) -> str:
     whether its licenses are alternatives. The normalizer reads one as a
     choice, and a registry's list is then judged under both readings. A
     reviewed license is judged as written, under the one reading its author
-    gave, so a list is rejected before it is normalized.
+    gave, so a list is rejected. One license whose own name holds a comma or
+    a slash (``Apache License, Version 2.0``) is not a list.
     """
-    if any(separator in raw_license for separator in _LIST_SEPARATORS):
+    if reads_as_license_list(raw_license):
         raise click.ClickException(
             f"Invalid {REVIEW_FILE_NAME}: the license of the review entry for "
-            f"{_printable(label)} holds a comma or a slash, so it is not a license expression. "
+            f"{_printable(label)} is a comma- or slash-separated list, not a license expression. "
             "Write SPDX identifiers, joined with `OR` or `AND` when there are several: a list "
             "does not say whether its licenses are alternatives."
         )

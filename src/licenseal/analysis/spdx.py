@@ -1205,6 +1205,17 @@ def license_list_items(raw: str, *, slash_is_choice: bool = False) -> tuple[str,
     return _unconfirmed_alternatives(found[0][1])
 
 
+def reads_as_license_list(raw: str) -> bool:
+    """Whether :func:`normalize_license` splits ``raw`` on its commas or slashes.
+
+    False for one license whose own name holds a separator (``Apache
+    License, Version 2.0``), which is matched whole, and for a license URL.
+    """
+    found: list[tuple[str, list[str]]] = []
+    _normalize_license_inner(raw, found)
+    return bool(found)
+
+
 def _unconfirmed_alternatives(items: Iterable[str]) -> tuple[str, ...]:
     """Distinct ``items``, sorted, when they are a list with no defined meaning.
 
