@@ -240,7 +240,7 @@ Preview:
 
 ![License compatibility badge preview](https://img.shields.io/badge/license%20compatibility-CI%20status-informational)
 
-For a PR comment or audit artifact, write Markdown or JSON. The file is written even when the check fails, so CI can publish it; the findings that failed the check are also printed to stderr:
+For a PR comment or audit artifact, write Markdown or JSON. The file is written even when findings or analysis gaps fail the check, so CI can publish it; the findings that failed the check are also printed to stderr:
 
 ```bash
 licenseal check -f markdown -o LICENSES.md   # PR-comment-friendly audit

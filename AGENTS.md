@@ -227,7 +227,7 @@ A direct dependency must resolve to one version in both modes: the registry walk
 - The module universe is every `go.sum` row plus every direct requirement discovery read from `go.mod` (after `replace`), at the required version. No version is selected among `go.sum` rows.
 - `go.sum` carries no edge data, so `transitive._resolve_go_transitive` fetches each module's own `go.mod` from `proxy.golang.org/<encoded-module>/@v/<encoded-version>.mod` (module path and version encoded by `encode_module_proxy_path`), parses its `require` block, and runs `_graph.compute_direct_ancestors` from the prod and the dev direct deps. When the universe holds a module at several versions, edges come from the version the scanned `go.mod` requires.
 - A fetched `go.mod`'s own `replace` directives are never applied to its edges: Go honours `replace` only in the main module.
-- A module whose proxy fetch failed is PROD, not dropped.
+- A module that no direct dep reaches (for example because its parent's proxy fetch failed) is PROD, not dropped.
 - A `go.mod` below `go 1.17`, or with no `go` directive, lists direct requirements only: `_record_unlisted_go_requirements` records an analysis gap on it when one of its scanned requirements has no `go.sum` row.
 - The Go 1.24+ `tool` directive is the only dev marker (`discovery/go/go_mod.py`). Each tool import path is matched to its required module by longest prefix, and that module is `DependencyGroup.DEV`; transitives reachable only from a DEV direct dep are DEV, and a tool module that a PROD direct dep also requires is PROD. Without the directive, `--dev` and `--no-dev` produce identical reports.
 - `// indirect` is not a dev signal: the module is PROD.
