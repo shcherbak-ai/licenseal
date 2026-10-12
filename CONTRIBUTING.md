@@ -76,7 +76,7 @@ Give images descriptive alt text and check them at their README display size on 
 
 - `assets/licenseal-report.svg` is licenseal's own output for an illustrative project. Render it with `uv run python scripts/render_readme_report.py`; a test fails while the committed file is not what the script renders.
 - `assets/licenseal-wordmark.svg` is pixel art, 104 by 20 pixels. Show it at a whole multiple of that size (`width="416"`), so its pixels stay square.
-- `assets/contextgem-wordmark.svg` and `assets/tethered-wordmark.svg` are the sibling projects' pixel names, drawn at twice their size on a 336 by 104 pane. Show them at that width.
+- `assets/contextgem-wordmark.svg` and `assets/tethered-wordmark.svg` are the sibling projects' pixel names, drawn at twice their size in transparent images of one size (336 by 80), so the two share a baseline. Show them at that width.
 - The figures are drawn on their own dark ground, so one file serves both GitHub themes.
 
 The package description is [PYPI.md](PYPI.md) (`project.readme` in `pyproject.toml`). Keep it short, use absolute HTTPS links, and update it when the summary, the ecosystems, or the install commands change. Screenshots and the overview stay in the README.
