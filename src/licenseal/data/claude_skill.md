@@ -57,10 +57,10 @@ Keep the command's stderr: step 2 reads its `Warning:` lines.
 
 - A non-zero exit with the JSON written is expected when violations exist.
 - On a re-audit the command can fail and write no JSON, because `licenseal.review.toml` holds filled entries that no longer apply:
-  - `Reviewed licenses did not match any resolved package versions`: the listed entries are for a version or `source` the project no longer resolves.
+  - `Reviewed licenses did not match any resolved package versions`: the listed entries are for a version or `source` the project no longer resolves, or for a dependency this scan leaves out (a dev dependency in a scan without `--dev`).
   - `Review entries can only override flagged dependencies`: the listed entries match dependencies that are now compatible.
 
-  Show the user the listed entries, note each one's `license` and `note`, delete them from the file, and run the scan again. A dependency that is flagged at its new version or source is walked in step 4 like any other: tell the user what the deleted entry recorded and ask whether it still holds.
+  Show the user the listed entries. If one is for a dev dependency and this scan ran without `--dev`, the earlier audit covered dev dependencies: keep the entry and use `--dev` here and in every later command. Otherwise note each one's `license` and `note`, delete them from the file, and run the scan again. A dependency that is flagged at its new version or source is walked in step 4 like any other: tell the user what the deleted entry recorded and ask whether it still holds.
 
 ### 2. Read the summary
 
@@ -77,13 +77,14 @@ Then:
 - Flagged `0` and `summary.gaps > 0`: the project is **not** clean. Handle the gaps as below, and stop.
 - Flagged above `0`: handle any gaps as below, and continue.
 
-**Analysis gaps.** A gap is an incomplete analysis, not a license finding: in strict mode it fails `check` by itself, and no review entry clears it. Each gap is an entry of the top-level `diagnostics[]` with a `path` and a `reason`. Tell the user each gap's `path` and `reason`, that it must be settled outside the review file, and what to do:
+**Analysis gaps.** A gap is an incomplete analysis, not a license finding: in strict mode it fails `check` by itself, and no review entry clears it. Each gap is an entry of the top-level `diagnostics[]` with `severity: "gap"`, a `path` and a `reason`; ignore entries of severity `recovered`, and treat `estimate` as already accepted. Tell the user each gap's `path` and `reason`, that it must be settled outside the review file, and what to do:
 
 | `reason` starts with | Meaning | What to do |
 | --- | --- | --- |
 | `declares dependencies that no lockfile covers` | There is no lockfile, or the lockfile holds no version the manifest's declaration admits. licenseal picked versions and transitive dependencies from the registry, so the report is an estimate for that manifest. Each such dependency carries `"estimated": ["version"]` (`~1.2.3` in the table and Markdown formats). | Ask the user which way to settle it: commit an up-to-date lockfile and re-scan from step 1, or accept the estimate by adding `--no-require-lockfile` to every later `licenseal check` in this procedure and in CI (the diagnostic then has `severity: "estimate"`, is not counted in `summary.gaps`, and does not fail strict mode). Do not choose for the user: a review based on estimated versions can miss the license of the version actually installed. |
 | `declares off-registry dependencies that no lockfile records` | A git, URL, or path dependency has no lockfile entry, so what it depends on is missing from the report. | The same choice. |
 | `the dependencies of <package>` | A registry did not return that package's dependency list, so what it requires may be missing from the report although the package itself is listed. | Run the scan again: it is usually a transient registry error or rate limit. If it persists (a Maven version deps.dev has not indexed, a NuGet dependency declared without a version that can be pinned), tell the user which package is affected. A lockfile removes the need for the registry walk; `--no-require-lockfile` does not accept this gap. |
+| `declares repositories` | A `composer.json` takes packages from repositories that do not name them, and no `composer.lock` was read, so those packages may have been looked up on Packagist by name. | The user scans with the `composer.lock`. |
 | anything else | licenseal could not read or parse a file (an unreadable manifest, a syntax error, an unsupported file), or a `go.mod` below `go 1.17` has no `go.sum` row for its requirements. | The user fixes the file; for the `go.mod` case, commits an up-to-date `go.sum`. |
 
 **Licenses read from another release.** A dependency whose `estimated` array contains `"license"` (`~MIT` in the table and Markdown formats) is reported with a license that the registry records for another release than the one in `resolved_version`: an R package pinned to a version other than CRAN's current one, a Hex package at a release other than the one published last, or a PyPI release that declares no license of its own or is not on PyPI. It is not a finding and does not fail strict mode; a license change between the two releases shows only as this mark.
@@ -178,7 +179,9 @@ If no pattern fits and the user gives no concrete reason, leave unreviewed.
   - These license pairs are legally incompatible even though their risk levels would pass. The dependency's `risk` can even read `permissive`.
   - **GPLv3-family dependency (`GPL-3.0-*`, `LGPL-3.0-*`, `AGPL-3.0-*`) in a `GPL-2.0-only` project**, or **`GPL-2.0-only` dependency in a `GPL-3.0-*` / `AGPL-3.0-*` project**: version conflict with no upgrade clause to escape it. A deprecated bare ID in a manifest or registry (`GPL-2.0`, `LGPL-3.0`) is read as `-only` and reported that way; only a `+` suffix (`GPL-2.0+`) or an explicit `-or-later` carries the upgrade clause.
     - Ask: *"Is the project (or the dependency) actually licensed 'or later'?"*
-    - The dependency is → reviewable as a detection override, with the `-or-later` ID as `license` and where it was confirmed in `note`. The project is → the user fixes the project's manifest; start again from step 1. Neither → leave unreviewed.
+    - The project is → the user fixes the project's manifest; start again from step 1.
+    - A `GPL-2.0-only` dependency in a `GPL-3.0-*` / `AGPL-3.0-*` project is really `-or-later` → reviewable as a detection override, with the `-or-later` ID as `license` and where it was confirmed in `note`.
+    - A GPLv3-family dependency in a `GPL-2.0-only` project is a violation with or without "or later": leave unreviewed. Neither → leave unreviewed.
   - **`Apache-2.0` dependency in a `GPL-2.0-only` project**: the FSF documents Apache-2.0 as GPLv2-incompatible. Leave unreviewed; the resolution is usually relicensing the project to `GPL-2.0-or-later` / `GPL-3.0` or replacing the dependency. `Apache-2.0 WITH LLVM-exception` is not flagged: that exception waives the conflicting sections for a combination with GPLv2 code.
   - **`EPL-1.0` / `CDDL-*` / `MPL-1.1` dependency in any GPL-family project** (`GPL-2.0-*`, `GPL-3.0-*`, `AGPL-3.0-*`): FSF-documented GPL-incompatible weak copyleft.
     - Ask: *"Many EPL/CDDL-era artifacts are dual-licensed (e.g. `CDDL OR GPL-2.0-with-classpath-exception`). Does {name} offer a second license the resolver missed?"*
@@ -294,7 +297,7 @@ For each `[[review]]` entry with `license = ""` (on a `--merge` run, only the ap
 - **A reviewable decision**: set `license` and `note` from it.
 - **No decision**: leave `license = ""`. This is what "leave unreviewed" means throughout this skill: the entry stays in the file, the dependency stays flagged, and `check` prints a `Warning:` that names the incomplete entry.
 
-`license` must be one of the following; anything else fails the next `check`:
+Write `license` as one of the following (a value that is not a license fails the next `check`):
 
 - an SPDX license ID, current or deprecated (`"MIT"`, `"Apache-2.0"`)
 - a source-available ID licenseal recognises (`SSPL-*`, `BUSL-*`, `Elastic-*`, `FSL-*`, `Parity-*`, `PolyForm-*`)
@@ -335,8 +338,8 @@ licenseal check --no-dev -f markdown --no-strict -o LICENSES.md
 
 1. Use the flags chosen earlier: `--dev` if dev dependencies are in scope, `--no-require-lockfile` if the user accepted estimates in step 2.
 2. `LICENSES.md` in the scanned directory is the human-readable audit: all verdicts after review, the project license, the dependencies still flagged, the review entries that were applied, and any analysis gaps.
-3. A non-zero exit with the file written is expected while unreviewed violations remain. `--no-strict` lets the command pass with gaps, so read the summary line of the saved file. If it ends with `N analysis gap(s)`, the file has an **Analysis gaps** section naming each manifest, and the audit is incomplete until those are settled as in step 2. Tell the user which manifests are listed.
-4. With `--no-require-lockfile`, the summary line ends with `N estimated manifest(s)` and the file has an **Estimates** section instead.
+3. A non-zero exit with the file written is expected while unreviewed violations remain. `--no-strict` lets the command pass with gaps, so read the summary line of the saved file. If it contains `N analysis gap(s)`, the file has an **Analysis gaps** section naming each manifest, and the audit is incomplete until those are settled as in step 2. Tell the user which manifests are listed.
+4. With `--no-require-lockfile`, the summary line also has `N estimated manifest(s)` and the file has an **Estimates** section.
 5. Tell the user to commit `LICENSES.md` alongside `licenseal.review.toml`, the machine-readable state the next scan applies.
 
 ## URL trust model
