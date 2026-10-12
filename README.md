@@ -1,54 +1,35 @@
+<!-- markdownlint-disable MD033 -->
 <h1 align="center">
-  <img src="assets/licenseal-header-v7.png" alt="licenseal traces a dependency tree, compares dependency licenses against the project license, and reports compatible packages, warnings, violations, and unknowns in CI" width="850"><br>
-  licenseal
+  <img src="assets/licenseal-wordmark.svg" alt="licenseal" width="416">
 </h1>
 
 <p align="center">
-  Fast cross-ecosystem license compatibility checker for CI, audits, and enterprise adoption.
+  <strong>Catch incompatible dependency licenses before they block a release.</strong><br>
+  A verdict, not a list · Transitive across 10 ecosystems · Install-free
 </p>
-<br>
 
-<!-- markdownlint-disable MD033 -->
-<table align="center">
-  <tr>
-    <td align="center"><strong>Prevent release blockers</strong><br>Catch dependency-license problems before release, approval, or audit.</td>
-    <td align="center"><strong>10 ecosystems</strong><br>Scan Python, JS/TS, Rust, Go, Java/JVM, .NET, PHP, Ruby, Elixir/Erlang, and R.</td>
-    <td align="center"><strong>Document reviews</strong><br>Use the <a href="#-claude-code-review-skill">Claude Code skill</a> to investigate findings and record decisions.</td>
-  </tr>
-</table>
-<br>
+<p align="center">
+  <a href="https://pypi.org/project/licenseal/"><img src="https://img.shields.io/pypi/v/licenseal?v=2" alt="PyPI"></a>
+  <a href="https://pypi.org/project/licenseal/"><img src="https://img.shields.io/pypi/pyversions/licenseal?v=2" alt="Python"></a>
+  <a href="https://pepy.tech/project/licenseal"><img src="https://api.pepy.tech/badge/licenseal/month" alt="Downloads/month"></a>
+  <a href="https://github.com/shcherbak-ai/licenseal/actions/workflows/ci.yml"><img src="https://github.com/shcherbak-ai/licenseal/actions/workflows/ci.yml/badge.svg?branch=main" alt="CI"></a>
+  <a href="https://github.com/shcherbak-ai/licenseal/actions/workflows/ci.yml"><img src="https://img.shields.io/endpoint?url=https://gist.githubusercontent.com/SergiiShcherbak/17230af3dfe294ebd8a8fd9c4cd775a8/raw/licenseal-coverage.json" alt="coverage"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache--2.0-blue.svg" alt="License: Apache-2.0"></a>
+</p>
 
-<table align="center">
-  <tr>
-    <td align="right"><strong>Package</strong></td>
-    <td>
-      <a href="https://pypi.org/project/licenseal/"><img src="https://img.shields.io/pypi/v/licenseal?v=2" alt="PyPI"></a>
-      <a href="https://pypi.org/project/licenseal/"><img src="https://img.shields.io/pypi/pyversions/licenseal?v=2" alt="Python"></a>
-      <a href="https://pepy.tech/project/licenseal"><img src="https://api.pepy.tech/badge/licenseal/month" alt="Downloads/month"></a>
-      <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache--2.0-blue.svg" alt="License: Apache-2.0"></a>
-    </td>
-  </tr>
-  <tr>
-    <td align="right"><strong>Quality</strong></td>
-    <td>
-      <a href="https://github.com/shcherbak-ai/licenseal/actions/workflows/ci.yml"><img src="https://github.com/shcherbak-ai/licenseal/actions/workflows/ci.yml/badge.svg?branch=main" alt="CI"></a>
-      <a href="https://github.com/shcherbak-ai/licenseal/actions/workflows/ci.yml"><img src="https://img.shields.io/endpoint?url=https://gist.githubusercontent.com/SergiiShcherbak/17230af3dfe294ebd8a8fd9c4cd775a8/raw/licenseal-coverage.json" alt="coverage"></a>
-      <a href="https://github.com/shcherbak-ai/licenseal/actions/workflows/licenseal.yml"><img src="https://github.com/shcherbak-ai/licenseal/actions/workflows/licenseal.yml/badge.svg?branch=main" alt="License compatibility"></a>
-      <a href="https://github.com/shcherbak-ai/licenseal/actions/workflows/codeql.yml"><img src="https://github.com/shcherbak-ai/licenseal/actions/workflows/codeql.yml/badge.svg?branch=main" alt="CodeQL"></a>
-      <a href="https://github.com/PyCQA/bandit"><img src="https://img.shields.io/badge/security-bandit-yellow.svg" alt="security: bandit"></a>
-    </td>
-  </tr>
-  <tr>
-    <td align="right"><strong>Tooling</strong></td>
-    <td>
-      <a href="https://github.com/astral-sh/ruff"><img src="https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/ruff/main/assets/badge/v2.json" alt="Ruff"></a>
-      <a href="https://github.com/astral-sh/uv"><img src="https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/uv/main/assets/badge/v0.json" alt="uv"></a>
-      <a href="https://github.com/astral-sh/ty"><img src="https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/ty/main/assets/badge/v0.json" alt="ty"></a>
-      <a href="https://github.com/shcherbak-ai/tethered"><img src="https://img.shields.io/badge/egress-tethered-orange?labelColor=4B8BBE" alt="egress: tethered"></a>
-    </td>
-  </tr>
-</table>
-<br>
+<p align="center">
+  <a href="#quick-start">Quick start</a> ·
+  <a href="#ci-integration">CI integration</a> ·
+  <a href="#how-licenseal-decides">How it decides</a> ·
+  <a href="USAGE.md">Usage</a> ·
+  <a href="SECURITY.md">Security model</a>
+</p>
+
+<p align="center">
+  <img src="assets/licenseal-report.svg" alt="licenseal report for an illustrative MIT project: client, transport and parser are compatible; certs, brought in through client under GPL-3.0-only, is a violation. Summary: 1 violation, 3 ok." width="832">
+</p>
+
+<p align="center">Illustrative packages. The report is licenseal's own output.</p>
 <!-- markdownlint-enable MD033 -->
 
 **licenseal is a fast license compatibility checker for dependency trees across language ecosystems.** It reads manifests, lockfiles, and public registry metadata and tells you whether your dependency licenses are compatible with the license you ship under, fast enough to run in CI. It does not install dependencies, run package-manager commands, execute build scripts, or download package archives.
@@ -57,28 +38,28 @@
 uvx licenseal check
 ```
 
-![Illustrative licenseal report for an Apache-2.0 project: client pulls in certs under MPL-2.0, producing one warning alongside three compatible dependencies](assets/licenseal-cli-example.svg)
-
-*Illustrative packages, rendered with licenseal. Report excerpt showing transitive dependencies and the compatibility summary.*
-
 > **Not legal advice.** licenseal automates dependency-license discovery and compatibility classification. It is a CI/audit aid, not a substitute for legal review.
 
-## 🧭 Why This Matters
+## Why it matters
 
 License non-compliance is a quiet delivery risk: it usually does not break the build, but it can block a shipment, customer approval, funding round, or acquisition when discovered late.
 
-| Blocker | What can happen |
-| --- | --- |
-| Enterprise adoption | Security and procurement teams ask for an open-source license report before approval. |
-| Due diligence | Investors, acquirers, or partners flag copyleft, source-available, or unknown-license dependencies late. |
-| Release timing | A problematic dependency forces a replacement, upgrade, or architecture change when the team is trying to ship. |
-| Hidden transitives | The risky license is several levels down, pulled in by a package that looked harmless. |
-| Product obligations | GPL, AGPL, SSPL, BUSL, Elastic, non-commercial Creative Commons, and similar terms may be incompatible with how you distribute or host the product. |
-| Audit trail | Review decisions need to be explicit and checked in, not buried in a spreadsheet or chat thread. |
+<!-- markdownlint-disable MD033 -->
+<table>
+  <tr>
+    <td width="33%" valign="top"><strong>Enterprise adoption</strong><br>Security and procurement teams ask for a license report before approval.</td>
+    <td width="33%" valign="top"><strong>Due diligence</strong><br>Investors and acquirers flag copyleft, source-available, or unknown licenses late.</td>
+    <td width="33%" valign="top"><strong>Release timing</strong><br>A problematic dependency forces a swap or redesign when you are trying to ship.</td>
+  </tr>
+  <tr>
+    <td valign="top"><strong>Hidden transitives</strong><br>The risky license is several levels down, pulled in by a package that looked harmless.</td>
+    <td valign="top"><strong>Product obligations</strong><br>GPL, AGPL, SSPL, BUSL, and similar terms may not fit how you distribute or host.</td>
+    <td valign="top"><strong>Audit trail</strong><br>Review decisions must be explicit and checked in, not buried in a spreadsheet.</td>
+  </tr>
+</table>
+<!-- markdownlint-enable MD033 -->
 
 licenseal turns that hidden risk into fast CI feedback: it scans the transitive dependency tree, flags compatibility issues, and records reviewed decisions for cases that need human judgment.
-
-![Illustrative dependency tree: an Apache-2.0 app depends on MIT client, which pulls in MIT transport and then MPL-2.0 certs. The path to certs is highlighted because it receives a warning; unreviewed warnings fail strict checks](assets/licenseal-transitive-path.svg)
 
 > [!IMPORTANT]
 > In a benchmark of 50 widely used open-source repositories across ten ecosystems, licenseal flagged 485 license-compatibility issues at default settings — 405 warnings and 80 outright violations, spanning 9 of the 10 ecosystems — each a dependency whose license needed compatibility review against the project's own declared license. Inventory-only license tools surface none of these.
@@ -92,39 +73,40 @@ Public engineering policies and case history show why dependency-license checks 
 </details>
 <!-- markdownlint-enable MD033 -->
 
-## ⚙️ How It Works
+## How it works
 
-| 1. Read | 2. Resolve | 3. Classify | 4. Report |
-| --- | --- | --- | --- |
-| Manifests and lockfiles | Transitive dependency tree plus public registry license metadata | Project license vs dependency license compatibility | CI verdict, Markdown/JSON report, and checked-in review overrides |
+<!-- markdownlint-disable MD033 -->
+<p align="center">
+  <img src="assets/licenseal-how-it-works.svg" alt="How licenseal works, in four steps. Read: manifests and lockfiles. Resolve: the whole dependency tree. Classify: each license against yours. Report: a verdict CI can gate on. No install, no build, no package downloads." width="832">
+</p>
+<!-- markdownlint-enable MD033 -->
 
-## 🚀 Quick Start
+licenseal reads the manifests and lockfiles in your repository, resolves the transitive dependency tree, looks up each package's license in public registry metadata, and compares it with your project's license. You get a CI verdict, a Markdown or JSON report, and checked-in review overrides.
 
-Install-free one-shot:
+## Supported ecosystems
+
+<p align="center">
+  <strong>Python · JavaScript/TypeScript · Rust · Go · Java/JVM · .NET · PHP · Ruby · Elixir/Erlang · R</strong>
+</p>
+
+Supported registries include PyPI, npm, crates.io, deps.dev, proxy.golang.org, Maven Central, NuGet.org, Packagist, RubyGems, Hex, and CRAN. See [USAGE.md](USAGE.md#supported-ecosystems) for manifest and lockfile details.
+
+## Quick start
 
 ```bash
+# Run once, nothing to install
 uvx licenseal check
-```
 
-Persistent install:
+# Install the CLI
+uv tool install licenseal    # or: pipx install licenseal
 
-```bash
-uv tool install licenseal
-# or
-pipx install licenseal
-```
-
-Inside a Python project:
-
-```bash
-uv add --dev licenseal
-# or
-pip install licenseal
+# Or add it to a Python project
+uv add --dev licenseal       # or: pip install licenseal
 ```
 
 The exit code is non-zero when there are unreviewed violations, warnings, unknown licenses, or analysis gaps (something the scan could not read, such as a manifest without an up-to-date lockfile). Commit the lockfile, or pass `--no-require-lockfile` to accept versions estimated from the registry. See [USAGE.md](USAGE.md) for every flag and report format.
 
-## 🧰 Important Defaults
+## Important defaults
 
 | Default | Meaning |
 | --- | --- |
@@ -135,64 +117,7 @@ The exit code is non-zero when there are unreviewed violations, warnings, unknow
 | Violations always fail | `--no-strict` demotes warnings, unknown licenses, and analysis gaps only; definite incompatibilities still fail. |
 | Project license from the scanned directory, else `Proprietary` | Read from a manifest in the scanned directory, never from a nested package. If none declares a license, or the first that does declares a value that is not a recognised license, the project is checked as `Proprietary`: permissive dependencies pass, copyleft ones are flagged. See [USAGE.md](USAGE.md#project-license). |
 
-## 🌐 Supported Ecosystems
-
-![Python](https://img.shields.io/badge/Python-3776AB?logo=python&logoColor=white)
-![npm](https://img.shields.io/badge/npm-CB3837?logo=npm&logoColor=white)
-![Rust](https://img.shields.io/badge/Rust-000000?logo=rust&logoColor=white)
-![Go](https://img.shields.io/badge/Go-00ADD8?logo=go&logoColor=white)
-![Java](https://img.shields.io/badge/Java-007396?logo=openjdk&logoColor=white)
-![.NET](https://img.shields.io/badge/.NET-512BD4?logo=dotnet&logoColor=white)
-![PHP](https://img.shields.io/badge/PHP-777BB4?logo=php&logoColor=white)
-![Ruby](https://img.shields.io/badge/Ruby-CC342D?logo=ruby&logoColor=white)
-![Elixir/Erlang](https://img.shields.io/badge/Elixir%20%2F%20Erlang-4B275F?logo=elixir&logoColor=white)
-![R](https://img.shields.io/badge/R-276DC3?logo=r&logoColor=white)
-
-Supported registries include PyPI, npm, crates.io, deps.dev, proxy.golang.org, Maven Central, NuGet.org, Packagist, RubyGems, Hex, and CRAN. See [USAGE.md](USAGE.md#supported-ecosystems) for manifest and lockfile details.
-
-## 📊 How It Compares
-
-Comparison last reviewed: June 2026. Tool capabilities change; check each project before making a buying or compliance decision.
-
-### CI license-compatibility workflow
-
-| Capability | **licenseal** | [pip-licenses](https://github.com/raimon49/pip-licenses) | [license-checker](https://github.com/RSeidelsohn/license-checker-rseidelsohn) | [LicenseFinder](https://github.com/pivotal/LicenseFinder) | [fossa-cli](https://github.com/fossas/fossa-cli) |
-| --- | :-: | :-: | :-: | :-: | :-: |
-| **Project-license compatibility verdict** | ✓ | - | - | ~ | ~ |
-| **Transitive discovery with no install or build** | ✓ | - | - | - | ~ |
-| **Fast, seconds-scale CI path** | ✓ | ~ | ~ | - | - |
-| **Agent-assisted flagged-finding review** | ✓ | - | - | - | - |
-| **Manual review override file** | ✓ | - | ~ | ✓ | ~ |
-
-### Coverage and artifacts
-
-| Capability | **licenseal** | [pip-licenses](https://github.com/raimon49/pip-licenses) | [license-checker](https://github.com/RSeidelsohn/license-checker-rseidelsohn) | [LicenseFinder](https://github.com/pivotal/LicenseFinder) | [fossa-cli](https://github.com/fossas/fossa-cli) |
-| --- | :-: | :-: | :-: | :-: | :-: |
-| Multiple ecosystems in one tool | ✓ (10) | - | - | ✓ | ✓ |
-| Dependency license report | ✓ | ✓ | ✓ | ✓ | ✓ |
-| Local-only full workflow, no hosted service | ✓ | ✓ | ✓ | ✓ | - |
-| Offline operation | - | ✓ | ✓ | ~ | - |
-| Standards SBOM export (CycloneDX / SPDX) | - | - | - | - | ✓ |
-
-`✓` supported · `~` partial · `-` not supported
-
-No tool clears every row. The discovery row is about source-tree analysis: manifests, lockfiles, and registry metadata before a successful package-manager install is assumed. Some tools can produce broader inventories after installation or hosted analysis; licenseal is optimized for transitive dependency coverage in CI without that prerequisite. `~` means the capability exists, but with a different workflow, hosted service, package-manager prerequisite, or policy model. The speed row reflects benchmark runs on public repositories, not a vendor guarantee. Pair licenseal with an SBOM generator, hosted compliance platform, or installed-metadata scanner when those are the artifacts or workflows you need.
-
-## 🎯 Scope
-
-licenseal is intentionally narrow:
-
-- It is a **license compatibility checker**, not a legal approval workflow or policy-exception manager.
-- It checks **published dependency license metadata**, not vulnerability status, provenance, or SBOM completeness.
-- It reads **manifests, lockfiles, and public registry metadata endpoints** only. A package pinned to a private registry is looked up on the public one by name (see [SECURITY.md](SECURITY.md#what-leaves-the-process)).
-- An **off-registry dependency**, installed from a git repository, a direct URL, or a path the scan does not read (outside the scanned directory, an archive, a vendored or excluded directory), has no registry record. It is reported as `UNKNOWN` with its source, nothing is requested or downloaded for it, and a review keyed on that source records its license (see [USAGE.md](USAGE.md#off-registry-dependencies)).
-- It does not infer dependency licenses by pattern-matching local `LICENSE` files or source comments; missing structured metadata is reported as `UNKNOWN` and routed to manual review.
-- It produces Markdown/JSON dependency license reports, but not standards-compliant CycloneDX or SPDX SBOMs; use a dedicated SBOM tool when you need that artifact.
-- Manual review can override flagged findings when a maintainer has better information, but the review file is an audit record, not hidden legal sign-off.
-
-The full trust boundary and network allowlist are documented in [SECURITY.md](SECURITY.md).
-
-## ✅ CI Integration
+## CI integration
 
 GitHub Actions:
 
@@ -209,16 +134,6 @@ jobs:
       - run: uvx licenseal check
 ```
 
-README badge:
-
-```md
-[![License compatibility](https://github.com/OWNER/REPO/actions/workflows/licenseal.yml/badge.svg)](https://github.com/OWNER/REPO/actions/workflows/licenseal.yml)
-```
-
-Preview:
-
-![License compatibility badge preview](https://img.shields.io/badge/license%20compatibility-CI%20status-informational)
-
 For a PR comment or audit artifact, write Markdown or JSON. The file is written even when findings or analysis gaps fail the check, so CI can publish it; the findings that failed the check are also printed to stderr:
 
 ```bash
@@ -230,7 +145,13 @@ For projects that want a checked-in audit trail, commit the generated Markdown r
 
 The JSON schema is documented in [JSON_OUTPUT.md](JSON_OUTPUT.md).
 
-## 🧾 Manual Review Overrides
+This repository runs the same check on itself: [![License compatibility](https://github.com/shcherbak-ai/licenseal/actions/workflows/licenseal.yml/badge.svg?branch=main)](https://github.com/shcherbak-ai/licenseal/actions/workflows/licenseal.yml). To show the status in your own README:
+
+```md
+[![License compatibility](https://github.com/OWNER/REPO/actions/workflows/licenseal.yml/badge.svg)](https://github.com/OWNER/REPO/actions/workflows/licenseal.yml)
+```
+
+## Manual review overrides
 
 When a dependency is flagged but you have better license information than the resolver, record the reviewed license in a checked-in `licenseal.review.toml`:
 
@@ -254,7 +175,7 @@ licenseal check                                              # 4. overrides appl
 
 Reviews can only override flagged dependencies, never compatible ones. A reviewed dependency passes strict mode and stays visible with both the detected and reviewed licenses shown. An off-registry dependency is reviewed by its source instead of its version: the scaffolded entry carries a `source` line. Full review rules are in [USAGE.md](USAGE.md#manual-review-file).
 
-## 🤖 Claude Code Review Skill
+## Claude Code review skill
 
 CI can tell you which dependency licenses need attention; the bundled [Claude Code](https://claude.com/claude-code) skill helps turn those findings into documented decisions. Install it in the project being audited, then run `/licenseal-review` in Claude Code:
 
@@ -266,7 +187,7 @@ The skill runs `licenseal check`, walks through warnings, violations, unknown li
 
 [![Claude Code licenseal review skill asking whether MPL dependencies were modified before marking them reviewed](assets/claude_skill_qa.png)](assets/claude_skill_qa.png)
 
-## 🧩 How Licenseal Decides
+## How licenseal decides
 
 licenseal classifies each dependency license into a risk level and compares that risk against the project license, which it reads from a manifest in the scanned directory.
 
@@ -298,17 +219,68 @@ With `--dev`, a violation on a dev dependency is downgraded to a warning, becaus
 | Network Copyleft | AGPL-3.0-only | Strong copyleft with network-use source-offer obligations |
 | Unknown | SSPL, BUSL, Elastic, FSL, Parity, PolyForm, CC-BY-NC, CC-BY-ND, `BSD-3-Clause-No-Military-License` and the other use-restricted BSD variants, Unicode-TOU; missing or unrecognized licenses; an unrecognized `WITH` exception on a license that is not strong or network copyleft | Cannot be auto-classified; routed to manual review |
 
-## Learn More
+## How it compares
+
+Comparison last reviewed: June 2026. Tool capabilities change; check each project before making a buying or compliance decision.
+
+### CI license-compatibility workflow
+
+| Capability | **licenseal** | [pip-licenses](https://github.com/raimon49/pip-licenses) | [license-checker](https://github.com/RSeidelsohn/license-checker-rseidelsohn) | [LicenseFinder](https://github.com/pivotal/LicenseFinder) | [fossa-cli](https://github.com/fossas/fossa-cli) |
+| --- | :-: | :-: | :-: | :-: | :-: |
+| **Project-license compatibility verdict** | ✓ | - | - | ~ | ~ |
+| **Transitive discovery with no install or build** | ✓ | - | - | - | ~ |
+| **Fast, seconds-scale CI path** | ✓ | ~ | ~ | - | - |
+| **Agent-assisted flagged-finding review** | ✓ | - | - | - | - |
+| **Manual review override file** | ✓ | - | ~ | ✓ | ~ |
+
+### Coverage and artifacts
+
+| Capability | **licenseal** | [pip-licenses](https://github.com/raimon49/pip-licenses) | [license-checker](https://github.com/RSeidelsohn/license-checker-rseidelsohn) | [LicenseFinder](https://github.com/pivotal/LicenseFinder) | [fossa-cli](https://github.com/fossas/fossa-cli) |
+| --- | :-: | :-: | :-: | :-: | :-: |
+| Multiple ecosystems in one tool | ✓ (10) | - | - | ✓ | ✓ |
+| Dependency license report | ✓ | ✓ | ✓ | ✓ | ✓ |
+| Local-only full workflow, no hosted service | ✓ | ✓ | ✓ | ✓ | - |
+| Offline operation | - | ✓ | ✓ | ~ | - |
+| Standards SBOM export (CycloneDX / SPDX) | - | - | - | - | ✓ |
+
+`✓` supported · `~` partial · `-` not supported
+
+No tool clears every row. The discovery row is about source-tree analysis: manifests, lockfiles, and registry metadata before a successful package-manager install is assumed. Some tools can produce broader inventories after installation or hosted analysis; licenseal is optimized for transitive dependency coverage in CI without that prerequisite. `~` means the capability exists, but with a different workflow, hosted service, package-manager prerequisite, or policy model. The speed row reflects benchmark runs on public repositories, not a vendor guarantee. Pair licenseal with an SBOM generator, hosted compliance platform, or installed-metadata scanner when those are the artifacts or workflows you need.
+
+## Scope
+
+licenseal is intentionally narrow:
+
+- It is a **license compatibility checker**, not a legal approval workflow or policy-exception manager.
+- It checks **published dependency license metadata**, not vulnerability status, provenance, or SBOM completeness.
+- It reads **manifests, lockfiles, and public registry metadata endpoints** only. A package pinned to a private registry is looked up on the public one by name (see [SECURITY.md](SECURITY.md#what-leaves-the-process)).
+- An **off-registry dependency**, installed from a git repository, a direct URL, or a path the scan does not read (outside the scanned directory, an archive, a vendored or excluded directory), has no registry record. It is reported as `UNKNOWN` with its source, nothing is requested or downloaded for it, and a review keyed on that source records its license (see [USAGE.md](USAGE.md#off-registry-dependencies)).
+- It does not infer dependency licenses by pattern-matching local `LICENSE` files or source comments; missing structured metadata is reported as `UNKNOWN` and routed to manual review.
+- It produces Markdown/JSON dependency license reports, but not standards-compliant CycloneDX or SPDX SBOMs; use a dedicated SBOM tool when you need that artifact.
+- Manual review can override flagged findings when a maintainer has better information, but the review file is an audit record, not hidden legal sign-off.
+
+The full trust boundary and network allowlist are documented in [SECURITY.md](SECURITY.md).
+
+[![CodeQL](https://github.com/shcherbak-ai/licenseal/actions/workflows/codeql.yml/badge.svg?branch=main)](https://github.com/shcherbak-ai/licenseal/actions/workflows/codeql.yml)
+[![security: bandit](https://img.shields.io/badge/security-bandit-yellow.svg)](https://github.com/PyCQA/bandit)
+[![egress: tethered](https://img.shields.io/badge/egress-tethered-orange?labelColor=4B8BBE)](https://github.com/shcherbak-ai/tethered)
+
+## Learn more
 
 - **[USAGE.md](USAGE.md)** - full CLI reference, transitive-resolution behavior, per-ecosystem detail, review-file rules, and the Claude Code skill
 - **[SECURITY.md](SECURITY.md)** - the manifest-and-registry trust boundary and exact network-egress allowlist
 - **[JSON_OUTPUT.md](JSON_OUTPUT.md)** - stable machine-readable schema
+- **[CHANGELOG.md](CHANGELOG.md)** - what changed in each release, and how to upgrade
 
 ## Contributing
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for development setup and guidelines.
 
 If licenseal helps your project, star ⭐ this repo to help other teams find it too.
+
+[![Ruff](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/ruff/main/assets/badge/v2.json)](https://github.com/astral-sh/ruff)
+[![uv](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/uv/main/assets/badge/v0.json)](https://github.com/astral-sh/uv)
+[![ty](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/ty/main/assets/badge/v0.json)](https://github.com/astral-sh/ty)
 
 ## License
 

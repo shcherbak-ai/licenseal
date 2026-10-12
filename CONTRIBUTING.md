@@ -74,6 +74,10 @@ For HTML images, use `src="assets/example.png"`. These paths work in local previ
 
 Give images descriptive alt text and check them at their README display size on light and dark backgrounds. Label fictional examples as illustrative. Render CLI excerpts with licenseal, and keep diagrams and captions consistent with the current verdicts, strict-mode behavior, and transitive-dependency attribution.
 
+- `assets/licenseal-report.svg` is licenseal's own output for an illustrative project. Render it with `uv run python scripts/render_readme_report.py`; a test fails while the committed file is not what the script renders.
+- `assets/licenseal-wordmark.svg` is pixel art, 104 by 20 pixels. Show it at a whole multiple of that size (`width="416"`), so its pixels stay square.
+- The figures are drawn on their own dark ground, so one file serves both GitHub themes.
+
 The package description is [PYPI.md](PYPI.md) (`project.readme` in `pyproject.toml`). Keep it short, use absolute HTTPS links, and update it when the summary, the ecosystems, or the install commands change. Screenshots and the overview stay in the README.
 
 ## Vendored SPDX license list

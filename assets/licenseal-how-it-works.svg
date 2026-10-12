@@ -1,0 +1,71 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="934" height="270" viewBox="0 0 934 270" role="img" aria-labelledby="title desc">
+<title id="title">How licenseal works</title>
+<desc id="desc">Four steps. Read: manifests and lockfiles, such as pyproject.toml, package-lock.json and Cargo.lock. Resolve: the whole dependency tree, shown as an illustrative app that requires client and parser, where client brings in transport and transport brings in certs. Classify: each license against the project's own, here MIT; MIT, Apache-2.0 and BSD-3-Clause are compatible and GPL-3.0-only is not. Report: a verdict that CI can gate on, here 1 violation and 3 ok with exit code 1, as a table, Markdown or JSON. Nothing is installed, built or downloaded as a package.</desc>
+<style>
+text{font-family:ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;font-size:13px;fill:#a1a1aa}
+.step{font-size:12px;letter-spacing:1.6px;font-weight:600;fill:#fafafa}
+.no{font-size:12px;letter-spacing:1.6px;fill:#63636b}
+.cap{font-family:-apple-system, BlinkMacSystemFont, "Segoe UI", "Noto Sans", Helvetica, Arial, sans-serif;font-size:14px;fill:#e4e4e7}
+.hi{fill:#e4e4e7}.dim{fill:#63636b}.caught{fill:#fbbf24}.foot{fill:#8b8b93;letter-spacing:.4px}
+path,rect{fill:none;shape-rendering:crispEdges}
+.rule{stroke:#2e2e33}.wire{stroke:#52525b}.chip{stroke:#3f3f46}
+.mark{stroke:#a1a1aa;stroke-width:1.5;shape-rendering:geometricPrecision}
+.miss{stroke:#fbbf24;stroke-width:1.5;shape-rendering:geometricPrecision}
+</style>
+<path d="M0.5 0.5H933.5V269.5H0.5Z" style="fill:#0c0c0e;stroke:#2e2e33"/>
+<path class="rule" d="M233.5 0.5V220.5M467.5 0.5V220.5M700.5 0.5V220.5M0.5 220.5H933.5"/>
+
+<!-- Between two steps: the way the work goes. -->
+<g>
+<rect x="225.5" y="100.5" width="16" height="20" style="fill:#0c0c0e;stroke:none"/>
+<rect x="459.5" y="100.5" width="16" height="20" style="fill:#0c0c0e;stroke:none"/>
+<rect x="692.5" y="100.5" width="16" height="20" style="fill:#0c0c0e;stroke:none"/>
+<path class="mark" style="stroke:#63636b" d="M230.5 105.5l5 5l-5 5M464.5 105.5l5 5l-5 5M697.5 105.5l5 5l-5 5"/>
+</g>
+
+<!-- 01 Read -->
+<text class="no" x="24" y="35">01</text><text class="step" x="50" y="35">READ</text>
+<path class="wire" d="M24.5 68.5h7l3 3v10h-10zM24.5 92.5h7l3 3v10h-10zM24.5 116.5h7l3 3v10h-10z"/>
+<text x="46" y="79.5">pyproject.toml</text>
+<text x="46" y="103.5">package-lock.json</text>
+<text x="46" y="127.5">Cargo.lock</text>
+<text class="dim" x="46" y="151.5">and more</text>
+<text class="cap" x="24" y="196">Manifests and lockfiles</text>
+
+<!-- 02 Resolve -->
+<text class="no" x="258" y="35">02</text><text class="step" x="284" y="35">RESOLVE</text>
+<path class="wire" d="M263.5 84.5V147.5H274.5M263.5 99.5H274.5M285.5 106.5V115.5H296.5M307.5 122.5V131.5H318.5"/>
+<text class="hi" x="258" y="79.5">app</text>
+<text x="280" y="103.5">client</text>
+<text x="302" y="119.5">transport</text>
+<text x="324" y="135.5">certs</text>
+<text x="280" y="151.5">parser</text>
+<text class="cap" x="258" y="196">The whole dependency tree</text>
+
+<!-- 03 Classify -->
+<text class="no" x="492" y="35">03</text><text class="step" x="518" y="35">CLASSIFY</text>
+<text class="dim" x="492" y="75.5">project</text><text class="hi" x="676" y="75.5" text-anchor="end">MIT</text>
+<path class="rule" d="M492.5 84.5H676.5"/>
+<text x="492" y="103.5">MIT</text>
+<text x="492" y="121.5">Apache-2.0</text>
+<text x="492" y="139.5">BSD-3-Clause</text>
+<text class="caught" x="492" y="157.5">GPL-3.0-only</text>
+<path class="mark" d="M666 99.5l3 3l6 -7M666 117.5l3 3l6 -7M666 135.5l3 3l6 -7"/>
+<path class="miss" d="M667 149.5l7 7M674 149.5l-7 7"/>
+<text class="cap" x="492" y="196">Each license against yours</text>
+
+<!-- 04 Report -->
+<text class="no" x="725" y="35">04</text><text class="step" x="751" y="35">REPORT</text>
+<text class="caught" x="725" y="79.5">1 violation</text>
+<text x="725" y="99.5">3 ok</text>
+<text class="hi" x="725" y="123.5">exit code 1</text>
+<rect class="chip" x="725.5" y="138.5" width="50" height="22"/>
+<rect class="chip" x="781.5" y="138.5" width="74" height="22"/>
+<rect class="chip" x="861.5" y="138.5" width="44" height="22"/>
+<text x="750.5" y="153.5" text-anchor="middle" style="font-size:12px">table</text>
+<text x="818.5" y="153.5" text-anchor="middle" style="font-size:12px">markdown</text>
+<text x="883.5" y="153.5" text-anchor="middle" style="font-size:12px">json</text>
+<text class="cap" x="725" y="196">A verdict CI can gate on</text>
+
+<text class="foot" x="467" y="250" text-anchor="middle">no install  ·  no build  ·  no package downloads</text>
+</svg>
