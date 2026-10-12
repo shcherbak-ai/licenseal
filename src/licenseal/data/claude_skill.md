@@ -60,7 +60,7 @@ Keep the command's stderr: step 2 reads its `Warning:` lines.
   - `Reviewed licenses did not match any resolved package versions`: the listed entries are for a version or `source` the project no longer resolves, or for a dependency this scan leaves out (a dev dependency in a scan without `--dev`).
   - `Review entries can only override flagged dependencies`: the listed entries match dependencies that are now compatible.
 
-  Show the user the listed entries. If one is for a dev dependency and this scan ran without `--dev`, the earlier audit covered dev dependencies: keep the entry and use `--dev` here and in every later command. Otherwise note each one's `license` and `note`, delete them from the file, and run the scan again. A dependency that is flagged at its new version or source is walked in step 4 like any other: tell the user what the deleted entry recorded and ask whether it still holds.
+  Show the user the listed entries. If this scan ran without `--dev`, run it once with `--dev`: an entry that is no longer listed is for a dev dependency, so keep it and use `--dev` here and in every later command. An entry that is still listed is stale: note its `license` and `note`, delete it from the file, and run the scan again. A dependency that is flagged at its new version or source is walked in step 4 like any other: tell the user what the deleted entry recorded and ask whether it still holds.
 
 ### 2. Read the summary
 
@@ -296,6 +296,7 @@ For each `[[review]]` entry with `license = ""` (on a `--merge` run, only the ap
 
 - **A reviewable decision**: set `license` and `note` from it.
 - **No decision**: leave `license = ""`. This is what "leave unreviewed" means throughout this skill: the entry stays in the file, the dependency stays flagged, and `check` prints a `Warning:` that names the incomplete entry.
+- **An unfilled entry that matches no flagged dependency of this scan** (left from an earlier version or source): delete it. It is never an error, so it would stay in the file and draw that `Warning:` on every run.
 
 Write `license` as one of the following (a value that is not a license fails the next `check`):
 
