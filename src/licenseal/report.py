@@ -828,16 +828,19 @@ def render_table(
     )
     console.print()
 
+    # A reason is printed as written (``highlight=False``): the console's own
+    # highlighting would style the number inside a license ID, a quoted
+    # value, or a path, in colours that mean a verdict elsewhere in the report.
     if gaps:
         console.print(f"  [bold]Analysis gaps[/bold] ({_GAP_NOTE}):")
         for label, _, reason in _gap_rows(gaps):
-            console.print(f"    {_rich_escape(label)}: {_rich_escape(reason)}")
+            console.print(f"    {_rich_escape(label)}: {_rich_escape(reason)}", highlight=False)
         console.print()
 
     if estimates:
         console.print(f"  [bold]Estimates[/bold] ({_ESTIMATE_NOTE}):")
         for label, _, reason in _gap_rows(estimates):
-            console.print(f"    {_rich_escape(label)}: {_rich_escape(reason)}")
+            console.print(f"    {_rich_escape(label)}: {_rich_escape(reason)}", highlight=False)
         console.print()
 
     # Show reasons for non-ok results
@@ -846,7 +849,7 @@ def render_table(
         console.print("  [bold]Details:[/bold]")
         for result in detail_results:
             icon = _glyphs(_VERDICT_ICONS[result.verdict], console.encoding)
-            console.print(f"    {icon} {_rich_escape(result.reason)}")
+            console.print(f"    {icon} {_rich_escape(result.reason)}", highlight=False)
         console.print()
 
     reviewed_results = _reviewed_results(grouped)

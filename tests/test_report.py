@@ -2240,6 +2240,44 @@ _RECOVERED = ReportDiagnostic(
 )
 
 
+class TestReasonsAreNotHighlighted:
+    """A reason reaches the terminal as written. Left to the console's own
+    highlighting, the number inside a license ID would be styled, and a
+    quoted value or a path would take a colour that means a verdict."""
+
+    def test_detail_gap_and_estimate_reasons_carry_no_style(self):
+        report = AnalysisReport(
+            project_license="MIT",
+            results=[
+                _make_result(
+                    "certs",
+                    "GPL-3.0-only",
+                    RiskLevel.STRONG_COPYLEFT,
+                    CompatibilityVerdict.INCOMPATIBLE,
+                    reason="certs uses GPL-3.0-only (strong copyleft), not compatible with 'MIT'",
+                )
+            ],
+            read_diagnostics=[
+                _gap("go.work", "references '/abs/module', which is not a relative path"),
+                ReportDiagnostic(
+                    path="web/package.json",
+                    reason="declares 2 dependencies that no lockfile covers",
+                    severity="estimate",
+                ),
+            ],
+        )
+        console, buf = _make_terminal_console()
+        render_table(report, console)
+        lines = buf.getvalue().splitlines()
+        # The icon is the one styled thing on a detail line.
+        assert (
+            "    \x1b[31m✗\x1b[0m certs uses GPL-3.0-only (strong copyleft), "
+            "not compatible with 'MIT'"
+        ) in lines
+        assert "    go.work: references '/abs/module', which is not a relative path" in lines
+        assert "    web/package.json: declares 2 dependencies that no lockfile covers" in lines
+
+
 class TestAnalysisGaps:
     """Manifests the scan could not analyze are listed in the saved reports."""
 
