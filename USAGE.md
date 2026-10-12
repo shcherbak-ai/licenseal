@@ -225,11 +225,39 @@ For each ecosystem: what is read beyond the files listed under [Supported ecosys
 
 licenseal is a license resolver, not a dependency resolver: it does not resolve version conflicts between transitive requirements, and it does not model what a given environment would install.
 
+## How licenseal decides
+
+licenseal classifies each dependency license into a risk level and compares that risk against the [project license](#project-license).
+
+| Project \ Dependency | Permissive | Weak Copyleft | Strong Copyleft | Network Copyleft |
+| --- | --- | --- | --- | --- |
+| **Permissive** | OK | Warning | Violation | Violation |
+| **Weak Copyleft** | OK | OK | Violation | Violation |
+| **Strong Copyleft** | OK | OK | OK | Warning |
+| **Network Copyleft** | OK | OK | OK | OK |
+
+**Pair-level overrides** strengthen the matrix where two licenses are documented as legally incompatible:
+
+- Violation: a GPLv3-family dependency (`GPL-3.0-*`, `LGPL-3.0-*`, `AGPL-3.0-*`) in a `GPL-2.0-only` project, or a `GPL-2.0-only` dependency in a `GPL-3.0-*` / `AGPL-3.0-*` project.
+- Violation: `Apache-2.0` in a `GPL-2.0-only` project.
+- Violation: `EPL-1.0`, `CDDL-*`, or `MPL-1.1` in any GPL-family project (`GPL-2.0-*`, `GPL-3.0-*`, `AGPL-3.0-*`).
+- Warning: `EPL-2.0` in a GPL-family project, because its GPL compatibility depends on a secondary-license designation that package metadata cannot reveal.
+
+`-or-later` forms are exempt where the upgrade clause resolves the conflict. A deprecated GNU identifier is read by its SPDX meaning: a bare `GPL-2.0` is `GPL-2.0-only`, and `GPL-2.0+` is `GPL-2.0-or-later`.
+
+| Risk level | Examples | Meaning |
+| --- | --- | --- |
+| Permissive | MIT, BSD, Apache-2.0, ISC | No significant restrictions |
+| Weak Copyleft | LGPL, MPL-2.0, EPL, CDDL, GPL with Classpath exception | File-scope reciprocity; linking from other files is usually allowed |
+| Strong Copyleft | GPL, OSL, EUPL, CC-BY-SA | Share-alike obligations can extend to the derivative work |
+| Network Copyleft | AGPL-3.0-only | Strong copyleft with network-use source-offer obligations |
+| Unknown | SSPL, BUSL, Elastic, FSL, Parity, PolyForm, CC-BY-NC, CC-BY-ND, `BSD-3-Clause-No-Military-License` and the other use-restricted BSD variants, Unicode-TOU; missing or unrecognized licenses; an unrecognized `WITH` exception on a license that is not strong or network copyleft | Cannot be auto-classified; routed to manual review |
+
 ## License expressions
 
-How a declared license string is read before the matrix and the pair-level overrides in the [README](README.md#how-licenseal-decides) apply.
+How a declared license string is read before the matrix and the pair-level overrides [above](#how-licenseal-decides) apply.
 
-- **`OR` expressions.** The dependency gets the verdict of the choice that suits the project best, each choice judged as a whole. The report's Risk column shows its least restrictive choice.
+- **`OR` expressions.** The dependency gets the verdict of the choice that suits the project best, each choice judged as a whole: `GPL-3.0-only OR MIT` in a `GPL-2.0-only` project is compatible through its MIT choice. The report's Risk column shows its least restrictive choice.
 - **`WITH` exceptions** are matched against a fixed list.
   - `Classpath-exception-2.0` and `Classpath-exception-2.0-short` on a GPL license make that license weak copyleft.
   - An exception that only adds a permission leaves the license judged without it: `Autoconf-exception-2.0`, `Autoconf-exception-3.0`, `Bison-exception-2.2`, `Bootloader-exception`, `Font-exception-2.0`, `GCC-exception-2.0`, `GCC-exception-3.1`, `Libtool-exception`, `Linux-syscall-note`, `LLVM-exception`, `OCaml-LGPL-linking-exception`, `Swift-exception`, `Universal-FOSS-exception-1.0`, `WxWindows-exception-3.1`. In addition, `Apache-2.0 WITH LLVM-exception` is compatible in a `GPL-2.0-only` project.

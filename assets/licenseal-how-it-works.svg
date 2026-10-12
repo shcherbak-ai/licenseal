@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="934" height="270" viewBox="0 0 934 270" role="img" aria-labelledby="title desc">
 <title id="title">How licenseal works</title>
-<desc id="desc">Four steps. Read: manifests and lockfiles, such as pyproject.toml, package-lock.json and Cargo.lock. Resolve: the whole dependency tree, shown as an illustrative app that requires client and parser, where client brings in transport and transport brings in certs. Classify: each license against the project's own, here MIT; MIT, Apache-2.0 and BSD-3-Clause are compatible and GPL-3.0-only is not. Report: a verdict that CI can gate on, here 1 violation and 3 ok with exit code 1, as a table, Markdown or JSON. Nothing is installed, built or downloaded as a package.</desc>
+<desc id="desc">Four steps. Read: manifests and lockfiles, such as pyproject.toml, package-lock.json and Cargo.lock. Resolve: the whole dependency tree, shown as an illustrative app that requires client and parser, where client brings in transport and transport brings in certs. Classify: each license against the project's own, here MIT; MIT, Apache-2.0 and BSD-3-Clause are compatible and GPL-3.0-only is not. Report: a verdict that CI can gate on, here 1 violation and 3 ok with exit code 1, as a table, Markdown or JSON. No dependency is installed or built, and no package is downloaded.</desc>
 <style>
 text{font-family:ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;font-size:13px;fill:#a1a1aa}
 .step{font-size:12px;letter-spacing:1.6px;font-weight:600;fill:#fafafa}
@@ -67,5 +67,5 @@ path,rect{fill:none;shape-rendering:crispEdges}
 <text x="883.5" y="153.5" text-anchor="middle" style="font-size:12px">json</text>
 <text class="cap" x="725" y="196">A verdict CI can gate on</text>
 
-<text class="foot" x="467" y="250" text-anchor="middle">no install  ·  no build  ·  no package downloads</text>
+<text class="foot" x="467" y="250" text-anchor="middle">no dependency installs  ·  no builds  ·  no package downloads</text>
 </svg>
