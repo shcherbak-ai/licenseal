@@ -4,12 +4,12 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
-from enum import Enum
+from enum import StrEnum
 
 _PEP503_SEPARATORS_RE = re.compile(r"[-_.]+")
 
 
-class Ecosystem(str, Enum):
+class Ecosystem(StrEnum):
     """Package ecosystem."""
 
     PYTHON = "python"
@@ -80,14 +80,14 @@ _ECOSYSTEM_LABELS: dict[Ecosystem, str] = {
 }
 
 
-class DependencyGroup(str, Enum):
+class DependencyGroup(StrEnum):
     """Dependency group (production vs development)."""
 
     PROD = "prod"
     DEV = "dev"
 
 
-class RiskLevel(str, Enum):
+class RiskLevel(StrEnum):
     """License risk classification."""
 
     PERMISSIVE = "permissive"
@@ -111,7 +111,7 @@ _RISK_SEVERITY: dict[RiskLevel, int] = {
 }
 
 
-class CompatibilityVerdict(str, Enum):
+class CompatibilityVerdict(StrEnum):
     """Compatibility assessment result."""
 
     COMPATIBLE = "compatible"

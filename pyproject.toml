@@ -6,7 +6,7 @@ readme = "PYPI.md"
 authors = [
     { name = "SergiiShcherbak", email = "sergii@shcherbak.ai" }
 ]
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 license = "Apache-2.0"
 license-files = ["LICENSE", "NOTICE"]
 keywords = ["license", "compliance", "spdx", "dependencies", "python", "pypi", "javascript", "typescript", "npm", "rust", "crates", "go", "java", "jvm", "maven", "gradle", "dotnet", "nuget", "php", "composer", "packagist", "ruby", "rubygems", "elixir", "erlang", "hex", "r", "cran"]
@@ -14,7 +14,6 @@ classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Developers",
     "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
@@ -33,7 +32,6 @@ dependencies = [
     "httpx>=0.28",
     "packaging>=24.0",
     "semantic-version>=2.10",
-    "tomli>=2.0; python_version < '3.11'",
     "tethered>=0.5.1",
     "pyyaml>=6.0.3",
     "defusedxml>=0.7.1",
@@ -94,7 +92,7 @@ partial_branches = [
 source = ["src"]
 
 [tool.ruff]
-target-version = "py310"
+target-version = "py311"
 line-length = 100
 src = ["src", "tests"]
 
@@ -114,7 +112,6 @@ select = [
 ]
 ignore = [
     "S101",   # assert used (fine in tests)
-    "UP007",  # Use X | Y for union types (keep Optional for 3.10 compat in non-annotations context)
 ]
 
 [tool.ruff.lint.isort]

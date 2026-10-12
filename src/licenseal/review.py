@@ -20,7 +20,7 @@ from __future__ import annotations
 
 import json
 import re
-import sys
+import tomllib
 from collections.abc import Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -35,12 +35,6 @@ from licenseal.analysis.risk import DEPRECATED_SPDX_IDS, KNOWN_SPDX_IDS
 from licenseal.analysis.spdx import normalize_license, reads_as_license_list
 from licenseal.models import CompatibilityResult, CompatibilityVerdict, Ecosystem, LicenseInfo
 from licenseal.report import _printable  # noqa: PLC2701
-
-if sys.version_info >= (3, 11):
-    import tomllib  # pragma: no cover - Python 3.10 takes the other arm
-else:
-    import tomli as tomllib  # ty: ignore[unresolved-import]  # pragma: no cover
-
 
 REVIEW_FILE_NAME = "licenseal.review.toml"
 

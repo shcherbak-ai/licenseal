@@ -52,18 +52,13 @@ import contextlib
 import contextvars
 import json
 import re
-import sys
+import tomllib
 from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, TypeVar, cast
 
 import yaml
-
-if sys.version_info >= (3, 11):
-    import tomllib  # pragma: no cover - Python 3.10 takes the other arm
-else:  # pragma: no cover
-    import tomli as tomllib  # ty: ignore[unresolved-import]
 
 __all__ = [
     "ReadDiagnostic",

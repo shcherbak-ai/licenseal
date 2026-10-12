@@ -7,7 +7,7 @@
 
 ## Setup
 
-Requires Python 3.10+ and [uv](https://docs.astral.sh/uv/).
+Requires Python 3.11+ and [uv](https://docs.astral.sh/uv/).
 
 ```bash
 git clone https://github.com/shcherbak-ai/licenseal.git

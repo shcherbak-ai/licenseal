@@ -10,7 +10,6 @@
 |[httpx (0.28.1)](https://pypi.org/project/httpx/)|python|prod|[pyproject.toml](pyproject.toml)|[BSD-3-Clause](https://spdx.org/licenses/BSD-3-Clause.html)|permissive|✓|
 |  └─ [anyio (4.13.0)](https://pypi.org/project/anyio/)|python|prod||[MIT](https://spdx.org/licenses/MIT.html)|permissive|✓|
 |  └─ [certifi (2026.5.20)](https://pypi.org/project/certifi/)|python|prod||[MPL-2.0](https://spdx.org/licenses/MPL-2.0.html)|weak-copyleft|⚠|
-|  └─ [exceptiongroup (1.3.1)](https://pypi.org/project/exceptiongroup/)|python|prod||[MIT](https://spdx.org/licenses/MIT.html)|permissive|✓|
 |  └─ [h11 (0.16.0)](https://pypi.org/project/h11/)|python|prod||[MIT](https://spdx.org/licenses/MIT.html)|permissive|✓|
 |  └─ [httpcore (1.0.9)](https://pypi.org/project/httpcore/)|python|prod||[BSD-3-Clause](https://spdx.org/licenses/BSD-3-Clause.html)|permissive|✓|
 |  └─ [idna (3.18.0)](https://pypi.org/project/idna/)|python|prod||[BSD-3-Clause](https://spdx.org/licenses/BSD-3-Clause.html)|permissive|✓|
@@ -23,9 +22,8 @@
 |  └─ [pygments (2.20.0)](https://pypi.org/project/pygments/)|python|prod||[BSD-2-Clause](https://spdx.org/licenses/BSD-2-Clause.html)|permissive|✓|
 |[semantic-version (2.10.0)](https://pypi.org/project/semantic-version/)|python|prod|[pyproject.toml](pyproject.toml)|[BSD-3-Clause](https://spdx.org/licenses/BSD-3-Clause.html)|permissive|✓|
 |[tethered (0.5.1)](https://pypi.org/project/tethered/)|python|prod|[pyproject.toml](pyproject.toml)|[MIT](https://spdx.org/licenses/MIT.html)|permissive|✓|
-|[tomli (2.4.1)](https://pypi.org/project/tomli/)|python|prod|[pyproject.toml](pyproject.toml)|[MIT](https://spdx.org/licenses/MIT.html)|permissive|✓|
 
-**Summary:** 0 violations, 1 warning, 0 unknown, 19 ok (of which 1 reviewed)
+**Summary:** 0 violations, 1 warning, 0 unknown, 17 ok (of which 1 reviewed)
 
 ## Details
 

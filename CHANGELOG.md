@@ -23,6 +23,7 @@ Most of these changes close cases where a scan passed although it had missed dep
 
 #### Install requirements
 
+- Python 3.11 or newer is required (was 3.10). Python 3.10 reached end of life in October 2026.
 - `httpx` 0.28 or newer is required (was 0.27). The guarantee that credentials in `~/.netrc` are never read holds from that version on.
 
 #### Projects without a lockfile

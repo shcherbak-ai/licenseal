@@ -314,7 +314,7 @@ Add at least one `<eco>`-only repo plus one polyglot repo that includes the new 
 
 ## Rules
 
-- Python 3.10+. `from __future__ import annotations` in every file.
+- Python 3.11+. `from __future__ import annotations` in every file.
 - ruff (line length 100), ty (default rules; `[tool.ty.src]` scopes it to `src/`).
 - Network egress goes through `tethered.scope(allow=..., label="licenseal.resolve", hint=...)`. `scope()` intersects with any host policy, so embedding licenseal cannot widen its egress. Never call `tethered.activate()` from library code: it is process-wide and reserved for the host application or local dev.
 - `cli._TETHERED_HINT` is the text tethered shows when a host policy blocks a call. It explains why the listed hosts are needed and must link to the *Network egress* heading of SECURITY.md: a test checks that the link's fragment is a heading of that file and that the section lists every host.
