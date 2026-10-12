@@ -13,7 +13,7 @@
   <tr>
     <td align="center"><strong>Prevent release blockers</strong><br>Catch dependency-license problems before release, approval, or audit.</td>
     <td align="center"><strong>10 ecosystems</strong><br>Scan Python, JS/TS, Rust, Go, Java/JVM, .NET, PHP, Ruby, Elixir/Erlang, and R.</td>
-    <td align="center"><strong>Document reviews</strong><br>Use the Claude Code skill to investigate findings and record decisions.</td>
+    <td align="center"><strong>Document reviews</strong><br>Use the <a href="#-claude-code-review-skill">Claude Code skill</a> to investigate findings and record decisions.</td>
   </tr>
 </table>
 <br>
@@ -135,18 +135,6 @@ The exit code is non-zero when there are unreviewed violations, warnings, unknow
 | Violations always fail | `--no-strict` demotes warnings, unknown licenses, and analysis gaps only; definite incompatibilities still fail. |
 | Project license from the scanned directory, else `Proprietary` | Read from a manifest in the scanned directory, never from a nested package. If none declares a license, or the first that does declares a value that is not a recognised license, the project is checked as `Proprietary`: permissive dependencies pass, copyleft ones are flagged. See [USAGE.md](USAGE.md#project-license). |
 
-## 🤖 Claude Code Review Skill
-
-CI can tell you which dependency licenses need attention; the bundled [Claude Code](https://claude.com/claude-code) skill helps turn those findings into documented decisions. Install it in the project being audited, then run `/licenseal-review` in Claude Code:
-
-```bash
-licenseal install-skill
-```
-
-The skill runs `licenseal check`, walks through warnings, violations, unknown licenses, and analysis gaps, and asks how your project is distributed, hosted, modified, or shipped. It fills `licenseal.review.toml` only when there is a concrete reviewable rationale, keeps genuine incompatibilities flagged, and re-runs the check so what is still flagged is explicit.
-
-[![Claude Code licenseal review skill asking whether MPL dependencies were modified before marking them reviewed](assets/claude_skill_qa.png)](assets/claude_skill_qa.png)
-
 ## 🌐 Supported Ecosystems
 
 ![Python](https://img.shields.io/badge/Python-3776AB?logo=python&logoColor=white)
@@ -265,6 +253,18 @@ licenseal check                                              # 4. overrides appl
 ```
 
 Reviews can only override flagged dependencies, never compatible ones. A reviewed dependency passes strict mode and stays visible with both the detected and reviewed licenses shown. An off-registry dependency is reviewed by its source instead of its version: the scaffolded entry carries a `source` line. Full review rules are in [USAGE.md](USAGE.md#manual-review-file).
+
+## 🤖 Claude Code Review Skill
+
+CI can tell you which dependency licenses need attention; the bundled [Claude Code](https://claude.com/claude-code) skill helps turn those findings into documented decisions. Install it in the project being audited, then run `/licenseal-review` in Claude Code:
+
+```bash
+licenseal install-skill
+```
+
+The skill runs `licenseal check`, walks through warnings, violations, unknown licenses, and analysis gaps, and asks how your project is distributed, hosted, modified, or shipped. It fills `licenseal.review.toml` only when there is a concrete reviewable rationale, keeps genuine incompatibilities flagged, and re-runs the check so what is still flagged is explicit.
+
+[![Claude Code licenseal review skill asking whether MPL dependencies were modified before marking them reviewed](assets/claude_skill_qa.png)](assets/claude_skill_qa.png)
 
 ## 🧩 How Licenseal Decides
 
