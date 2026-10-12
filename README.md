@@ -147,13 +147,6 @@ The skill runs `licenseal check`, walks through warnings, violations, unknown li
 
 [![Claude Code licenseal review skill asking whether MPL dependencies were modified before marking them reviewed](assets/claude_skill_qa.png)](assets/claude_skill_qa.png)
 
-## ✨ What Licenseal Does
-
-|  |  |  |
-| --- | --- | --- |
-| **Compatibility verdict**<br>Checks dependencies against your project license. | **Transitive by default**<br>Finds risks several levels down. | **Install-free**<br>Reads manifests, lockfiles, and registries only. |
-| **Agent-assisted review**<br>Claude Code skill investigates flagged findings and asks verdict-aware questions. | **Cross-ecosystem**<br>One scan for polyglot repos. | **CI-ready speed**<br>Seconds-scale scans in benchmark runs, with strict exits and JSON/Markdown output. |
-
 ## 🌐 Supported Ecosystems
 
 ![Python](https://img.shields.io/badge/Python-3776AB?logo=python&logoColor=white)
