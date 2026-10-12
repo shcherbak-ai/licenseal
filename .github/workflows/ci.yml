@@ -17,17 +17,17 @@ permissions:
   contents: read
 
 env:
-  UV_VERSION: "0.11.19"
+  UV_VERSION: "0.13.0"
 
 jobs:
   lint:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
 
       - name: Install uv
-        uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78  # v7
+        uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884  # v10.3.0
         with:
           version: ${{ env.UV_VERSION }}
 
@@ -55,10 +55,10 @@ jobs:
         python-version: ["3.11", "3.12", "3.13", "3.14"]
 
     steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
 
       - name: Install uv
-        uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78  # v7
+        uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884  # v10.3.0
         with:
           version: ${{ env.UV_VERSION }}
 
@@ -84,7 +84,7 @@ jobs:
 
       - name: Update coverage badge
         if: matrix.os == 'ubuntu-latest' && matrix.python-version == '3.13' && github.ref == 'refs/heads/main'
-        uses: schneegans/dynamic-badges-action@e9a478b16159b4d31420099ba146cdc50f134483  # v1.7.0
+        uses: schneegans/dynamic-badges-action@28b0fa8bdeb46170ac397105ece0c1fe58f68910  # v1.9.0
         with:
           auth: ${{ secrets.GIST_TOKEN }}
           gistID: ${{ vars.COVERAGE_GIST_ID }}

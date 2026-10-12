@@ -4,26 +4,25 @@
 
 |Package|Ecosystem|Group|Source|License|Risk|Status|
 |---------|-----------|-------|--------|---------|------|--------|
-|[click (8.4.1)](https://pypi.org/project/click/)|python|prod|[pyproject.toml](pyproject.toml)|[BSD-3-Clause](https://spdx.org/licenses/BSD-3-Clause.html)|permissive|✓|
-|  └─ [colorama (0.4.6)](https://pypi.org/project/colorama/)|python|prod||[BSD-3-Clause](https://spdx.org/licenses/BSD-3-Clause.html)|permissive|✓|
+|[click (8.5.0)](https://pypi.org/project/click/)|python|prod|[pyproject.toml](pyproject.toml)|[BSD-3-Clause](https://spdx.org/licenses/BSD-3-Clause.html)|permissive|✓|
 |[defusedxml (0.7.1)](https://pypi.org/project/defusedxml/)|python|prod|[pyproject.toml](pyproject.toml)|[PSF-2.0](https://spdx.org/licenses/PSF-2.0.html)|permissive|✓|
 |[httpx (0.28.1)](https://pypi.org/project/httpx/)|python|prod|[pyproject.toml](pyproject.toml)|[BSD-3-Clause](https://spdx.org/licenses/BSD-3-Clause.html)|permissive|✓|
-|  └─ [anyio (4.13.0)](https://pypi.org/project/anyio/)|python|prod||[MIT](https://spdx.org/licenses/MIT.html)|permissive|✓|
-|  └─ [certifi (2026.5.20)](https://pypi.org/project/certifi/)|python|prod||[MPL-2.0](https://spdx.org/licenses/MPL-2.0.html)|weak-copyleft|⚠|
+|  └─ [anyio (4.15.1)](https://pypi.org/project/anyio/)|python|prod||[MIT](https://spdx.org/licenses/MIT.html)|permissive|✓|
+|  └─ [certifi (2026.7.22)](https://pypi.org/project/certifi/)|python|prod||[MPL-2.0](https://spdx.org/licenses/MPL-2.0.html)|weak-copyleft|⚠|
 |  └─ [h11 (0.16.0)](https://pypi.org/project/h11/)|python|prod||[MIT](https://spdx.org/licenses/MIT.html)|permissive|✓|
 |  └─ [httpcore (1.0.9)](https://pypi.org/project/httpcore/)|python|prod||[BSD-3-Clause](https://spdx.org/licenses/BSD-3-Clause.html)|permissive|✓|
-|  └─ [idna (3.18.0)](https://pypi.org/project/idna/)|python|prod||[BSD-3-Clause](https://spdx.org/licenses/BSD-3-Clause.html)|permissive|✓|
-|  └─ [typing-extensions (4.15.0)](https://pypi.org/project/typing-extensions/)|python|prod||[PSF-2.0](https://spdx.org/licenses/PSF-2.0.html)|permissive|✓|
-|[packaging (26.2.0)](https://pypi.org/project/packaging/)|python|prod|[pyproject.toml](pyproject.toml)|[Apache-2.0](https://spdx.org/licenses/Apache-2.0.html) OR [BSD-2-Clause](https://spdx.org/licenses/BSD-2-Clause.html)|permissive|✓|
+|  └─ [idna (3.20.0)](https://pypi.org/project/idna/)|python|prod||[BSD-3-Clause](https://spdx.org/licenses/BSD-3-Clause.html)|permissive|✓|
+|  └─ [typing-extensions (4.16.0)](https://pypi.org/project/typing-extensions/)|python|prod||[PSF-2.0](https://spdx.org/licenses/PSF-2.0.html)|permissive|✓|
+|[packaging (26.3.0)](https://pypi.org/project/packaging/)|python|prod|[pyproject.toml](pyproject.toml)|[Apache-2.0](https://spdx.org/licenses/Apache-2.0.html) OR [BSD-2-Clause](https://spdx.org/licenses/BSD-2-Clause.html)|permissive|✓|
 |[pyyaml (6.0.3)](https://pypi.org/project/pyyaml/)|python|prod|[pyproject.toml](pyproject.toml)|[MIT](https://spdx.org/licenses/MIT.html)|permissive|✓|
 |[rich (15.0.0)](https://pypi.org/project/rich/)|python|prod|[pyproject.toml](pyproject.toml)|[MIT](https://spdx.org/licenses/MIT.html)|permissive|✓|
 |  └─ [markdown-it-py (4.2.0)](https://pypi.org/project/markdown-it-py/)|python|prod||[MIT](https://spdx.org/licenses/MIT.html)|permissive|✓|
 |  └─ [mdurl (0.1.2)](https://pypi.org/project/mdurl/)|python|prod||[MIT](https://spdx.org/licenses/MIT.html)|permissive|✓|
-|  └─ [pygments (2.20.0)](https://pypi.org/project/pygments/)|python|prod||[BSD-2-Clause](https://spdx.org/licenses/BSD-2-Clause.html)|permissive|✓|
+|  └─ [pygments (2.21.0)](https://pypi.org/project/pygments/)|python|prod||[BSD-2-Clause](https://spdx.org/licenses/BSD-2-Clause.html)|permissive|✓|
 |[semantic-version (2.10.0)](https://pypi.org/project/semantic-version/)|python|prod|[pyproject.toml](pyproject.toml)|[BSD-3-Clause](https://spdx.org/licenses/BSD-3-Clause.html)|permissive|✓|
-|[tethered (0.5.1)](https://pypi.org/project/tethered/)|python|prod|[pyproject.toml](pyproject.toml)|[MIT](https://spdx.org/licenses/MIT.html)|permissive|✓|
+|[tethered (0.5.3)](https://pypi.org/project/tethered/)|python|prod|[pyproject.toml](pyproject.toml)|[MIT](https://spdx.org/licenses/MIT.html)|permissive|✓|
 
-**Summary:** 0 violations, 1 warning, 0 unknown, 17 ok (of which 1 reviewed)
+**Summary:** 0 violations, 1 warning, 0 unknown, 16 ok (of which 1 reviewed)
 
 ## Details
 
@@ -33,6 +32,6 @@
 
 |Package|Detected|Reviewed|Note|
 |---------|----------|----------|----|
-|[certifi (2026.5.20)](https://pypi.org/project/certifi/)|MPL-2.0|[MPL-2.0](https://spdx.org/licenses/MPL-2.0.html)|Unmodified PyPI dep (transitive via httpx); MPL-2.0 file-level copyleft only triggers on modifications to MPL-licensed files.|
+|[certifi (2026.7.22)](https://pypi.org/project/certifi/)|MPL-2.0|[MPL-2.0](https://spdx.org/licenses/MPL-2.0.html)|Unmodified PyPI dep (transitive via httpx); MPL-2.0 file-level copyleft only triggers on modifications to MPL-licensed files.|
 
 _Generated by `licenseal check`. Versions shown are the resolved releases checked._

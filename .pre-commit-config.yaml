@@ -7,27 +7,27 @@ repos:
       - id: check-yaml
       - id: check-toml
 
-  - repo: https://github.com/astral-sh/ruff-pre-commit
-    rev: 0839f92796ae388643a08a21640a029b322be5c2  # v0.15.2
-    hooks:
-      - id: ruff-check
-        args: [--fix]
-      - id: ruff-format
-
-  - repo: https://github.com/DavidAnson/markdownlint-cli2
-    rev: 5387279b3b4c24822c0f86d4df4f28b37e3e8992  # v0.21.0
-    hooks:
-      - id: markdownlint-cli2
-
-  - repo: https://github.com/PyCQA/bandit
-    rev: ea0d187d78b2e6365e35f676d2eb9b1be264c091  # 1.9.2
-    hooks:
-      - id: bandit
-        args: ["-c", "pyproject.toml"]
-        additional_dependencies: ["bandit[toml]"]
-
+  # These run from the project environment: uv.lock is their only version pin.
   - repo: local
     hooks:
+      - id: ruff-check
+        name: ruff check
+        entry: uv run ruff check --force-exclude --fix
+        language: system
+        types_or: [python, pyi, jupyter]
+        require_serial: true
+      - id: ruff-format
+        name: ruff format
+        entry: uv run ruff format --force-exclude
+        language: system
+        types_or: [python, pyi, jupyter, markdown]
+        require_serial: true
+      - id: bandit
+        name: bandit
+        entry: uv run bandit -c pyproject.toml
+        language: system
+        types: [python]
+        require_serial: true
       - id: ty
         name: ty
         entry: uv run ty check src/
@@ -58,9 +58,13 @@ repos:
         language: system
         files: ^src/licenseal/analysis/(spdx|risk)\.py$|^src/licenseal/data/spdx-license-ids\.json$
         pass_filenames: false
-
-  - repo: https://github.com/commitizen-tools/commitizen
-    rev: 7179a42b3544e953e3683a670056ad385892365d  # v4.13.8
-    hooks:
       - id: commitizen
+        name: commitizen check
+        entry: uv run cz check --allow-abort --commit-msg-file
+        language: system
         stages: [commit-msg]
+
+  - repo: https://github.com/DavidAnson/markdownlint-cli2
+    rev: 916ad0aaa108c64d294101002066f530ea170b10  # v0.23.3
+    hooks:
+      - id: markdownlint-cli2

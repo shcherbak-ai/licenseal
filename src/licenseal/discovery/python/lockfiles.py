@@ -138,7 +138,7 @@ def _load_toml(path: Path) -> dict[str, Any]:
     couldn't read is a set of dependencies we couldn't vouch for. The empty
     dict here only keeps the parse loop from crashing.
     """
-    return cast("dict[str, Any]", load_toml(path) or {})
+    return load_toml(path) or {}
 
 
 def _attribute(

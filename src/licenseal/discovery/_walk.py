@@ -13,7 +13,7 @@ import contextlib
 import contextvars
 import functools
 import os
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Generator
 from pathlib import Path
 from typing import ParamSpec, TypeVar, cast
 
@@ -83,7 +83,7 @@ _WALK_CACHE: contextvars.ContextVar[dict[tuple[str, frozenset[Path]], list[Path]
 
 
 @contextlib.contextmanager
-def shared_walk_cache() -> Iterator[None]:
+def shared_walk_cache() -> Generator[None]:
     """Reuse one full-tree walk across all ``walk_project_files*`` calls within.
 
     Re-entrant: if a cache is already active (e.g. the CLI wraps both
@@ -110,7 +110,7 @@ _EXCLUDED: contextvars.ContextVar[frozenset[Path]] = contextvars.ContextVar(
 
 
 @contextlib.contextmanager
-def scan_exclusions(exclude_paths: frozenset[Path]) -> Iterator[None]:
+def scan_exclusions(exclude_paths: frozenset[Path]) -> Generator[None]:
     """Make ``exclude_paths`` the exclusions :func:`is_walked_directory` applies.
 
     ``exclude_paths`` holds pre-resolved absolute paths, as for the walk.

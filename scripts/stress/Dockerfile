@@ -6,7 +6,7 @@
 # install rooted at /src/src. At run time the working tree's src/ is mounted
 # read-only over /src/src, so scans exercise the current code without a
 # rebuild. Rebuild only when pyproject.toml or uv.lock changes.
-FROM ghcr.io/astral-sh/uv:0.12.18-python3.14-trixie-slim
+FROM ghcr.io/astral-sh/uv:0.13.0-python3.14-trixie-slim
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends git ca-certificates \

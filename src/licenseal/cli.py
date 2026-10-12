@@ -7,7 +7,7 @@ import hashlib
 import io
 import sys
 import time
-from collections.abc import Iterator, Sequence
+from collections.abc import Generator, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from dataclasses import replace
@@ -207,7 +207,7 @@ class _PhaseTimings:
         self.entries.append((name, seconds))
 
     @contextmanager
-    def phase(self, name: str) -> Iterator[None]:
+    def phase(self, name: str) -> Generator[None]:
         """Time the enclosed block and record it under ``name``."""
         started = time.perf_counter()
         try:

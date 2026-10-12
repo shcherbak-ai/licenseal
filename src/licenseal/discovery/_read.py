@@ -53,7 +53,7 @@ import contextvars
 import json
 import re
 import tomllib
-from collections.abc import Iterator
+from collections.abc import Generator
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, TypeVar, cast
@@ -119,7 +119,7 @@ _DIAGNOSTICS: contextvars.ContextVar[list[ReadDiagnostic] | None] = contextvars.
 
 
 @contextlib.contextmanager
-def collect_read_diagnostics() -> Iterator[list[ReadDiagnostic]]:
+def collect_read_diagnostics() -> Generator[list[ReadDiagnostic]]:
     """Activate the read-diagnostics sink for the enclosed block.
 
     Re-entrant like :func:`licenseal.discovery._walk.shared_walk_cache`: a

@@ -526,7 +526,7 @@ def _cases():
 
 
 class TestSatisfies:
-    @pytest.mark.parametrize(("ecosystem", "version", "constraint", "expected"), _cases())
+    @pytest.mark.parametrize(("ecosystem", "version", "constraint", "expected"), list(_cases()))
     def test_table(self, ecosystem, version, constraint, expected):
         assert satisfies(ecosystem, version, constraint) is expected
 
