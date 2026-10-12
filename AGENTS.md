@@ -53,7 +53,7 @@ src/licenseal/
       lockfile.py             go.sum; the edge graph and group attribution live in transitive.py
     java/
       pom_xml.py              pom.xml (multi-module reactor, parent chain, `<dependencyManagement>`, BOM imports, `${…}` properties)
-      build_gradle.py         build.gradle[.kts], a text parser for static-string declarations; USAGE.md lists what it skips
+      build_gradle.py         build.gradle[.kts], a text parser for static-string declarations; docs/ecosystems/java.md lists what it skips
       gradle_lockfile.py      gradle.lockfile (PROD/DEV split by classpath)
     dotnet/
       csproj.py               .csproj / .fsproj / .vbproj (SDK-style and legacy); CPM versions and `$(Property)` tokens are stitched in discovery/__init__.py
@@ -96,7 +96,7 @@ src/licenseal/
     version_selection.py      Version grammar of every ecosystem: `satisfies`, `select_version`, `is_prerelease`, `concrete_maven_version`
 ```
 
-The *Per-ecosystem resolution detail* section of `USAGE.md` is the specification for which dependencies are dev and which are off-registry. Change it in the same change as the parser.
+The ecosystem pages (`docs/ecosystems/<ecosystem>.md`) are the specification for which dependencies are dev and which are off-registry. Change the page in the same change as the parser.
 
 **Licenses.**
 
@@ -143,8 +143,8 @@ The *Per-ecosystem resolution detail* section of `USAGE.md` is the specification
 
 licenseal reads two kinds of input and nothing else:
 
-1. **Manifests and lockfiles on disk** (listed in USAGE.md), and the project's own license declaration where a manifest carries one.
-2. **Registry APIs over HTTPS**: the read-only endpoints listed in SECURITY.md, the Maven fallback registries in `resolvers/maven_central.py:_FALLBACK_POM_REGISTRIES`, and PEP 658 `.metadata` files on `files.pythonhosted.org`, which hold a wheel's metadata without the wheel.
+1. **Manifests and lockfiles on disk** (listed in `docs/ecosystems/index.md`), and the project's own license declaration where a manifest carries one.
+2. **Registry APIs over HTTPS**: the read-only endpoints listed in `docs/security/network.md`, the Maven fallback registries in `resolvers/maven_central.py:_FALLBACK_POM_REGISTRIES`, and PEP 658 `.metadata` files on `files.pythonhosted.org`, which hold a wheel's metadata without the wheel.
 
 licenseal does **not**:
 
@@ -244,7 +244,7 @@ A direct dependency must resolve to one version in both modes: the registry walk
 - A requirements include and a `file:` directive (`requirements.referenced_requirements`) are followed only when they resolve to a file inside the scanned directory, and a URL is refused on its text.
 - Any new parser that follows a content-derived path must use the same guard.
 
-**Directory walk.** Discovery uses `discovery._walk.walk_project_files`, which skips the directory names listed in USAGE.md, any directory with a `pyvenv.cfg` or its own `.git`, symlinked directories, and `--exclude-dirs` paths.
+**Directory walk.** Discovery uses `discovery._walk.walk_project_files`, which skips the directory names listed in `docs/concepts/discovery.md`, any directory with a `pyvenv.cfg` or its own `.git`, symlinked directories, and `--exclude-dirs` paths.
 
 ## Adding a new ecosystem
 
@@ -317,7 +317,7 @@ Add at least one `<eco>`-only repo plus one polyglot repo that includes the new 
 - Python 3.11+. `from __future__ import annotations` in every file.
 - ruff (line length 100), ty (default rules; `[tool.ty.src]` scopes it to `src/`).
 - Network egress goes through `tethered.scope(allow=..., label="licenseal.resolve", hint=...)`. `scope()` intersects with any host policy, so embedding licenseal cannot widen its egress. Never call `tethered.activate()` from library code: it is process-wide and reserved for the host application or local dev.
-- `cli._TETHERED_HINT` is the text tethered shows when a host policy blocks a call. It explains why the listed hosts are needed and must link to the *Network egress* heading of SECURITY.md: a test checks that the link's fragment is a heading of that file and that the section lists every host.
+- `cli._TETHERED_HINT` is the text tethered shows when a host policy blocks a call. It explains why the listed hosts are needed and must link to the *Network egress* heading of SECURITY.md: a test checks that the link's fragment is a heading of that file and that the section lists every host, and another that the table of `docs/security/network.md` does.
 - Every thread pool that fetches must carry the caller's context into its workers: route a new pool through `licenseal._concurrency.map_with_context`. The scope lives in a `ContextVar`, which does not cross thread boundaries, so a raw `pool.map` worker runs outside it and bypasses the allowlist, and the unit tests do not catch that.
 - Requests carry only dependency coordinates `(system, name, version)` plus a static `User-Agent`, never manifest or lockfile contents, file paths, the project name, or credentials. Don't add an `Authorization` header or read `.netrc` / `.npmrc` / `.pypirc` / keyring (no `httpx.NetRCAuth`). The resolution client keeps httpx's `trust_env` default, so `HTTP(S)_PROXY` is honored but `.netrc` is never read implicitly (httpx ≥ 0.28). See SECURITY.md *What leaves the process*.
 - License identifiers come only from structured fields; see *Architecture: manifest + registry only*.
@@ -325,9 +325,9 @@ Add at least one `<eco>`-only repo plus one polyglot repo that includes the new 
 - The table report (`report.render_table`) must show every column at any width. Give a free-text column `overflow="fold"` and a fixed-vocabulary column `no_wrap=True` as well, and pass each table through `_fit_table` before printing it: off a terminal it widens the console to the table's natural width, on a narrow terminal it lets the columns shrink below their minimum widths. Any non-ASCII glyph the report draws itself needs an entry in `_ASCII_GLYPHS`, because a stdout under a legacy code page cannot encode it; `-o` files are always UTF-8.
 - Changes to risk classifications (`analysis/risk.py`), the compat matrix, or reason strings (`analysis/compatibility.py`) ripple into committed docs that embed matrix semantics by hand. Review and update each in the same change; none is generated:
   - `README.md` — the compatibility matrix table and the sentence under it that names examples of each risk level.
-  - `USAGE.md` — the *How licenseal decides* section (the matrix, the pair-level overrides, the risk levels table) and the *License expressions* section (the exception list and the worked verdicts).
+  - `docs/concepts/verdicts.md` (the matrix, the pair-level overrides, the risk levels table) and `docs/concepts/license-expressions.md` (the exception list and the worked verdicts).
   - `src/licenseal/data/claude_skill.md` — per-verdict walkthrough (the WARNING / INCOMPATIBLE / UNKNOWN bullets in step 4) and the concrete-examples table. Each matrix cell that can flag a dep must be reachable through a per-dep question pattern in this file.
-  - `JSON_OUTPUT.md` — the `risk` and `verdict` enum lines, their descriptions, and the sample `reason` string.
+  - `docs/reference/json-dependency-fields.md` — the `risk` and `verdict` enum lines and their descriptions; `docs/reference/json-report.md` — the sample `reason` string.
   - `LICENSES.md` — the sample `reason` string in the Details section.
 - 100% test coverage is required; the command is under *Verification*.
 - Tests use `respx` to mock HTTP calls. Never make real network requests in tests.
@@ -341,7 +341,12 @@ Add at least one `<eco>`-only repo plus one polyglot repo that includes the new 
 
 ## Documentation and package description
 
-- `README.md` is the overview with the visuals; the reference is `USAGE.md`. Use relative links for repository files and images under `assets/`; keep external and GitHub service URLs absolute.
+- `README.md` is the overview. The user documentation is the site built from `docs/` (`zensical.toml`; the generator is a tool pinned in `.github/docs-constraints.txt`, not a dependency of the package; published to <https://shcherbak-ai.github.io/licenseal/> from `main`); `USAGE.md` and `JSON_OUTPUT.md` only say where their sections went, and `SECURITY.md` keeps the reporting policy, a summary, and the host list.
+- A behaviour change updates the page that states the behaviour, in the same change. One fact is stated on one page; other pages link to it.
+- Pages are GitHub-flavoured Markdown with relative links to each other (`../concepts/verdicts.md#the-matrix`), and call-outs in GitHub's alert syntax (`> [!NOTE]`, `> [!WARNING]`). A warning is for something that can make a report wrong or incomplete, or that leaves the machine.
+- The site sets no cookie and asks no third party for anything. Keep it so: no web font, no analytics, no `repo_url` in `zensical.toml`, no Mermaid or MathJax fence, no image or script from another host.
+- `uvx --constraints .github/docs-constraints.txt zensical build --strict` must pass: it fails on a link or an anchor that does not resolve.
+- In `README.md`, link to the site for documentation, use relative links for repository files, and take images from `docs/assets/` (shared with the site) or `assets/` (the README's own).
 - `PYPI.md` is the short package description selected by `project.readme` in `pyproject.toml`. Keep its summary, supported ecosystems, and commands aligned with the CLI, and use absolute HTTPS links to public documentation. Builds use it directly; do not introduce README link rewriting during release.
 - Follow [CONTRIBUTING.md](CONTRIBUTING.md#readme-links-and-images) when updating documentation or visuals, including example accuracy and preview checks.
 

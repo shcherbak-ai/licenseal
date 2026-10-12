@@ -60,24 +60,39 @@ uv run pytest -n 8 --cov=licenseal --cov-report=term-missing
 3. Pre-commit hooks pass
 4. Submit PR to `dev`
 
-## README links and images
+## Documentation
 
-Use relative paths for repository files in `README.md`, and keep images under `assets/`:
+The user documentation is a site built from the Markdown pages under `docs/` with [Zensical](https://zensical.org/) (`zensical.toml`), and published to <https://shcherbak-ai.github.io/licenseal/> from `main`.
 
-```markdown
-[Security](SECURITY.md)
-[Manual review](USAGE.md#manual-review-file)
-![Description of the image](assets/example.svg)
+```bash
+uvx --constraints .github/docs-constraints.txt zensical serve            # preview at http://localhost:8000
+uvx --constraints .github/docs-constraints.txt zensical build --strict   # what CI runs: fails on a broken link or anchor
 ```
 
-For HTML images, use `src="assets/example.png"`. These paths work in local previews and follow the branch being viewed on GitHub. External links, badges, and GitHub service pages such as Actions, issues, and security advisories keep absolute URLs.
+Zensical is run as a tool at the versions pinned in `.github/docs-constraints.txt`. It is not a dependency of the package.
+
+- Change the page that states a behaviour in the same change as the behaviour. State a fact on one page and link to it from the others.
+- Write GitHub-flavoured Markdown, with relative links between pages (`../concepts/verdicts.md`) and call-outs in GitHub's alert syntax (`> [!NOTE]`).
+- A new page goes into the `nav` list of `zensical.toml`.
+- The site sets no cookie and loads nothing from another host. Do not add a web font, analytics, or an embed, and do not set `repo_url`.
+
+## README links and images
+
+In `README.md`, link to the documentation site for anything it documents, and use relative paths for repository files. Images come from `docs/assets/` (shared with the site) or `assets/` (the README's own):
+
+```markdown
+[Contributing](CONTRIBUTING.md)
+![Description of the image](docs/assets/example.svg)
+```
+
+For HTML images, use `src="docs/assets/example.png"`. These paths work in local previews and follow the branch being viewed on GitHub. External links, badges, and GitHub service pages such as Actions, issues, and security advisories keep absolute URLs.
 
 Give images descriptive alt text and check them at their README display size on light and dark backgrounds. Label fictional examples as illustrative. Render CLI excerpts with licenseal, and keep diagrams and captions consistent with the current verdicts, strict-mode behavior, and transitive-dependency attribution.
 
-- `assets/licenseal-report.svg` is licenseal's own output for an illustrative project. Render it with `uv run python scripts/render_readme_report.py`; a test fails while the committed file is not what the script renders.
-- `assets/licenseal-wordmark.svg` is pixel art, 104 by 20 pixels. Show it at a whole multiple of that size (`width="416"`), so its pixels stay square.
+- `docs/assets/licenseal-report.svg` is licenseal's own output for an illustrative project. Render it with `uv run python scripts/render_readme_report.py`; a test fails while the committed file is not what the script renders.
+- `docs/assets/licenseal-wordmark.svg` is pixel art, 104 by 20 pixels. Show it at a whole multiple of that size (`width="416"`), so its pixels stay square.
 - `assets/contextgem-wordmark.svg` and `assets/tethered-wordmark.svg` are the sibling projects' pixel names, drawn at twice their size in transparent images of one size (336 by 80), so the two share a baseline. Show them at that width.
-- The figures are drawn on their own dark ground, so one file serves both GitHub themes.
+- The figures (`licenseal-report.svg`, `licenseal-how-it-works.svg`, `resolution-flow.svg`, `data-flow.svg`) are drawn on their own dark ground, so one file serves the site and both GitHub themes. Draw a new one in their style: hairlines, monospace labels, grey, amber only for what licenseal catches.
 
 The package description is [PYPI.md](PYPI.md) (`project.readme` in `pyproject.toml`). Keep it short, use absolute HTTPS links, and update it when the summary, the ecosystems, or the install commands change. Screenshots and the overview stay in the README.
 

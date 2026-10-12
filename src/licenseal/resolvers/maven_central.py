@@ -96,7 +96,7 @@ _DEPS_DEV_MAVEN_VERSION_URL = (
 # serves the standard layout
 # ``{base}/{group/path}/{artifact}/{version}/{artifact}-{version}.pom``.
 #
-# Inclusion criterion (also documented in SECURITY.md):
+# Inclusion criterion (also documented in docs/security/network.md):
 #   1. Operated by a recognized OSS foundation or major widely-trusted
 #      vendor (here: Google, Jenkins Project / Continuous Delivery
 #      Foundation).
@@ -113,12 +113,13 @@ _DEPS_DEV_MAVEN_VERSION_URL = (
 _FALLBACK_POM_REGISTRIES: tuple[str, ...] = (
     # Vendor-operated Maven repository serving artifacts not mirrored to
     # Central. Required when a scan target's dependencies, or the parents
-    # and BOMs they inherit from, are published only here. See SECURITY.md
-    # for the inclusion criterion.
+    # and BOMs they inherit from, are published only here. See
+    # docs/security/network.md for the inclusion criterion.
     "https://dl.google.com/dl/android/maven2/"
     "{group_path}/{artifact}/{version}/{artifact}-{version}.pom",
     # Foundation-operated Maven repository serving artifacts not mirrored
-    # to Central. Same inclusion criterion as above; see SECURITY.md.
+    # to Central. Same inclusion criterion as above; see
+    # docs/security/network.md.
     "https://repo.jenkins-ci.org/public/{group_path}/{artifact}/{version}/{artifact}-{version}.pom",
 )
 
@@ -185,8 +186,8 @@ def _fetch_pom(
 
     1. Maven Central (``repo.maven.apache.org``) — the canonical primary.
     2. Each entry in :data:`_FALLBACK_POM_REGISTRIES`. Hard-coded list
-       covering OSS JVM artifacts not mirrored to Central; see SECURITY.md
-       for the per-host inclusion criterion.
+       covering OSS JVM artifacts not mirrored to Central; see
+       docs/security/network.md for the per-host inclusion criterion.
 
     A registry gives no usable body when the fetch fails (a 404, another
     error status, a request that still fails after its retries) or the

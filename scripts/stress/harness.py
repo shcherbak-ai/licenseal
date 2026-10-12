@@ -30,7 +30,7 @@ LABELS = ("baseline", "fresh", "scan")
 REVIEW_FILE = "licenseal.review.toml"
 NAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
 
-# Mirrors the walker's documented skip set (USAGE.md) so the inventory counts
+# Mirrors the walker's documented skip set (docs/ecosystems/index.md) so the inventory counts
 # only manifests licenseal is expected to see.
 SKIP_DIRS = frozenset(
     {

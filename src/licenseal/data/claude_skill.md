@@ -64,7 +64,7 @@ Keep the command's stderr: step 2 reads its `Warning:` lines.
 
 ### 2. Read the summary
 
-Parse `$SCAN_FILE`. Every field used below is named here; the full schema is in the licenseal repository's `JSON_OUTPUT.md`, which is not installed with this skill, so do not look for it locally. Report to the user:
+Parse `$SCAN_FILE`. Every field used below is named here; the full schema is in licenseal's documentation (<https://shcherbak-ai.github.io/licenseal/reference/json-report/>), which is not installed with this skill, so do not look for it locally. Report to the user:
 
 - `project_license`, and `project_license_source`: the manifest in the scanned directory that declared it. When `project_license_source` is `""`, say that the project was checked as `Proprietary`.
 - `summary.total` dependencies scanned

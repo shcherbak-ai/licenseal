@@ -116,7 +116,7 @@ _REGISTRY_HOSTS = [
     # Fallback Maven registries — queried after Maven Central, for any POM
     # and for an artifact's ``maven-metadata.xml``, whenever Central gives
     # no usable body for it. See :data:`maven_central._FALLBACK_POM_REGISTRIES`
-    # and SECURITY.md for the inclusion criterion. tethered allow rules are
+    # and docs/security/network.md for the inclusion criterion. tethered allow rules are
     # host:port-granular, so ``dl.google.com:443`` permits the whole host even
     # though licenseal only ever requests its ``/dl/android/maven2`` path — it
     # is the broadest entry here, included solely for that Maven mirror.
@@ -124,7 +124,7 @@ _REGISTRY_HOSTS = [
     "repo.jenkins-ci.org:443",
     # NuGet flatcontainer — canonical .NET package registry. Serves the
     # raw .nuspec XML at the v3-flatcontainer endpoint; see
-    # :mod:`resolvers.nuget` and SECURITY.md.
+    # :mod:`resolvers.nuget` and docs/security/network.md.
     "api.nuget.org:443",
     # Packagist v2 metadata — canonical Composer / PHP package registry.
     # Serves per-package version-history JSON at /p2/{vendor}/{package}.json.
@@ -132,17 +132,20 @@ _REGISTRY_HOSTS = [
     "repo.packagist.org:443",
     # RubyGems v2/v1 metadata — canonical Ruby package registry. Serves
     # per-version JSON at /api/v2/rubygems/{name}/versions/{version}.json
-    # and latest-version JSON at /api/v1/gems/{name}.json. See SECURITY.md.
+    # and latest-version JSON at /api/v1/gems/{name}.json. See
+    # docs/security/network.md.
     "rubygems.org:443",
     # hex.pm — canonical Hex (Elixir / Erlang) package registry. Serves
     # package metadata at /api/packages/{name} (license + links + latest
     # version) and release edges at /api/packages/{name}/releases/{version}.
-    # deps.dev does not index Hex, so this is the only source. See SECURITY.md.
+    # deps.dev does not index Hex, so this is the only source. See
+    # docs/security/network.md.
     "hex.pm:443",
     # cran.r-project.org — official CRAN. licenseal fetches the PACKAGES index
     # (License + dependency edges for every current package) once per scan and
     # resolves all R packages locally from it — no per-package requests, no
-    # community mirror. deps.dev does not index CRAN. See SECURITY.md.
+    # community mirror. deps.dev does not index CRAN. See
+    # docs/security/network.md.
     "cran.r-project.org:443",
 ]
 _REQUEST_TIMEOUT_SECONDS = 10.0
