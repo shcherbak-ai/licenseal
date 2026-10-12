@@ -215,9 +215,19 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for development setup and guidelines. If 
 
 ## More from shcherbak_ai
 
-| Project | What it does |
-| --- | --- |
-| 💎 [ContextGem](https://github.com/shcherbak-ai/contextgem) | Structured extraction from documents with LLMs. |
-| 🪁 [tethered](https://github.com/shcherbak-ai/tethered) | Network egress control for CLI tools and agent workflows. |
+<!-- markdownlint-disable MD033 -->
+<table>
+  <tr>
+    <td width="50%" align="center" valign="top">
+      <a href="https://github.com/shcherbak-ai/contextgem"><img src="assets/contextgem-wordmark.svg" alt="ContextGem" width="336"></a><br>
+      Structured extraction from documents with LLMs.
+    </td>
+    <td width="50%" align="center" valign="top">
+      <a href="https://github.com/shcherbak-ai/tethered"><img src="assets/tethered-wordmark.svg" alt="tethered" width="336"></a><br>
+      Network egress control for CLI tools and agent workflows.
+    </td>
+  </tr>
+</table>
+<!-- markdownlint-enable MD033 -->
 
 Questions or collaboration ideas? Reach out on [LinkedIn](https://www.linkedin.com/in/sergii-shcherbak-10068866/) or [X](https://x.com/seshch). Built with ❤️ in Oslo, Norway.
