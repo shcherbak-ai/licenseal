@@ -3,6 +3,9 @@ config:
     siblings_only: true
   line-length: false
   first-line-heading: false
+  # A documentation page has its title in its front matter and as its heading.
+  single-title:
+    front_matter_title: ""
   table-column-style: false
   no-inline-html:
     allowed_elements:
@@ -12,3 +15,7 @@ config:
       - strong
       - br
       - h1
+      # The documentation pages (docs/): a figure with its caption, and the home page's grid.
+      - figure
+      - figcaption
+      - div

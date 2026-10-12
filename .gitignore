@@ -9,6 +9,10 @@ __pycache__/
 dist/
 build/
 
+# Documentation site (zensical build)
+site/
+.cache/
+
 # Testing
 .pytest_cache/
 .coverage

@@ -7,7 +7,7 @@ from pathlib import Path
 
 _ROOT = Path(__file__).resolve().parent.parent
 _SCRIPT = _ROOT / "scripts" / "render_readme_report.py"
-_FIGURE = _ROOT / "assets" / "licenseal-report.svg"
+_FIGURE = _ROOT / "docs" / "assets" / "licenseal-report.svg"
 
 
 def test_committed_figure_is_what_the_script_renders():

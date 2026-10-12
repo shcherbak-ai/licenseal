@@ -1,0 +1,125 @@
+# The documentation site: https://shcherbak-ai.github.io/licenseal/
+#
+#   uvx --constraints .github/docs-constraints.txt zensical serve            # preview at http://localhost:8000
+#   uvx --constraints .github/docs-constraints.txt zensical build --strict   # what CI runs; the site is written to site/
+#
+# The site sets no cookie and asks no third party for anything: fonts are the
+# reader's own, there is no analytics, and nothing below turns on a feature
+# that loads a script or a stylesheet from another host. Keep it so: do not set
+# repo_url (the theme would ask api.github.com for star counts), and do not
+# enable a Mermaid or MathJax fence (each is fetched from a CDN).
+
+[project]
+site_name = "licenseal"
+site_url = "https://shcherbak-ai.github.io/licenseal/"
+site_description = "Catch incompatible dependency licenses before they block a release. A fast license compatibility checker for ten ecosystems."
+site_author = "Sergii Shcherbak"
+copyright = "Copyright &copy; 2026 Sergii Shcherbak. Apache-2.0. Not legal advice."
+docs_dir = "docs"
+site_dir = "site"
+extra_css = ["stylesheets/extra.css"]
+
+nav = [
+  { "Home" = "index.md" },
+  { "Get started" = [
+    "get-started/quick-start.md",
+    "get-started/read-the-report.md",
+  ] },
+  { "Guides" = [
+    "guides/ci.md",
+    "guides/fix-a-failing-check.md",
+    "guides/review-findings.md",
+    "guides/claude-code-skill.md",
+  ] },
+  { "How it works" = [
+    "concepts/index.md",
+    "concepts/discovery.md",
+    "concepts/dependency-resolution.md",
+    "concepts/version-resolution.md",
+    "concepts/off-registry.md",
+    "concepts/project-license.md",
+    "concepts/verdicts.md",
+    "concepts/license-expressions.md",
+    "concepts/check-failures.md",
+  ] },
+  { "Ecosystems" = [
+    "ecosystems/index.md",
+    "ecosystems/python.md",
+    "ecosystems/npm.md",
+    "ecosystems/rust.md",
+    "ecosystems/go.md",
+    "ecosystems/java.md",
+    "ecosystems/dotnet.md",
+    "ecosystems/php.md",
+    "ecosystems/ruby.md",
+    "ecosystems/hex.md",
+    "ecosystems/r.md",
+  ] },
+  { "Reference" = [
+    "reference/cli.md",
+    "reference/review-file.md",
+    { "JSON report" = [
+      "reference/json-report.md",
+      "reference/json-dependency-fields.md",
+      "reference/json-urls.md",
+      "reference/json-diagnostics.md",
+    ] },
+  ] },
+  { "Security" = [
+    "security/index.md",
+    "security/data-sent.md",
+    "security/network.md",
+    "security/license-sources.md",
+  ] },
+  { "Changelog" = "changelog.md" },
+]
+
+[project.theme]
+language = "en"
+font = false
+logo = "assets/licenseal-wordmark.svg"
+favicon = "assets/favicon.svg"
+features = [
+  "content.code.copy",
+  "navigation.footer",
+  "navigation.indexes",
+  "navigation.sections",
+  "navigation.tabs",
+  "navigation.top",
+  "search.highlight",
+  "toc.follow",
+  "toc.integrate",
+]
+
+[project.theme.palette]
+scheme = "slate"
+primary = "custom"
+accent = "custom"
+
+[project.extra]
+generator = false
+
+[[project.extra.social]]
+icon = "fontawesome/brands/github"
+link = "https://github.com/shcherbak-ai/licenseal"
+name = "licenseal on GitHub"
+
+[[project.extra.social]]
+icon = "fontawesome/brands/python"
+link = "https://pypi.org/project/licenseal/"
+name = "licenseal on PyPI"
+
+[project.markdown_extensions]
+admonition = {}
+attr_list = {}
+md_in_html = {}
+tables = {}
+toc.permalink = true
+pymdownx.details = {}
+pymdownx.highlight.anchor_linenums = true
+pymdownx.highlight.pygments_lang_class = true
+pymdownx.inlinehilite = {}
+pymdownx.quotes.callouts = true
+pymdownx.snippets.base_path = ["."]
+pymdownx.snippets.check_paths = true
+pymdownx.superfences = {}

@@ -1,0 +1,55 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="934" height="270" viewBox="0 0 934 270" role="img" aria-labelledby="title desc">
+<title id="title">What leaves your machine</title>
+<desc id="desc">On your machine, licenseal reads manifests and lockfiles. Their contents, file paths, environment variables and credentials are never sent. What is sent, over HTTPS, is a package's name and version. It goes to fourteen public registry hosts on a fixed allowlist, among them pypi.org, registry.npmjs.org, crates.io and api.deps.dev. A request to any other host is blocked. No dependency is installed or built, and no package archive is downloaded.</desc>
+<style>
+text{font-family:ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;font-size:13px;fill:#a1a1aa}
+.step{font-size:12px;letter-spacing:1.6px;font-weight:600;fill:#fafafa}
+.cap{font-family:-apple-system, BlinkMacSystemFont, "Segoe UI", "Noto Sans", Helvetica, Arial, sans-serif;font-size:14px;fill:#e4e4e7}
+.sub{font-family:-apple-system, BlinkMacSystemFont, "Segoe UI", "Noto Sans", Helvetica, Arial, sans-serif;font-size:13px;fill:#a1a1aa}
+.hi{fill:#fafafa}.dim{fill:#63636b}.caught{fill:#fbbf24}.foot{fill:#8b8b93;letter-spacing:.4px}
+path,rect{fill:none;shape-rendering:crispEdges}
+.rule{stroke:#2e2e33}.wire{stroke:#52525b}
+.mark{stroke:#a1a1aa;stroke-width:1.5;shape-rendering:geometricPrecision}
+.miss{stroke:#fbbf24;stroke-width:1.5;shape-rendering:geometricPrecision}
+.way{stroke:#63636b;stroke-width:1.5;shape-rendering:geometricPrecision}
+</style>
+<path d="M0.5 0.5H933.5V269.5H0.5Z" style="fill:#0c0c0e;stroke:#2e2e33"/>
+<path class="rule" d="M320.5 0.5V220.5M610.5 0.5V220.5M0.5 220.5H933.5"/>
+<g>
+<rect x="312.5" y="100.5" width="16" height="20" style="fill:#0c0c0e;stroke:none"/>
+<rect x="602.5" y="100.5" width="16" height="20" style="fill:#0c0c0e;stroke:none"/>
+<path class="way" d="M317.5 105.5l5 5l-5 5M607.5 105.5l5 5l-5 5"/>
+</g>
+
+<!-- Your machine -->
+<text class="step" x="24" y="35">YOUR MACHINE</text>
+<path class="wire" d="M24.5 62.5h7l3 3v10h-10zM24.5 86.5h7l3 3v10h-10z"/>
+<text class="hi" x="46" y="73.5">manifests</text>
+<text class="hi" x="46" y="97.5">lockfiles</text>
+<text class="cap" x="24" y="134">Read here, never sent</text>
+<text class="sub" x="24" y="157">File contents, paths,</text>
+<text class="sub" x="24" y="176">environment variables, credentials</text>
+
+<!-- What is sent -->
+<text class="step" x="344" y="35">SENT</text>
+<text class="hi" x="344" y="73.5">name + version</text>
+<text class="dim" x="344" y="97.5">HTTPS</text>
+<text class="cap" x="344" y="134">Package coordinates</text>
+<text class="sub" x="344" y="157">For each dependency that</text>
+<text class="sub" x="344" y="176">comes from a registry</text>
+
+<!-- Where it goes -->
+<text class="step" x="634" y="35">PUBLIC REGISTRIES</text>
+<text x="634" y="69.5">pypi.org</text>
+<text x="634" y="87.5">registry.npmjs.org</text>
+<text x="634" y="105.5">crates.io</text>
+<text x="634" y="123.5">api.deps.dev</text>
+<text class="dim" x="634" y="141.5">and ten more</text>
+<path class="mark" d="M896 65.5l3 3l6 -7M896 83.5l3 3l6 -7M896 101.5l3 3l6 -7M896 119.5l3 3l6 -7"/>
+<path class="rule" d="M634.5 154.5H909.5"/>
+<text class="caught" x="634" y="176.5">any other host</text>
+<path class="miss" d="M897 168.5l7 7M904 168.5l-7 7"/>
+<text class="sub" x="634" y="200">Fourteen hosts, on a fixed allowlist</text>
+
+<text class="foot" x="467" y="250" text-anchor="middle">no dependency installs  ·  no builds  ·  no package downloads</text>
+</svg>

@@ -3641,6 +3641,13 @@ class TestTetheredIntegration:
         section = "\n".join(lines[named[0] : end])
         assert [host for host in _REGISTRY_HOSTS if f"`{host}`" not in section] == []
 
+    def test_documentation_lists_every_allowed_host_and_no_other(self):
+        """The host table of the documentation's Network egress page has one
+        row for each allowed host."""
+        page = Path(__file__).parent.parent / "docs" / "security" / "network.md"
+        rows = re.findall(r"^\| `([a-z0-9.-]+:\d+)` \|", page.read_text(encoding="utf-8"), re.M)
+        assert sorted(rows) == sorted(_REGISTRY_HOSTS)
+
     @respx.mock
     def test_runs_under_host_activate_policy(self, tmp_path):
         """Local-dev / host process can call tethered.activate() and the CLI's

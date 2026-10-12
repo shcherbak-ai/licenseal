@@ -15,7 +15,7 @@ Run from the repository root::
 
     uv run python scripts/render_readme_report.py
 
-The figure is written to ``assets/licenseal-report.svg``; a path given as the
+The figure is written to ``docs/assets/licenseal-report.svg``; a path given as the
 first argument is written instead. ``tests/test_readme_figure.py`` fails while
 the committed figure is not what this script renders, so a change to the
 report's layout is followed by a run of it.
@@ -40,7 +40,7 @@ from rich.text import Text
 
 import licenseal.cli
 
-OUT = Path(__file__).resolve().parent.parent / "assets" / "licenseal-report.svg"
+OUT = Path(__file__).resolve().parent.parent / "docs" / "assets" / "licenseal-report.svg"
 
 # The illustrative project: ``app`` is MIT and requires ``client`` and
 # ``parser``; ``client`` brings in ``transport``, which brings in ``certs``.
