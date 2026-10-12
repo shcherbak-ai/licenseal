@@ -495,7 +495,7 @@ def _discover_workspace_local_artifacts(
     by ``client/pom.xml``) would 404 on Maven Central / deps.dev because
     those artifacts aren't published publicly. Filter them out before
     registry resolution — same posture as the Go workspace-local module-path
-    filter (:func:`licenseal.discovery.go.go_mod._discover_workspace_local_module_paths`).
+    filter (:func:`licenseal.discovery.go.go_mod.read_go_workspace`).
 
     Per the Maven spec, a child POM that omits ``<groupId>`` inherits its
     ``<parent><groupId>``. The ``_parse_pom`` helper applies that fallback,

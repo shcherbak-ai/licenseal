@@ -867,6 +867,177 @@ class TestGoWorkUsePathConfinement:
         assert diags == []
 
 
+class TestGoWorkReplace:
+    """``replace`` directives of ``go.work`` apply to the modules it lists
+    with ``use``, and override those modules' own directives."""
+
+    @staticmethod
+    def _module(root: Path, directory: str, body: str) -> None:
+        (root / directory).mkdir(parents=True, exist_ok=True)
+        name = "app" if directory == "." else directory
+        (root / directory / "go.mod").write_text(
+            f"module example.com/{name}\n\ngo 1.22\n\n{body}", encoding="utf-8"
+        )
+
+    @staticmethod
+    def _rows(root: Path) -> list[tuple[str, str, str, str]]:
+        deps, _filtered = discover_go_mod_dependencies(root)
+        return sorted((d.name, d.version_constraint, d.origin, d.source) for d in deps)
+
+    @pytest.mark.parametrize(
+        "directory, source",
+        [(".", "go.mod"), ("./svc", "svc/go.mod")],
+        ids=["root-module", "nested-module"],
+    )
+    def test_module_replaced_by_a_local_path_is_off_registry(self, tmp_path, directory, source):
+        self._module(tmp_path, directory, "require example.org/lib v1.4.0\n")
+        (tmp_path / "go.work").write_text(
+            f"go 1.22\n\nuse {directory}\n\nreplace example.org/lib v1.4.0 => ../lib\n",
+            encoding="utf-8",
+        )
+        assert self._rows(tmp_path) == [("example.org/lib", "", "../lib", source)]
+
+    def test_local_path_is_relative_to_go_work(self, tmp_path):
+        # Seen from go.work, ./shared is a directory the scan walks: the
+        # project's own code.
+        (tmp_path / "shared").mkdir()
+        self._module(tmp_path, "svc", "require example.org/shared v1.0.0\n")
+        (tmp_path / "go.work").write_text(
+            "use ./svc\nreplace example.org/shared => ./shared\n", encoding="utf-8"
+        )
+        assert self._rows(tmp_path) == []
+
+        # Control: the same directive in svc/go.mod names svc/shared, which
+        # does not exist.
+        (tmp_path / "go.work").write_text("use ./svc\n", encoding="utf-8")
+        self._module(
+            tmp_path,
+            "svc",
+            "require example.org/shared v1.0.0\nreplace example.org/shared => ./shared\n",
+        )
+        assert self._rows(tmp_path) == [("example.org/shared", "", "./shared", "svc/go.mod")]
+
+    @pytest.mark.parametrize(
+        "go_work",
+        [
+            "use ./svc\n"
+            "replace example.org/original => example.org/fork v1.2.1\n"
+            "replace example.org/local => ../local\n",
+            "use (\n\t./svc\n)\n\n"
+            "replace (\n"
+            "\texample.org/original => example.org/fork v1.2.1\n"
+            "\texample.org/local => ../local\n"
+            ")\n",
+        ],
+        ids=["single-line", "block"],
+    )
+    def test_directive_forms_are_equivalent(self, tmp_path, go_work):
+        self._module(
+            tmp_path,
+            "svc",
+            "require (\n"
+            "\texample.org/original v1.2.0\n"
+            "\texample.org/local v0.1.0\n"
+            "\texample.org/untouched v3.0.0\n"
+            ")\n",
+        )
+        (tmp_path / "go.work").write_text(go_work, encoding="utf-8")
+        assert self._rows(tmp_path) == [
+            # Scanned under the replacement's identity; the original is gone.
+            ("example.org/fork", "v1.2.1", "", "svc/go.mod"),
+            ("example.org/local", "", "../local", "svc/go.mod"),
+            # Control: a module no directive names is reported as required.
+            ("example.org/untouched", "v3.0.0", "", "svc/go.mod"),
+        ]
+
+    @pytest.mark.parametrize(
+        "in_go_work, in_go_mod, scanned_as",
+        [
+            # A go.work directive for every version overrides a go.mod
+            # directive for the required one.
+            (
+                "replace example.org/lib => example.org/work-fork v9.0.0\n",
+                "replace example.org/lib v1.0.0 => example.org/mod-fork v1.0.1\n",
+                ("example.org/work-fork", "v9.0.0"),
+            ),
+            (
+                "replace example.org/lib v1.0.0 => example.org/work-fork v9.0.0\n",
+                "replace example.org/lib v1.0.0 => example.org/mod-fork v1.0.1\n",
+                ("example.org/work-fork", "v9.0.0"),
+            ),
+            (
+                "replace example.org/lib v1.0.0 => example.org/work-fork v9.0.0\n",
+                "replace example.org/lib => example.org/mod-fork v1.0.1\n",
+                ("example.org/work-fork", "v9.0.0"),
+            ),
+            (
+                "replace example.org/lib => example.org/work-fork v9.0.0\n",
+                "replace example.org/lib => ../lib\n",
+                ("example.org/work-fork", "v9.0.0"),
+            ),
+            # A go.work directive for another version does not apply: the
+            # go.mod directive does, or the requirement stands.
+            (
+                "replace example.org/lib v2.0.0 => example.org/work-fork v9.0.0\n",
+                "replace example.org/lib => example.org/mod-fork v1.0.1\n",
+                ("example.org/mod-fork", "v1.0.1"),
+            ),
+            (
+                "replace example.org/lib v2.0.0 => example.org/work-fork v9.0.0\n",
+                "",
+                ("example.org/lib", "v1.0.0"),
+            ),
+            # Likewise a go.work directive for another module.
+            (
+                "replace example.org/other => example.org/work-fork v9.0.0\n",
+                "replace example.org/lib => example.org/mod-fork v1.0.1\n",
+                ("example.org/mod-fork", "v1.0.1"),
+            ),
+        ],
+        ids=[
+            "every-version-over-required-version",
+            "required-version-over-required-version",
+            "required-version-over-every-version",
+            "module-over-local-path",
+            "another-version-leaves-go.mod-directive",
+            "another-version-leaves-requirement",
+            "another-module-leaves-go.mod-directive",
+        ],
+    )
+    def test_go_work_directive_overrides_the_go_mod_one(
+        self, tmp_path, in_go_work, in_go_mod, scanned_as
+    ):
+        self._module(tmp_path, "svc", "require example.org/lib v1.0.0\n" + in_go_mod)
+        (tmp_path / "go.work").write_text("use ./svc\n" + in_go_work, encoding="utf-8")
+        assert self._rows(tmp_path) == [(*scanned_as, "", "svc/go.mod")]
+
+    def test_go_mod_that_go_work_does_not_use_is_unaffected(self, tmp_path):
+        self._module(tmp_path, "svc", "require example.org/lib v1.0.0\n")
+        self._module(tmp_path, "tools", "require example.org/lib v1.0.0\n")
+        (tmp_path / "go.work").write_text(
+            "use ./svc\nreplace example.org/lib => ../lib\n", encoding="utf-8"
+        )
+        assert self._rows(tmp_path) == [
+            ("example.org/lib", "", "../lib", "svc/go.mod"),
+            ("example.org/lib", "v1.0.0", "", "tools/go.mod"),
+        ]
+
+    def test_go_work_without_use_applies_to_no_module(self, tmp_path):
+        self._module(tmp_path, ".", "require example.org/lib v1.0.0\n")
+        (tmp_path / "go.work").write_text("replace example.org/lib => ../lib\n", encoding="utf-8")
+        assert self._rows(tmp_path) == [("example.org/lib", "v1.0.0", "", "go.mod")]
+
+    def test_workspace_module_stays_filtered_whatever_replaces_it(self, tmp_path):
+        self._module(tmp_path, "svc", "require example.com/lib v0.0.0\n")
+        self._module(tmp_path, "lib", "")
+        (tmp_path / "go.work").write_text(
+            "use (\n\t./svc\n\t./lib\n)\nreplace example.com/lib => ../elsewhere/lib\n",
+            encoding="utf-8",
+        )
+        deps, filtered = discover_go_mod_dependencies(tmp_path)
+        assert (deps, filtered) == ([], 1)
+
+
 class TestIsTestFixtureGoMod:
     def test_top_level_go_mod_is_not_fixture(self, tmp_path):
         assert _is_test_fixture_go_mod(tmp_path / "go.mod") is False

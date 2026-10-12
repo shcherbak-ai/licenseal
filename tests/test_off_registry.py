@@ -5455,6 +5455,56 @@ class TestGoLocalReplacements:
         assert (row["origin"], row["group"], row["license"]) == ("../gen", "dev", "UNKNOWN")
         assert respx.calls.call_count == 0
 
+    @respx.mock
+    @pytest.mark.parametrize("go_sum", [True, False], ids=["go.sum", "no-go.sum"])
+    def test_module_that_go_work_replaces_by_a_local_path_is_not_looked_up(self, tmp_path, go_sum):
+        project = tmp_path / "project"
+        _write(
+            project / "svc" / "go.mod",
+            """\
+            module example.com/svc
+
+            go 1.22
+
+            require (
+                example.org/regular v1.0.0
+                example.org/outside v0.1.0
+            )
+            """,
+        )
+        _write(
+            project / "go.work",
+            """\
+            go 1.22
+
+            use ./svc
+
+            replace example.org/outside => ../outside
+            """,
+        )
+        _write(project / "LICENSE", "MIT License\n")
+        if go_sum:
+            _write(
+                project / "svc" / "go.sum",
+                "example.org/regular v1.0.0 h1:h\nexample.org/regular v1.0.0/go.mod h1:h\n",
+            )
+        _GO_LICENSES.clear()
+        _mock_go_module("example.org/regular", "v1.0.0")
+        # The public index knows the replaced module, under another license.
+        _mock_go_module("example.org/outside", "v0.1.0", "GPL-3.0-only")
+        _mock_go_licenses()
+        _refuse_everything_else()
+
+        result, data = _check_json(project, "--no-strict")
+        assert result.exit_code == 0
+        assert _versions(data) == {
+            "example.org/regular": ("", "v1.0.0"),
+            "example.org/outside": ("../outside", ""),
+        }
+        row = _rows(data)["example.org/outside"]
+        assert (row["license"], row["source"]) == ("UNKNOWN", "svc/go.mod")
+        assert _requests_mentioning("example.org/outside") == []
+
 
 # ------------------------------------------- the stderr counts of a check
 

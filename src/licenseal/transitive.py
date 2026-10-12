@@ -60,10 +60,12 @@ from licenseal.discovery.dotnet.csproj import (
     _discover_workspace_local_project_ids,
 )
 from licenseal.discovery.go.go_mod import (
-    _discover_workspace_local_module_paths,  # noqa: PLC2701
+    WorkReplaces,
     _parse_go_mod,  # noqa: PLC2701
     apply_replaces,
     lists_all_requirements,
+    read_go_workspace,
+    work_replaces_for,
 )
 from licenseal.discovery.go.lockfile import find_go_lockfiles, parse_go_sum_entries
 from licenseal.discovery.hex.erlang_mk import workspace_hex_names
@@ -1040,9 +1042,7 @@ def _resolve_go_transitive(
     # this filter the transitive walker re-introduces them. Discovery
     # already applies the same filter at its emission point; this is the
     # symmetric apply on the lockfile-derived universe.
-    workspace_local = _discover_workspace_local_module_paths(
-        project_path, exclude_paths=exclude_paths
-    )
+    workspace_local, work_replaces = read_go_workspace(project_path, exclude_paths=exclude_paths)
 
     # ---- 1. enumerate the module universe ----
     go_locks = find_go_lockfiles(project_path, exclude_paths=exclude_paths)
@@ -1059,7 +1059,7 @@ def _resolve_go_transitive(
                 entries.append(mod_ver)
     # Checked against the go.sum rows alone, before the requirements join them.
     _record_unlisted_go_requirements(
-        project_path, exclude_paths, workspace_local, frozenset(seen_entries)
+        project_path, exclude_paths, workspace_local, work_replaces, frozenset(seen_entries)
     )
     # Every direct requirement is part of the universe, whatever go.sum holds:
     # a nested module can have no go.sum of its own, a go.sum can list a
@@ -1144,6 +1144,7 @@ def _record_unlisted_go_requirements(
     project_path: Path,
     exclude_paths: frozenset[Path],
     workspace_local: set[str],
+    work_replaces: WorkReplaces,
     locked: frozenset[tuple[str, str]],
 ) -> None:
     """Record a gap on each ``go.mod`` whose requirements' own dependencies are unknown.
@@ -1155,7 +1156,9 @@ def _record_unlisted_go_requirements(
     Below that, or with no ``go`` directive, they are missing from the report.
 
     Requirements that are not scanned — replaced by a local path, or modules
-    of this workspace — need no row and are not counted.
+    of this workspace — need no row and are not counted. ``work_replaces``
+    holds the ``replace`` directives of ``go.work`` (see
+    :func:`read_go_workspace`).
     """
     for go_mod in walk_project_files(project_path, "go.mod", exclude_paths=exclude_paths):
         text = decode_text(go_mod)
@@ -1164,7 +1167,9 @@ def _record_unlisted_go_requirements(
         requires, replaces, _ = _parse_go_mod(text)
         unlocked = [
             requirement
-            for requirement in apply_replaces(requires, replaces)
+            for requirement in apply_replaces(
+                requires, replaces, work_replaces_for(go_mod, work_replaces)
+            )
             if requirement[0] not in workspace_local and requirement not in locked
         ]
         if unlocked:

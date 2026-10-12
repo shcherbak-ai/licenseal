@@ -52,6 +52,12 @@ the left of ``=>`` restricts the replacement to a requirement on that version;
 without one it covers every version. Go honours ``replace`` only in the main
 module, so the directives of a dependency's own ``go.mod`` are never applied.
 
+A ``go.work`` in the scanned directory can hold ``replace`` directives too.
+They apply to the modules it lists with ``use`` and, as in Go, override the
+``go.mod`` directives of those modules: one that names a module, at the
+required version or at every version, decides that requirement. A local path
+in ``go.work`` is relative to the directory of ``go.work``.
+
 ``exclude`` directives drop a specific module@version from the build. The
 resolver wouldn't see it anyway (it's not in ``require``); ignored here.
 """
@@ -80,6 +86,10 @@ _TOOL_LINE_RE = re.compile(r"^\s*(?P<path>\S+)\s*$")
 # ``old_version`` is ``None`` when the directive names no version and so covers
 # every version of the module.
 _Replaces = dict[tuple[str, str | None], tuple[str, str | None]]
+
+# The ``replace`` directives of ``go.work``, keyed by the resolved ``go.mod`` of
+# each module they apply to.
+WorkReplaces = dict[Path, _Replaces]
 
 
 def _record_replace(spec: str, replaces: _Replaces) -> None:
@@ -245,27 +255,42 @@ def lists_all_requirements(text: str) -> bool:
     return False
 
 
-def _replacement(path: str, version: str, replaces: _Replaces) -> tuple[str, str | None]:
-    """Return what ``replaces`` turns the requirement ``path`` at ``version`` into.
+def _replacement(
+    path: str, version: str, replaces: _Replaces, work_replaces: _Replaces
+) -> tuple[str, str | None, bool]:
+    """Return what the requirement ``path`` at ``version`` is replaced by.
 
-    A directive naming the required version takes precedence over one covering
-    every version of the module, as in Go. The returned version is ``None``
-    when the requirement is replaced by a local path, which is then returned
-    in place of the module path.
+    ``replaces`` holds the directives of the requiring ``go.mod`` and
+    ``work_replaces`` those of the ``go.work`` that applies to it, if any.
+    ``go.work`` is consulted first: a directive there that names the module,
+    at the required version or at every version, overrides the ``go.mod``
+    directives for it, as in Go. Within one file a directive naming the
+    required version takes precedence over one covering every version.
+
+    The returned version is ``None`` when the requirement is replaced by a
+    local path, which is then returned in place of the module path. The flag
+    is True when the directive is one of ``work_replaces``, whose local paths
+    are relative to the directory of ``go.work``.
     """
-    key = (path, version) if (path, version) in replaces else (path, None)
-    return replaces.get(key, (path, version))
+    for from_work, directives in ((True, work_replaces), (False, replaces)):
+        for key in ((path, version), (path, None)):
+            if key in directives:
+                return (*directives[key], from_work)
+    return path, version, False
 
 
-def apply_replaces(requires: list[tuple[str, str]], replaces: _Replaces) -> list[tuple[str, str]]:
-    """Return the ``(module, version)`` requirements once ``replaces`` is applied.
+def apply_replaces(
+    requires: list[tuple[str, str]], replaces: _Replaces, work_replaces: _Replaces
+) -> list[tuple[str, str]]:
+    """Return the ``(module, version)`` requirements once the directives are applied.
 
+    ``replaces`` and ``work_replaces`` are read as in :func:`_replacement`.
     A requirement replaced by another module becomes that module and version;
     one replaced by a local path is dropped, having no registry identity.
     """
     resolved: list[tuple[str, str]] = []
     for path, version in requires:
-        new_path, new_version = _replacement(path, version, replaces)
+        new_path, new_version, _ = _replacement(path, version, replaces, work_replaces)
         if new_version is not None:
             resolved.append((new_path, new_version))
     return resolved
@@ -275,10 +300,8 @@ def _parse_go_work_use_directories(text: str) -> list[str]:
     """Return directory paths from go.work's ``use`` directive(s).
 
     ``go.work`` syntax mirrors go.mod's. ``use ./dir`` is single-line;
-    ``use ( ... )`` is the bracketed block form. ``replace`` directives
-    in go.work are ignored — licenseal's workspace-local filter only
-    needs to know which directories are part of the workspace, not how
-    individual deps are rewritten.
+    ``use ( ... )`` is the bracketed block form. The ``replace``
+    directives of ``go.work`` are read by :func:`_parse_go_mod`.
     """
     out: list[str] = []
     in_use_block = False
@@ -319,14 +342,15 @@ def _is_test_fixture_go_mod(gm_path: Path) -> bool:
     return "testdata" in gm_path.parts
 
 
-def _discover_workspace_local_module_paths(
+def read_go_workspace(
     project_path: Path,
     *,
     exclude_paths: frozenset[Path] = frozenset(),
-) -> set[str]:
-    """Return module paths that are locally-developed inside this workspace.
+) -> tuple[set[str], WorkReplaces]:
+    """Return the workspace-local module paths and the ``go.work`` ``replace`` directives.
 
-    A module is workspace-local if it satisfies either of:
+    The first item holds the module paths that are locally-developed inside
+    this workspace. A module is workspace-local if it satisfies either of:
 
     1. Its ``module <path>`` declaration appears in any ``go.mod`` inside
        the project tree (covers implicit-monorepo layouts — multiple
@@ -346,6 +370,11 @@ def _discover_workspace_local_module_paths(
 
     ``go.mod`` files under ``testdata/`` are excluded — see
     :func:`_is_test_fixture_go_mod`.
+
+    The second item maps the ``go.mod`` of each ``use`` directory, resolved,
+    to the ``replace`` directives of ``go.work``: the files those directives
+    apply to (see :func:`work_replaces_for`). It is empty when ``go.work``
+    holds no ``replace``.
     """
     local: set[str] = set()
 
@@ -360,27 +389,39 @@ def _discover_workspace_local_module_paths(
             local.add(module_path)
 
     go_work = project_path / "go.work"
-    if go_work.is_file():
-        work_text = decode_text(go_work)
-        if work_text is None:
-            return local
-        for use_dir in _parse_go_work_use_directories(work_text):
-            # Only relative ``use`` directories are followed. The check is
-            # lexical and precedes ``resolve()``, which is itself filesystem I/O.
-            if rejected_path_reference(go_work, use_dir):
-                continue
-            target = (project_path / use_dir).resolve()
-            gm = target / "go.mod"
-            if not gm.is_file():
-                continue
-            text = decode_text(gm)
-            if text is None:
-                continue
-            module_path = _extract_module_declaration(text)
-            if module_path:
-                local.add(module_path)
+    work_text = decode_text(go_work) if go_work.is_file() else None
+    if work_text is None:
+        return local, {}
+    used: list[Path] = []
+    for use_dir in _parse_go_work_use_directories(work_text):
+        # Only relative ``use`` directories are followed. The check is
+        # lexical and precedes ``resolve()``, which is itself filesystem I/O.
+        if rejected_path_reference(go_work, use_dir):
+            continue
+        target = (project_path / use_dir).resolve()
+        gm = target / "go.mod"
+        if not gm.is_file():
+            continue
+        used.append(gm)
+        text = decode_text(gm)
+        if text is None:
+            continue
+        module_path = _extract_module_declaration(text)
+        if module_path:
+            local.add(module_path)
 
-    return local
+    _, work_replaces, _ = _parse_go_mod(work_text)
+    return local, dict.fromkeys(used, work_replaces) if work_replaces else {}
+
+
+def work_replaces_for(go_mod: Path, work_replaces: WorkReplaces) -> _Replaces:
+    """Return the ``go.work`` ``replace`` directives that apply to ``go_mod``.
+
+    ``work_replaces`` is the second item of :func:`read_go_workspace`. The
+    directives apply to the modules ``go.work`` lists with ``use``, and to no
+    other ``go.mod`` of the scanned tree.
+    """
+    return work_replaces.get(go_mod.resolve(), {}) if work_replaces else {}
 
 
 def _module_for_tool_path(tool_path: str, module_paths: list[str]) -> str | None:
@@ -417,7 +458,8 @@ def discover_go_mod_dependencies(
     one with that path as its origin and no version. ``filtered_count`` is the number of require
     entries dropped because their name matches a workspace-local module
     path (sibling go.mod in a monorepo, or a target of a ``go.work``
-    ``use`` directive — see :func:`_discover_workspace_local_module_paths`).
+    ``use`` directive — see :func:`read_go_workspace`). The ``replace``
+    directives of ``go.work`` are applied to the modules it lists with ``use``.
 
     Tool deps (matched via the ``tool`` directive's import path → require'd
     module path) surface as ``DependencyGroup.DEV``; everything else is
@@ -427,9 +469,7 @@ def discover_go_mod_dependencies(
     web frontend's ``package.json``); each nested ``go.mod`` is the truth
     for its own subtree, so all are walked.
     """
-    workspace_local = _discover_workspace_local_module_paths(
-        project_path, exclude_paths=exclude_paths
-    )
+    workspace_local, work_replaces = read_go_workspace(project_path, exclude_paths=exclude_paths)
 
     out: list[Dependency] = []
     filtered = 0
@@ -438,19 +478,22 @@ def discover_go_mod_dependencies(
         if text is None:
             continue
         requires, replaces, tools = _parse_go_mod(text)
+        from_work = work_replaces_for(gm, work_replaces)
         source = gm.relative_to(project_path).as_posix()
 
         # Resolve replace rewrites first so the tool-to-module match runs
         # against the post-replace module paths.
         resolved: list[tuple[str, str, str]] = []  # (module, version, origin)
         for path, version in requires:
-            new_path, new_version = _replacement(path, version, replaces)
+            new_path, new_version, in_go_work = _replacement(path, version, replaces, from_work)
             if new_version is not None:
                 resolved.append((new_path, new_version, ""))
                 continue
-            # Replaced by a local path. One the scan reads is the project's
-            # own module; any other is a dependency no registry describes.
-            origin = path_origin(new_path, gm.parent, project_path)
+            # Replaced by a local path, relative to the file that holds the
+            # directive. One the scan reads is the project's own module; any
+            # other is a dependency no registry describes.
+            base_dir = project_path if in_go_work else gm.parent
+            origin = path_origin(new_path, base_dir, project_path)
             if origin is not None:
                 resolved.append((path, "", origin))
 

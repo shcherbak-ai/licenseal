@@ -7834,6 +7834,45 @@ class TestGoModWithUnlistedRequirements:
         ]
 
     @respx.mock
+    def test_requirement_that_go_work_replaces_needs_no_row(self, tmp_path):
+        # go.work replaces one requirement by a local path the scan reads,
+        # which is not scanned, and one by a fork: the fork needs the row.
+        _mit_project(tmp_path)
+        self._write_go_mod(
+            tmp_path / "go.mod",
+            "go 1.16\n\n",
+            ("example.org/local", "v0.1.0"),
+            ("example.org/original", "v1.2.0"),
+        )
+        (tmp_path / "local").mkdir()
+        (tmp_path / "go.work").write_text(
+            "go 1.22\n\nuse .\n\n"
+            "replace (\n"
+            "\texample.org/local => ./local\n"
+            "\texample.org/original => example.org/fork v1.2.1\n"
+            ")\n",
+            encoding="utf-8",
+        )
+        fork = ("example.org/fork", "v1.2.1")
+        (tmp_path / "go.sum").write_text(_go_sum(fork), encoding="utf-8")
+        _mock_go_modules({fork: ("MIT", "")})
+
+        result, data = _check_json(tmp_path)
+        assert result.exit_code == 0
+        assert [d["name"] for d in data["dependencies"]] == ["example.org/fork"]
+        assert data["diagnostics"] == []
+
+        # Without the fork's row, the fork is the one requirement counted.
+        original = ("example.org/original", "v1.2.0")
+        (tmp_path / "go.sum").write_text(_go_sum(original), encoding="utf-8")
+        _mock_go_modules({fork: ("MIT", ""), original: ("MIT", "")})
+        result, data = _check_json(tmp_path)
+        assert result.exit_code == 1
+        assert data["diagnostics"] == [
+            {"path": "go.mod", "reason": _GO_UNLISTED.format(1), "severity": "gap"}
+        ]
+
+    @respx.mock
     def test_each_go_mod_is_judged_by_its_own_go_directive(self, tmp_path):
         # Neither module's requirement has a go.sum row. The root is at go
         # 1.22 and complete; the nested module is at go 1.15 and is the gap.
