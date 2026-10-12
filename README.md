@@ -171,9 +171,7 @@ Comparison last reviewed: June 2026. Tool capabilities change; check each projec
 | Capability | **licenseal** | [pip-licenses](https://github.com/raimon49/pip-licenses) | [license-checker](https://github.com/RSeidelsohn/license-checker-rseidelsohn) | [LicenseFinder](https://github.com/pivotal/LicenseFinder) | [fossa-cli](https://github.com/fossas/fossa-cli) |
 | --- | :-: | :-: | :-: | :-: | :-: |
 | **Project-license compatibility verdict** | ✓ | - | - | ~ | ~ |
-| **Transitive discovery before install** | ✓ | - | - | - | ~ |
-| **No successful install/restore required** | ✓ | - | - | - | ~ |
-| **No dependency install/build step** | ✓ | - | - | - | ~ |
+| **Transitive discovery with no install or build** | ✓ | - | - | - | ~ |
 | **Fast, seconds-scale CI path** | ✓ | ~ | ~ | - | - |
 | **Agent-assisted flagged-finding review** | ✓ | - | - | - | - |
 | **Manual review override file** | ✓ | - | ~ | ✓ | ~ |
@@ -190,7 +188,7 @@ Comparison last reviewed: June 2026. Tool capabilities change; check each projec
 
 `✓` supported · `~` partial · `-` not supported
 
-No tool clears every row. The discovery rows are about source-tree analysis: manifests, lockfiles, and registry metadata before a successful package-manager install is assumed. Some tools can produce broader inventories after installation or hosted analysis; licenseal is optimized for transitive dependency coverage in CI without that prerequisite. `~` means the capability exists, but with a different workflow, hosted service, package-manager prerequisite, or policy model. The speed row reflects benchmark runs on public repositories, not a vendor guarantee. Pair licenseal with an SBOM generator, hosted compliance platform, or installed-metadata scanner when those are the artifacts or workflows you need.
+No tool clears every row. The discovery row is about source-tree analysis: manifests, lockfiles, and registry metadata before a successful package-manager install is assumed. Some tools can produce broader inventories after installation or hosted analysis; licenseal is optimized for transitive dependency coverage in CI without that prerequisite. `~` means the capability exists, but with a different workflow, hosted service, package-manager prerequisite, or policy model. The speed row reflects benchmark runs on public repositories, not a vendor guarantee. Pair licenseal with an SBOM generator, hosted compliance platform, or installed-metadata scanner when those are the artifacts or workflows you need.
 
 ## 🎯 Scope
 
