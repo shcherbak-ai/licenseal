@@ -1383,7 +1383,8 @@ def _render_report_to_string(report: AnalysisReport, output_format: str, project
     is_flag=True,
     help=(
         "Add new flagged entries to an existing review file; existing entries are "
-        "kept. Without it, an existing file is an error."
+        "kept. Without it, the command stops with an error rather than change an "
+        "existing file."
     ),
 )
 @click.option(

@@ -4097,7 +4097,7 @@ class TestHelpText:
 
     def test_merge_says_what_happens_without_it(self):
         screen = _help_screen("init-review-file", width=400)
-        assert "Without it, an existing file is an error." in screen
+        assert "Without it, the command stops with an error rather than change an" in screen
 
 
 class TestFlagValidation:

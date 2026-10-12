@@ -375,7 +375,10 @@ def apply_reviewed_licenses(
         raise click.ClickException(
             "Reviewed licenses did not match any resolved package versions: "
             + _shown_keys(unmatched)
-            + "\nHint: a dependency upgrade likely moved past the pin. Open "
+            + "\nHint: a dependency upgrade likely moved past the pin, unless this "
+            "scan leaves the dependency out (a dev dependency without `--dev`, a "
+            "transitive with `--no-transitive`, an excluded directory): then scan "
+            "with the options the review was made with. For a moved pin, open "
             "`licenseal.review.toml` and update the `version` field on the "
             "stale entry or entries above to the new resolved version, but only "
             "if the new version has the same `license` as the original review. "
