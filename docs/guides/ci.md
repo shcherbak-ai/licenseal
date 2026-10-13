@@ -50,12 +50,6 @@ The JSON format is described in the [JSON report](../reference/json-report.md) r
 
 A finding that you have looked into is cleared with a [review](review-findings.md), not with a flag.
 
-## A status badge
-
-```md
-[![License compatibility](https://github.com/OWNER/REPO/actions/workflows/licenseal.yml/badge.svg)](https://github.com/OWNER/REPO/actions/workflows/licenseal.yml)
-```
-
 ## Next
 
 - [Claude Code skill](claude-code-skill.md)
