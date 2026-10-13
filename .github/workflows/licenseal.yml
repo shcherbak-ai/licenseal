@@ -29,8 +29,9 @@ jobs:
       - name: Set up Python from .python-version
         run: uv python install
 
+      # --locked: fail when uv.lock does not match pyproject.toml.
       - name: Install dependencies
-        run: uv sync
+        run: uv sync --locked
 
       # Real registry calls catch bugs that mocked tests can hide: response
       # shape regressions, threading/contextvar issues, and live I/O behavior.

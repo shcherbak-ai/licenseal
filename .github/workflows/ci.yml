@@ -34,8 +34,10 @@ jobs:
       - name: Set up Python from .python-version
         run: uv python install
 
+      # --locked: fail when uv.lock does not match pyproject.toml, where a
+      # plain sync would resolve again and run other versions of the tools.
       - name: Install dependencies
-        run: uv sync
+        run: uv sync --locked
 
       - name: Run pre-commit checks (ruff, ty, bandit, interrogate, markdownlint)
         run: uv run pre-commit run --all-files
@@ -66,7 +68,7 @@ jobs:
         run: uv python install ${{ matrix.python-version }}
 
       - name: Install dependencies
-        run: uv sync --python ${{ matrix.python-version }}
+        run: uv sync --locked --python ${{ matrix.python-version }}
 
       # Fails the cell when .python-version, not the matrix, chose the
       # interpreter the tests run on.
