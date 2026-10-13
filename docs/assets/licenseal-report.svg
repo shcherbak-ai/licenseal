@@ -7,20 +7,43 @@ text{font-family:ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "Libe
 .caught{fill:#fbbf24}.tab{fill:#a1a1aa;font-size:12px}
 path{fill:none;shape-rendering:crispEdges}
 .grid{stroke:#34343a}.tree{stroke:#63636b}
+.row{animation:show 0.3s ease-out backwards}
+.key{animation:show 0.042s steps(1) backwards}
+@keyframes show{from{opacity:0}}
+@media (prefers-reduced-motion:reduce){*{animation:none!important}}
 </style>
 <path d="M0.5 0.5H92.0V26.5H933.5V371.5H0.5Z" style="fill:#0c0c0e;stroke:#2e2e33"/>
 <text class="tab" x="46.0" y="17.5" text-anchor="middle">terminal</text>
-<path class="grid" d="M30.2 145.0H903.8M30.2 189.0H903.8M30.2 299.0H903.8M30.2 145.0V299.0M240.2 145.0V299.0M341.0 145.0V299.0M408.2 145.0V299.0M551.0 145.0V299.0M677.0 145.0V299.0M828.2 145.0V299.0M903.8 145.0V299.0"/>
-<path class="tree" d="M63.8 233.0H76.4M63.8 255.0H76.4M63.8 222.0V233.0M63.8 244.0V255.0"/>
 <text class="dim" x="47.0" y="61.5" text-anchor="middle">$</text>
-<text class="name bold" x="59.6" y="61.5" textLength="25.2" lengthAdjust="spacing">uvx</text>
-<text class="name bold" x="93.2" y="61.5" textLength="75.6" lengthAdjust="spacing">licenseal</text>
-<text class="name bold" x="177.2" y="61.5" textLength="42.0" lengthAdjust="spacing">check</text>
+<text class="name bold key" x="63.8" y="61.5" text-anchor="middle" style="animation-delay:0.30s">u</text>
+<text class="name bold key" x="72.2" y="61.5" text-anchor="middle" style="animation-delay:0.34s">v</text>
+<text class="name bold key" x="80.6" y="61.5" text-anchor="middle" style="animation-delay:0.38s">x</text>
+<text class="name bold key" x="97.4" y="61.5" text-anchor="middle" style="animation-delay:0.47s">l</text>
+<text class="name bold key" x="105.8" y="61.5" text-anchor="middle" style="animation-delay:0.51s">i</text>
+<text class="name bold key" x="114.2" y="61.5" text-anchor="middle" style="animation-delay:0.55s">c</text>
+<text class="name bold key" x="122.6" y="61.5" text-anchor="middle" style="animation-delay:0.59s">e</text>
+<text class="name bold key" x="131.0" y="61.5" text-anchor="middle" style="animation-delay:0.64s">n</text>
+<text class="name bold key" x="139.4" y="61.5" text-anchor="middle" style="animation-delay:0.68s">s</text>
+<text class="name bold key" x="147.8" y="61.5" text-anchor="middle" style="animation-delay:0.72s">e</text>
+<text class="name bold key" x="156.2" y="61.5" text-anchor="middle" style="animation-delay:0.76s">a</text>
+<text class="name bold key" x="164.6" y="61.5" text-anchor="middle" style="animation-delay:0.81s">l</text>
+<text class="name bold key" x="181.4" y="61.5" text-anchor="middle" style="animation-delay:0.89s">c</text>
+<text class="name bold key" x="189.8" y="61.5" text-anchor="middle" style="animation-delay:0.93s">h</text>
+<text class="name bold key" x="198.2" y="61.5" text-anchor="middle" style="animation-delay:0.97s">e</text>
+<text class="name bold key" x="206.6" y="61.5" text-anchor="middle" style="animation-delay:1.02s">c</text>
+<text class="name bold key" x="215.0" y="61.5" text-anchor="middle" style="animation-delay:1.06s">k</text>
+<g class="row" style="animation-delay:1.45s">
 <text class="text" x="42.8" y="105.5" textLength="58.8" lengthAdjust="spacing">Project</text>
 <text class="text" x="110.0" y="105.5" textLength="67.2" lengthAdjust="spacing">license:</text>
 <text class="name bold" x="185.6" y="105.5" textLength="25.2" lengthAdjust="spacing">MIT</text>
 <text class="text" x="219.2" y="105.5" textLength="42.0" lengthAdjust="spacing">(from</text>
 <text class="text" x="269.6" y="105.5" textLength="126.0" lengthAdjust="spacing">pyproject.toml)</text>
+</g>
+<g class="row" style="animation-delay:1.80s">
+<path class="grid" d="M30.2 145.0H903.8M30.2 145.0V156.0M240.2 145.0V156.0M341.0 145.0V156.0M408.2 145.0V156.0M551.0 145.0V156.0M677.0 145.0V156.0M828.2 145.0V156.0M903.8 145.0V156.0"/>
+</g>
+<g class="row" style="animation-delay:1.80s">
+<path class="grid" d="M30.2 156.0V178.0M240.2 156.0V178.0M341.0 156.0V178.0M408.2 156.0V178.0M551.0 156.0V178.0M677.0 156.0V178.0M828.2 156.0V178.0M903.8 156.0V178.0"/>
 <text class="name bold" x="42.8" y="171.5" textLength="58.8" lengthAdjust="spacing">Package</text>
 <text class="name bold" x="252.8" y="171.5" textLength="75.6" lengthAdjust="spacing">Ecosystem</text>
 <text class="name bold" x="353.6" y="171.5" textLength="42.0" lengthAdjust="spacing">Group</text>
@@ -28,6 +51,12 @@ path{fill:none;shape-rendering:crispEdges}
 <text class="name bold" x="563.6" y="171.5" textLength="58.8" lengthAdjust="spacing">License</text>
 <text class="name bold" x="689.6" y="171.5" textLength="33.6" lengthAdjust="spacing">Risk</text>
 <text class="name bold" x="840.8" y="171.5" textLength="50.4" lengthAdjust="spacing">Status</text>
+</g>
+<g class="row" style="animation-delay:1.80s">
+<path class="grid" d="M30.2 189.0H903.8M30.2 178.0V200.0M240.2 178.0V200.0M341.0 178.0V200.0M408.2 178.0V200.0M551.0 178.0V200.0M677.0 178.0V200.0M828.2 178.0V200.0M903.8 178.0V200.0"/>
+</g>
+<g class="row" style="animation-delay:2.05s">
+<path class="grid" d="M30.2 200.0V222.0M240.2 200.0V222.0M341.0 200.0V222.0M408.2 200.0V222.0M551.0 200.0V222.0M677.0 200.0V222.0M828.2 200.0V222.0M903.8 200.0V222.0"/>
 <text class="name" x="42.8" y="215.5" textLength="50.4" lengthAdjust="spacing">client</text>
 <text class="name" x="101.6" y="215.5" textLength="58.8" lengthAdjust="spacing">(2.4.0)</text>
 <text class="text" x="252.8" y="215.5" textLength="50.4" lengthAdjust="spacing">python</text>
@@ -36,6 +65,10 @@ path{fill:none;shape-rendering:crispEdges}
 <text class="text" x="563.6" y="215.5" textLength="25.2" lengthAdjust="spacing">MIT</text>
 <text class="ok" x="689.6" y="215.5" textLength="84.0" lengthAdjust="spacing">permissive</text>
 <text class="ok" x="861.8" y="215.5" text-anchor="middle">✓</text>
+</g>
+<g class="row" style="animation-delay:2.30s">
+<path class="grid" d="M30.2 222.0V244.0M240.2 222.0V244.0M341.0 222.0V244.0M408.2 222.0V244.0M551.0 222.0V244.0M677.0 222.0V244.0M828.2 222.0V244.0M903.8 222.0V244.0"/>
+<path class="tree" d="M63.8 233.0H76.4M63.8 222.0V233.0"/>
 <text class="name" x="84.8" y="237.5" textLength="42.0" lengthAdjust="spacing">certs</text>
 <text class="name" x="135.2" y="237.5" textLength="58.8" lengthAdjust="spacing">(3.1.0)</text>
 <text class="text" x="252.8" y="237.5" textLength="50.4" lengthAdjust="spacing">python</text>
@@ -43,6 +76,10 @@ path{fill:none;shape-rendering:crispEdges}
 <text class="text" x="563.6" y="237.5" textLength="100.8" lengthAdjust="spacing">GPL-3.0-only</text>
 <text class="caught" x="689.6" y="237.5" textLength="126.0" lengthAdjust="spacing">strong-copyleft</text>
 <text class="caught" x="861.8" y="237.5" text-anchor="middle">✗</text>
+</g>
+<g class="row" style="animation-delay:2.55s">
+<path class="grid" d="M30.2 244.0V266.0M240.2 244.0V266.0M341.0 244.0V266.0M408.2 244.0V266.0M551.0 244.0V266.0M677.0 244.0V266.0M828.2 244.0V266.0M903.8 244.0V266.0"/>
+<path class="tree" d="M63.8 255.0H76.4M63.8 244.0V255.0"/>
 <text class="name" x="84.8" y="259.5" textLength="75.6" lengthAdjust="spacing">transport</text>
 <text class="name" x="168.8" y="259.5" textLength="58.8" lengthAdjust="spacing">(1.8.2)</text>
 <text class="text" x="252.8" y="259.5" textLength="50.4" lengthAdjust="spacing">python</text>
@@ -50,6 +87,9 @@ path{fill:none;shape-rendering:crispEdges}
 <text class="text" x="563.6" y="259.5" textLength="84.0" lengthAdjust="spacing">Apache-2.0</text>
 <text class="ok" x="689.6" y="259.5" textLength="84.0" lengthAdjust="spacing">permissive</text>
 <text class="ok" x="861.8" y="259.5" text-anchor="middle">✓</text>
+</g>
+<g class="row" style="animation-delay:2.80s">
+<path class="grid" d="M30.2 266.0V288.0M240.2 266.0V288.0M341.0 266.0V288.0M408.2 266.0V288.0M551.0 266.0V288.0M677.0 266.0V288.0M828.2 266.0V288.0M903.8 266.0V288.0"/>
 <text class="name" x="42.8" y="281.5" textLength="50.4" lengthAdjust="spacing">parser</text>
 <text class="name" x="101.6" y="281.5" textLength="58.8" lengthAdjust="spacing">(0.9.1)</text>
 <text class="text" x="252.8" y="281.5" textLength="50.4" lengthAdjust="spacing">python</text>
@@ -58,10 +98,16 @@ path{fill:none;shape-rendering:crispEdges}
 <text class="text" x="563.6" y="281.5" textLength="100.8" lengthAdjust="spacing">BSD-3-Clause</text>
 <text class="ok" x="689.6" y="281.5" textLength="84.0" lengthAdjust="spacing">permissive</text>
 <text class="ok" x="861.8" y="281.5" text-anchor="middle">✓</text>
+</g>
+<g class="row" style="animation-delay:2.80s">
+<path class="grid" d="M30.2 299.0H903.8M30.2 288.0V299.0M240.2 288.0V299.0M341.0 288.0V299.0M408.2 288.0V299.0M551.0 288.0V299.0M677.0 288.0V299.0M828.2 288.0V299.0M903.8 288.0V299.0"/>
+</g>
+<g class="row" style="animation-delay:3.15s">
 <text class="text" x="42.8" y="347.5" textLength="67.2" lengthAdjust="spacing">Summary:</text>
 <text class="caught bold" x="122.6" y="347.5" text-anchor="middle">1</text>
 <text class="caught" x="135.2" y="347.5" textLength="75.6" lengthAdjust="spacing">violation</text>
 <text class="text" x="215.0" y="347.5" text-anchor="middle">,</text>
 <text class="ok bold" x="231.8" y="347.5" text-anchor="middle">3</text>
 <text class="ok" x="244.4" y="347.5" textLength="16.8" lengthAdjust="spacing">ok</text>
+</g>
 </svg>

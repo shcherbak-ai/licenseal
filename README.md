@@ -1,28 +1,29 @@
 <!-- markdownlint-disable MD033 -->
-<h1 align="center">
+<p align="center">
   <img src="docs/assets/licenseal-wordmark.svg" alt="licenseal" width="416">
-</h1>
+</p>
+
+<h1 align="center">Catch incompatible dependency licenses before they block a release</h1>
 
 <p align="center">
-  <strong>Catch incompatible dependency licenses before they block a release.</strong><br>
-  A verdict, not a list · Transitive across 10 ecosystems · No dependency installs · <a href="#claude-code-review-skill">Claude Code review skill</a>
+  A verdict, not a list · Transitive across 10 ecosystems · No dependency installs
 </p>
 
 <p align="center">
-  <a href="https://pypi.org/project/licenseal/"><img src="https://img.shields.io/pypi/v/licenseal?v=2" alt="PyPI"></a>
-  <a href="https://pypi.org/project/licenseal/"><img src="https://img.shields.io/pypi/pyversions/licenseal?v=2" alt="Python"></a>
-  <a href="https://pepy.tech/project/licenseal"><img src="https://api.pepy.tech/badge/licenseal/month" alt="Downloads/month"></a>
-  <a href="https://github.com/shcherbak-ai/licenseal/actions/workflows/ci.yml"><img src="https://github.com/shcherbak-ai/licenseal/actions/workflows/ci.yml/badge.svg?branch=main" alt="CI"></a>
-  <a href="https://github.com/shcherbak-ai/licenseal/actions/workflows/ci.yml"><img src="https://img.shields.io/endpoint?url=https://gist.githubusercontent.com/SergiiShcherbak/17230af3dfe294ebd8a8fd9c4cd775a8/raw/licenseal-coverage.json" alt="coverage"></a>
-  <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache--2.0-blue.svg" alt="License: Apache-2.0"></a>
+  <a href="https://pypi.org/project/licenseal/"><img src="https://img.shields.io/pypi/v/licenseal?style=flat-square&labelColor=18181b&color=a78bfa" alt="PyPI version"></a>
+  <a href="https://pypi.org/project/licenseal/"><img src="https://img.shields.io/pypi/pyversions/licenseal?style=flat-square&labelColor=18181b&color=a78bfa" alt="Python versions"></a>
+  <a href="https://pypi.org/project/licenseal/"><img src="https://img.shields.io/pypi/dm/licenseal?style=flat-square&labelColor=18181b&color=a78bfa&label=downloads" alt="Downloads per month"></a>
+  <a href="https://github.com/shcherbak-ai/licenseal/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/shcherbak-ai/licenseal/ci.yml?branch=main&style=flat-square&labelColor=18181b&label=CI" alt="CI"></a>
+  <a href="https://github.com/shcherbak-ai/licenseal/actions/workflows/ci.yml"><img src="https://img.shields.io/endpoint?url=https://gist.githubusercontent.com/SergiiShcherbak/17230af3dfe294ebd8a8fd9c4cd775a8/raw/licenseal-coverage.json&style=flat-square&labelColor=18181b&color=a78bfa" alt="Coverage"></a>
 </p>
 
 <p align="center">
-  <a href="#quick-start">Quick start</a> ·
-  <a href="#ci-integration">CI integration</a> ·
-  <a href="#how-licenseal-decides">How it decides</a> ·
-  <a href="https://licenseal.shcherbak.ai/">Documentation</a> ·
-  <a href="https://licenseal.shcherbak.ai/security/">Security model</a>
+  <a href="https://licenseal.shcherbak.ai/get-started/quick-start/"><strong>Quick start</strong></a> ·
+  <a href="https://licenseal.shcherbak.ai/guides/ci/"><strong>CI integration</strong></a> ·
+  <a href="https://licenseal.shcherbak.ai/guides/claude-code-skill/"><strong>Claude Code skill</strong></a> ·
+  <a href="https://licenseal.shcherbak.ai/concepts/verdicts/"><strong>How it decides</strong></a> ·
+  <a href="https://licenseal.shcherbak.ai/security/"><strong>Security model</strong></a> ·
+  <a href="https://licenseal.shcherbak.ai/"><strong>Documentation</strong></a>
 </p>
 
 <p align="center">

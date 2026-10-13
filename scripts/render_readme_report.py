@@ -11,6 +11,11 @@ its place on the terminal grid are licenseal's. Two things are drawn instead of
 set in type, so that they do not depend on the reader's fonts: the table's
 borders and the tree branch before a transitive dependency are lines.
 
+The figure shows the command at work: it is typed, and the report follows a
+line at a time. That is a CSS animation, the only kind an SVG shown as an
+image runs. It plays once and rests on the whole figure, which is also what a
+reader sees who prefers reduced motion, or whose viewer animates nothing.
+
 Run from the repository root::
 
     uv run python scripts/render_readme_report.py
@@ -64,6 +69,15 @@ PAD_BOTTOM = 18.0
 # The tab on the window's top edge, which says where the command is run.
 TAB_HEIGHT = 26.0
 TAB_WIDTH = 92.0
+
+# The animation, in seconds. The command is typed from TYPE_START, for
+# TYPE_TIME. A line of the report then appears PAUSE after the one before, and
+# a row of the table ROW_PAUSE after the row before, each over FADE.
+TYPE_START = 0.3
+TYPE_TIME = 0.8
+PAUSE = 0.35
+ROW_PAUSE = 0.25
+FADE = 0.3
 
 GROUND = "#0c0c0e"
 FRAME = "#2e2e33"
@@ -201,8 +215,8 @@ def _merged(spans: dict[float, list[tuple[float, float]]]) -> list[tuple[float, 
     return joined
 
 
-def _word(word: str, column: int, row_top: float, style: Style) -> str:
-    """Set one word of the report at its column."""
+def _word(word: str, column: int, row_top: float, style: Style, typed: float | None = None) -> str:
+    """Set one word of the report at its column; ``typed`` is when a typed key appears."""
     x, y = PAD_X + column * CELL, row_top + BASELINE
     if len(word) == 1:
         # A lone character is centred in its cell: a mark can come from a wider font.
@@ -211,7 +225,31 @@ def _word(word: str, column: int, row_top: float, style: Style) -> str:
         # A word is held to its cells, whatever the width of the reader's font.
         span = f'textLength="{len(word) * CELL:.1f}" lengthAdjust="spacing"'
         place = f'x="{x:.1f}" y="{y:.1f}" {span}'
-    return f'<text class="{_classes(style)}" {place}>{html.escape(word, quote=False)}</text>'
+    classes = _classes(style)
+    if typed is not None:
+        classes, place = f"{classes} key", f'{place} style="animation-delay:{typed:.2f}s"'
+    return f'<text class="{classes}" {place}>{html.escape(word, quote=False)}</text>'
+
+
+def _moments(lines: list[Text]) -> list[float]:
+    """When each line appears, in seconds: the report follows the typed command."""
+    # The command's own line is there from the start; its keys have their own moments.
+    moments = [0.0]
+    clock = TYPE_START + TYPE_TIME
+    in_head = False
+    for line in lines[1:]:
+        first = line.plain.lstrip()[:1]
+        if first in {"┏", "┃", "┡"}:
+            # The table's head is printed as one: its top rule, its titles, the rule under them.
+            clock += 0 if in_head else PAUSE
+        elif first == "│":
+            clock += ROW_PAUSE
+        elif first and first != "└":
+            # A line of text. The rule under the table comes with its last row.
+            clock += PAUSE
+        in_head = first in {"┏", "┃", "┡"}
+        moments.append(clock)
+    return moments
 
 
 def _typeset(lines: list[Text]) -> str:
@@ -221,18 +259,21 @@ def _typeset(lines: list[Text]) -> str:
     top = TAB_HEIGHT + PAD_TOP
     height = top + len(lines) * LINE + PAD_BOTTOM
 
-    words: list[str] = []
-    # Lines drawn in place of box-drawing characters, by what they belong to:
-    # horizontal spans keyed by their y, vertical spans keyed by their x.
-    across: dict[str, dict[float, list[tuple[float, float]]]] = {"grid": {}, "tree": {}}
-    down: dict[str, dict[float, list[tuple[float, float]]]] = {"grid": {}, "tree": {}}
-
-    for row, line in enumerate(lines):
+    key_time = TYPE_TIME / len(COMMAND)
+    drawn: list[str] = []
+    for row, (line, moment) in enumerate(zip(lines, _moments(lines), strict=True)):
         row_top = top + row * LINE
         centre = row_top + LINE / 2
+        words: list[str] = []
+        # Lines drawn in place of box-drawing characters, by what they belong to:
+        # horizontal spans keyed by their y, vertical spans keyed by their x.
+        across: dict[str, dict[float, list[tuple[float, float]]]] = {"grid": {}, "tree": {}}
+        down: dict[str, dict[float, list[tuple[float, float]]]] = {"grid": {}, "tree": {}}
         for start, characters, style in _runs(line):
             # A branch is part of a package's cell and has its colour; a border has none.
             part = "tree" if style.color else "grid"
+            # The command is typed: each of its characters is set alone, at its moment.
+            typed = row == 0 and characters == COMMAND
             word_start: int | None = None
             # One space past the end closes a word that the run ends with.
             for offset, character in enumerate(f"{characters} "):
@@ -248,18 +289,33 @@ def _typeset(lines: list[Text]) -> str:
                 if "d" in arms:
                     down[part].setdefault(middle, []).append((centre, row_top + LINE))
                 if not (character.isspace() or arms):
-                    word_start = offset if word_start is None else word_start
+                    if typed:
+                        at = TYPE_START + offset * key_time
+                        words.append(_word(character, start + offset, row_top, style, at))
+                    else:
+                        word_start = offset if word_start is None else word_start
                 elif word_start is not None:
                     word = characters[word_start:offset]
                     words.append(_word(word, start + word_start, row_top, style))
                     word_start = None
 
-    rules = []
-    for part in ("grid", "tree"):
-        strokes = [f"M{start:.1f} {y:.1f}H{end:.1f}" for y, start, end in _merged(across[part])]
-        strokes += [f"M{x:.1f} {start:.1f}V{end:.1f}" for x, start, end in _merged(down[part])]
-        if strokes:
-            rules.append(f'<path class="{part}" d="{"".join(strokes)}"/>')
+        # A line's rules stay with it, so that they appear when it does: a rule
+        # that runs down the table is drawn a line at a time, each part meeting the next.
+        rules = []
+        for part in ("grid", "tree"):
+            strokes = [f"M{a:.1f} {y:.1f}H{b:.1f}" for y, a, b in _merged(across[part])]
+            strokes += [f"M{x:.1f} {a:.1f}V{b:.1f}" for x, a, b in _merged(down[part])]
+            if strokes:
+                rules.append(f'<path class="{part}" d="{"".join(strokes)}"/>')
+        if row == 0:
+            drawn += words
+        elif rules or words:
+            drawn += [
+                f'<g class="row" style="animation-delay:{moment:.2f}s">',
+                *rules,
+                *words,
+                "</g>",
+            ]
 
     outline = (
         f"M0.5 0.5H{TAB_WIDTH:.1f}V{TAB_HEIGHT + 0.5:.1f}H{width - 0.5:.1f}V{height - 0.5:.1f}H0.5Z"
@@ -281,12 +337,17 @@ def _typeset(lines: list[Text]) -> str:
             ".caught{fill:#fbbf24}.tab{fill:#a1a1aa;font-size:12px}",
             "path{fill:none;shape-rendering:crispEdges}",
             ".grid{stroke:#34343a}.tree{stroke:#63636b}",
+            # Each animation starts hidden and ends on the figure as it is drawn:
+            # that is what remains, and what is shown where nothing is animated.
+            f".row{{animation:show {FADE}s ease-out backwards}}",
+            f".key{{animation:show {key_time:.3f}s steps(1) backwards}}",
+            "@keyframes show{from{opacity:0}}",
+            "@media (prefers-reduced-motion:reduce){*{animation:none!important}}",
             "</style>",
             f'<path d="{outline}" style="fill:{GROUND};stroke:{FRAME}"/>',
             f'<text class="tab" x="{TAB_WIDTH / 2:.1f}" y="17.5" text-anchor="middle">'
             "terminal</text>",
-            *rules,
-            *words,
+            *drawn,
             "</svg>",
             "",
         ]
