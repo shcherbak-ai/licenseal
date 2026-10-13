@@ -37,10 +37,23 @@ def _port_in_use(port: int) -> bool:
 
 
 @task
-def docs(c: Context) -> None:
-    """Build the documentation site into site/, as CI does (strict, full rebuild)."""
+def docs(c: Context, clean: bool = False) -> None:
+    """
+    Build the documentation site into site/ in strict mode, as CI does.
+
+    The build fails on a link or an anchor that does not resolve. It reuses
+    the build cache, so it can run while ``docs-live`` is serving.
+
+    Args:
+        clean: Rebuild from nothing. Stop ``docs-live`` first: it holds the cache.
+
+    Example:
+        uv run inv docs
+        uv run inv docs --clean
+    """
+    flags = "--strict --clean" if clean else "--strict"
     with c.cd(str(_ROOT)):
-        c.run(f"{_ZENSICAL} build --strict --clean")
+        c.run(f"{_ZENSICAL} build {flags}")
 
 
 @task(name="docs-live")
