@@ -361,7 +361,7 @@ uv run pre-commit run --all-files
 uv run pytest -n 8 --cov=licenseal --cov-report=term-missing
 ```
 
-`pre-commit` is the authoritative static gate and mirrors CI — it runs ruff (check + format), ty, bandit, markdownlint, deptry, interrogate, vulture, and the SPDX-ID validator. Running only `ruff check` / `ty check` skips bandit, markdownlint, and the SPDX validator, so a green local run can still fail CI. `pytest` is not a pre-commit hook; run it separately.
+`pre-commit` is the authoritative static gate and mirrors CI — it runs ruff (check + format), ty, bandit, markdownlint, deptry, the lockfile check (`uv lock --check`), interrogate, vulture, and the SPDX-ID validator. Running only `ruff check` / `ty check` skips bandit, markdownlint, and the SPDX validator, so a green local run can still fail CI. `pytest` is not a pre-commit hook; run it separately.
 
 ### Stress-testing on real repos
 
