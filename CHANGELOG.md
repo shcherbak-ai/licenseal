@@ -220,3 +220,11 @@ Documentation and package metadata only; CLI behavior is unchanged.
 ### Fixed
 
 - The aopalliance license URL now resolves to the permissive `LicenseRef-Public-Domain` sentinel instead of a bare `Public-Domain` string that no risk rule recognized, which routed a known public-domain artifact to manual review. The hyphenated `public-domain` publisher spelling normalizes the same way.
+
+[1.0.0]: https://github.com/shcherbak-ai/licenseal/compare/v0.4.2...v1.0.0
+[0.4.2]: https://github.com/shcherbak-ai/licenseal/compare/v0.4.1...v0.4.2
+[0.4.1]: https://github.com/shcherbak-ai/licenseal/compare/v0.4.0...v0.4.1
+[0.4.0]: https://github.com/shcherbak-ai/licenseal/compare/v0.3.0...v0.4.0
+[0.3.0]: https://github.com/shcherbak-ai/licenseal/compare/v0.2.1...v0.3.0
+[0.2.1]: https://github.com/shcherbak-ai/licenseal/compare/v0.2.0...v0.2.1
+[0.2.0]: https://github.com/shcherbak-ai/licenseal/compare/v0.1.2...v0.2.0

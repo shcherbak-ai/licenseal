@@ -349,6 +349,7 @@ Add at least one `<eco>`-only repo plus one polyglot repo that includes the new 
 - The build writes `llms.txt`, the site's index for language models and coding agents, and a Markdown copy of each page it lists, from `[project.plugins.llmstxt]` in `zensical.toml`. A new page goes into a section there as well as into `nav`, in the same order and with the `description` of its front matter; `tests/test_llms_index.py` checks both. There is deliberately no `llms-full.txt`.
 - In `README.md`, link to the site for documentation, use relative links for repository files, and take images from `docs/assets/` (shared with the site) or `assets/` (the README's own).
 - `PYPI.md` is the short package description selected by `project.readme` in `pyproject.toml`. Keep its summary, supported ecosystems, and commands aligned with the CLI, and use absolute HTTPS links to public documentation. Builds use it directly; do not introduce README link rewriting during release.
+- `CHANGELOG.md` follows Keep a Changelog. Breaking changes stand under one heading, first in their version, and a major version points to its migration guide. Each version has a compare link at the end of the file, newest first like the sections; `tests/test_changelog.py` checks the links.
 - Follow [CONTRIBUTING.md](CONTRIBUTING.md#readme-links-and-images) when updating documentation or visuals, including example accuracy and preview checks.
 
 ## Verification
