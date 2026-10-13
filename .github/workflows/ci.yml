@@ -31,8 +31,8 @@ jobs:
         with:
           version: ${{ env.UV_VERSION }}
 
-      - name: Set up Python
-        run: uv python install 3.13
+      - name: Set up Python from .python-version
+        run: uv python install
 
       - name: Install dependencies
         run: uv sync
@@ -68,14 +68,16 @@ jobs:
       - name: Install dependencies
         run: uv sync --python ${{ matrix.python-version }}
 
-      - name: Show the interpreter the tests run on
-        run: uv run python --version
+      # Fails the cell when .python-version, not the matrix, chose the
+      # interpreter the tests run on.
+      - name: Check the tests run on Python ${{ matrix.python-version }}
+        run: uv run python -c "import sys; found = '%d.%d' % sys.version_info[:2]; assert found == '${{ matrix.python-version }}', found"
 
       - name: Run tests with coverage
         run: uv run pytest tests/ -n auto --cov=src/licenseal --cov-report=xml --cov-report=term-missing --cov-fail-under=100
 
       - name: Extract coverage percentage
-        if: matrix.os == 'ubuntu-latest' && matrix.python-version == '3.13'
+        if: matrix.os == 'ubuntu-latest' && matrix.python-version == '3.14'
         id: coverage
         run: |
           RATE=$(python3 -c "import xml.etree.ElementTree as ET; print(ET.parse('coverage.xml').getroot().get('line-rate'))")
@@ -83,7 +85,7 @@ jobs:
           echo "pct=$PCT" >> "$GITHUB_OUTPUT"
 
       - name: Update coverage badge
-        if: matrix.os == 'ubuntu-latest' && matrix.python-version == '3.13' && github.ref == 'refs/heads/main'
+        if: matrix.os == 'ubuntu-latest' && matrix.python-version == '3.14' && github.ref == 'refs/heads/main'
         uses: schneegans/dynamic-badges-action@28b0fa8bdeb46170ac397105ece0c1fe58f68910  # v1.9.0
         with:
           auth: ${{ secrets.GIST_TOKEN }}

@@ -36,8 +36,8 @@ jobs:
         with:
           version: ${{ env.UV_VERSION }}
 
-      - name: Set up Python
-        run: uv python install 3.13
+      - name: Set up Python from .python-version
+        run: uv python install
 
       # --strict fails the build on a link or an anchor that does not resolve.
       - name: Build the site

@@ -26,8 +26,8 @@ jobs:
         with:
           version: ${{ env.UV_VERSION }}
 
-      - name: Set up Python
-        run: uv python install 3.13
+      - name: Set up Python from .python-version
+        run: uv python install
 
       - name: Install dependencies
         run: uv sync
