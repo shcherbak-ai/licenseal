@@ -58,5 +58,6 @@ A finding that you have looked into is cleared with a [review](review-findings.m
 
 ## Next
 
+- [Claude Code skill](claude-code-skill.md)
 - [Fix a failing check](fix-a-failing-check.md)
 - [Review flagged dependencies](review-findings.md)

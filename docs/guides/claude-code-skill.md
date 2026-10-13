@@ -16,7 +16,7 @@ licenseal install-skill --force          # overwrite a hand-edited skill
 The skill runs `licenseal check`, walks through warnings, violations, unknown licenses, and [analysis gaps](../concepts/check-failures.md#analysis-gaps), and asks how your project is distributed, hosted, modified, or shipped. It fills `licenseal.review.toml` from your decisions, only when there is a concrete reason that a reviewer can check, keeps genuine incompatibilities flagged, and re-runs the check so what is still flagged is explicit.
 
 <figure markdown>
-![Claude Code licenseal review skill asking whether MPL dependencies were modified before marking them reviewed](../assets/claude-skill-question.png)
+![Claude Code licenseal review skill asking whether MPL dependencies were modified before marking them reviewed](../assets/claude-skill-question.png){ .screenshot }
 </figure>
 
 The skill is written only inside the project (`.claude/skills/`), never globally, so it can be committed with the code it audits. Claude Code discovers it automatically.

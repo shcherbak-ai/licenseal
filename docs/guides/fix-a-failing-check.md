@@ -5,7 +5,7 @@ description: "What to do when licenseal check fails: a violation, a warning, an 
 
 # Fix a failing check
 
-`licenseal check` gives the reason for a failure under the table, in the **Details** and **Analysis gaps** sections, and on stderr. Find the symptom below.
+`licenseal check` gives the reason for a failure under the table, in the **Details** and **Analysis gaps** sections, and on stderr. Find the symptom below, or let the [Claude Code skill](claude-code-skill.md) walk you through the findings.
 
 ## A violation (✗)
 

@@ -210,6 +210,19 @@ body,
   letter-spacing: -0.01em;
 }
 
+/* What sets licenseal apart, in one quiet line under the lead. */
+.md-typeset .home-points {
+  color: #a1a1aa;
+  font-size: 0.75rem;
+}
+
+/* A screenshot keeps its own pixels: it is framed, and never scaled up. */
+.md-typeset figure img.screenshot {
+  width: auto;
+  max-width: 100%;
+  border: 1px solid #27272a;
+}
+
 .md-typeset .grid.cards > ul > li,
 .md-typeset .grid > .card {
   border: 1px solid #27272a;

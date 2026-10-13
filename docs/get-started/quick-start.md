@@ -16,7 +16,7 @@ uvx licenseal check
 [`uvx`](https://docs.astral.sh/uv/) runs licenseal without installing it. licenseal reads the manifests and lockfiles under the directory (`pyproject.toml`, `package-lock.json`, and the like), looks up dependency licenses in public registry metadata, and prints a [report](read-the-report.md). It needs Python 3.11 or newer and outbound HTTPS to the [registries](../security/network.md).
 
 > [!NOTE]
-> **Private packages.** A package that comes from a private registry is looked up by name on the public one too, which discloses its name and version. If your project has internal packages, read [What leaves the process](../security/data-sent.md#private-packages) first.
+> **Private packages.** A package from a private registry is looked up by name on the public registry too, so that registry's operator sees its name and version. If the public registry has a package of the same name, the report shows that package's license. See [What leaves the process](../security/data-sent.md#private-packages).
 
 ## Install it
 
@@ -38,6 +38,14 @@ The exit code is non-zero when a dependency is [flagged](../concepts/check-failu
 
 The most common first failure is a manifest without an up-to-date lockfile. Commit the lockfile, or pass `--no-require-lockfile` to accept versions [estimated](../concepts/version-resolution.md#estimates) from the registry. For every other failure, see [Fix a failing check](../guides/fix-a-failing-check.md).
 
+## Review findings with Claude Code
+
+```bash
+licenseal install-skill
+```
+
+Then run `/licenseal-review` in [Claude Code](https://claude.com/claude-code). The bundled skill walks you through each flagged dependency and records your decisions in `licenseal.review.toml`: see [Claude Code skill](../guides/claude-code-skill.md).
+
 ## Defaults
 
 - The whole dependency tree is scanned, without dev dependencies. `--no-transitive` scans direct dependencies only; `--dev` adds dev dependencies.
@@ -50,4 +58,5 @@ The full rule is in [What fails a check](../concepts/check-failures.md), and eve
 
 - [Read the report](read-the-report.md)
 - [Run it in CI](../guides/ci.md)
+- [Claude Code skill](../guides/claude-code-skill.md)
 - [Review flagged dependencies](../guides/review-findings.md)

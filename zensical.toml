@@ -31,9 +31,9 @@ nav = [
   ] },
   { "Guides" = [
     "guides/ci.md",
+    "guides/claude-code-skill.md",
     "guides/fix-a-failing-check.md",
     "guides/review-findings.md",
-    "guides/claude-code-skill.md",
   ] },
   { "How it works" = [
     "concepts/index.md",

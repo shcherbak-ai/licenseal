@@ -48,6 +48,7 @@ A row marked ⚠, ✗, or `?` is flagged, and by default it fails the check. **D
 
 - [How licenseal decides](../concepts/verdicts.md) says what each verdict means.
 - [Fix a failing check](../guides/fix-a-failing-check.md) says what to do, symptom by symptom.
+- The [Claude Code skill](../guides/claude-code-skill.md) walks you through each flagged row.
 - [Review flagged dependencies](../guides/review-findings.md) shows how to record a decision about a dependency you have looked into.
 
 ## Write it to a file

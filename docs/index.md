@@ -10,6 +10,9 @@ hide:
 
 <p class="home-lead">Catch incompatible dependency licenses before they block a release.</p>
 
+A verdict, not a list · Transitive across 10 ecosystems · No dependency installs · [Claude Code review skill](guides/claude-code-skill.md)
+{ .home-points }
+
 licenseal reads manifests (`pyproject.toml`, `package.json`, and the like), lockfiles, and public registry metadata and tells you whether your dependency licenses are compatible with the license you ship under, fast enough to run in CI. It does not install dependencies, run package-manager commands, execute build scripts, or download package archives.
 
 ```bash
@@ -19,6 +22,16 @@ uvx licenseal check
 <figure markdown>
 ![licenseal report for an illustrative MIT project: client, transport and parser are compatible; certs, brought in through client under GPL-3.0-only, is a violation. Summary: 1 violation, 3 ok.](assets/licenseal-report.svg)
 <figcaption>Illustrative packages. The report is licenseal's own output.</figcaption>
+</figure>
+
+The check says which licenses need attention. The bundled [Claude Code skill](guides/claude-code-skill.md) walks you through each finding and records your decisions in a checked-in file:
+
+```bash
+licenseal install-skill   # then run /licenseal-review in Claude Code
+```
+
+<figure markdown>
+![Claude Code licenseal review skill asking whether MPL dependencies were modified before marking them reviewed](assets/claude-skill-question.png){ .screenshot }
 </figure>
 
 <div class="grid cards" markdown>
