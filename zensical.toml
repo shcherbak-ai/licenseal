@@ -1,6 +1,6 @@
 # The documentation site: https://shcherbak-ai.github.io/licenseal/
 #
-#   uv run inv docs-live   # preview at http://localhost:8000
+#   uv run inv docs-live   # preview at http://localhost:9000
 #   uv run inv docs        # what CI runs; the site is written to site/
 #
 # Both tasks (tasks.py) run Zensical at the versions pinned in
