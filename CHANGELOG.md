@@ -4,20 +4,13 @@ All notable changes to this project will be documented in this file. Each versio
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/), and this project adheres to [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## [1.0.0] - 2026-10-13
 
-Planned for release as 1.0.0 and updated as work lands. Everything below is relative to 0.4.2.
-
-Most of these changes close cases where a scan passed although it had missed dependencies, misread a license, or skipped a file without saying so. A check that passes on 0.4.2 can therefore fail on this version with no change to the project. A `licenseal.review.toml` entry can also stop matching, which is an error, when its dependency is now reported at another version or is no longer reported. Every change of that kind is listed under **Breaking changes**, together with changes to defaults, report values, the review file, and install requirements.
+Most of the changes since 0.4.2 close cases where a scan passed although it had missed dependencies, misread a license, or skipped a file without saying so. A check that passes on 0.4.2 can therefore fail on 1.0.0 with no change to the project. A `licenseal.review.toml` entry can also stop matching, which is an error, when its dependency is now reported at another version or is no longer reported. Every change of that kind is listed under **Breaking changes**, together with changes to defaults, report values, the review file, and install requirements.
 
 ### Upgrading from 0.4.x
 
-- **No lockfile committed.** `check` fails in strict mode. Commit the lockfile, or pass `--no-require-lockfile` to accept versions estimated from the registry.
-- **License declared only in a sub-package or a `LICENSE` file.** The project is checked as `Proprietary`, and the report says so. Declare the license in a manifest of the scanned directory, or scan the sub-package with `--path`.
-- **Dependencies from git, a URL, or a path.** Each is an UNKNOWN row and is no longer looked up by name. Run `licenseal init-review-file --merge` to scaffold review entries keyed on their source.
-- **An existing `licenseal.review.toml`.** Correct or delete an entry that no longer matches a reported row, or whose `license` names no license: both are now errors. For Go, Java, npm, and Ruby, `package` must match the reported name's case exactly.
-- **A checked-in `LICENSES.md`.** Regenerate it: the header, the escaping, and the row layout changed.
-- **A script that parses the JSON report.** See [Report output](#report-output) for the new fields and changed values.
+Follow the [1.0.0 migration guide](https://licenseal.shcherbak.ai/guides/migrate-to-v1/). It says what to change in a project, in its `licenseal.review.toml`, in a checked-in `LICENSES.md`, and in a script that reads the JSON report, and how to stay on 0.4.2 until that is done.
 
 ### Breaking changes
 
@@ -42,6 +35,7 @@ Most of these changes close cases where a scan passed although it had missed dep
 #### Package names and versions
 
 - **Names are compared the way each registry compares them.** In Go, Java, npm, and Ruby, two names that differ only in case are two packages: each is reported with its own license; one used to stand for both. A `licenseal.review.toml` entry for those ecosystems must spell `package` exactly as the report does; an entry in another case stops matching, which is an error. .NET, PHP, Rust, Hex, and R names are compared without regard to case and Python names by PyPI's normalisation rule, as before.
+- **Names and versions are percent-encoded in every registry URL.** A dependency name or version containing `/../`, `?`, `#`, or `%xx` could make a lookup return another package's metadata, and the row passed with that package's license. One that would still address another resource is not sent: the dependency is UNKNOWN under its declared name. The URL of a well-formed name is unchanged.
 - **Every declared version is scanned.** When manifests in one tree declare a package with different version constraints, each one is resolved, walked, and reported under its own manifest. Only the first used to be scanned, so the other version and everything below it were missing.
 - **A lockfile covers a dependency only at a version its manifest admits.** A lockfile used to cover a declared dependency whenever it held a package of that name. A manifest that is ahead of its lockfile, or that pins another version than a lockfile elsewhere in the tree, is now resolved from the registry for that dependency and counts as a manifest without a lockfile, an analysis gap under the default `--require-lockfile`. A locked prerelease is accepted for any range, since whether a range admits one depends on settings licenseal does not read.
 - **A locked row is a direct dependency only at a declared version.** Another locked version of a directly declared package, such as a nested copy in an npm lockfile or a second major in `Cargo.lock`, is a transitive: in JSON its `depth` is 1 and its `source` is empty. A requirement that did not resolve is reported even when a row of the same name resolved at a version that does not satisfy it.
@@ -96,6 +90,7 @@ New rows can carry new findings.
 - **Python.** A local wheel, archive, or directory path in a requirements file is no longer read as a package named after its first path segment and looked up on PyPI.
 - **Go.** With a `go.sum`, a row at a version other than the one `go.mod` requires is a transitive, not a direct dependency. `replace` directives in a dependency's own `go.mod` are no longer applied; Go honours them only in the main module. `replace` directives in a `go.work` in the scanned directory are applied to the modules it lists with `use`, and override those modules' own; they used to be ignored, so a module that `go.work` redirects to a local path was looked up on deps.dev and the Go module proxy. When `go.sum` lists several versions of a required module, `direct_ancestors` and the `prod` / `dev` group follow the required version's `go.mod`; they could follow another version's.
 - **R.** A `DESCRIPTION` requirement written `(== x)` is reported at `x`, with its license marked as an estimate when CRAN's index lists another version. The default scan used to report the indexed version.
+- **The project's own packages.** A project of the scanned tree that another manifest names in a different case has no row and is no longer looked up on the public registry: a .NET package reference to an in-tree project, and a Cargo dependency on a workspace crate. It used to be a row with the license of whatever registry package has that name (for .NET, in a `--no-transitive` scan).
 - **Production wins.** A dependency that is declared as dev and is also pulled in by a production dependency is `prod` everywhere: in the registry walk, when several lockfiles are merged, for Go `tool` modules, in the Maven and NuGet walks, and in `paket.lock`. `--dev` adds rows and never turns a `prod` row into `dev`.
 
 #### Stricter license reading
@@ -155,16 +150,15 @@ Each of these is now an analysis gap on the file, reported on stderr and in the 
 - Inputs that ended the scan with a traceback and no report (a manifest in a broken encoding, a registry response of an unexpected shape, a name that cannot be put in a URL, and similar) now produce an analysis gap or an UNKNOWN row, and the scan continues. A `setup.cfg` license that holds a stray `%` (`license = 100% free`) is read as declaring no license.
 - A `licenseal.review.toml`, a `--from-report` file, or an installed skill file that is not UTF-8 or cannot be parsed ends the command with an error that names the file.
 - `init-review-file` writes every scaffold field so that it parses back unchanged. A multi-line license string from a registry used to be written partly as live TOML, which could leave a scaffold that did not parse, or plant a pre-filled review entry for another dependency. A dependency whose name, version, or source a TOML file cannot hold (a lone surrogate) gets no entry and is named in a note; it used to make the whole file unloadable.
-- A project of the scanned tree that another manifest names in a different case is no longer looked up on the public registry: a .NET package reference to an in-tree project, and a Cargo dependency on a workspace crate.
 - The table report no longer fails when a dependency name contains `[`, and terminal escape sequences in registry strings no longer reach the terminal, in the reports or in the messages on stderr. Bidirectional control characters and line separators are shown escaped as well, and Markdown escapes `*`.
 - The table report prints a reason as written. On a terminal, the number inside a license ID (`GPL-3.0-only`), a quoted value, or a path in a details, analysis-gap, or estimate line used to be highlighted, in colours that mean a verdict elsewhere in the report.
-- A dependency name or version containing `/../`, `?`, `#`, or `%xx` could make a lookup return another package's metadata. Names and versions are percent-encoded in every registry URL, and one that would still address another resource is not sent: the dependency is UNKNOWN under its declared name.
 - A range resolves to the same row with and without `--no-transitive` for PyPI, npm, and RubyGems. The two modes could report different versions or licenses when a version's own registry endpoint answered 404.
 - With stdout redirected under a legacy code page such as cp1252, the table and Markdown formats print ASCII replacements for the glyphs the encoding lacks instead of failing with no output.
 - `check` printed "No dependencies to resolve." before the lockfiles were read. It now says so only when the scan found nothing.
 - `--no-transitive` reports a `pom.xml` dependency at the version its parent chain supplies (`<dependencyManagement>`, an imported BOM, a `${property}`), as the default scan does. Those rows were UNKNOWN with no version.
 - A Go module version that contains an uppercase letter is requested from the module proxy at the correct URL.
 - The hint printed when a request to a host is blocked links to the section of `SECURITY.md` that lists the hosts. Its link pointed at a heading that did not exist.
+- The `--help` screens show each command's summary whole, show the default of `--path` and `--format`, and say which options a command rejects together (`--max-depth` with `--no-transitive`; `--dev` / `--no-dev`, `--max-workers`, and `--exclude-dirs` with `--from-report`). Help text only: no option, default, or exit code changed.
 
 ## [0.4.2] - 2026-09-26
 
