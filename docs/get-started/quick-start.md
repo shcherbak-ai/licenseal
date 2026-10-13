@@ -15,8 +15,8 @@ uvx licenseal check
 
 [`uvx`](https://docs.astral.sh/uv/) runs licenseal without installing it. licenseal reads the manifests and lockfiles under the directory (`pyproject.toml`, `package-lock.json`, and the like), looks up dependency licenses in public registry metadata, and prints a [report](read-the-report.md). It needs Python 3.11 or newer and outbound HTTPS to the [registries](../security/network.md).
 
-> [!WARNING]
-> Dependencies are looked up by name and version on public registries. A package from a private registry is looked up on the public one as well, which discloses its name and version: see [What leaves the process](../security/data-sent.md#private-packages).
+> [!NOTE]
+> **Private packages.** A package that comes from a private registry is looked up by name on the public one too, which discloses its name and version. If your project has internal packages, read [What leaves the process](../security/data-sent.md#private-packages) first.
 
 ## Install it
 

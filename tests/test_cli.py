@@ -7,6 +7,7 @@ import json
 import re
 import textwrap
 import time
+import tomllib
 from importlib.metadata import PackageNotFoundError
 from pathlib import Path
 from unittest.mock import patch
@@ -3757,6 +3758,11 @@ class TestVersionCommand:
         # test tracks version bumps and also flags drift between
         # ``__init__.__version__`` and the packaged metadata Click reports.
         assert __version__ in result.output
+
+    def test_documentation_footer_names_the_version(self):
+        config = Path(__file__).parent.parent / "zensical.toml"
+        footer = tomllib.loads(config.read_text(encoding="utf-8"))["project"]["copyright"]
+        assert footer.startswith(f"licenseal {__version__} ")
 
 
 def _installed_skill_path(project_dir):

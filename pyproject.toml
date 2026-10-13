@@ -164,6 +164,7 @@ version_files = [
     "src/licenseal/__init__.py:__version__",
     "pyproject.toml:version",
     "CITATION.cff:version",
+    "zensical.toml:^copyright",
 ]
 tag_format = "v$version"
 annotated_tag = true

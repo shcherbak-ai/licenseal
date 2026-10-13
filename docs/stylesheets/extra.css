@@ -262,6 +262,28 @@ body,
   max-width: none;
 }
 
+/* A code block is as wide as the running text, and wider only when its own
+   lines are. */
+.md-typeset > .highlight {
+  width: fit-content;
+  min-width: min(100%, 38rem);
+  max-width: 100%;
+}
+
+.md-content__inner:has(.home-name) > .highlight {
+  width: auto;
+}
+
+/* A heading's link mark shows while the pointer is on the heading, not
+   because a link led to it. */
+.md-typeset :target > .headerlink:not(:focus) {
+  opacity: 0;
+}
+
+.md-typeset :target:hover > .headerlink {
+  opacity: 1;
+}
+
 /* A flag, a host or a field name in a table's first column stays on one line. */
 .md-typeset table:not([class]) td:first-child code {
   white-space: nowrap;
