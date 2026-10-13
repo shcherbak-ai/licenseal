@@ -1,7 +1,10 @@
 # The documentation site: https://shcherbak-ai.github.io/licenseal/
 #
-#   uvx --constraints .github/docs-constraints.txt zensical serve            # preview at http://localhost:8000
-#   uvx --constraints .github/docs-constraints.txt zensical build --strict   # what CI runs; the site is written to site/
+#   uv run inv docs-live   # preview at http://localhost:8000
+#   uv run inv docs        # what CI runs; the site is written to site/
+#
+# Both tasks (tasks.py) run Zensical at the versions pinned in
+# .github/docs-constraints.txt.
 #
 # The site sets no cookie and asks no third party for anything: fonts are the
 # reader's own, there is no analytics, and nothing below turns on a feature

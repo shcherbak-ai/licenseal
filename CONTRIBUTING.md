@@ -65,11 +65,11 @@ uv run pytest -n 8 --cov=licenseal --cov-report=term-missing
 The user documentation is a site built from the Markdown pages under `docs/` with [Zensical](https://zensical.org/) (`zensical.toml`), and published to <https://shcherbak-ai.github.io/licenseal/> from `main`.
 
 ```bash
-uvx --constraints .github/docs-constraints.txt zensical serve            # preview at http://localhost:8000
-uvx --constraints .github/docs-constraints.txt zensical build --strict   # what CI runs: fails on a broken link or anchor
+uv run inv docs-live   # preview at http://localhost:8000, rebuilt when a page changes (--port N for another port)
+uv run inv docs        # what CI runs: fails on a broken link or anchor
 ```
 
-Zensical is run as a tool at the versions pinned in `.github/docs-constraints.txt`. It is not a dependency of the package.
+Both are [Invoke](https://www.pyinvoke.org/) tasks in `tasks.py`; `uv run inv --list` lists them. They run Zensical with `uvx`, as a tool at the versions pinned in `.github/docs-constraints.txt`. It is not a dependency of the package.
 
 - Change the page that states a behaviour in the same change as the behaviour. State a fact on one page and link to it from the others.
 - Write GitHub-flavoured Markdown, with relative links between pages (`../concepts/verdicts.md`) and call-outs in GitHub's alert syntax (`> [!NOTE]`).

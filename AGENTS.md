@@ -345,7 +345,7 @@ Add at least one `<eco>`-only repo plus one polyglot repo that includes the new 
 - A behaviour change updates the page that states the behaviour, in the same change. One fact is stated on one page; other pages link to it.
 - Pages are GitHub-flavoured Markdown with relative links to each other (`../concepts/verdicts.md#the-matrix`), and call-outs in GitHub's alert syntax (`> [!NOTE]`, `> [!WARNING]`). A warning is for something that can make a report wrong or incomplete, or that leaves the machine.
 - The site sets no cookie and asks no third party for anything. Keep it so: no web font, no analytics, no `repo_url` in `zensical.toml`, no Mermaid or MathJax fence, no image or script from another host.
-- `uvx --constraints .github/docs-constraints.txt zensical build --strict` must pass: it fails on a link or an anchor that does not resolve.
+- `uv run inv docs` must pass: it is the strict build that CI runs, and it fails on a link or an anchor that does not resolve. `uv run inv docs-live` serves a preview. Both are tasks in `tasks.py`.
 - In `README.md`, link to the site for documentation, use relative links for repository files, and take images from `docs/assets/` (shared with the site) or `assets/` (the README's own).
 - `PYPI.md` is the short package description selected by `project.readme` in `pyproject.toml`. Keep its summary, supported ecosystems, and commands aligned with the CLI, and use absolute HTTPS links to public documentation. Builds use it directly; do not introduce README link rewriting during release.
 - Follow [CONTRIBUTING.md](CONTRIBUTING.md#readme-links-and-images) when updating documentation or visuals, including example accuracy and preview checks.
