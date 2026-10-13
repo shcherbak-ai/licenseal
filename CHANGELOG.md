@@ -138,7 +138,7 @@ Each of these is now an analysis gap on the file, reported on stderr and in the 
 
 ### Added
 
-- A documentation site, at <https://licenseal.shcherbak.ai/>, built from the Markdown pages under `docs/`. It replaces `USAGE.md` and `JSON_OUTPUT.md`, which now only say where each of their sections went, and holds the detail of the security model, which `SECURITY.md` summarises.
+- A documentation site, at <https://licenseal.shcherbak.ai/>, built from the Markdown pages under `docs/`. It replaces `USAGE.md` and `JSON_OUTPUT.md`, which now only say where each of their sections went, and holds the detail of the security model, which `SECURITY.md` summarises. Its pages are listed for language models and coding agents at <https://licenseal.shcherbak.ai/llms.txt>, each with a Markdown copy.
 - hex.pm's limit of 100 unauthenticated requests per minute is waited out: a project with more than 100 Hex packages pauses until the registry's reported reset time and then continues; every package past the limit used to resolve to UNKNOWN. Each pause is announced on stderr with its length. The waiting is bounded, and lookups abandoned because the limit never lifted are counted in a closing warning.
 - `check --no-require-lockfile` accepts dependencies resolved without a lockfile as estimates; see [Projects without a lockfile](#projects-without-a-lockfile).
 - `check` reports dependencies from an off-registry source on their own stderr line. The `could not be resolved from registries` warning counts failed lookups only.

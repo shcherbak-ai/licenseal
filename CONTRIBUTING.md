@@ -73,7 +73,7 @@ Both are [Invoke](https://www.pyinvoke.org/) tasks in `tasks.py`; `uv run inv --
 
 - Change the page that states a behaviour in the same change as the behaviour. State a fact on one page and link to it from the others.
 - Write GitHub-flavoured Markdown, with relative links between pages (`../concepts/verdicts.md`) and call-outs in GitHub's alert syntax (`> [!NOTE]`).
-- A new page goes into the `nav` list of `zensical.toml`.
+- A new page goes into the `nav` list of `zensical.toml`, and into a section of the `llms.txt` index in the same file (`[project.plugins.llmstxt.sections]`), at the same place and with the `description` of its front matter; a test fails until the two agree. The build writes that index to the root of the site, <https://licenseal.shcherbak.ai/llms.txt>, for language models and coding agents.
 - The site sets no cookie and loads nothing from another host. Do not add a web font, analytics, or an embed, and do not set `repo_url`.
 
 ## README links and images

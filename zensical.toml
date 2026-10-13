@@ -128,3 +128,69 @@ pymdownx.quotes.callouts = true
 pymdownx.snippets.base_path = ["."]
 pymdownx.snippets.check_paths = true
 pymdownx.superfences = {}
+
+# llms.txt, the index of the documentation for language models and coding
+# agents (https://llmstxt.org/): the build writes it to the root of the site,
+# with a Markdown copy of every page it lists beside the HTML one. They are
+# static files like the rest; nothing is fetched from anywhere. A page that is
+# added to nav above goes into a section below as well, in the same order and
+# with the description of its front matter: tests/test_llms_index.py fails
+# until it does. The home page is left out, since the index says what it says.
+# There is no llms-full.txt: the index lets a reader take the page it needs.
+[project.plugins.llmstxt]
+markdown_description = "licenseal is a command-line tool. `licenseal check` reads the manifests and lockfiles under a directory, resolves the whole dependency tree, looks up each dependency's license in public registry metadata, and compares it with the project's own license. It exits non-zero on a violation and, by default, on a warning, an unknown license, or anything the scan could not read; a decision about a flagged dependency is recorded in `licenseal.review.toml`. It does not install dependencies, run package managers, or download package archives, and its verdicts are not legal advice."
+
+[project.plugins.llmstxt.sections]
+"Get started" = [
+  { "get-started/quick-start.md" = "Run a first licenseal scan, install the command, and learn what makes the check fail." },
+  { "get-started/read-the-report.md" = "What each column of the licenseal report shows, what is printed under the table, what to do about a flagged row, and how to write the report to a file." },
+]
+"Guides" = [
+  { "guides/ci.md" = "Add licenseal to a CI pipeline: the workflow, lockfiles, publishing the report, and adjusting the gate." },
+  { "guides/claude-code-skill.md" = "Install the bundled Claude Code skill and let it walk you through each flagged dependency." },
+  { "guides/fix-a-failing-check.md" = "What to do when licenseal check fails: a violation, a warning, an unknown license, an analysis gap, a review entry that no longer matches, or a scan that could not run." },
+  { "guides/review-findings.md" = "Record a reviewed license for a flagged dependency in licenseal.review.toml, so that the check passes and the decision stays on record." },
+  { "guides/migrate-to-v1.md" = "What to change in a project, its review file, its checked-in report, and its scripts when upgrading licenseal from 0.4.x to 1.0.0." },
+]
+"How it works" = [
+  { "concepts/index.md" = "The four steps of a licenseal scan: read the manifests and lockfiles, resolve the dependency tree, classify each license, and report a verdict." },
+  { "concepts/discovery.md" = "Which directory licenseal scans, the directories it skips, how to exclude one, and how to scan one package of a monorepo." },
+  { "concepts/dependency-resolution.md" = "How licenseal finds the whole dependency tree: from the lockfile first, and from the registry where no lockfile covers a dependency." },
+  { "concepts/version-resolution.md" = "Which version of a dependency licenseal reports, when a version or a license is an estimate, and what happens when a lookup fails." },
+  { "concepts/off-registry.md" = "How licenseal reports a dependency that comes from a git repository, a URL, or a path instead of a package registry." },
+  { "concepts/project-license.md" = "Where licenseal reads your project's own license from, and what it assumes when it finds none." },
+  { "concepts/verdicts.md" = "The four verdicts, the risk level of each license family, the compatibility matrix, and the rules for specific license pairs." },
+  { "concepts/license-expressions.md" = "How licenseal reads a license string: OR, AND and WITH, malformed expressions, license lists, and R's file LICENSE." },
+  { "concepts/check-failures.md" = "Strict mode, flagged dependencies, analysis gaps, and manifests without a lockfile: what makes licenseal check exit non-zero." },
+]
+"Ecosystems" = [
+  { "ecosystems/index.md" = "The ten ecosystems licenseal scans, with the registry, manifest files and lockfiles read for each." },
+  { "ecosystems/python.md" = "Python: the files licenseal reads, what counts as a dev dependency, what is off-registry, and what is not evaluated." },
+  { "ecosystems/npm.md" = "JavaScript and TypeScript: the files licenseal reads, what counts as a dev dependency, what is off-registry, and what is not evaluated." },
+  { "ecosystems/rust.md" = "Rust: the files licenseal reads, what counts as a dev dependency, what is off-registry, and what is not evaluated." },
+  { "ecosystems/go.md" = "Go: the files licenseal reads, what counts as a dev dependency, what is off-registry, and what is not evaluated." },
+  { "ecosystems/java.md" = "Java and the JVM: the files licenseal reads, what counts as a dev dependency, what is off-registry, and what is not evaluated." },
+  { "ecosystems/dotnet.md" = ".NET: the files licenseal reads, what counts as a dev dependency, what is off-registry, and what is not evaluated." },
+  { "ecosystems/php.md" = "PHP: the files licenseal reads, what counts as a dev dependency, what is off-registry, and what is not evaluated." },
+  { "ecosystems/ruby.md" = "Ruby: the files licenseal reads, what counts as a dev dependency, and what is off-registry." },
+  { "ecosystems/hex.md" = "Elixir and Erlang: the files licenseal reads, what counts as a dev dependency, and what is off-registry." },
+  { "ecosystems/r.md" = "R: the files licenseal reads, what counts as a dev dependency, what is off-registry, and what is not evaluated." },
+]
+"Reference" = [
+  { "reference/cli.md" = "Every licenseal command and option, with defaults and exit codes." },
+  { "reference/review-file.md" = "The keys of a licenseal.review.toml entry and the rules an entry must meet." },
+  { "reference/json-report.md" = "The JSON document that licenseal check -f json writes: an example, the top-level fields, and the summary block." },
+  { "reference/json-dependency-fields.md" = "Every field of a dependencies entry in the JSON report." },
+  { "reference/json-urls.md" = "Which URLs of the JSON report can be trusted, and the actionability block of a flagged entry." },
+  { "reference/json-diagnostics.md" = "The diagnostics block of the JSON report: what the scan could not read, read with a caveat, or estimated." },
+]
+"Security" = [
+  { "security/index.md" = "What licenseal reads, what it never does, and which files can decide a verdict." },
+  { "security/data-sent.md" = "What licenseal sends to public registries, what it never sends, and when a private package's name is disclosed." },
+  { "security/network.md" = "The fourteen public registry hosts licenseal can contact, what each is asked, and the rules that hold for all of them." },
+  { "security/license-sources.md" = "For each registry host: when it is asked, which field a license is read from, and when the license is an estimate." },
+]
+# A section of this name may be left out by a reader that is short of room.
+"Optional" = [
+  { "changelog.md" = "What changed in each licenseal release, and how to upgrade." },
+]

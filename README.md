@@ -121,6 +121,9 @@ Defaults worth knowing:
 
 Every flag is in the [CLI reference](https://licenseal.shcherbak.ai/reference/cli/).
 
+> [!NOTE]
+> **Upgrading from 0.4.x?** 1.0.0 finds dependencies that 0.4.x missed and reads licenses more strictly, so a check that passed can fail with no change to your project. Follow the [migration guide](https://licenseal.shcherbak.ai/guides/migrate-to-v1/), or point a coding agent at [llms.txt](https://licenseal.shcherbak.ai/llms.txt), the index of the documentation.
+
 ## CI integration
 
 ```yaml
@@ -200,7 +203,7 @@ The trust boundary and the network allowlist are in the [security model](https:/
 
 ## Documentation
 
-The documentation is at **[licenseal.shcherbak.ai](https://licenseal.shcherbak.ai/)**:
+The documentation is at **[licenseal.shcherbak.ai](https://licenseal.shcherbak.ai/)**, with an index for language models and coding agents at [llms.txt](https://licenseal.shcherbak.ai/llms.txt):
 
 - [Quick start](https://licenseal.shcherbak.ai/get-started/quick-start/) and [reading the report](https://licenseal.shcherbak.ai/get-started/read-the-report/)
 - [Run it in CI](https://licenseal.shcherbak.ai/guides/ci/) and [fix a failing check](https://licenseal.shcherbak.ai/guides/fix-a-failing-check/)
