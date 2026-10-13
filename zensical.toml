@@ -1,4 +1,4 @@
-# The documentation site: https://shcherbak-ai.github.io/licenseal/
+# The documentation site: https://licenseal.shcherbak.ai/
 #
 #   uv run inv docs-live   # preview at http://localhost:9000
 #   uv run inv docs        # what CI runs; the site is written to site/
@@ -14,7 +14,7 @@
 
 [project]
 site_name = "licenseal"
-site_url = "https://shcherbak-ai.github.io/licenseal/"
+site_url = "https://licenseal.shcherbak.ai/"
 site_description = "Catch incompatible dependency licenses before they block a release. A fast license compatibility checker for ten ecosystems."
 site_author = "Sergii Shcherbak"
 # The version is rewritten by `cz bump` (version_files in pyproject.toml).

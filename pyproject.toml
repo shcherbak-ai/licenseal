@@ -39,7 +39,7 @@ dependencies = [
 
 [project.urls]
 Homepage = "https://github.com/shcherbak-ai/licenseal"
-Documentation = "https://shcherbak-ai.github.io/licenseal/"
+Documentation = "https://licenseal.shcherbak.ai/"
 Repository = "https://github.com/shcherbak-ai/licenseal"
 Issues = "https://github.com/shcherbak-ai/licenseal/issues"
 

@@ -18,6 +18,6 @@ For a persistent installation:
 uv tool install licenseal
 ```
 
-See the [documentation](https://shcherbak-ai.github.io/licenseal/) for options, CI integration, and each ecosystem, the [security model](https://shcherbak-ai.github.io/licenseal/security/) for the input and network boundaries, and the [repository](https://github.com/shcherbak-ai/licenseal#readme) for the source.
+See the [documentation](https://licenseal.shcherbak.ai/) for options, CI integration, and each ecosystem, the [security model](https://licenseal.shcherbak.ai/security/) for the input and network boundaries, and the [repository](https://github.com/shcherbak-ai/licenseal#readme) for the source.
 
 Licensed under [Apache-2.0](https://github.com/shcherbak-ai/licenseal/blob/main/LICENSE). License classification is a technical aid, not legal advice.

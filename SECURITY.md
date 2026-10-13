@@ -10,13 +10,13 @@ licenseal is a license-assessment tool, not a security primitive. It reads manif
 
 The model is described in the documentation:
 
-- [Security model](https://shcherbak-ai.github.io/licenseal/security/): what is read, what is never done, and which files can decide a verdict
-- [Network egress](https://shcherbak-ai.github.io/licenseal/security/network/): each host, what it is asked, and the rules that hold for all of them
-- [License sources](https://shcherbak-ai.github.io/licenseal/security/license-sources/): where each host's answer holds the license
-- [What leaves the process](https://shcherbak-ai.github.io/licenseal/security/data-sent/): what a request carries, and when a private package's name is sent to a public registry
+- [Security model](https://licenseal.shcherbak.ai/security/): what is read, what is never done, and which files can decide a verdict
+- [Network egress](https://licenseal.shcherbak.ai/security/network/): each host, what it is asked, and the rules that hold for all of them
+- [License sources](https://licenseal.shcherbak.ai/security/license-sources/): where each host's answer holds the license
+- [What leaves the process](https://licenseal.shcherbak.ai/security/data-sent/): what a request carries, and when a private package's name is sent to a public registry
 
 ## Network egress
 
 Outbound network access is restricted to fourteen hosts by [`tethered`](https://github.com/shcherbak-ai/tethered), an egress allowlist applied to every registry request: `pypi.org:443`, `files.pythonhosted.org:443`, `registry.npmjs.org:443`, `crates.io:443`, `api.deps.dev:443`, `proxy.golang.org:443`, `repo.maven.apache.org:443`, `dl.google.com:443`, `repo.jenkins-ci.org:443`, `api.nuget.org:443`, `repo.packagist.org:443`, `rubygems.org:443`, `hex.pm:443`, `cran.r-project.org:443`.
 
-A host that embeds licenseal under its own `tethered.activate(allow=[...])` policy must allow these fourteen. The documentation's [Network egress](https://shcherbak-ai.github.io/licenseal/security/network/) page says what each is asked.
+A host that embeds licenseal under its own `tethered.activate(allow=[...])` policy must allow these fourteen. The documentation's [Network egress](https://licenseal.shcherbak.ai/security/network/) page says what each is asked.

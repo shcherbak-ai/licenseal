@@ -62,7 +62,7 @@ uv run pytest -n 8 --cov=licenseal --cov-report=term-missing
 
 ## Documentation
 
-The user documentation is a site built from the Markdown pages under `docs/` with [Zensical](https://zensical.org/) (`zensical.toml`), and published to <https://shcherbak-ai.github.io/licenseal/> from `main`.
+The user documentation is a site built from the Markdown pages under `docs/` with [Zensical](https://zensical.org/) (`zensical.toml`), and published to <https://licenseal.shcherbak.ai/> from `main`.
 
 ```bash
 uv run inv docs-live   # preview at http://localhost:9000, rebuilt when a page changes (--port N for another port)

@@ -21,8 +21,8 @@
   <a href="#quick-start">Quick start</a> ·
   <a href="#ci-integration">CI integration</a> ·
   <a href="#how-licenseal-decides">How it decides</a> ·
-  <a href="https://shcherbak-ai.github.io/licenseal/">Documentation</a> ·
-  <a href="https://shcherbak-ai.github.io/licenseal/security/">Security model</a>
+  <a href="https://licenseal.shcherbak.ai/">Documentation</a> ·
+  <a href="https://licenseal.shcherbak.ai/security/">Security model</a>
 </p>
 
 <p align="center">
@@ -96,7 +96,7 @@ licenseal reads the manifests and lockfiles in your repository, resolves the tra
   <img src="https://img.shields.io/badge/R-111113?style=flat-square&logo=r&logoColor=white" alt="R">
 </p>
 
-The manifests, lockfiles, and registries read for each are listed under [Supported ecosystems](https://shcherbak-ai.github.io/licenseal/ecosystems/).
+The manifests, lockfiles, and registries read for each are listed under [Supported ecosystems](https://licenseal.shcherbak.ai/ecosystems/).
 
 ## Quick start
 
@@ -117,9 +117,9 @@ Defaults worth knowing:
 
 - The whole dependency tree is scanned, without dev dependencies. `--no-transitive` scans direct dependencies only; `--dev` adds dev dependencies.
 - Violations always fail. Warnings, unknown licenses, and analysis gaps fail too, unless you pass `--no-strict`.
-- The project license is read from a manifest in the scanned directory, never from a nested package. If that does not give a recognised license, the project is checked as `Proprietary`: permissive dependencies pass, copyleft ones are flagged ([details](https://shcherbak-ai.github.io/licenseal/concepts/project-license/)).
+- The project license is read from a manifest in the scanned directory, never from a nested package. If that does not give a recognised license, the project is checked as `Proprietary`: permissive dependencies pass, copyleft ones are flagged ([details](https://licenseal.shcherbak.ai/concepts/project-license/)).
 
-Every flag is in the [CLI reference](https://shcherbak-ai.github.io/licenseal/reference/cli/).
+Every flag is in the [CLI reference](https://licenseal.shcherbak.ai/reference/cli/).
 
 ## CI integration
 
@@ -136,11 +136,11 @@ jobs:
       - run: uvx licenseal check
 ```
 
-For a PR comment or an audit trail, write a report with `-f markdown -o LICENSES.md` or `-f json -o report.json` ([schema](https://shcherbak-ai.github.io/licenseal/reference/json-report/)). The file is written even when findings or analysis gaps fail the check, so CI can publish it. This repository commits its own report as [LICENSES.md](LICENSES.md).
+For a PR comment or an audit trail, write a report with `-f markdown -o LICENSES.md` or `-f json -o report.json` ([schema](https://licenseal.shcherbak.ai/reference/json-report/)). The file is written even when findings or analysis gaps fail the check, so CI can publish it. This repository commits its own report as [LICENSES.md](LICENSES.md).
 
 ## Reviewing findings
 
-When a dependency is flagged but you have better license information than the scan found, record the reviewed license in a checked-in `licenseal.review.toml`. `licenseal init-review-file` scaffolds an entry for each flagged dependency. A review can only override a flagged dependency, and a reviewed dependency stays in the report with both its detected and its reviewed license. The workflow, the file format, and its rules are in [Review flagged dependencies](https://shcherbak-ai.github.io/licenseal/guides/review-findings/).
+When a dependency is flagged but you have better license information than the scan found, record the reviewed license in a checked-in `licenseal.review.toml`. `licenseal init-review-file` scaffolds an entry for each flagged dependency. A review can only override a flagged dependency, and a reviewed dependency stays in the report with both its detected and its reviewed license. The workflow, the file format, and its rules are in [Review flagged dependencies](https://licenseal.shcherbak.ai/guides/review-findings/).
 
 ### Claude Code review skill
 
@@ -165,7 +165,7 @@ licenseal gives each dependency license a risk level and compares it with your p
 | **Strong Copyleft** | OK | OK | OK | Warning |
 | **Network Copyleft** | OK | OK | OK | OK |
 
-MIT, BSD, and Apache-2.0 are permissive; LGPL, MPL-2.0, and EPL are weak copyleft; GPL is strong copyleft; AGPL is network copyleft. A license that cannot be classified, such as a source-available one, or a package with no license metadata, is Unknown and goes to manual review. The rules for specific license pairs, for `OR` / `AND` / `WITH` expressions, and for dev dependencies are in [How licenseal decides](https://shcherbak-ai.github.io/licenseal/concepts/verdicts/).
+MIT, BSD, and Apache-2.0 are permissive; LGPL, MPL-2.0, and EPL are weak copyleft; GPL is strong copyleft; AGPL is network copyleft. A license that cannot be classified, such as a source-available one, or a package with no license metadata, is Unknown and goes to manual review. The rules for specific license pairs, for `OR` / `AND` / `WITH` expressions, and for dev dependencies are in [How licenseal decides](https://licenseal.shcherbak.ai/concepts/verdicts/).
 
 ## How it compares
 
@@ -192,23 +192,23 @@ No tool clears every row. The discovery row is about source-tree analysis: manif
 licenseal is intentionally narrow:
 
 - It is a **license compatibility checker**, not a legal approval workflow, a vulnerability scanner, or an SBOM generator.
-- It reads **manifests, lockfiles, and public registry metadata** only. A package pinned to a private registry is looked up on the public one by name ([what leaves the process](https://shcherbak-ai.github.io/licenseal/security/data-sent/)). A dependency installed from git, a URL, or a path the scan does not read is reported as `UNKNOWN`, and nothing is requested for it ([off-registry dependencies](https://shcherbak-ai.github.io/licenseal/concepts/off-registry/)).
+- It reads **manifests, lockfiles, and public registry metadata** only. A package pinned to a private registry is looked up on the public one by name ([what leaves the process](https://licenseal.shcherbak.ai/security/data-sent/)). A dependency installed from git, a URL, or a path the scan does not read is reported as `UNKNOWN`, and nothing is requested for it ([off-registry dependencies](https://licenseal.shcherbak.ai/concepts/off-registry/)).
 - It does not infer licenses from `LICENSE` files or source comments: missing structured metadata is `UNKNOWN` and goes to manual review.
 - A review records a maintainer's decision. It is an audit record, not legal sign-off.
 
-The trust boundary and the network allowlist are in the [security model](https://shcherbak-ai.github.io/licenseal/security/).
+The trust boundary and the network allowlist are in the [security model](https://licenseal.shcherbak.ai/security/).
 
 ## Documentation
 
-The documentation is at **[shcherbak-ai.github.io/licenseal](https://shcherbak-ai.github.io/licenseal/)**:
+The documentation is at **[licenseal.shcherbak.ai](https://licenseal.shcherbak.ai/)**:
 
-- [Quick start](https://shcherbak-ai.github.io/licenseal/get-started/quick-start/) and [reading the report](https://shcherbak-ai.github.io/licenseal/get-started/read-the-report/)
-- [Run it in CI](https://shcherbak-ai.github.io/licenseal/guides/ci/) and [fix a failing check](https://shcherbak-ai.github.io/licenseal/guides/fix-a-failing-check/)
-- [What fails a check](https://shcherbak-ai.github.io/licenseal/concepts/check-failures/) and [how licenseal decides](https://shcherbak-ai.github.io/licenseal/concepts/verdicts/)
-- [Supported ecosystems](https://shcherbak-ai.github.io/licenseal/ecosystems/), with a page for each
-- [CLI reference](https://shcherbak-ai.github.io/licenseal/reference/cli/) and the [JSON report](https://shcherbak-ai.github.io/licenseal/reference/json-report/)
-- [Security model](https://shcherbak-ai.github.io/licenseal/security/): what is read, which hosts are contacted, and what is sent
-- [Changelog](https://shcherbak-ai.github.io/licenseal/changelog/)
+- [Quick start](https://licenseal.shcherbak.ai/get-started/quick-start/) and [reading the report](https://licenseal.shcherbak.ai/get-started/read-the-report/)
+- [Run it in CI](https://licenseal.shcherbak.ai/guides/ci/) and [fix a failing check](https://licenseal.shcherbak.ai/guides/fix-a-failing-check/)
+- [What fails a check](https://licenseal.shcherbak.ai/concepts/check-failures/) and [how licenseal decides](https://licenseal.shcherbak.ai/concepts/verdicts/)
+- [Supported ecosystems](https://licenseal.shcherbak.ai/ecosystems/), with a page for each
+- [CLI reference](https://licenseal.shcherbak.ai/reference/cli/) and the [JSON report](https://licenseal.shcherbak.ai/reference/json-report/)
+- [Security model](https://licenseal.shcherbak.ai/security/): what is read, which hosts are contacted, and what is sent
+- [Changelog](https://licenseal.shcherbak.ai/changelog/)
 
 ## Contributing
 

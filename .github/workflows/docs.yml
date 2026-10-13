@@ -3,7 +3,9 @@ name: Documentation
 # Builds the documentation site (docs/, zensical.toml) on every push and pull
 # request, so a broken link or anchor fails before it is merged, and
 # publishes it to GitHub Pages from main, which holds releases only: the
-# published site describes the released version.
+# published site describes the released version. Its domain,
+# licenseal.shcherbak.ai, is set in the repository's Pages settings; a
+# deployment from a workflow reads no CNAME file.
 
 on:
   push:

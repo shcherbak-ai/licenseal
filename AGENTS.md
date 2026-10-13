@@ -341,7 +341,7 @@ Add at least one `<eco>`-only repo plus one polyglot repo that includes the new 
 
 ## Documentation and package description
 
-- `README.md` is the overview. The user documentation is the site built from `docs/` (`zensical.toml`; the generator is a tool pinned in `.github/docs-constraints.txt`, not a dependency of the package; published to <https://shcherbak-ai.github.io/licenseal/> from `main`); `USAGE.md` and `JSON_OUTPUT.md` only say where their sections went, and `SECURITY.md` keeps the reporting policy, a summary, and the host list.
+- `README.md` is the overview. The user documentation is the site built from `docs/` (`zensical.toml`; the generator is a tool pinned in `.github/docs-constraints.txt`, not a dependency of the package; published to <https://licenseal.shcherbak.ai/> from `main`); `USAGE.md` and `JSON_OUTPUT.md` only say where their sections went, and `SECURITY.md` keeps the reporting policy, a summary, and the host list.
 - A behaviour change updates the page that states the behaviour, in the same change. One fact is stated on one page; other pages link to it.
 - Pages are GitHub-flavoured Markdown with relative links to each other (`../concepts/verdicts.md#the-matrix`), and call-outs in GitHub's alert syntax (`> [!NOTE]`, `> [!WARNING]`). A warning is for something that can make a report wrong or incomplete. A caveat that concerns only some readers is a note that names them.
 - The site sets no cookie and asks no third party for anything. Keep it so: no web font, no analytics, no `repo_url` in `zensical.toml`, no Mermaid or MathJax fence, no image or script from another host.
