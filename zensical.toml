@@ -121,6 +121,8 @@ md_in_html = {}
 tables = {}
 toc.permalink = "#"
 pymdownx.details = {}
+# An anchor at the start of every line of a code block. The stylesheet tells a
+# block of one line from the others by them (docs/stylesheets/extra.css).
 pymdownx.highlight.anchor_linenums = true
 pymdownx.highlight.pygments_lang_class = true
 pymdownx.inlinehilite = {}

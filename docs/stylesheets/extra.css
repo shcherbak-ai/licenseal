@@ -245,9 +245,9 @@ body,
 }
 
 /* The home page has no side columns: its text keeps a readable measure, the
-   width of the report figure. */
+   width of the report figure, and the theme's gutter on a narrow screen. */
 .md-content__inner:has(.home-name) {
-  max-width: 46.7rem;
+  max-width: min(46.7rem, 100% - 1.6rem);
   margin-inline: auto;
 }
 
@@ -276,15 +276,30 @@ body,
 }
 
 /* A code block is as wide as the running text, and wider only when its own
-   lines are. */
+   lines are. It stays in the text column on a narrow screen too, where the
+   theme would pull it out to the screen's edges. */
 .md-typeset > .highlight {
   width: fit-content;
   min-width: min(100%, 38rem);
   max-width: 100%;
+  margin-inline: 0;
 }
 
-.md-content__inner:has(.home-name) > .highlight {
-  width: auto;
+/* A block of one line is as wide as that line, with room for the copy button,
+   and never wider than the column: a command is not stretched across the
+   page. The highlighter starts every line with an anchor (anchor_linenums in
+   zensical.toml), so a block without a second one has one line. */
+.md-typeset .highlight:not(:has(code > [id^="__codelineno"] ~ [id^="__codelineno"])) {
+  width: fit-content;
+  min-width: 0;
+  max-width: 100%;
+}
+
+.md-typeset
+  .highlight:not(:has(code > [id^="__codelineno"] ~ [id^="__codelineno"]))
+  > pre
+  > code {
+  padding-right: 3.5em;
 }
 
 /* A heading's link mark shows while the pointer is on the heading, not
