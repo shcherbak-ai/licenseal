@@ -96,6 +96,7 @@ Give images descriptive alt text and check them at their README display size on 
 - `docs/assets/licenseal-wordmark.svg` is pixel art, 104 by 20 pixels. Show it at a whole multiple of that size (`width="416"`), so its pixels stay square.
 - `assets/contextgem-wordmark.svg` and `assets/tethered-wordmark.svg` are the sibling projects' pixel names, drawn at twice their size in transparent images of one size (336 by 80), so the two share a baseline. Show them at that width.
 - The figures (`licenseal-report.svg`, `licenseal-how-it-works.svg`, `resolution-flow.svg`, `data-flow.svg`) are drawn on their own dark ground, so one file serves the site and both GitHub themes. Draw a new one in their style: hairlines, monospace labels, grey, amber only for what licenseal catches.
+- `social/github-social-preview.png` is the picture a link to the repository is shown with on other sites. It is drawn in the SVG beside it, from the wordmark, the README's heading, and the README's figure. When one of those changes, change the SVG with it, render the picture again with `uv run inv social-preview` (the task needs Chrome, Edge, or Chromium), and say so in the pull request: GitHub reads no file for the social preview, so a maintainer uploads the picture in the repository's settings.
 
 The package description is [PYPI.md](PYPI.md) (`project.readme` in `pyproject.toml`). Keep it short, use absolute HTTPS links, and update it when the summary, the ecosystems, or the install commands change. Screenshots and the overview stay in the README.
 

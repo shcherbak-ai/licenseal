@@ -125,6 +125,7 @@ known-first-party = ["licenseal"]
 "tests/**/*.py" = ["S", "T20"]
 "src/licenseal/analysis/spdx.py" = ["E501"]
 "scripts/**/*.py" = ["T20"]
+"tasks.py" = ["T20"]
 
 [tool.ty.src]
 include = ["src"]
