@@ -352,6 +352,7 @@ Add at least one `<eco>`-only repo plus one polyglot repo that includes the new 
 - In `README.md`, link to the site for documentation, use relative links for repository files, and take images from `docs/assets/` (shared with the site) or `assets/` (the README's own).
 - `PYPI.md` is the short package description selected by `project.readme` in `pyproject.toml`. Keep its summary, supported ecosystems, and commands aligned with the CLI, and use absolute HTTPS links to public documentation. Builds use it directly; do not introduce README link rewriting during release.
 - `CHANGELOG.md` follows Keep a Changelog. Breaking changes stand under one heading, first in their version, and a major version points to its migration guide. Each version has a compare link at the end of the file, newest first like the sections; `tests/test_changelog.py` checks the links.
+- `cz bump` rewrites the version fields and not the release date. Before the bump, write the release day into the version's changelog heading and into `date-released` of `CITATION.cff`: `tests/test_changelog.py` compares the two, and as the last `pre_bump_hooks` entry in `pyproject.toml` it stops a bump where they differ. A stopped bump has made no commit or tag, but leaves the version fields rewritten and `uv.lock` staged: restore those files before running it again, or commitizen finds nothing to bump.
 - Follow [CONTRIBUTING.md](CONTRIBUTING.md#readme-links-and-images) when updating documentation or visuals, including example accuracy and preview checks.
 
 ## Verification
