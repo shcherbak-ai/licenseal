@@ -95,7 +95,7 @@ _PREVIEW_PAGE = f"""<!doctype html>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="color-scheme" content="light dark">
-<title>README.md</title>
+<title>README.md · licenseal</title>
 <link rel="stylesheet" href="/{_MARKDOWN_CSS}">
 <style>
   body {{ margin: 0; background: #ffffff; }}
