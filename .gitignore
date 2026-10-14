@@ -23,9 +23,10 @@ coverage.xml
 # Linting
 .ruff_cache/
 
-# IDE
+# IDE: the extensions the project recommends are shared
 .idea/
-.vscode/
+.vscode/*
+!.vscode/extensions.json
 *.swp
 *.swo
 
@@ -41,10 +42,18 @@ Thumbs.db
 credentials.json
 token.json
 
-# Agents
+# Agents: Claude Code's project settings and their hooks are shared
 .agents/
-.claude/
+.claude/*
+!.claude/settings.json
+!.claude/hooks/
 .codex/
+
+# Development tools that npm installs (package.json)
+node_modules/
+
+# Playwright artifacts: what the agents' browser saves goes in .playwright-mcp/
+.playwright*
 
 # Licenseal scans
 licenseal-scans/

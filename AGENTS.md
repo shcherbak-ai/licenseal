@@ -360,6 +360,16 @@ Add at least one `<eco>`-only repo plus one polyglot repo that includes the new 
 - `cz bump` rewrites the version fields and not the release date. Before the bump, write the release day into the version's changelog heading and into `date-released` of `CITATION.cff`: `tests/test_changelog.py` compares the two, and as the last `pre_bump_hooks` entry in `pyproject.toml` it stops a bump where they differ. A stopped bump has made no commit or tag, but leaves the version fields rewritten and `uv.lock` staged: restore those files before running it again, or commitizen finds nothing to bump.
 - Follow [CONTRIBUTING.md](CONTRIBUTING.md#readme-links-and-images) when updating documentation or visuals, including example accuracy and preview checks.
 
+## Checking the README in a browser
+
+- **A change to `README.md`, or to an image it shows, isn't done until the README was looked at as GitHub renders it**: at 1280 pixels wide (`browser_resize` to 1280x900) and at 390 (390x844), in light and in dark (`browser_emulate_media` with `colorScheme`), with the figure played to its end. Say what you looked at, and what you couldn't check.
+- **`uv run inv readme-preview` serves it at `http://127.0.0.1:9100/`.** Ask that address first and use what answers, else start the task in the background. What the page shows, and how often it asks GitHub, is in [CONTRIBUTING.md](CONTRIBUTING.md#readme-links-and-images).
+- **Use the `playwright` browser** ([Playwright MCP](https://github.com/microsoft/playwright-mcp)). `.mcp.json` starts it, in the version that `package-lock.json` holds (`npm ci` installs it), once the developer has approved it: the installed Chrome, without a window, with a fresh profile for each session. Drive it a step at a time with its tools (`browser_navigate`, `browser_resize`, `browser_emulate_media`, `browser_take_screenshot`, `browser_evaluate`), and don't write Playwright scripts of your own.
+  - It refuses addresses other than `localhost`, `127.0.0.1`, and `camo.githubusercontent.com`, GitHub's image proxy, which serves the badges (`--allowed-origins`). That catches a mistake and isn't a security boundary.
+- **The figure plays for a few seconds after the page loads**, so a screenshot taken at once catches it part-way: wait, then take it. Emulated reduced motion doesn't reach an image inside `<img>`. To check that the figure stops, open the SVG itself (`http://127.0.0.1:9100/docs/assets/licenseal-report.svg`) with `reducedMotion: "reduce"`: it shows the whole figure at once.
+- **Everything the browser saves goes in `.playwright-mcp/`**, which git ignores, and nothing in the project's root. It puts the files it names itself there; a file that you name is taken from the root, so name it with the folder: `.playwright-mcp/readme-390.png`. In Claude Code a hook refuses any other name (`.claude/hooks/playwright-files.mjs`, which `.claude/settings.json` starts before each of the browser's tools; pre-commit runs its tests).
+- **Clear out your own files when the work is done.** Delete what your session put in `.playwright-mcp/`, never the folder as a whole: another session may be using it. A screenshot that your last message asks the developer to look at stays, named in that message.
+
 ## Verification
 
 Run the full pre-commit suite and the tests before submitting changes:
@@ -369,7 +379,7 @@ uv run pre-commit run --all-files
 uv run pytest -n 8 --cov=licenseal --cov-report=term-missing
 ```
 
-`pre-commit` is the authoritative static gate and mirrors CI — it runs ruff (check + format), ty, bandit, markdownlint, deptry, the lockfile check (`uv lock --check`), interrogate, vulture, and the SPDX-ID validator. Running only `ruff check` / `ty check` skips bandit, markdownlint, and the SPDX validator, so a green local run can still fail CI. `pytest` is not a pre-commit hook; run it separately.
+`pre-commit` is the authoritative static gate and mirrors CI — it runs ruff (check + format), ty, bandit, markdownlint, deptry, the lockfile check (`uv lock --check`), interrogate, vulture, the SPDX-ID validator, and the tests of the Claude Code hook (with Node). Running only `ruff check` / `ty check` skips bandit, markdownlint, and the SPDX validator, so a green local run can still fail CI. `pytest` is not a pre-commit hook; run it separately.
 
 ### Stress-testing on real repos
 

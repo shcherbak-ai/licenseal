@@ -7,13 +7,14 @@
 
 ## Setup
 
-Requires Python 3.11+ and [uv](https://docs.astral.sh/uv/).
+Requires Python 3.11+ and [uv](https://docs.astral.sh/uv/), and [Node.js](https://nodejs.org/) for the development tools that `package.json` lists: the stylesheet of the README preview and the agents' browser. None of them is part of the package.
 
 ```bash
 git clone https://github.com/shcherbak-ai/licenseal.git
 cd licenseal
 git checkout dev
 uv sync
+npm ci
 uv run pre-commit install --hook-type pre-commit --hook-type commit-msg
 ```
 
@@ -31,6 +32,7 @@ Runs automatically on every commit:
 - **vulture** — dead-code detection on `src/`
 - **validate-spdx-ids** — verify SPDX IDs referenced in `src/licenseal/analysis/` exist in the vendored canonical list
 - **file hygiene** — `trailing-whitespace`, `end-of-file-fixer`, `check-yaml`, `check-toml`
+- **claude hooks tests** — the tests of the Claude Code hook in `.claude/hooks/` and of the settings that start it, with `node --test`
 - **commitizen** — commit messages follow Conventional Commits (`fix: …`, `feat: …`)
 
 Manual run:
@@ -97,6 +99,12 @@ Give images descriptive alt text and check them at their README display size on 
 - `assets/contextgem-wordmark.svg` and `assets/tethered-wordmark.svg` are the sibling projects' pixel names, drawn at twice their size in transparent images of one size (336 by 80), so the two share a baseline. Show them at that width.
 - The figures (`licenseal-report.svg`, `licenseal-how-it-works.svg`, `resolution-flow.svg`, `data-flow.svg`) are drawn on their own dark ground, so one file serves the site and both GitHub themes. Draw a new one in their style: hairlines, monospace labels, grey, amber only for what licenseal catches.
 - `social/github-social-preview.png` is the picture a link to the repository is shown with on other sites. It is drawn in the SVG beside it, from the wordmark, the README's heading, and the README's figure. When one of those changes, change the SVG with it, render the picture again with `uv run inv social-preview` (the task needs Chrome, Edge, or Chromium), and say so in the pull request: GitHub reads no file for the social preview, so a maintainer uploads the picture in the repository's settings.
+
+Look at a change as GitHub will show it before pushing it. `uv run inv readme-preview` serves `README.md` at <http://127.0.0.1:9100/> (`--port N` for another port):
+
+- The HTML is what GitHub's Markdown API returns for the file, so what GitHub removes from a README is removed here too.
+- The look comes from github-markdown-css, in GitHub's colours, light or dark as the browser is set. The column is as wide as GitHub's at 1280 pixels and wider, and below 768.
+- A reload sends the README to GitHub again when it has changed. GitHub allows 60 of those an hour without a token.
 
 The package description is [PYPI.md](PYPI.md) (`project.readme` in `pyproject.toml`). Keep it short, use absolute HTTPS links, and update it when the summary, the ecosystems, or the install commands change. Screenshots and the overview stay in the README.
 

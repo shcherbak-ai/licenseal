@@ -5,11 +5,21 @@ List them with ``uv run inv --list``.
 
 from __future__ import annotations
 
+import contextlib
+import functools
+import http.server
+import io
+import posixpath
 import shutil
 import socket
 import tempfile
+import urllib.parse
+from datetime import datetime
+from html import escape
+from http import HTTPStatus
 from pathlib import Path
 
+import httpx
 from invoke import task
 from invoke.context import Context
 from invoke.exceptions import Exit
@@ -19,6 +29,8 @@ _ROOT = Path(__file__).parent
 # The site generator runs as a tool at the versions pinned in the constraints
 # file. It is not a dependency of the package, so it is not in uv.lock.
 _ZENSICAL = "uvx --constraints .github/docs-constraints.txt zensical"
+
+_README = _ROOT / "README.md"
 
 # The repository's social preview: the drawing, and the picture made from it.
 _SOCIAL_PREVIEW = _ROOT / "social" / "github-social-preview.svg"
@@ -60,6 +72,122 @@ def _port_in_use(port: int) -> bool:
             if probe.connect_ex(address) == 0:
                 return True
     return False
+
+
+# GitHub's Markdown API renders the README's HTML, in the mode of a file in a
+# repository. Without a token it answers 60 requests an hour.
+_MARKDOWN_API = "https://api.github.com/markdown"
+
+# github-markdown-css gives the page GitHub's look; npm installs it (package.json).
+_MARKDOWN_CSS = "node_modules/github-markdown-css/github-markdown.css"
+
+# What the preview serves besides its page: the stylesheet, and the folders the
+# README's images come from. Nothing else in the repository is reachable.
+_PREVIEW_PATHS = ("node_modules/github-markdown-css/", "docs/assets/", "assets/")
+
+# The page around GitHub's HTML. The column is as wide as the README's on the
+# repository's page on GitHub at 1280 pixels and wider, and below 768, where the
+# sidebar goes under it; in between, GitHub's is narrower. The grounds are
+# GitHub's light and dark ones, and links are underlined, as GitHub has them.
+_PREVIEW_PAGE = f"""<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<title>README.md</title>
+<link rel="stylesheet" href="/{_MARKDOWN_CSS}">
+<style>
+  body {{ margin: 0; background: #ffffff; }}
+  @media (prefers-color-scheme: dark) {{ body {{ background: #0d1117; }} }}
+  .markdown-body {{
+    box-sizing: content-box; max-width: 838px; margin: 0 auto; padding: 32px 33px;
+  }}
+  .markdown-body a {{ text-decoration: underline; }}
+</style>
+</head>
+<body>
+<article class="markdown-body">
+<!-- README -->
+</article>
+</body>
+</html>
+"""
+
+
+class _RenderError(Exception):
+    """GitHub did not render the README; the message says why."""
+
+
+@functools.lru_cache(maxsize=1)
+def _render_readme(text: str) -> str:
+    """The HTML GitHub makes of ``text`` as a repository's README.
+
+    The last result is kept, so a page reload asks GitHub again only when the
+    README has changed.
+    """
+    try:
+        response = httpx.post(
+            _MARKDOWN_API,
+            json={"text": text, "mode": "markdown"},
+            headers={
+                "Accept": "application/vnd.github+json",
+                "X-GitHub-Api-Version": "2022-11-28",
+            },
+            timeout=30,
+        )
+    except httpx.HTTPError as error:
+        raise _RenderError(f"GitHub's Markdown API could not be reached: {error}") from error
+    if response.is_success:
+        return response.text
+    if response.headers.get("x-ratelimit-remaining") == "0":
+        reset = datetime.fromtimestamp(int(response.headers.get("x-ratelimit-reset", "0")))
+        raise _RenderError(f"GitHub's limit of 60 requests an hour is used up until {reset:%H:%M}.")
+    raise _RenderError(f"GitHub's Markdown API answered {response.status_code}: {response.text}")
+
+
+class _ReadmePreview(http.server.SimpleHTTPRequestHandler):
+    """Serves README.md as GitHub renders it at ``/``, and the files its page loads."""
+
+    # Windows can map these types to others in its registry, and a browser
+    # refuses a stylesheet that is not served as text/css.
+    extensions_map = {
+        **http.server.SimpleHTTPRequestHandler.extensions_map,
+        ".css": "text/css",
+        ".png": "image/png",
+        ".svg": "image/svg+xml",
+    }
+
+    def send_head(self):
+        """Answer ``/`` with the page, a path under ``_PREVIEW_PATHS`` with its file."""
+        path = urllib.parse.unquote(urllib.parse.urlsplit(self.path).path)
+        path = posixpath.normpath(path).lstrip("/")
+        if not path:
+            return self._send_page()
+        if path.startswith(_PREVIEW_PATHS):
+            return super().send_head()
+        self.send_error(HTTPStatus.NOT_FOUND, "The preview serves the README and its images only")
+        return None
+
+    def end_headers(self) -> None:
+        """Ask the browser not to keep anything, so a reload shows an edited image."""
+        self.send_header("Cache-Control", "no-store")
+        super().end_headers()
+
+    def _send_page(self) -> io.BytesIO:
+        """Send the headers of the page, and return its body."""
+        try:
+            html = _render_readme(_README.read_text(encoding="utf-8"))
+            status, page = HTTPStatus.OK, _PREVIEW_PAGE.replace("<!-- README -->", html)
+        except _RenderError as error:
+            print(error)
+            status, page = HTTPStatus.BAD_GATEWAY, f"<pre>{escape(str(error))}</pre>"
+        body = page.encode()
+        self.send_response(status)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        return io.BytesIO(body)
 
 
 # =============================================================================
@@ -107,6 +235,40 @@ def docs_live(c: Context, port: int = 9000) -> None:
         )
     with c.cd(str(_ROOT)):
         c.run(f"{_ZENSICAL} serve --dev-addr localhost:{port}")
+
+
+@task(name="readme-preview")
+def readme_preview(c: Context, port: int = 9100) -> None:
+    """
+    Serve README.md as GitHub renders it, to look at before it is pushed.
+
+    GitHub's Markdown API makes the HTML, so what GitHub removes is removed,
+    and github-markdown-css gives it GitHub's look (``npm ci`` installs it).
+    A reload renders the README again when it has changed, one request to
+    GitHub each: 60 an hour are allowed without a token.
+
+    Args:
+        port: Port number for the preview server (default: 9100)
+
+    Example:
+        uv run inv readme-preview
+        uv run inv readme-preview --port 9101
+    """
+    if not (_ROOT / _MARKDOWN_CSS).is_file():
+        raise Exit("The preview needs github-markdown-css. Install it first: npm ci", code=1)
+    if _port_in_use(port):
+        raise Exit(
+            f"Port {port} is in use by another program. Pass a free one: "
+            f"uv run inv readme-preview --port {port + 1}",
+            code=1,
+        )
+    handler = functools.partial(_ReadmePreview, directory=str(_ROOT))
+    # 127.0.0.1, not localhost: on Windows a request to localhost tries IPv6
+    # first and waits two seconds for the refusal.
+    with http.server.ThreadingHTTPServer(("127.0.0.1", port), handler) as server:
+        print(f"Serving README.md at http://127.0.0.1:{port}/ (Ctrl+C stops it)", flush=True)
+        with contextlib.suppress(KeyboardInterrupt):
+            server.serve_forever()
 
 
 # =============================================================================
