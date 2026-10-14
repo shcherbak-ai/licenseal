@@ -27,10 +27,9 @@
 </p>
 
 <p align="center">
-  <img src="docs/assets/licenseal-report.svg" alt="licenseal report for an illustrative MIT project: client, transport and parser are compatible; certs, brought in through client under GPL-3.0-only, is a violation. Summary: 1 violation, 3 ok." width="832">
+  <img src="docs/assets/licenseal-report.svg" alt="licenseal report for an illustrative MIT project: client, transport and parser are compatible; certs, brought in through client under GPL-3.0-only, is a violation. Summary: 1 violation, 3 ok." width="832"><br>
+  <sup>Illustrative packages. The report is licenseal's own output.</sup>
 </p>
-
-<p align="center"><sub>Illustrative packages. The report is licenseal's own output.</sub></p>
 <!-- markdownlint-enable MD033 -->
 
 **licenseal is a fast license compatibility checker for dependency trees across language ecosystems.** It reads manifests, lockfiles, and public registry metadata and tells you whether your dependency licenses are compatible with the license you ship under, fast enough to run in CI. It does not install dependencies, run package-manager commands, execute build scripts, or download package archives.
