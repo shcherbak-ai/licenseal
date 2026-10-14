@@ -20,7 +20,7 @@
 |  └─ [mdurl (0.1.2)](https://pypi.org/project/mdurl/)|python|prod||[MIT](https://spdx.org/licenses/MIT.html)|permissive|✓|
 |  └─ [pygments (2.21.0)](https://pypi.org/project/pygments/)|python|prod||[BSD-2-Clause](https://spdx.org/licenses/BSD-2-Clause.html)|permissive|✓|
 |[semantic-version (2.10.0)](https://pypi.org/project/semantic-version/)|python|prod|[pyproject.toml](pyproject.toml)|[BSD-3-Clause](https://spdx.org/licenses/BSD-3-Clause.html)|permissive|✓|
-|[tethered (0.5.3)](https://pypi.org/project/tethered/)|python|prod|[pyproject.toml](pyproject.toml)|[MIT](https://spdx.org/licenses/MIT.html)|permissive|✓|
+|[tethered (1.0.0)](https://pypi.org/project/tethered/)|python|prod|[pyproject.toml](pyproject.toml)|[MIT](https://spdx.org/licenses/MIT.html)|permissive|✓|
 
 **Summary:** 0 violations, 1 warning, 0 unknown, 16 ok (of which 1 reviewed)
 
