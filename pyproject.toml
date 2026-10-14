@@ -11,7 +11,7 @@ license = "Apache-2.0"
 license-files = ["LICENSE", "NOTICE"]
 keywords = ["license", "compliance", "spdx", "dependencies", "python", "pypi", "javascript", "typescript", "npm", "rust", "crates", "go", "java", "jvm", "maven", "gradle", "dotnet", "nuget", "php", "composer", "packagist", "ruby", "rubygems", "elixir", "erlang", "hex", "r", "cran"]
 classifiers = [
-    "Development Status :: 3 - Alpha",
+    "Development Status :: 5 - Production/Stable",
     "Intended Audience :: Developers",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.11",
