@@ -52,8 +52,8 @@ token.json
 # Development tools that npm installs (package.json)
 node_modules/
 
-# Playwright artifacts: what the agents' browser saves goes in .playwright-mcp/
-.playwright*
+# What the agents' browser (Playwright MCP) saves
+/.playwright-mcp/
 
 # Licenseal scans
 licenseal-scans/
