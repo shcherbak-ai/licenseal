@@ -34,11 +34,12 @@ repos:
         language: system
         types: [python]
         pass_filenames: false
+      # Imports against declared dependencies, so a change to either runs it.
       - id: deptry
         name: deptry
         entry: uv run deptry .
         language: system
-        types: [python]
+        types_or: [python, toml]
         pass_filenames: false
       - id: uv-lock
         name: uv lock check
