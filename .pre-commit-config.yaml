@@ -1,3 +1,8 @@
+# A hook without `stages` runs at every installed stage. At commit-msg it is
+# given the message file, so a hook without a file filter (uv lock --check)
+# would run a second time for each commit.
+default_stages: [pre-commit]
+
 repos:
   - repo: https://github.com/pre-commit/pre-commit-hooks
     rev: 3e8a8703264a2f4a69428a0aa4dcb512790b2c8c  # v6.0.0
