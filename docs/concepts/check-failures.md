@@ -30,11 +30,11 @@ An **analysis gap** is something the scan could not read, so a dependency may be
 - a manifest or lockfile that cannot be read (permission or I/O error, or larger than 128 MiB), decoded, or parsed, and a directory that cannot be traversed;
 - a value of a type its format does not allow (`"dependencies": []` in `package.json`): the value is ignored and the rest of the file is read;
 - a lockfile that cannot be used: a format version licenseal does not read (`pnpm-lock.yaml` below `lockfileVersion` 6), no entry in a readable form, or merge-conflict markers.
-  - The direct dependencies it would have covered are resolved through the registry instead.
-  - These three checks are not made for `Cargo.lock`, `go.sum`, `packages.lock.json`, `project.assets.json`, `paket.lock`, or `rebar.lock`: an entry of one of those that cannot be read is skipped without a diagnostic;
+    - The direct dependencies it would have covered are resolved through the registry instead.
+    - These three checks are not made for `Cargo.lock`, `go.sum`, `packages.lock.json`, `project.assets.json`, `paket.lock`, or `rebar.lock`: an entry of one of those that cannot be read is skipped without a diagnostic;
 - a reference to another file that is not followed:
-  - an MSBuild `<Import>` or `go.work` `use` that is not a relative path;
-  - a requirements `-r` include or setuptools `file:` directive that is a URL, is not a relative path, is not a file, or leaves the scanned directory;
+    - an MSBuild `<Import>` or `go.work` `use` that is not a relative path;
+    - a requirements `-r` include or setuptools `file:` directive that is a URL, is not a relative path, is not a file, or leaves the scanned directory;
 - a package whose dependency list the registry did not return during a [registry walk](dependency-resolution.md): the package is reported, and what it requires may be missing. `--no-require-lockfile` does not waive this one;
 - two ecosystem-specific cases: a `composer.json` with repositories and no `composer.lock` (see [PHP](../ecosystems/php.md)), and a `go.mod` below `go 1.17` with `go.sum` rows missing (see [Go](../ecosystems/go.md));
 - a [manifest without a lockfile](#a-manifest-without-a-lockfile), described below.
@@ -46,10 +46,10 @@ A **manifest without a lockfile** is one that declares a direct dependency no lo
 - That dependency and everything under it are resolved through the registry, and the result is an [estimate](version-resolution.md#estimates) of what the project installs. An [off-registry dependency](off-registry.md) that no lockfile records counts too.
 - With `--require-lockfile` (the default) the manifest is an analysis gap. With `--no-require-lockfile` it is listed under **Estimates** in the table and Markdown formats, has severity `estimate` in JSON `diagnostics`, and does not fail.
 - Exempt, with no diagnostic:
-  - Go;
-  - `--no-transitive`;
-  - a manifest whose only uncovered dependencies are dev dependencies in a scan without `--dev`;
-  - a manifest of a tool with no lockfile format (Maven `pom.xml`, NuGet `packages.config`, an erlang.mk `Makefile`), whose rows are still marked as estimates where licenseal picked the version.
+    - Go;
+    - `--no-transitive`;
+    - a manifest whose only uncovered dependencies are dev dependencies in a scan without `--dev`;
+    - a manifest of a tool with no lockfile format (Maven `pom.xml`, NuGet `packages.config`, an erlang.mk `Makefile`), whose rows are still marked as estimates where licenseal picked the version.
 
 ## Format versions and encodings
 

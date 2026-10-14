@@ -19,10 +19,10 @@ licenseal is a license resolver, not a dependency resolver: it does not resolve 
 
 - **Estimated versions.** A version that licenseal picked from a registry is marked: `~1.2.3` in the table and Markdown formats, with a legend line under the table, and `"estimated": ["version"]` in JSON. That is every transitive row that does not come from a lockfile and every direct dependency declared with a range or with no constraint. A row a lockfile supplies, an exact pin, a Maven version the parent chain manages, and a Go version are not marked.
 - **Estimated licenses.** A license read from metadata that describes another release than the reported one is marked `~MIT`, and `"license"` in the JSON `estimated` array. The mark is not a finding by itself, and the license is judged like any other: an estimated `GPL-3.0-only` in an MIT project is a violation. A license is an estimate where a registry does not serve it per release:
-  - an R package pinned to a version other than the one the CRAN index lists;
-  - a Hex package reported at a release other than the one published last;
-  - a Python release that declares no license in its own PyPI metadata or wheel metadata, which takes the license of the project's latest release;
-  - a Python release that PyPI does not have.
+    - an R package pinned to a version other than the one the CRAN index lists;
+    - a Hex package reported at a release other than the one published last;
+    - a Python release that declares no license in its own PyPI metadata or wheel metadata, which takes the license of the project's latest release;
+    - a Python release that PyPI does not have.
 
 ## Failed lookups and rate limits
 

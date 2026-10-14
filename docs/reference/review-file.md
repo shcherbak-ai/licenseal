@@ -24,12 +24,12 @@ description: "The keys of a licenseal.review.toml entry and the rules an entry m
 - An entry with a `source` key matches on ecosystem, package, and `source`, compared with the row's `origin` exactly, and on `version` when the entry has one. An entry keyed on a commit applies to that commit only. One keyed on a **branch or a tag** (all a manifest without a lockfile can say), on a bare repository URL, on a URL without a hash, or on a path keeps applying when the code there changes; pin a commit, or commit a lockfile, to get an immutable key.
 - `license` is a license expression. Each license in it must be an SPDX identifier (current or deprecated), a source-available license licenseal recognises (`BUSL-`, `FSL-`, `PolyForm-`, …), `Proprietary`, or a `LicenseRef-` reference; an exception after `WITH` is not checked against a list. A comma- or slash-separated list is not accepted: join the licenses with `OR` or `AND`.
 - These fail the command:
-  - an entry that matches a compatible dependency (only a flagged one can be overridden);
-  - a filled-in entry that matches no reported row (an old version after an upgrade, or a dev dependency in a scan without `--dev`): see [After an upgrade](../guides/review-findings.md#after-an-upgrade);
-  - a missing `ecosystem`, `package`, or `version` (`version` is optional beside `source`), or a value that is not a string;
-  - an unknown ecosystem;
-  - a duplicate;
-  - a `license` that breaks the rule above.
+    - an entry that matches a compatible dependency (only a flagged one can be overridden);
+    - a filled-in entry that matches no reported row (an old version after an upgrade, or a dev dependency in a scan without `--dev`): see [After an upgrade](../guides/review-findings.md#after-an-upgrade);
+    - a missing `ecosystem`, `package`, or `version` (`version` is optional beside `source`), or a value that is not a string;
+    - an unknown ecosystem;
+    - a duplicate;
+    - a `license` that breaks the rule above.
 - An entry whose `license` is empty is not applied, and `check` names it in a `Warning:` that is not an analysis gap.
 - `licenseal.review.toml` and the report passed to `--from-report` must be UTF-8; write the report with `-o report.json` rather than a shell redirect.
 - A reviewed dependency never fails the check, whatever verdict its reviewed license gets. Unreviewed warnings, violations, and unknowns still fail. An [analysis gap](../concepts/check-failures.md#analysis-gaps) cannot be reviewed: fix the file, commit a lockfile, or pass `--no-require-lockfile`.

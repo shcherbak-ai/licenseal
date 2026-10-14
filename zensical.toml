@@ -120,6 +120,9 @@ attr_list = {}
 md_in_html = {}
 tables = {}
 toc.permalink = "#"
+# A heading's anchor is the one GitHub gives it, so a link between two pages
+# works in the repository and on the site ("a + b" is "a--b" in both).
+toc.slugify = { object = "pymdownx.slugs.slugify", kwds = { case = "lower" } }
 pymdownx.details = {}
 # An anchor at the start of every line of a code block. The stylesheet tells a
 # block of one line from the others by them (docs/stylesheets/extra.css).

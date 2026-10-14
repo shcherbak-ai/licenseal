@@ -1,0 +1,6 @@
+# The pages of the documentation site, on top of the repository's rules.
+config:
+  # A nested list item is indented by four spaces: the site's Markdown reader
+  # (Python-Markdown) takes less for running text. GitHub reads both the same.
+  ul-indent:
+    indent: 4

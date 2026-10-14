@@ -14,7 +14,7 @@ What licenseal reads in an R package. The rules that hold for every ecosystem ar
 ## What is read
 
 - `Imports`, `Depends`, and `LinkingTo` in `DESCRIPTION` are read as production.
-- R's license grammar (`GPL (>= 2)`, `MIT + file LICENSE`) is translated to SPDX; a bare `file LICENSE` is `UNKNOWN`. See [License expressions](../concepts/license-expressions.md#r-file-license).
+- R's license grammar (`GPL (>= 2)`, `MIT + file LICENSE`) is translated to SPDX; a bare `file LICENSE` is `UNKNOWN`. See [License expressions](../concepts/license-expressions.md#r--file-license).
 
 ## Dev dependencies
 
