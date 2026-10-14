@@ -40,6 +40,10 @@ uvx licenseal check
 
 > **Not legal advice.** licenseal automates dependency-license discovery and compatibility classification. It is a CI/audit aid, not a substitute for legal review.
 
+<!-- markdownlint-disable MD033 -->
+<p align="center"><img src="assets/licenseal-separator.svg" alt="" width="446" height="22"></p>
+<!-- markdownlint-enable MD033 -->
+
 ## Why it matters
 
 License non-compliance is a quiet delivery risk: it usually does not break the build, but it can block a shipment, customer approval, funding round, or acquisition when discovered late.
@@ -97,6 +101,10 @@ licenseal reads the manifests and lockfiles in your repository, resolves the tra
 </p>
 
 The manifests, lockfiles, and registries read for each are listed under [Supported ecosystems](https://licenseal.shcherbak.ai/ecosystems/).
+
+<!-- markdownlint-disable MD033 -->
+<p align="center"><img src="assets/licenseal-separator.svg" alt="" width="446" height="22"></p>
+<!-- markdownlint-enable MD033 -->
 
 ## Quick start
 
@@ -156,6 +164,10 @@ licenseal install-skill
 The skill runs `licenseal check`, walks through warnings, violations, unknown licenses, and analysis gaps, and asks how your project is distributed, hosted, modified, or shipped. It fills `licenseal.review.toml` only when there is a concrete reviewable rationale, keeps genuine incompatibilities flagged, and re-runs the check so what is still flagged is explicit.
 
 [![Claude Code licenseal review skill asking whether MPL dependencies were modified before marking them reviewed](docs/assets/claude-skill-question.png)](docs/assets/claude-skill-question.png)
+
+<!-- markdownlint-disable MD033 -->
+<p align="center"><img src="assets/licenseal-separator.svg" alt="" width="446" height="22"></p>
+<!-- markdownlint-enable MD033 -->
 
 ## How licenseal decides
 
@@ -220,6 +232,10 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for development setup and guidelines. If 
 ## License
 
 [Apache-2.0](LICENSE). See [`LICENSE`](LICENSE) for the full text and [`NOTICE`](NOTICE) for attribution.
+
+<!-- markdownlint-disable MD033 -->
+<p align="center"><img src="assets/licenseal-separator.svg" alt="" width="446" height="22"></p>
+<!-- markdownlint-enable MD033 -->
 
 ## More from shcherbak_ai
 
