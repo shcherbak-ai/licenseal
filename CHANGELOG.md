@@ -144,6 +144,7 @@ Each of these is now an analysis gap on the file, reported on stderr and in the 
 - `check` reports dependencies from an off-registry source on their own stderr line. The `could not be resolved from registries` warning counts failed lookups only.
 - TOML manifests and lockfiles written as UTF-16, UTF-32, or UTF-8 with a byte-order mark are read.
 - A lockfile in a format version newer than licenseal was written for is read on a best-effort basis and reported with a warning that does not fail strict mode. Yarn Berry lockfiles up to metadata version 10 are read without one.
+- Python 3.15 is supported, and the test matrix runs on it. PyYAML publishes no wheel for 3.15 yet, so installing licenseal there builds PyYAML from source. That needs no compiler, but fails where source builds are switched off (`pip --only-binary :all:`, `uv --no-build`).
 
 ### Fixed
 
