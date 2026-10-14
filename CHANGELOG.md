@@ -4,7 +4,7 @@ All notable changes to this project will be documented in this file. Each versio
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/), and this project adheres to [Semantic Versioning](https://semver.org/).
 
-## [1.0.0] - 2026-10-13
+## [1.0.0] - 2026-10-14
 
 Most of the changes since 0.4.2 close cases where a scan passed although it had missed dependencies, misread a license, or skipped a file without saying so. A check that passes on 0.4.2 can therefore fail on 1.0.0 with no change to the project. A `licenseal.review.toml` entry can also stop matching, which is an error, when its dependency is now reported at another version or is no longer reported. Every change of that kind is listed under **Breaking changes**, together with changes to defaults, report values, the review file, and install requirements.
 

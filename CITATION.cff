@@ -3,8 +3,8 @@ message: "If you use this software, please cite it as below."
 type: software
 title: "Licenseal"
 abstract: "License compatibility checker for Python, JS/TS, Rust, Go, Java/JVM, .NET, PHP, Ruby, Elixir/Erlang, and R dependencies"
-version: 0.4.2
-date-released: 2026-09-26
+version: 1.0.0
+date-released: 2026-10-14
 license: Apache-2.0
 repository-code: "https://github.com/shcherbak-ai/licenseal"
 url: "https://github.com/shcherbak-ai/licenseal"
