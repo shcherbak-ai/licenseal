@@ -7,6 +7,7 @@ import hashlib
 import io
 import sys
 import time
+import urllib.request
 from collections.abc import Generator, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
@@ -181,6 +182,55 @@ def _http_headers(command_name: str) -> dict[str, str]:
         "Accept": "application/json",
         "User-Agent": f"licenseal/{_package_version()} ({_PROJECT_URL}; {command_name})",
     }
+
+
+def _registry_client(command_name: str) -> tuple[httpx.Client, list[str]]:
+    """Build the registry client and the allow list of the scope it runs in.
+
+    licenseal picks the proxy itself and gives the same answer to the client and
+    to the allow list: a proxy the client found on its own would be refused by
+    the scope. It is the one httpx would pick: ``HTTPS_PROXY``, else
+    ``ALL_PROXY``, or on Windows and macOS the system proxy when no variable names
+    one (``urllib.request.getproxies``). A registry host that ``NO_PROXY`` lists
+    is reached directly. The client is handed its transports, so it reads no
+    proxy setting of its own.
+
+    The transports keep httpx's ``trust_env`` default, which honors
+    ``SSL_CERT_FILE`` and ``SSL_CERT_DIR``, as a proxy that inspects TLS needs.
+    No credentials are read: httpx (>=0.28) reads ``~/.netrc`` only through an
+    explicit ``NetRCAuth``, which licenseal does not use, and licenseal sets no
+    ``Authorization`` header. A proxy sees only the package-coordinate requests
+    every registry sees.
+    """
+    proxies = urllib.request.getproxies()
+    proxy = proxies.get("https") or proxies.get("all")
+    hosts = [rule.rpartition(":")[0] for rule in _REGISTRY_HOSTS]
+    # NO_PROXY as curl reads it: a name covers itself and its subdomains, and
+    # ``*`` covers every host. Not ``urllib.request.proxy_bypass``, which on
+    # Windows and macOS reads the system's exception list and looks each host
+    # up in DNS to match it.
+    exempt = [name.strip().lstrip(".").lower() for name in proxies.get("no", "").split(",")]
+    bypassed = [
+        host
+        for host in hosts
+        if "*" in exempt
+        or any(host == name or host.endswith(f".{name}") for name in exempt if name)
+    ]
+    direct = httpx.HTTPTransport()
+    transport = direct
+    allow = list(_REGISTRY_HOSTS)
+    if proxy and len(bypassed) < len(hosts):
+        url = httpx.URL(proxy if "://" in proxy else f"http://{proxy}")
+        transport = httpx.HTTPTransport(proxy=url)
+        proxy_host = f"[{url.host}]" if ":" in url.host else url.host
+        allow.append(f"{proxy_host}:{url.port or (443 if url.scheme == 'https' else 80)}")
+    client = httpx.Client(
+        timeout=_REQUEST_TIMEOUT_SECONDS,
+        headers=_http_headers(command_name),
+        transport=transport,
+        mounts={f"all://{host}": direct for host in bypassed},
+    )
+    return client, allow
 
 
 def _worker_count(dep_count: int, max_workers: int) -> int:
@@ -590,24 +640,13 @@ def _resolve_license_infos(
         # cleanly through ``analyze()`` and the renderers, so the caller still
         # emits a valid (empty) report.
         return []
+    # licenseal must work behind a corporate egress proxy, common in the
+    # compliance-focused orgs that run it.
+    client, allow = _registry_client(command_name)
     try:
         with (
-            tethered.scope(
-                allow=_REGISTRY_HOSTS,
-                label="licenseal.resolve",
-                hint=_TETHERED_HINT,
-            ),
-            # Keep httpx's default ``trust_env=True`` so ``HTTP(S)_PROXY`` is
-            # honored — licenseal must work behind a corporate egress proxy,
-            # common in the compliance-focused orgs that run it. This exposes no
-            # credentials: httpx (>=0.28) never reads ``~/.netrc`` implicitly —
-            # only via an explicit ``NetRCAuth``, which licenseal does not use —
-            # and licenseal sets no ``Authorization`` header. The proxy sees only
-            # the same package-coordinate requests every registry does.
-            httpx.Client(
-                timeout=_REQUEST_TIMEOUT_SECONDS,
-                headers=_http_headers(command_name),
-            ) as client,
+            tethered.scope(allow=allow, label="licenseal.resolve", hint=_TETHERED_HINT),
+            client,
         ):
             # One URL cache for the whole scan. The walker hammers a
             # narrow set of URLs (popular transitives are referenced by
@@ -996,7 +1035,8 @@ def _resolve_license_infos(
         raise click.ClickException(
             f"{exc}\n"
             "If a host tethered policy is in effect (tethered.activate() or an "
-            "enclosing tethered.scope()), include the hosts above in its allowlist."
+            "enclosing tethered.scope()), include the hosts above in its allowlist, "
+            "and the proxy licenseal uses, if one is set."
         ) from exc
 
 

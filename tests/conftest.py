@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import threading
+import urllib.request
 
 import click
 import httpx
@@ -30,6 +31,20 @@ def _pin_terminal_environment(monkeypatch):
     for name in ("TERM", "FORCE_COLOR", "NO_COLOR", "LINES", "TTY_COMPATIBLE", "TTY_INTERACTIVE"):
         monkeypatch.delenv(name, raising=False)
     monkeypatch.setenv("COLUMNS", "80")
+
+
+@pytest.fixture(autouse=True)
+def _pin_proxy_settings(monkeypatch):
+    """Run every test as if no proxy were set, whatever the host is.
+
+    The CLI takes its proxy from the environment and, on Windows and macOS, from
+    the system's proxy settings; either would change the client and the allow
+    list of every scan. A test that needs a proxy sets its own on top of this.
+    """
+    for name in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY"):
+        monkeypatch.delenv(name, raising=False)
+        monkeypatch.delenv(name.lower(), raising=False)
+    monkeypatch.setattr(urllib.request, "getproxies", urllib.request.getproxies_environment)
 
 
 @pytest.fixture(autouse=True)

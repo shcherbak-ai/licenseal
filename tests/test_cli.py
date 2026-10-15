@@ -8,6 +8,7 @@ import re
 import textwrap
 import time
 import tomllib
+import urllib.request
 from importlib.metadata import PackageNotFoundError
 from pathlib import Path
 from unittest.mock import patch
@@ -35,6 +36,7 @@ from licenseal.cli import (
     _project_skill_staleness_hint,
     _read_diagnostics_view,
     _registries_unreachable,
+    _registry_client,
     _render_installed_skill,
     _should_fail,
     _warn_unscaffoldable,
@@ -3502,6 +3504,115 @@ class TestCheckWithUnusableRegistryAnswers:
             ("flask", "BSD-3-Clause")
         ]
         assert len(fake_registry_clock.sleeps) == 1
+
+
+def _proxy_of(client: httpx.Client, host: str) -> str | None:
+    """The proxy that ``client`` sends a request for ``host`` through, or None when direct."""
+    pool = client._transport_for_url(httpx.URL(f"https://{host}/"))._pool  # noqa: SLF001
+    proxy_url = getattr(pool, "_proxy_url", None)
+    return None if proxy_url is None else f"{proxy_url.host.decode()}:{proxy_url.port}"
+
+
+class TestRegistryProxy:
+    """The client goes through the proxy that the scope allows, and through no other."""
+
+    def test_without_a_proxy_every_registry_is_reached_directly(self):
+        client, allow = _registry_client("check")
+        with client:
+            assert allow == _REGISTRY_HOSTS
+            assert _proxy_of(client, "pypi.org") is None
+
+    @pytest.mark.parametrize("variable", ["HTTPS_PROXY", "ALL_PROXY"])
+    def test_an_environment_proxy_is_used_and_allowed(self, monkeypatch, variable):
+        monkeypatch.setenv(variable, "http://proxy.corp.example:3128")
+        client, allow = _registry_client("check")
+        with client:
+            assert allow == [*_REGISTRY_HOSTS, "proxy.corp.example:3128"]
+            assert _proxy_of(client, "pypi.org") == "proxy.corp.example:3128"
+
+    def test_https_proxy_takes_precedence_over_all_proxy(self, monkeypatch):
+        monkeypatch.setenv("HTTPS_PROXY", "http://https-proxy.corp.example:3128")
+        monkeypatch.setenv("ALL_PROXY", "http://all-proxy.corp.example:3128")
+        client, allow = _registry_client("check")
+        with client:
+            assert allow[-1] == "https-proxy.corp.example:3128"
+            assert _proxy_of(client, "pypi.org") == "https-proxy.corp.example:3128"
+
+    def test_http_proxy_alone_is_not_used(self, monkeypatch):
+        # Every registry is reached over HTTPS; HTTP_PROXY is the proxy of http:// URLs.
+        monkeypatch.setenv("HTTP_PROXY", "http://proxy.corp.example:3128")
+        client, allow = _registry_client("check")
+        with client:
+            assert allow == _REGISTRY_HOSTS
+            assert _proxy_of(client, "pypi.org") is None
+
+    def test_a_registry_that_no_proxy_lists_is_reached_directly(self, monkeypatch):
+        monkeypatch.setenv("HTTPS_PROXY", "http://proxy.corp.example:3128")
+        monkeypatch.setenv(
+            "NO_PROXY", "internal.corp.example, .pythonhosted.org,PyPI.org,npmjs.org,ates.io"
+        )
+        client, allow = _registry_client("check")
+        with client:
+            assert allow == [*_REGISTRY_HOSTS, "proxy.corp.example:3128"]
+            assert _proxy_of(client, "pypi.org") is None
+            assert _proxy_of(client, "files.pythonhosted.org") is None
+            # A name covers its subdomains, and only at a dot.
+            assert _proxy_of(client, "registry.npmjs.org") is None
+            assert _proxy_of(client, "crates.io") == "proxy.corp.example:3128"
+            assert _proxy_of(client, "hex.pm") == "proxy.corp.example:3128"
+
+    def test_a_proxy_no_registry_goes_through_is_not_allowed(self, monkeypatch):
+        monkeypatch.setenv("HTTPS_PROXY", "http://proxy.corp.example:3128")
+        monkeypatch.setenv("NO_PROXY", "*")
+        client, allow = _registry_client("check")
+        with client:
+            assert allow == _REGISTRY_HOSTS
+            assert _proxy_of(client, "pypi.org") is None
+
+    def test_the_system_proxy_is_used_when_no_variable_names_one(self, monkeypatch):
+        # On Windows and macOS, urllib falls back to the system's proxy settings.
+        monkeypatch.setattr(
+            urllib.request, "getproxies", lambda: {"https": "http://proxy.corp.example:8080"}
+        )
+        client, allow = _registry_client("check")
+        with client:
+            assert allow == [*_REGISTRY_HOSTS, "proxy.corp.example:8080"]
+            assert _proxy_of(client, "pypi.org") == "proxy.corp.example:8080"
+
+    @pytest.mark.parametrize(
+        ("proxy", "rule"),
+        [
+            ("http://proxy.corp.example", "proxy.corp.example:80"),
+            ("https://proxy.corp.example", "proxy.corp.example:443"),
+            ("proxy.corp.example:3128", "proxy.corp.example:3128"),
+            ("http://user:secret@[fd00::1]:3128", "[fd00::1]:3128"),
+        ],
+    )
+    def test_the_allow_rule_names_the_proxy_host_and_port(self, monkeypatch, proxy, rule):
+        monkeypatch.setenv("HTTPS_PROXY", proxy)
+        client, allow = _registry_client("check")
+        with client, tethered.scope(allow=allow, label="probe"):
+            assert allow[-1] == rule
+
+    @respx.mock
+    def test_a_scan_runs_with_a_proxy_set(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("HTTPS_PROXY", "http://proxy.corp.example:3128")
+        (tmp_path / "pyproject.toml").write_text(
+            textwrap.dedent("""\
+            [project]
+            name = "myproject"
+            license = {text = "MIT"}
+            dependencies = ["requests"]
+            """)
+        )
+        _mock_pypi("requests", "MIT")
+
+        with patch.object(tethered, "scope", wraps=tethered.scope) as mock_scope:
+            result = CliRunner().invoke(
+                main, ["check", "--path", str(tmp_path), "--no-require-lockfile"]
+            )
+        assert result.exit_code == 0
+        assert mock_scope.call_args.kwargs["allow"][-1] == "proxy.corp.example:3128"
 
 
 class TestTetheredIntegration:
