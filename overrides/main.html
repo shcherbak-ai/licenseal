@@ -1,0 +1,49 @@
+{#-
+  The theme's page, with what a link to a page shows on other sites: its
+  title, its description, and the repository's social preview as its picture
+  (docs/assets/social-preview.png, which `inv social-preview` writes with
+  social/github-social-preview.png). A page whose title is the site's name
+  (the home page) is titled once, where the theme would print it twice
+  ("licenseal - licenseal").
+-#}
+{% extends "base.html" %}
+
+{% block htmltitle %}
+  {% if page.meta and page.meta.title == config.site_name %}
+    <title>{{ config.site_name }}</title>
+  {% else %}
+    {{ super() }}
+  {% endif %}
+{% endblock %}
+
+{% block extrahead %}
+  {% if page.meta and page.meta.title %}
+    {% set name = page.meta.title %}
+  {% elif page.title %}
+    {% set name = page.title | striptags %}
+  {% else %}
+    {% set name = config.site_name %}
+  {% endif %}
+  {% if name == config.site_name %}
+    {% set title = name %}
+  {% else %}
+    {% set title = name ~ " - " ~ config.site_name %}
+  {% endif %}
+  {% if page.meta and page.meta.description %}
+    {% set description = page.meta.description %}
+  {% else %}
+    {% set description = config.site_description %}
+  {% endif %}
+  <meta property="og:type" content="website">
+  <meta property="og:site_name" content="{{ config.site_name }}">
+  <meta property="og:title" content="{{ title }}">
+  <meta property="og:description" content="{{ description }}">
+  {% if page.canonical_url %}
+    <meta property="og:url" content="{{ page.canonical_url }}">
+  {% endif %}
+  <meta property="og:image" content="{{ config.site_url }}assets/social-preview.png">
+  <meta property="og:image:width" content="1280">
+  <meta property="og:image:height" content="640">
+  <meta property="og:image:alt" content="The licenseal wordmark and the line Catch incompatible dependency licenses before they block a release, beside the duck checking crates on a path to a release flag, in pixel art.">
+  <meta name="twitter:card" content="summary_large_image">
+{% endblock %}

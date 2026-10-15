@@ -34,6 +34,9 @@ _README = _ROOT / "README.md"
 
 # The repository's social preview: the drawing, and the picture made from it.
 _SOCIAL_PREVIEW = _ROOT / "social" / "github-social-preview.svg"
+# The same picture as the documentation site's share image, which the site
+# serves itself (overrides/main.html names it).
+_SITE_SHARE_IMAGE = _ROOT / "docs" / "assets" / "social-preview.png"
 
 # The browsers that can take that picture, by the names they have on a PATH
 # and by where Windows and macOS install them.
@@ -282,6 +285,8 @@ def social_preview(c: Context, browser: str = "") -> None:
     Render social/github-social-preview.png from the SVG beside it.
 
     A headless Chrome, Edge or Chromium takes the picture, at 1280 by 640 pixels.
+    The same picture is written to docs/assets/social-preview.png, the
+    documentation site's share image.
 
     Args:
         browser: Path of the browser, where none is found
@@ -313,4 +318,6 @@ def social_preview(c: Context, browser: str = "") -> None:
         if not shot.is_file():
             raise Exit(f"{browser} wrote no image.\n{result.stderr}", code=1)
         shutil.copyfile(shot, png)
-    print(f"Wrote {png.relative_to(_ROOT).as_posix()}")
+        shutil.copyfile(shot, _SITE_SHARE_IMAGE)
+    for written in (png, _SITE_SHARE_IMAGE):
+        print(f"Wrote {written.relative_to(_ROOT).as_posix()}")
