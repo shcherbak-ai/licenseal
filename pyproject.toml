@@ -33,7 +33,7 @@ dependencies = [
     "httpx>=0.28",
     "packaging>=24.0",
     "semantic-version>=2.10",
-    "tethered>=0.5.1",
+    "tethered>=1.0.0",
     "pyyaml>=6.0.3",
     "defusedxml>=0.7.1",
 ]
