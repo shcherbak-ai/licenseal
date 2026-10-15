@@ -19,4 +19,6 @@ The model is described in the documentation:
 
 Outbound network access is restricted to fourteen hosts by [`tethered`](https://github.com/shcherbak-ai/tethered), an egress allowlist applied to every registry request: `pypi.org:443`, `files.pythonhosted.org:443`, `registry.npmjs.org:443`, `crates.io:443`, `api.deps.dev:443`, `proxy.golang.org:443`, `repo.maven.apache.org:443`, `dl.google.com:443`, `repo.jenkins-ci.org:443`, `api.nuget.org:443`, `repo.packagist.org:443`, `rubygems.org:443`, `hex.pm:443`, `cran.r-project.org:443`.
 
-A host that embeds licenseal under its own `tethered.activate(allow=[...])` policy must allow these fourteen. The documentation's [Network egress](https://licenseal.shcherbak.ai/security/network/) page says what each is asked.
+When a proxy is set, licenseal reaches the registries through it and allows its host and port as well ([Proxies](https://licenseal.shcherbak.ai/security/network/#proxies)).
+
+A host that embeds licenseal under its own `tethered.activate(allow=[...])` policy must allow these fourteen, and the proxy when one is set. The documentation's [Network egress](https://licenseal.shcherbak.ai/security/network/) page says what each is asked.

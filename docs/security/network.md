@@ -28,9 +28,15 @@ How each host's answer becomes a license is in [License sources](license-sources
 
 ## The allowlist
 
-The allowlist is hard-coded: a host is added only in a licenseal release, with security review. It is enforced inside the licenseal process, and a request to any other host is blocked. The restriction is a `tethered.scope()` around resolution, and the scope is propagated into the worker threads that resolve licenses and walk registries, so every registry request, including the deps.dev batch POSTs, is checked against the policy.
+The allowlist is hard-coded: a host is added only in a licenseal release, with security review. The one host it takes from the environment is a [proxy](#proxies). It is enforced inside the licenseal process, and a request to any other host is blocked. The restriction is a `tethered.scope()` around resolution, and the scope is propagated into the worker threads that resolve licenses and walk registries, so every registry request, including the deps.dev batch POSTs, is checked against the policy.
 
 A Maven fallback host (`dl.google.com`, `repo.jenkins-ci.org`) must be run by a recognized vendor, be public-read, use the standard `/maven2/` layout, and serve a meaningful fraction of the open-source JVM artifacts that are not on Central.
+
+## Proxies
+
+Registry requests go through the proxy that `HTTPS_PROXY` names, or `ALL_PROXY` when `HTTPS_PROXY` is not set. On Windows and macOS, when neither is set, they go through the proxy in the system's settings; a proxy auto-configuration (PAC) script is not read, so where the system's proxy comes from one, set `HTTPS_PROXY`. A registry host that `NO_PROXY` lists is reached directly, and `NO_PROXY=*` turns the proxy off; the system's list of exceptions is not read. `HTTP_PROXY` is not used: every registry is reached over HTTPS.
+
+licenseal adds the proxy's host and port to the allowlist for the scan. Through a proxy, its requests still name only the hosts above, but the allowlist sees the connection to the proxy, not the one the proxy makes onward. The proxy sees only the requests listed under [What leaves the process](data-sent.md#what-a-request-carries).
 
 ## Rules for every host
 
@@ -42,4 +48,4 @@ A Maven fallback host (`dl.google.com`, `repo.jenkins-ci.org`) must be run by a 
 
 When licenseal runs inside another Python application, the scope is context-local: licenseal does not flip a process-wide switch on the application that embeds it. If that application already calls `tethered.activate()` or wraps the call in an outer `tethered.scope()`, the effective policy is the **intersection** of all active policies. For a tamper-resistant ceiling, the embedding application can use `tethered.activate(locked=True)`.
 
-For embedded use, the embedding application's `tethered.activate(allow=[...])` allowlist must include licenseal's fourteen registry hosts, each with its port as the table above writes it.
+For embedded use, the embedding application's `tethered.activate(allow=[...])` allowlist must include licenseal's fourteen registry hosts, each with its port as the table above writes it, and the [proxy](#proxies) when one is set.

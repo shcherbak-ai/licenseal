@@ -74,4 +74,4 @@ An error prints an `Error:` line on stderr and no report; a failed check prints 
 
 ## Environment
 
-The standard `HTTP(S)_PROXY` environment variables are honored: see [What leaves the process](../security/data-sent.md#what-a-request-carries).
+Registry requests go through the proxy that `HTTPS_PROXY` or `ALL_PROXY` names, and `NO_PROXY` exempts hosts from it: see [Proxies](../security/network.md#proxies).

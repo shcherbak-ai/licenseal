@@ -16,7 +16,7 @@ licenseal sends **only package coordinates (a name and a version) and fixed regi
     - a metadata URL that the registry provided (the PEP 658 `.metadata` URL, whose path encodes only the wheel's name and version).
 - **Headers** are static: `Accept`, and a `User-Agent` of `licenseal/<version> (<project-url>; <subcommand>)`, where `<project-url>` is the URL of licenseal's own repository and `<subcommand>` is the literal CLI command (`check` / `init-review-file`), not user data.
 - **No credentials are read or sent.** licenseal reads no `.npmrc`, `.pypirc`, or keyring, and sets no `Authorization` header. `~/.netrc` is never read.
-- **Proxies.** Standard `HTTP(S)_PROXY` environment proxies are honored, so licenseal works behind a corporate egress proxy; the proxy sees only the requests described above.
+- **Proxies.** licenseal works behind a corporate egress proxy, which sees only the requests described above. [Proxies](network.md#proxies) says which proxy is used.
 
 ## Which dependencies are sent
 

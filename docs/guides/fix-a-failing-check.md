@@ -50,7 +50,7 @@ The scan could not read something, so dependencies may be missing from the repor
 
 ## The scan could not run
 
-`Could not resolve any of the … dependencies` means that every registry request failed: no network, a proxy or firewall that blocks the registries, or a registry outage. The job needs outbound HTTPS to the hosts listed under [Network egress](../security/network.md). The standard `HTTP(S)_PROXY` environment variables are honored.
+`Could not resolve any of the … dependencies` means that every registry request failed: no network, a proxy or firewall that blocks the registries, or a registry outage. The job needs outbound HTTPS to the hosts listed under [Network egress](../security/network.md). Behind a proxy, set `HTTPS_PROXY`: see [Proxies](../security/network.md#proxies).
 
 ## An error instead of a report
 

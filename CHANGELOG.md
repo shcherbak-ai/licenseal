@@ -4,6 +4,16 @@ All notable changes to this project will be documented in this file. Each versio
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/), and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.0.1] - 2026-10-15
+
+### Changed
+
+- `tethered` 1.0.0 or newer is required (was 0.5.1).
+
+### Fixed
+
+- **A scan runs behind a proxy on another host.** With `HTTPS_PROXY` or `ALL_PROXY` set, or on Windows and macOS a proxy in the system's settings, every scan stopped with `Blocked by tethered: <proxy> is not in the allow list`: licenseal's egress allowlist held the registry hosts but not the proxy that carried the requests to them, and no setting could add it. licenseal now chooses the proxy itself, sends the registry requests through it, and allows its host and port; see [Proxies](https://licenseal.shcherbak.ai/security/network/#proxies). A proxy on `127.0.0.1` or `::1` was not affected.
+
 ## [1.0.0] - 2026-10-14
 
 Most of the changes since 0.4.2 close cases where a scan passed although it had missed dependencies, misread a license, or skipped a file without saying so. A check that passes on 0.4.2 can therefore fail on 1.0.0 with no change to the project. A `licenseal.review.toml` entry can also stop matching, which is an error, when its dependency is now reported at another version or is no longer reported. Every change of that kind is listed under **Breaking changes**, together with changes to defaults, report values, the review file, and install requirements.
@@ -222,6 +232,7 @@ Documentation and package metadata only; CLI behavior is unchanged.
 
 - The aopalliance license URL now resolves to the permissive `LicenseRef-Public-Domain` sentinel instead of a bare `Public-Domain` string that no risk rule recognized, which routed a known public-domain artifact to manual review. The hyphenated `public-domain` publisher spelling normalizes the same way.
 
+[1.0.1]: https://github.com/shcherbak-ai/licenseal/compare/v1.0.0...v1.0.1
 [1.0.0]: https://github.com/shcherbak-ai/licenseal/compare/v0.4.2...v1.0.0
 [0.4.2]: https://github.com/shcherbak-ai/licenseal/compare/v0.4.1...v0.4.2
 [0.4.1]: https://github.com/shcherbak-ai/licenseal/compare/v0.4.0...v0.4.1
