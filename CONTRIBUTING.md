@@ -101,11 +101,11 @@ Give images descriptive alt text and check them at their README display size on 
 - The figures (`licenseal-report.svg`, `licenseal-how-it-works.svg`, `resolution-flow.svg`, `data-flow.svg`) are drawn on their own dark ground, so one file serves the site and both GitHub themes. Draw a new one in their style: hairlines, monospace labels, grey, amber only for what licenseal catches.
 - `social/github-social-preview.png` is the picture a link to the repository is shown with on other sites. It is drawn in the SVG beside it as the game's share card from shcherbak.ai: the duck at work among the crates in pixel art, and on paper the wordmark, the README's heading, the tagline's claims, and the company's name. When one of those changes, change the SVG with it, render the picture again with `uv run inv social-preview` (the task needs Chrome, Edge, or Chromium; it also writes `docs/assets/social-preview.png`, the picture a link to the documentation site shows), and say so in the pull request: GitHub reads no file for the social preview, so a maintainer uploads the picture in the repository's settings.
 
-Look at a change as GitHub will show it before pushing it. `uv run inv readme-preview` serves `README.md` at <http://127.0.0.1:9100/> (`--port N` for another port):
+Look at a change as GitHub will show it before pushing it. `uv run inv readme-preview` serves `README.md` in GitHub's light theme at <http://127.0.0.1:9100/> and in its dark theme at <http://127.0.0.1:9101/> (`--port N` serves them at N and N+1):
 
 - The HTML is what GitHub's Markdown API returns for the file, so what GitHub removes from a README is removed here too.
-- The look comes from github-markdown-css, in GitHub's colours, light or dark as the browser is set. The column is as wide as GitHub's at 1280 pixels and wider, and below 768.
-- A reload sends the README to GitHub again when it has changed. GitHub allows 60 of those an hour without a token.
+- The look comes from github-markdown-css, in GitHub's colours, each page in its theme whatever the browser is set to. The column is as wide as GitHub's at 1280 pixels and wider, and below 768.
+- A reload sends the README to GitHub again when it has changed, once for both pages. GitHub allows 60 of those an hour without a token.
 
 The package description is [PYPI.md](PYPI.md) (`project.readme` in `pyproject.toml`). Keep it short, use absolute HTTPS links, and update it when the summary, the ecosystems, or the install commands change. Screenshots and the overview stay in the README.
 
