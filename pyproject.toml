@@ -64,7 +64,22 @@ dev = [
     "vulture>=2.16",
     "deptry>=0.25.1",
     "invoke>=2.2",
+    "pre-commit-hooks>=6.0",
 ]
+
+[tool.uv]
+# A release enters uv.lock only a week after its upload, when a compromised one
+# has been found and removed. Until every version of uv.lock is a week old, a
+# fixed date: the upload of its newest file. From 2026-10-22 01:16 UTC, "7 days"
+# (the advisories hook says when)
+exclude-newer = "2026-10-15T01:16:00Z"
+
+# A security fix taken inside the cooldown, up to its upload: the advisories
+# hook says when the entry is no longer needed.
+[tool.uv.exclude-newer-package]
+# 2026.10.19 drops the root CAs whose intermediate keys were compromised
+# (GHSA-6q48-6c7w-9gw2)
+certifi = "2026-10-20T02:25:00Z"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

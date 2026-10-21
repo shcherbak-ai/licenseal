@@ -6,11 +6,12 @@
 # Zensical is a tool that builds the site (docs/, zensical.toml). It is not a
 # dependency of the package and is not in uv.lock, so `licenseal check` on
 # this repository does not report it. It is pre-1.0: change the versions on
-# purpose, with
+# purpose, from the root of the repository, where uv takes the cooldown of
+# new releases from pyproject.toml (`exclude-newer`; uvx does not), with
 #
 #   echo "zensical==<version>" | uv pip compile - --universal --python-version 3.11 --no-header --no-annotate
 #
-# and look at the built site afterwards.
+# and look at the built site afterwards. The advisories hook checks the pins.
 click==8.5.0
 deepmerge==3.0.1
 jinja2==3.1.6

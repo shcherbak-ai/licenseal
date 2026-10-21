@@ -39,8 +39,17 @@ jobs:
       - name: Install dependencies
         run: uv sync --locked
 
+      # markdownlint, at the version of package-lock.json, on the runner's Node
+      # (no install scripts: .npmrc).
+      - name: Install the development tools of package.json
+        run: npm ci --no-audit --no-fund
+
+      # Without the check of advisories, which fails on an advisory of the
+      # day, whatever the commit.
       - name: Run pre-commit checks (ruff, ty, bandit, interrogate, markdownlint)
         run: uv run pre-commit run --all-files
+        env:
+          SKIP: advisories
 
   test:
     runs-on: ${{ matrix.os }}

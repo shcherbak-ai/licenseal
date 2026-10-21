@@ -3,18 +3,33 @@
 # would run a second time for each commit.
 default_stages: [pre-commit]
 
+# Every hook runs a tool of uv.lock or of package-lock.json, none a repository
+# that pre-commit installs: it would resolve the dependencies of the repository
+# afresh, past the cooldown of the lockfiles and their advisory check.
 repos:
-  - repo: https://github.com/pre-commit/pre-commit-hooks
-    rev: 3e8a8703264a2f4a69428a0aa4dcb512790b2c8c  # v6.0.0
-    hooks:
-      - id: trailing-whitespace
-      - id: end-of-file-fixer
-      - id: check-yaml
-      - id: check-toml
-
   # These run from the project environment: uv.lock is their only version pin.
   - repo: local
     hooks:
+      - id: trailing-whitespace
+        name: trim trailing whitespace
+        entry: uv run trailing-whitespace-fixer
+        language: system
+        types: [text]
+      - id: end-of-file-fixer
+        name: fix end of files
+        entry: uv run end-of-file-fixer
+        language: system
+        types: [text]
+      - id: check-yaml
+        name: check yaml
+        entry: uv run check-yaml
+        language: system
+        types: [yaml]
+      - id: check-toml
+        name: check toml
+        entry: uv run check-toml
+        language: system
+        types: [toml]
       - id: ruff-check
         name: ruff check
         entry: uv run ruff check --force-exclude --fix
@@ -51,6 +66,18 @@ repos:
         entry: uv lock --check
         language: system
         pass_filenames: false
+      # New releases stay out of the lockfiles for a week, and no locked
+      # version has an advisory at osv.dev, but for its ACCEPTED_ADVISORIES.
+      # At each commit, as an advisory comes out without a change to a file.
+      # CI skips it (SKIP), where its result would depend on the day, not on
+      # the commit. Verbose, for its warnings, which do not fail it.
+      - id: advisories
+        name: release cooldown, and no advisories of locked versions
+        entry: uv run python scripts/check_advisories.py
+        language: system
+        pass_filenames: false
+        always_run: true
+        verbose: true
       - id: interrogate
         name: interrogate
         entry: uv run interrogate src/
@@ -75,16 +102,18 @@ repos:
         language: system
         stages: [commit-msg]
 
-  - repo: https://github.com/DavidAnson/markdownlint-cli2
-    rev: 916ad0aaa108c64d294101002066f530ea170b10  # v0.23.3
-    hooks:
-      - id: markdownlint-cli2
-
-  # The tests of the Claude Code hook that keeps the agents' browser files in
-  # one folder, and of the settings that start it, with Node's own runner: the
-  # Node that npm needs for the development tools (package.json).
+  # These run on the Node that npm needs for the development tools
+  # (package.json): markdownlint from node_modules (npm ci), with
+  # package-lock.json its only version pin, and the tests of the Claude Code
+  # hook that keeps the agents' browser files in one folder, and of the
+  # settings that start it, with Node's own runner.
   - repo: local
     hooks:
+      - id: markdownlint-cli2
+        name: markdownlint-cli2
+        entry: node node_modules/markdownlint-cli2/markdownlint-cli2-bin.mjs
+        language: system
+        types: [markdown]
       - id: claude-hooks
         name: claude hooks tests
         entry: node --test .claude/hooks/playwright-files.test.mjs

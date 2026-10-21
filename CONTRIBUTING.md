@@ -7,7 +7,7 @@
 
 ## Setup
 
-Requires Python 3.11+ and [uv](https://docs.astral.sh/uv/), and [Node.js](https://nodejs.org/) for the development tools that `package.json` lists: the stylesheet of the README preview and the agents' browser. None of them is part of the package.
+Requires Python 3.11+ and [uv](https://docs.astral.sh/uv/), and [Node.js](https://nodejs.org/) 22 or newer for the development tools that `package.json` lists: markdownlint, which a pre-commit hook runs, the stylesheet of the README preview, and the agents' browser. None of them is part of the package, and none runs a script when it is installed (`ignore-scripts` in `.npmrc`).
 
 ```bash
 git clone https://github.com/shcherbak-ai/licenseal.git
@@ -26,8 +26,9 @@ Runs automatically on every commit:
 - **ty** — type checking ([Astral's type checker](https://docs.astral.sh/ty/))
 - **deptry** — dependency declaration/import consistency
 - **uv lock check** — `uv.lock` matches `pyproject.toml`
+- **advisories** — a release enters `uv.lock` and `package-lock.json` only a week after its upload (`exclude-newer` in `pyproject.toml`, `min-release-age` in `.npmrc`), and no locked version has an advisory at [osv.dev](https://osv.dev), but for those listed with their reasons in `ACCEPTED_ADVISORIES` in [scripts/check_advisories.py](scripts/check_advisories.py). It asks osv.dev at each commit, as an advisory can come out at any time, so it can fail on a change that touches no dependency: commit with `SKIP=advisories` in front of the command, and the maintainer upgrades the dependencies. CI skips it
 - **bandit** — security analysis
-- **markdownlint** — Markdown linting
+- **markdownlint** — Markdown linting, with the version of `package-lock.json` (`npm ci` installs it)
 - **interrogate** — docstring coverage on `src/`
 - **vulture** — dead-code detection on `src/`
 - **validate-spdx-ids** — verify SPDX IDs referenced in `src/licenseal/analysis/` exist in the vendored canonical list

@@ -338,6 +338,12 @@ Add at least one `<eco>`-only repo plus one polyglot repo that includes the new 
 - No specific stress-test repository or package names in source or test comments. Describe the pattern (`large Python projects`, `Cargo workspaces`, `packages with extras-heavy transitives`) instead of the project where you happened to observe it.
 - No hardcoded benchmark numbers in comments (MB, timings, `~3.3x` style speedups). They go stale.
 - External repositories used for stress-testing are untrusted code. Clone and scan them only through the Docker harness in `scripts/stress/`; never clone one onto the host filesystem. Read their manifest and lockfile contents only; never install their dependencies, run their setup or build scripts, execute their code, or import their packages.
+- A release enters `uv.lock` and `package-lock.json` only a week after its upload, when a compromised one has been found and removed: `[tool.uv] exclude-newer = "7 days"` in `pyproject.toml` (a fixed date while `uv.lock` holds a younger version) and `min-release-age=7` in `.npmrc`. Never shorten the cooldown or bypass it to take a release early. A security fix needed sooner goes into `[tool.uv.exclude-newer-package]`, dated at its upload, by decision of the maintainer.
+  - The `advisories` pre-commit hook (`scripts/check_advisories.py`) fails when either setting is missing or is another span. It warns of a fixed `exclude-newer` date and of each `exclude-newer-package` entry with the day it is to change, and fails from that day.
+  - It asks osv.dev for the advisories of every version in `uv.lock`, `package-lock.json`, and `.github/docs-constraints.txt`, and fails on each one that `ACCEPTED_ADVISORIES` does not list with its reason. Upgrade past a vulnerability; accept one only where no version the ranges admit fixes it. A report of a malicious package (`MAL-`) is never accepted: tell the maintainer at once, as each machine that installed it is compromised.
+  - It asks osv.dev at each commit, and CI skips it. When it fails on a change that touches no dependency, say so, and commit with `SKIP=advisories`.
+  - `ignore-scripts=true` in `.npmrc` keeps every npm package from running a script when it is installed. A development tool that needs one goes in only by decision of the maintainer.
+  - The release's wheel check (`publish.yml`) installs the versions of `uv.lock` by their hashes and the wheel without dependencies, after the release files are uploaded: nothing is resolved afresh, and nothing it runs can change what is published.
 - Branch from `dev`, PR to `dev`. `main` is releases only.
 
 ## Documentation and package description
@@ -382,7 +388,7 @@ uv run pre-commit run --all-files
 uv run pytest -n 8 --cov=licenseal --cov-report=term-missing
 ```
 
-`pre-commit` is the authoritative static gate and mirrors CI — it runs ruff (check + format), ty, bandit, markdownlint, deptry, the lockfile check (`uv lock --check`), interrogate, vulture, the SPDX-ID validator, and the tests of the Claude Code hook (with Node). Running only `ruff check` / `ty check` skips bandit, markdownlint, and the SPDX validator, so a green local run can still fail CI. `pytest` is not a pre-commit hook; run it separately.
+`pre-commit` is the authoritative static gate and mirrors CI — it runs ruff (check + format), ty, bandit, markdownlint, deptry, the lockfile check (`uv lock --check`), interrogate, vulture, the SPDX-ID validator, and the tests of the Claude Code hook (with Node), and, outside CI, the cooldown and advisory check (`advisories`). Every hook takes its tool from a lockfile: the Python ones through `uv run` (`uv.lock`), markdownlint from `node_modules` (`package-lock.json`, installed by `npm ci`). Add a tool to the dev group or to `package.json` and run it as a local hook, never from a hook repository, whose dependencies pre-commit resolves at install time, outside the cooldown and the advisory check. Running only `ruff check` / `ty check` skips bandit, markdownlint, and the SPDX validator, so a green local run can still fail CI. `pytest` is not a pre-commit hook; run it separately.
 
 ### Stress-testing on real repos
 
