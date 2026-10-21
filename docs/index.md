@@ -1,5 +1,5 @@
 ---
-title: "licenseal"
+title: "licenseal: dependency license compatibility checker"
 description: "Catch incompatible dependency licenses before they block a release. A fast license compatibility checker for ten ecosystems."
 hide:
   - navigation

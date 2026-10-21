@@ -2,15 +2,15 @@
   The theme's page, with what a link to a page shows on other sites: its
   title, its description, and the repository's social preview as its picture
   (docs/assets/social-preview.png, which `inv social-preview` writes with
-  social/github-social-preview.png). A page whose title is the site's name
-  (the home page) is titled once, where the theme would print it twice
-  ("licenseal - licenseal").
+  social/github-social-preview.png). The home page, the one at the site's
+  address, is titled with its front-matter title alone, which names licenseal
+  and says what it is: the theme would add " - licenseal".
 -#}
 {% extends "base.html" %}
 
 {% block htmltitle %}
-  {% if page.meta and page.meta.title == config.site_name %}
-    <title>{{ config.site_name }}</title>
+  {% if page.canonical_url == config.site_url %}
+    <title>{{ page.meta.title }}</title>
   {% else %}
     {{ super() }}
   {% endif %}
@@ -24,7 +24,7 @@
   {% else %}
     {% set name = config.site_name %}
   {% endif %}
-  {% if name == config.site_name %}
+  {% if page.canonical_url == config.site_url or name == config.site_name %}
     {% set title = name %}
   {% else %}
     {% set title = name ~ " - " ~ config.site_name %}

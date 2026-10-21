@@ -1,0 +1,4 @@
+User-agent: *
+Allow: /
+
+Sitemap: https://licenseal.shcherbak.ai/sitemap.xml
