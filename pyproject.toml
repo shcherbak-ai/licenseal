@@ -36,6 +36,10 @@ dependencies = [
     "tethered>=1.0.0",
     "pyyaml>=6.0.3",
     "defusedxml>=0.7.1",
+    # httpx verifies registry certificates against certifi's bundle, and pip
+    # leaves an installed certifi in place: the floor drops the root CAs whose
+    # intermediate keys were compromised (GHSA-6q48-6c7w-9gw2)
+    "certifi>=2026.10.19",
 ]
 
 [project.urls]
@@ -69,17 +73,8 @@ dev = [
 
 [tool.uv]
 # A release enters uv.lock only a week after its upload, when a compromised one
-# has been found and removed. Until every version of uv.lock is a week old, a
-# fixed date: the upload of its newest file. From 2026-10-22 01:16 UTC, "7 days"
-# (the advisories hook says when)
-exclude-newer = "2026-10-15T01:16:00Z"
-
-# A security fix taken inside the cooldown, up to its upload: the advisories
-# hook says when the entry is no longer needed.
-[tool.uv.exclude-newer-package]
-# 2026.10.19 drops the root CAs whose intermediate keys were compromised
-# (GHSA-6q48-6c7w-9gw2)
-certifi = "2026-10-20T02:25:00Z"
+# has been found and removed.
+exclude-newer = "7 days"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
@@ -150,6 +145,9 @@ exclude = ["tests"]
 known_first_party = ["licenseal"]
 
 [tool.deptry.per_rule_ignores]
+DEP002 = [
+    "certifi",  # a version floor for httpx's certificate bundle, not imported
+]
 DEP004 = [
     "invoke",  # tasks.py, the development tasks
 ]

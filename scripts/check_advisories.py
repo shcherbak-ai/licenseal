@@ -54,10 +54,6 @@ _MARKDOWNLINT_0_24 = (
     "0.24.0, which the cooldown admits from 2026-10-28: then raise its range in package.json"
 )
 ACCEPTED_ADVISORIES: dict[str, str] = {
-    "GHSA-vfj7-8cjw-p6xm": (
-        "braces, through markdownlint-cli2: no release fixes it, and the deeply nested glob "
-        "patterns it chokes on would come from the repository's own configuration"
-    ),
     "GHSA-238p-pmpm-9mq7": (
         "katex, through markdownlint: low severity, fixed in 0.18.2 only, which "
         "micromark-extension-math (^0.16.0) does not admit"

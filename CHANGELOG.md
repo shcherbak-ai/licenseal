@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file. Each versio
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/), and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Security
+
+- `certifi` 2026.10.19 or newer is required. licenseal checks the registries' certificates against certifi's bundle, and installing licenseal with pip kept an older certifi already in the environment. Older bundles trust root CAs whose intermediate keys were compromised ([GHSA-6q48-6c7w-9gw2](https://github.com/advisories/GHSA-6q48-6c7w-9gw2)), so someone on the network path could have answered registry requests with licenses of their choosing. A bundle named by `SSL_CERT_FILE` or `SSL_CERT_DIR` is still used in certifi's place.
+
 ## [1.0.1] - 2026-10-15
 
 ### Changed
@@ -232,6 +238,7 @@ Documentation and package metadata only; CLI behavior is unchanged.
 
 - The aopalliance license URL now resolves to the permissive `LicenseRef-Public-Domain` sentinel instead of a bare `Public-Domain` string that no risk rule recognized, which routed a known public-domain artifact to manual review. The hyphenated `public-domain` publisher spelling normalizes the same way.
 
+[Unreleased]: https://github.com/shcherbak-ai/licenseal/compare/v1.0.1...HEAD
 [1.0.1]: https://github.com/shcherbak-ai/licenseal/compare/v1.0.0...v1.0.1
 [1.0.0]: https://github.com/shcherbak-ai/licenseal/compare/v0.4.2...v1.0.0
 [0.4.2]: https://github.com/shcherbak-ai/licenseal/compare/v0.4.1...v0.4.2
