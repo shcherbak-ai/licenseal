@@ -18,7 +18,7 @@ site_url = "https://licenseal.shcherbak.ai/"
 site_description = "Catch incompatible dependency licenses before they block a release. A fast license compatibility checker for ten ecosystems."
 site_author = "Sergii Shcherbak"
 # The version is rewritten by `cz bump` (version_files in pyproject.toml).
-copyright = "licenseal 1.0.1 &middot; Copyright &copy; 2026 Sergii Shcherbak. Apache-2.0. Not legal advice."
+copyright = "licenseal 1.0.2 &middot; Copyright &copy; 2026 Sergii Shcherbak. Apache-2.0. Not legal advice."
 docs_dir = "docs"
 site_dir = "site"
 extra_css = ["stylesheets/extra.css"]
