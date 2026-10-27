@@ -248,7 +248,7 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for development setup and guidelines. If 
     </td>
     <td width="50%" align="center" valign="top">
       <a href="https://github.com/shcherbak-ai/tethered"><img src="assets/tethered-wordmark.svg" alt="tethered" width="336"></a><br>
-      Network egress control for CLI tools and agent workflows.
+      Runtime network egress control for Python.
     </td>
   </tr>
 </table>
