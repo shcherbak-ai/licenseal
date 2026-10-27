@@ -8,10 +8,11 @@ of ``.npmrc``, and the check fails when either is missing or is another span.
 While the newest version of ``uv.lock`` is younger than the cooldown,
 ``exclude-newer`` can be a fixed date, past which nothing enters ``uv.lock``:
 the check warns of it until every version of ``uv.lock`` is older than the
-cooldown, and then fails until it is set to the span. A security fix taken
-inside the cooldown is an ``exclude-newer-package`` entry with the date of its
-upload: the check warns of it while the cooldown would hold the fix out, and
-then fails until it is removed.
+cooldown, and then fails until it is set to the span. A security fix, or a
+release of the maintainer's own whose wheel matches its tag, taken inside the
+cooldown is an ``exclude-newer-package`` entry with the date of its upload: the
+check warns of it while the cooldown would hold the release out, and then fails
+until it is removed.
 
 It asks osv.dev for the advisories of each version of ``uv.lock``,
 ``package-lock.json`` and ``.github/docs-constraints.txt``. A known
@@ -111,7 +112,7 @@ def _cooldown(pyproject: dict, lock: dict, now: datetime.datetime) -> tuple[list
         if not _is_date(until):
             findings.append(
                 f"pyproject.toml: [tool.uv.exclude-newer-package] {name} = {until!r}: "
-                "give it the date of the upload of the fix"
+                "give it the date of the upload of the release"
             )
             continue
         moment = datetime.datetime.fromisoformat(until)
@@ -121,7 +122,7 @@ def _cooldown(pyproject: dict, lock: dict, now: datetime.datetime) -> tuple[list
         if now >= due:
             findings.append(
                 f"pyproject.toml: [tool.uv.exclude-newer-package] {name}: the cooldown "
-                "admits the fix now: remove the entry"
+                "admits the release now: remove the entry"
             )
         else:
             warnings.append(

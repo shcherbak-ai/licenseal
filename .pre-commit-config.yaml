@@ -48,6 +48,17 @@ repos:
         language: system
         types: [python]
         require_serial: true
+      # No value of .env in a tracked file: in the staged files at a commit, and
+      # in all the tracked files with --all-files. Without a .env file, as in
+      # CI, it fails on a tracked env file only. pre-commit passes only the
+      # files that have every tag of `types`, by default `file`, which a
+      # symbolic link lacks.
+      - id: omerta
+        name: omerta (no value of .env in the tracked files)
+        entry: uv run omerta check
+        language: system
+        types: []
+        types_or: [file, symlink]
       - id: ty
         name: ty
         entry: uv run ty check src/

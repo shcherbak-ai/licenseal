@@ -242,14 +242,16 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for development setup and guidelines. If 
 <!-- markdownlint-disable MD033 -->
 <table>
   <tr>
-    <td width="50%" align="center" valign="top">
-      <a href="https://github.com/shcherbak-ai/contextgem"><img src="assets/contextgem-wordmark.svg" alt="ContextGem" width="336"></a><br>
-      Structured extraction from documents with LLMs.
-    </td>
-    <td width="50%" align="center" valign="top">
-      <a href="https://github.com/shcherbak-ai/tethered"><img src="assets/tethered-wordmark.svg" alt="tethered" width="336"></a><br>
-      Runtime network egress control for Python.
-    </td>
+    <td width="36%" align="center"><a href="https://github.com/shcherbak-ai/contextgem"><img src="assets/contextgem-wordmark.svg" alt="ContextGem" width="252"></a></td>
+    <td>Structured extraction from documents with LLMs.</td>
+  </tr>
+  <tr>
+    <td width="36%" align="center"><a href="https://github.com/shcherbak-ai/tethered"><img src="assets/tethered-wordmark.svg" alt="tethered" width="252"></a></td>
+    <td>Runtime network egress control for Python.</td>
+  </tr>
+  <tr>
+    <td width="36%" align="center"><a href="https://github.com/shcherbak-ai/omerta"><img src="assets/omerta-wordmark.svg" alt="omerta" width="252"></a></td>
+    <td>Catches .env secrets leaking into git: your own values, not lookalikes.</td>
   </tr>
 </table>
 <!-- markdownlint-enable MD033 -->

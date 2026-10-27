@@ -69,12 +69,20 @@ dev = [
     "deptry>=0.25.1",
     "invoke>=2.2",
     "pre-commit-hooks>=6.0",
+    "omerta>=0.1.2",
 ]
 
 [tool.uv]
 # A release enters uv.lock only a week after its upload, when a compromised one
 # has been found and removed.
 exclude-newer = "7 days"
+
+# Releases taken inside the cooldown, by decision of the maintainer, each up to
+# its upload: a security fix, or a release of the maintainer's own whose wheel
+# matches its tag. The advisories hook says when an entry is no longer needed.
+[tool.uv.exclude-newer-package]
+# omerta 0.1.2, which the omerta hook runs: its wheel is the v0.1.2 tag
+omerta = "2026-10-27T03:36:00Z"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
