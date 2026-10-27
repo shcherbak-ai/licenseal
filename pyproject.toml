@@ -70,6 +70,7 @@ dev = [
     "invoke>=2.2",
     "pre-commit-hooks>=6.0",
     "omerta>=0.1.2",
+    "zizmor>=1.31",
 ]
 
 [tool.uv]

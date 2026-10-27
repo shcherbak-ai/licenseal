@@ -25,6 +25,7 @@ Runs automatically on every commit:
 - **ruff** — linting and formatting
 - **ty** — type checking ([Astral's type checker](https://docs.astral.sh/ty/))
 - **deptry** — dependency declaration/import consistency
+- **zizmor** — the security of the GitHub workflows, offline, when one changes ([zizmor](https://docs.zizmor.sh/))
 - **uv lock check** — `uv.lock` matches `pyproject.toml`
 - **advisories** — a release enters `uv.lock` and `package-lock.json` only a week after its upload (`exclude-newer` in `pyproject.toml`, `min-release-age` in `.npmrc`), and no locked version has an advisory at [osv.dev](https://osv.dev), but for those listed with their reasons in `ACCEPTED_ADVISORIES` in [scripts/check_advisories.py](scripts/check_advisories.py). It asks osv.dev at each commit, as an advisory can come out at any time, so it can fail on a change that touches no dependency: commit with `SKIP=advisories` in front of the command, and the maintainer upgrades the dependencies. CI skips it
 - **bandit** — security analysis
