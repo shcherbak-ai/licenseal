@@ -12,7 +12,7 @@
 <p align="center">
   <a href="https://pypi.org/project/licenseal/"><img src="https://img.shields.io/pypi/v/licenseal?style=flat-square&labelColor=18181b&color=a78bfa" alt="PyPI version"></a>
   <a href="https://pypi.org/project/licenseal/"><img src="https://img.shields.io/pypi/pyversions/licenseal?style=flat-square&labelColor=18181b&color=a78bfa" alt="Python versions"></a>
-  <a href="https://pypi.org/project/licenseal/"><img src="https://img.shields.io/pypi/dm/licenseal?style=flat-square&labelColor=18181b&color=a78bfa&label=downloads" alt="Downloads per month"></a>
+  <a href="https://pepy.tech/projects/licenseal"><img src="https://img.shields.io/pepy/dt/licenseal?style=flat-square&labelColor=18181b&color=a78bfa&label=downloads" alt="Total downloads"></a>
   <a href="https://github.com/shcherbak-ai/licenseal/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/shcherbak-ai/licenseal/ci.yml?branch=main&style=flat-square&labelColor=18181b&label=CI" alt="CI"></a>
   <a href="https://github.com/shcherbak-ai/licenseal/actions/workflows/ci.yml"><img src="https://img.shields.io/endpoint?url=https://gist.githubusercontent.com/SergiiShcherbak/17230af3dfe294ebd8a8fd9c4cd775a8/raw/licenseal-coverage.json&style=flat-square&labelColor=18181b&color=a78bfa" alt="Coverage"></a>
 </p>
