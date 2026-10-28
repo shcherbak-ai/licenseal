@@ -4,7 +4,7 @@ All notable changes to this project will be documented in this file. Each versio
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/), and this project adheres to [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## [1.0.3] - 2026-10-28
 
 ### Changed
 
@@ -244,7 +244,7 @@ Documentation and package metadata only; CLI behavior is unchanged.
 
 - The aopalliance license URL now resolves to the permissive `LicenseRef-Public-Domain` sentinel instead of a bare `Public-Domain` string that no risk rule recognized, which routed a known public-domain artifact to manual review. The hyphenated `public-domain` publisher spelling normalizes the same way.
 
-[Unreleased]: https://github.com/shcherbak-ai/licenseal/compare/v1.0.2...HEAD
+[1.0.3]: https://github.com/shcherbak-ai/licenseal/compare/v1.0.2...v1.0.3
 [1.0.2]: https://github.com/shcherbak-ai/licenseal/compare/v1.0.1...v1.0.2
 [1.0.1]: https://github.com/shcherbak-ai/licenseal/compare/v1.0.0...v1.0.1
 [1.0.0]: https://github.com/shcherbak-ai/licenseal/compare/v0.4.2...v1.0.0
