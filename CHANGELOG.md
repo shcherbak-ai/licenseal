@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file. Each versio
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/), and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Changed
+
+- **licenseal no longer depends on `tethered`.** Its HTTP client refuses a request to a host outside the fourteen registry hosts itself, before it connects, so outbound access is restricted as before ([Network egress](https://licenseal.shcherbak.ai/security/network/)). licenseal therefore installs without a C compiler where tethered has no prebuilt wheel, such as on Intel macOS and Windows on Arm, and adds no audit hook to the process that runs it. An application that runs licenseal under a tethered policy of its own, one that leaves out a registry host, now gets tethered's error rather than licenseal's.
+
 ## [1.0.2] - 2026-10-27
 
 ### Security
@@ -238,6 +244,7 @@ Documentation and package metadata only; CLI behavior is unchanged.
 
 - The aopalliance license URL now resolves to the permissive `LicenseRef-Public-Domain` sentinel instead of a bare `Public-Domain` string that no risk rule recognized, which routed a known public-domain artifact to manual review. The hyphenated `public-domain` publisher spelling normalizes the same way.
 
+[Unreleased]: https://github.com/shcherbak-ai/licenseal/compare/v1.0.2...HEAD
 [1.0.2]: https://github.com/shcherbak-ai/licenseal/compare/v1.0.1...v1.0.2
 [1.0.1]: https://github.com/shcherbak-ai/licenseal/compare/v1.0.0...v1.0.1
 [1.0.0]: https://github.com/shcherbak-ai/licenseal/compare/v0.4.2...v1.0.0

@@ -1,11 +1,11 @@
 """Egress-policy thread-propagation regression tests.
 
-licenseal restricts network egress with ``tethered.scope()``, whose policy
-lives in a ``contextvars.ContextVar``. ContextVars do NOT cross thread
-boundaries (PEP 567), so a registry fetch issued from a bare
-``ThreadPoolExecutor`` worker runs with an empty context and tethered's audit
-hook silently allows it (fail-open). Every fetching pool must therefore
-propagate the caller's context into its workers via
+An application that embeds licenseal can restrict its egress with
+``tethered.scope()``, whose policy lives in a ``contextvars.ContextVar``.
+ContextVars do NOT cross thread boundaries (PEP 567), so a registry fetch
+issued from a bare ``ThreadPoolExecutor`` worker runs with an empty context and
+tethered's audit hook silently allows it (fail-open). Every fetching pool must
+therefore propagate the caller's context into its workers via
 :func:`licenseal._concurrency.map_with_context`.
 
 These tests prove enforcement actually reaches the worker threads. They use a

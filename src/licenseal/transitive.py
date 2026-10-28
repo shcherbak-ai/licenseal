@@ -1572,8 +1572,8 @@ def _resolve_dotnet_transitive(
     prod_owners: dict[tuple[str, str], set[str]] = {}
     dev_owners: dict[tuple[str, str], set[str]] = {}
     node_names: dict[tuple[str, str], str] = {}
-    # Propagate the active tethered scope into the edge-fetch workers — a bare
-    # pool fetches in an empty context and bypasses the egress policy.
+    # Carry the caller's context into the edge-fetch workers (see
+    # licenseal._concurrency): a bare pool fetches in an empty context.
     subgraphs = map_with_context(_one, walkable, max_workers)
     for (direct, _pinned), (nodes, unread) in zip(walkable, subgraphs, strict=True):
         # A package whose nuspec could not be read leaves a hole under the
@@ -2217,8 +2217,8 @@ def _resolve_java_transitive(
     prod_owners: dict[tuple[str, str], set[str]] = {}
     dev_owners: dict[tuple[str, str], set[str]] = {}
     node_names: dict[tuple[str, str], str] = {}
-    # Propagate the active tethered scope into the fetch workers — a bare
-    # pool fetches in an empty context and bypasses the egress policy.
+    # Carry the caller's context into the fetch workers (see
+    # licenseal._concurrency): a bare pool fetches in an empty context.
     subgraphs = map_with_context(_one, walkable, max_workers)
     for (direct, _pinned), (nodes, unread) in zip(walkable, subgraphs, strict=True):
         # deps.dev did not return this direct's whole graph: a gap on the
@@ -2322,8 +2322,8 @@ def _fetch_go_edge_graph(
         requires, _replaces, _tools = _parse_go_mod(text)
         return {_go_key(req_path) for req_path, _ in requires}
 
-    # Propagate the active tethered scope into the go.mod-fetch workers — a bare
-    # pool fetches in an empty context and bypasses the egress policy.
+    # Carry the caller's context into the go.mod-fetch workers (see
+    # licenseal._concurrency): a bare pool fetches in an empty context.
     # Results come back in ``entries`` order.
     listed_last: dict[str, set[str]] = {}
     of_required: dict[str, set[str]] = {}

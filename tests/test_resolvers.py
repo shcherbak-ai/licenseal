@@ -2426,7 +2426,7 @@ class TestRegistryCache:
     @respx.mock
     def test_exception_clears_inflight_slot_so_caller_can_retry(self):
         # If the fetch raises (not a 4xx/5xx — those are caught and return
-        # None — but e.g. tethered.EgressBlocked propagating through), the
+        # None — but e.g. a refused request propagating through), the
         # cache must NOT cache the failure and must clear the in-flight slot
         # so a re-attempt is possible.
         call_count = {"n": 0}

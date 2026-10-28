@@ -10,6 +10,7 @@ import pytest
 import respx
 import tethered
 
+from licenseal.cli import _registry_client, _UnlistedHostError
 from licenseal.resolvers import http as registry_http
 from tests._helpers import _DEEP
 
@@ -672,13 +673,19 @@ class TestUrlWithADotSegment:
 
 
 class TestBlockedEgressStillPropagates:
-    """The fetch helpers turn failed lookups into ``None``. A blocked egress is
-    not one of them: it must reach the caller so the scan aborts.
+    """The fetch helpers turn failed lookups into ``None``. A refused request is
+    not one of them: it must reach the caller so the scan aborts, whether
+    licenseal's client refused it or an application's tethered policy did.
     """
 
     @pytest.mark.parametrize("fetcher", sorted(_FETCHERS))
     def test_fetch_helper_does_not_swallow_it(self, fetcher):
         with httpx.Client() as client, pytest.raises(tethered.EgressBlocked):
+            _FETCHERS[fetcher]("https://example.invalid/data", client)
+
+    @pytest.mark.parametrize("fetcher", sorted(_FETCHERS))
+    def test_fetch_helper_does_not_swallow_the_clients_refusal(self, fetcher):
+        with _registry_client("check") as client, pytest.raises(_UnlistedHostError):
             _FETCHERS[fetcher]("https://example.invalid/data", client)
 
     def test_cache_does_not_record_it_as_a_failed_lookup(self):

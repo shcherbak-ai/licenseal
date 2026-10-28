@@ -38,8 +38,8 @@ def _pin_proxy_settings(monkeypatch):
     """Run every test as if no proxy were set, whatever the host is.
 
     The CLI takes its proxy from the environment and, on Windows and macOS, from
-    the system's proxy settings; either would change the client and the allow
-    list of every scan. A test that needs a proxy sets its own on top of this.
+    the system's proxy settings; either would change the client of every scan.
+    A test that needs a proxy sets its own on top of this.
     """
     for name in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY"):
         monkeypatch.delenv(name, raising=False)

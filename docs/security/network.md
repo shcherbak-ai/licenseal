@@ -5,7 +5,7 @@ description: "The fourteen public registry hosts licenseal can contact, what eac
 
 # Network egress
 
-Outbound network access is restricted to fourteen hosts by [`tethered`](https://github.com/shcherbak-ai/tethered), an egress allowlist applied to every registry request:
+Outbound network access is restricted to fourteen hosts:
 
 | Host | Registry (operator) | What is requested | Used for |
 | --- | --- | --- | --- |
@@ -28,7 +28,9 @@ How each host's answer becomes a license is in [License sources](license-sources
 
 ## The allowlist
 
-The allowlist is hard-coded: a host is added only in a licenseal release, with security review. The one host it takes from the environment is a [proxy](#proxies). It is enforced inside the licenseal process, and a request to any other host is blocked. The restriction is a `tethered.scope()` around resolution, and the scope is propagated into the worker threads that resolve licenses and walk registries, so every registry request, including the deps.dev batch POSTs, is checked against the policy.
+The allowlist is hard-coded: a host is added only in a licenseal release, with security review. Every registry request, the deps.dev batch POSTs included, goes through one HTTP client. It refuses a request to a host and port outside the table, or over plain HTTP, before it opens a connection, and it follows no redirects. A refused request stops the scan with an error that names the host. The one other host licenseal connects to is a [proxy](#proxies) that the environment names.
+
+In development, the test suite runs under [tethered](https://github.com/shcherbak-ai/tethered) with no host allowed, and scans of real repositories run under it with only these fourteen allowed, so a request to any other host fails the run.
 
 A Maven fallback host (`dl.google.com`, `repo.jenkins-ci.org`) must be run by a recognized vendor, be public-read, use the standard `/maven2/` layout, and serve a meaningful fraction of the open-source JVM artifacts that are not on Central.
 
@@ -36,7 +38,7 @@ A Maven fallback host (`dl.google.com`, `repo.jenkins-ci.org`) must be run by a 
 
 Registry requests go through the proxy that `HTTPS_PROXY` names, or `ALL_PROXY` when `HTTPS_PROXY` is not set. On Windows and macOS, when neither is set, they go through the proxy in the system's settings; a proxy auto-configuration (PAC) script is not read, so where the system's proxy comes from one, set `HTTPS_PROXY`. A registry host that `NO_PROXY` lists is reached directly, and `NO_PROXY=*` turns the proxy off; the system's list of exceptions is not read. `HTTP_PROXY` is not used: every registry is reached over HTTPS.
 
-licenseal adds the proxy's host and port to the allowlist for the scan. Through a proxy, its requests still name only the hosts above, but the allowlist sees the connection to the proxy, not the one the proxy makes onward. The proxy sees only the requests listed under [What leaves the process](data-sent.md#what-a-request-carries).
+Through a proxy, the requests still name only the hosts above, and the allowlist checks the host each request names. The proxy sees only the requests listed under [What leaves the process](data-sent.md#what-a-request-carries).
 
 ## Rules for every host
 
@@ -46,6 +48,6 @@ licenseal adds the proxy's host and port to the allowlist for the scan. Through 
 
 ## Embedding licenseal
 
-When licenseal runs inside another Python application, the scope is context-local: licenseal does not flip a process-wide switch on the application that embeds it. If that application already calls `tethered.activate()` or wraps the call in an outer `tethered.scope()`, the effective policy is the **intersection** of all active policies. For a tamper-resistant ceiling, the embedding application can use `tethered.activate(locked=True)`.
+When licenseal runs inside another Python application, it changes nothing outside its own HTTP client: it installs no audit hook and turns on no process-wide policy.
 
-For embedded use, the embedding application's `tethered.activate(allow=[...])` allowlist must include licenseal's fourteen registry hosts, each with its port as the table above writes it, and the [proxy](#proxies) when one is set.
+An application that restricts its own egress, for example with tethered, must allow licenseal's fourteen registry hosts, each with its port as the table above writes it, and the [proxy](#proxies) when one is set. licenseal's worker threads run in copies of the calling thread's context, so a `tethered.scope()` that the application enters around the call holds in them too.

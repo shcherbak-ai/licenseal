@@ -28,6 +28,11 @@ LOCK = OUT / "_corpus_lock.json"
 MODES = ("no-dev", "dev")
 LABELS = ("baseline", "fresh", "scan")
 REVIEW_FILE = "licenseal.review.toml"
+# Every licenseal run, under tethered with only the registry hosts allowed.
+LICENSEAL = ("python", "/harness/licenseal_egress.py")
+# A request to another host: refused by licenseal's client, or by tethered when
+# it went around the client.
+EGRESS_BLOCKED = ("licenseal refused a request to", "Blocked by tethered")
 NAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
 
 # Mirrors the walker's documented skip set (docs/ecosystems/index.md) so the inventory counts
@@ -329,7 +334,7 @@ def out_path(label: str, name: str, mode: str) -> Path:
 def _check(name: str, mode: str, fmt: str, target: Path, timeout: int) -> tuple[int, str]:
     """Run ``licenseal check`` on one clone; return ``(exit code, combined output)``."""
     cmd = [
-        "licenseal",
+        *LICENSEAL,
         "check",
         "-p",
         str(CORPUS / name),
@@ -358,7 +363,7 @@ def cmd_scan(args: argparse.Namespace) -> int:
     record = load_json(run_path)
     record["source_rev"] = os.environ.get("STRESS_SRC_REV", "")
     record["source_dirty"] = os.environ.get("STRESS_SRC_DIRTY", "")
-    record["licenseal_version"] = run(["licenseal", "--version"]).stdout.strip()
+    record["licenseal_version"] = run([*LICENSEAL, "--version"]).stdout.strip()
     scans = record.setdefault("scans", {})
     for repo in load_corpus(args.only):
         name = repo["name"]
@@ -375,14 +380,21 @@ def cmd_scan(args: argparse.Namespace) -> int:
             suffix = "_dev" if mode == "dev" else ""
             (log_dir / f"{name}{suffix}.err").write_text(output, encoding="utf-8")
             crashed = "Traceback (most recent call last)" in output
+            blocked = any(marker in output for marker in EGRESS_BLOCKED)
             scans[key] = {
                 "exit": code,
                 "seconds": seconds,
                 "wrote_json": target.exists(),
                 "crashed": crashed,
+                "egress_blocked": blocked,
                 "taken_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
             }
-            flag = "CRASH" if crashed else ("ok" if target.exists() else "nojson")
+            if blocked:
+                flag = "EGRESS"
+            elif crashed:
+                flag = "CRASH"
+            else:
+                flag = "ok" if target.exists() else "nojson"
             print(f"{flag:8} {key:32} exit={code} {seconds:7.1f}s", flush=True)
             write_json(run_path, record)
     return 0
@@ -581,7 +593,7 @@ def _gapfill_one(name: str, timeout: int) -> str:
     work.mkdir(parents=True, exist_ok=True)
     scaffold = work / REVIEW_FILE
     scaffold.unlink(missing_ok=True)
-    init = run(["licenseal", "init-review-file", "-p", str(work), "--from-report", str(report)])
+    init = run([*LICENSEAL, "init-review-file", "-p", str(work), "--from-report", str(report)])
     # One note per reason a stanza could not be written.
     notes = re.findall(r"Note: (\d+) flagged", init.stdout + init.stderr)
     unscaffoldable = sum(int(count) for count in notes)

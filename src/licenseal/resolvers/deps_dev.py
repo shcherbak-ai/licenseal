@@ -602,8 +602,8 @@ def bulk_resolve_licenses(
         system, chunk = tagged
         return system, _fetch_batch_chunk(chunk, client, system=system)
 
-    # Propagate the active tethered scope into the batch-POST workers — a
-    # bare pool fetches in an empty context and bypasses the egress policy.
+    # Carry the caller's context into the batch-POST workers (see
+    # licenseal._concurrency): a bare pool fetches in an empty context.
     for system, chunk_result in map_with_context(
         _fetch_one, tagged_chunks, min(max_workers, _BATCH_MAX_WORKERS)
     ):

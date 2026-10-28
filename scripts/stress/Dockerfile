@@ -2,7 +2,8 @@
 # Runner image for the stress-test corpus (see stress.py).
 # Build context: the repository root, filtered by Dockerfile.dockerignore.
 #
-# The image carries licenseal's locked runtime dependencies and an editable
+# The image carries licenseal's locked runtime dependencies, tethered (the
+# `egress` group, which harness.py runs every scan under), and an editable
 # install rooted at /src/src. At run time the working tree's src/ is mounted
 # read-only over /src/src, so scans exercise the current code without a
 # rebuild. Rebuild only when pyproject.toml or uv.lock changes.
@@ -22,10 +23,10 @@ ENV UV_PROJECT_ENVIRONMENT=/opt/venv \
 WORKDIR /src
 COPY pyproject.toml uv.lock PYPI.md LICENSE NOTICE ./
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv sync --frozen --no-dev --no-install-project
+    uv sync --frozen --no-dev --group egress --no-install-project
 COPY src ./src
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv sync --frozen --no-dev
+    uv sync --frozen --no-dev --group egress
 
 ENV PATH=/opt/venv/bin:$PATH
 

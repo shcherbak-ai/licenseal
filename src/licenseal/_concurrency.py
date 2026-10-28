@@ -1,16 +1,17 @@
 """Thread-pool fan-out that carries the caller's context into every worker.
 
-licenseal restricts outbound network egress with ``tethered.scope()``, whose
-policy lives in a :class:`contextvars.ContextVar`. Per PEP 567 a freshly
-spawned thread starts in an *empty* context — it does **not** inherit the
-submitting thread's ContextVars — so a worker that issues a registry request
-inside a bare ``ThreadPoolExecutor`` runs with no active scope, and tethered's
-audit hook silently allows the call (fail-open). That would punch a hole in the
-egress policy for every pool that fetches in parallel.
+An application that embeds licenseal can restrict its egress with
+``tethered.scope()``, whose policy lives in a :class:`contextvars.ContextVar`.
+Per PEP 567 a freshly spawned thread starts in an *empty* context — it does
+**not** inherit the submitting thread's ContextVars — so a worker that issues a
+registry request inside a bare ``ThreadPoolExecutor`` runs with no active scope,
+and tethered's audit hook silently allows the call (fail-open). That would
+punch a hole in the application's policy for every pool that fetches in
+parallel.
 
 :func:`map_with_context` closes that hole: it snapshots the active context once
 per item on the calling thread and runs each task inside its own snapshot, so
-the full host-plus-licenseal scope stack is enforced in the worker. One
+the application's whole scope stack is enforced in the worker. One
 snapshot per item (rather than one shared snapshot) is required because a single
 :class:`contextvars.Context` cannot be entered by more than one thread at a
 time — ``Context.run`` raises "cannot enter context: is already entered" on the
@@ -44,8 +45,8 @@ def map_with_context(
 
     Returns results in input order (like :meth:`ThreadPoolExecutor.map`). Each
     task executes inside an independent snapshot of the calling thread's context,
-    so an active ``tethered.scope()`` (and any enclosing host policy) is enforced
-    on the worker's network calls. ``max_workers`` is clamped to
+    so a ``tethered.scope()`` the calling application entered is enforced on the
+    worker's network calls. ``max_workers`` is clamped to
     ``[1, len(items)]`` — an empty ``items`` returns ``[]`` without starting a
     pool.
     """

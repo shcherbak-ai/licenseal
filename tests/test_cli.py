@@ -26,7 +26,7 @@ from licenseal import __version__
 from licenseal.cli import (
     _PROJECT_URL,
     _REGISTRY_HOSTS,
-    _TETHERED_HINT,
+    _REGISTRY_HOSTS_HINT,
     _echo_missing_lockfiles,
     _echo_read_diagnostics,
     _http_headers,
@@ -39,6 +39,7 @@ from licenseal.cli import (
     _registry_client,
     _render_installed_skill,
     _should_fail,
+    _UnlistedHostError,
     _warn_unscaffoldable,
     _worker_count,
     main,
@@ -3514,36 +3515,28 @@ def _proxy_of(client: httpx.Client, host: str) -> str | None:
 
 
 class TestRegistryProxy:
-    """The client goes through the proxy that the scope allows, and through no other."""
+    """The client goes through the proxy licenseal chose, and through no other."""
 
     def test_without_a_proxy_every_registry_is_reached_directly(self):
-        client, allow = _registry_client("check")
-        with client:
-            assert allow == _REGISTRY_HOSTS
+        with _registry_client("check") as client:
             assert _proxy_of(client, "pypi.org") is None
 
     @pytest.mark.parametrize("variable", ["HTTPS_PROXY", "ALL_PROXY"])
-    def test_an_environment_proxy_is_used_and_allowed(self, monkeypatch, variable):
+    def test_an_environment_proxy_is_used(self, monkeypatch, variable):
         monkeypatch.setenv(variable, "http://proxy.corp.example:3128")
-        client, allow = _registry_client("check")
-        with client:
-            assert allow == [*_REGISTRY_HOSTS, "proxy.corp.example:3128"]
+        with _registry_client("check") as client:
             assert _proxy_of(client, "pypi.org") == "proxy.corp.example:3128"
 
     def test_https_proxy_takes_precedence_over_all_proxy(self, monkeypatch):
         monkeypatch.setenv("HTTPS_PROXY", "http://https-proxy.corp.example:3128")
         monkeypatch.setenv("ALL_PROXY", "http://all-proxy.corp.example:3128")
-        client, allow = _registry_client("check")
-        with client:
-            assert allow[-1] == "https-proxy.corp.example:3128"
+        with _registry_client("check") as client:
             assert _proxy_of(client, "pypi.org") == "https-proxy.corp.example:3128"
 
     def test_http_proxy_alone_is_not_used(self, monkeypatch):
         # Every registry is reached over HTTPS; HTTP_PROXY is the proxy of http:// URLs.
         monkeypatch.setenv("HTTP_PROXY", "http://proxy.corp.example:3128")
-        client, allow = _registry_client("check")
-        with client:
-            assert allow == _REGISTRY_HOSTS
+        with _registry_client("check") as client:
             assert _proxy_of(client, "pypi.org") is None
 
     def test_a_registry_that_no_proxy_lists_is_reached_directly(self, monkeypatch):
@@ -3551,9 +3544,7 @@ class TestRegistryProxy:
         monkeypatch.setenv(
             "NO_PROXY", "internal.corp.example, .pythonhosted.org,PyPI.org,npmjs.org,ates.io"
         )
-        client, allow = _registry_client("check")
-        with client:
-            assert allow == [*_REGISTRY_HOSTS, "proxy.corp.example:3128"]
+        with _registry_client("check") as client:
             assert _proxy_of(client, "pypi.org") is None
             assert _proxy_of(client, "files.pythonhosted.org") is None
             # A name covers its subdomains, and only at a dot.
@@ -3561,38 +3552,25 @@ class TestRegistryProxy:
             assert _proxy_of(client, "crates.io") == "proxy.corp.example:3128"
             assert _proxy_of(client, "hex.pm") == "proxy.corp.example:3128"
 
-    def test_a_proxy_no_registry_goes_through_is_not_allowed(self, monkeypatch):
+    def test_no_proxy_star_turns_the_proxy_off(self, monkeypatch):
         monkeypatch.setenv("HTTPS_PROXY", "http://proxy.corp.example:3128")
         monkeypatch.setenv("NO_PROXY", "*")
-        client, allow = _registry_client("check")
-        with client:
-            assert allow == _REGISTRY_HOSTS
+        with _registry_client("check") as client:
             assert _proxy_of(client, "pypi.org") is None
+            assert _proxy_of(client, "hex.pm") is None
 
     def test_the_system_proxy_is_used_when_no_variable_names_one(self, monkeypatch):
         # On Windows and macOS, urllib falls back to the system's proxy settings.
         monkeypatch.setattr(
             urllib.request, "getproxies", lambda: {"https": "http://proxy.corp.example:8080"}
         )
-        client, allow = _registry_client("check")
-        with client:
-            assert allow == [*_REGISTRY_HOSTS, "proxy.corp.example:8080"]
+        with _registry_client("check") as client:
             assert _proxy_of(client, "pypi.org") == "proxy.corp.example:8080"
 
-    @pytest.mark.parametrize(
-        ("proxy", "rule"),
-        [
-            ("http://proxy.corp.example", "proxy.corp.example:80"),
-            ("https://proxy.corp.example", "proxy.corp.example:443"),
-            ("proxy.corp.example:3128", "proxy.corp.example:3128"),
-            ("http://user:secret@[fd00::1]:3128", "[fd00::1]:3128"),
-        ],
-    )
-    def test_the_allow_rule_names_the_proxy_host_and_port(self, monkeypatch, proxy, rule):
-        monkeypatch.setenv("HTTPS_PROXY", proxy)
-        client, allow = _registry_client("check")
-        with client, tethered.scope(allow=allow, label="probe"):
-            assert allow[-1] == rule
+    def test_a_proxy_without_a_scheme_is_used_as_an_http_proxy(self, monkeypatch):
+        monkeypatch.setenv("HTTPS_PROXY", "proxy.corp.example:3128")
+        with _registry_client("check") as client:
+            assert _proxy_of(client, "pypi.org") == "proxy.corp.example:3128"
 
     @respx.mock
     def test_a_scan_runs_with_a_proxy_set(self, tmp_path, monkeypatch):
@@ -3607,15 +3585,13 @@ class TestRegistryProxy:
         )
         _mock_pypi("requests", "MIT")
 
-        with patch.object(tethered, "scope", wraps=tethered.scope) as mock_scope:
-            result = CliRunner().invoke(
-                main, ["check", "--path", str(tmp_path), "--no-require-lockfile"]
-            )
+        result = CliRunner().invoke(
+            main, ["check", "--path", str(tmp_path), "--no-require-lockfile"]
+        )
         assert result.exit_code == 0
-        assert mock_scope.call_args.kwargs["allow"][-1] == "proxy.corp.example:3128"
 
 
-class TestTetheredIntegration:
+class TestRegistryEgress:
     def test_conftest_activate_blocks_unmocked_egress(self):
         """The test suite's no-real-network invariant is enforced by two
         layers: respx mocks per-test, and a process-wide
@@ -3631,7 +3607,7 @@ class TestTetheredIntegration:
             client.get("https://example.invalid/sentinel")
 
     @respx.mock
-    def test_parallel_workers_inherit_scope(self, tmp_path):
+    def test_parallel_workers_each_enter_their_own_context(self, tmp_path):
         """Regression: ThreadPoolExecutor workers must each get an independent
         context snapshot. A single shared Context cannot be entered concurrently
         — the second worker would crash with 'context already entered'.
@@ -3684,56 +3660,73 @@ class TestTetheredIntegration:
         assert "context is already entered" not in result.output
 
     @respx.mock
-    def test_scope_wraps_resolution(self, tmp_path):
+    def test_the_client_sends_to_every_listed_host(self):
+        route = respx.route().mock(return_value=httpx.Response(200))
+        with _registry_client("check") as client:
+            for rule in _REGISTRY_HOSTS:
+                assert client.get(f"https://{rule.removesuffix(':443')}/").status_code == 200
+        assert route.call_count == len(_REGISTRY_HOSTS)
+
+    @pytest.mark.parametrize(
+        ("url", "refused"),
+        [
+            ("https://example.com/pypi/requests/json", "https://example.com:443"),
+            ("https://pypi.org.example.com/pypi/requests/json", "https://pypi.org.example.com:443"),
+            ("http://pypi.org/pypi/requests/json", "http://pypi.org:80"),
+            ("https://pypi.org:8443/pypi/requests/json", "https://pypi.org:8443"),
+        ],
+    )
+    @pytest.mark.parametrize("proxy", ["", "http://proxy.corp.example:3128"])
+    @respx.mock
+    def test_the_client_refuses_any_other_host_before_sending(
+        self, monkeypatch, url, refused, proxy
+    ):
+        monkeypatch.setenv("HTTPS_PROXY", proxy)
+        route = respx.route().mock(return_value=httpx.Response(200))
+        with _registry_client("check") as client, pytest.raises(_UnlistedHostError) as caught:
+            client.get(url)
+        assert str(caught.value) == refused
+        assert not route.called
+
+    @respx.mock
+    def test_a_refused_request_stops_the_scan(self, tmp_path):
+        # PyPI's answer names the next URL: the wheel whose .metadata file is
+        # the license fallback. A wheel on another host is never requested.
         (tmp_path / "pyproject.toml").write_text(
             textwrap.dedent("""\
             [project]
             name = "myproject"
             license = {text = "MIT"}
-            dependencies = ["requests"]
+            dependencies = ["pkg-a==1.0.0"]
             """)
         )
-        _mock_pypi("requests", "MIT")
-
-        with patch.object(tethered, "scope", wraps=tethered.scope) as mock_scope:
-            runner = CliRunner()
-            result = runner.invoke(
-                main, ["check", "--path", str(tmp_path), "--no-require-lockfile"]
+        wheel_url = "https://downloads.example.com/pkg_a-1.0.0-py3-none-any.whl"
+        respx.get("https://pypi.org/pypi/pkg-a/1.0.0/json").mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "info": {"version": "1.0.0", "requires_dist": []},
+                    "urls": [{"packagetype": "bdist_wheel", "url": wheel_url}],
+                },
             )
-            assert result.exit_code == 0
-            mock_scope.assert_called_once()
-            kwargs = mock_scope.call_args.kwargs
-            assert kwargs["allow"] == [
-                "pypi.org:443",
-                "files.pythonhosted.org:443",
-                "registry.npmjs.org:443",
-                "crates.io:443",
-                "api.deps.dev:443",
-                "proxy.golang.org:443",
-                "repo.maven.apache.org:443",
-                "dl.google.com:443",
-                "repo.jenkins-ci.org:443",
-                "api.nuget.org:443",
-                "repo.packagist.org:443",
-                "rubygems.org:443",
-                "hex.pm:443",
-                "cran.r-project.org:443",
-            ]
-            assert kwargs["label"] == "licenseal.resolve"
-            assert "pypi.org:443" in kwargs["hint"]
-            assert "files.pythonhosted.org:443" in kwargs["hint"]
-            assert "registry.npmjs.org:443" in kwargs["hint"]
-            assert "api.deps.dev:443" in kwargs["hint"]
-            assert "proxy.golang.org:443" in kwargs["hint"]
-            assert "repo.maven.apache.org:443" in kwargs["hint"]
-            assert "dl.google.com:443" in kwargs["hint"]
-            assert "repo.jenkins-ci.org:443" in kwargs["hint"]
-            assert "api.nuget.org:443" in kwargs["hint"]
+        )
+        sidecar = respx.get(wheel_url + ".metadata").mock(
+            return_value=httpx.Response(200, text="License-Expression: MIT\n\n")
+        )
+
+        result = CliRunner().invoke(
+            main, ["check", "--path", str(tmp_path), "--no-require-lockfile"]
+        )
+        assert result.exit_code == 1
+        assert isinstance(result.exception, SystemExit)
+        assert not sidecar.called
+        assert "refused a request to https://downloads.example.com:443" in result.output
+        assert _REGISTRY_HOSTS_HINT in result.output
 
     def test_hint_links_to_the_section_that_lists_the_allowed_hosts(self):
         """The link at the end of the hint names a document of this repository
         and a heading in it, under which every allowed host is listed."""
-        link = urlsplit(_TETHERED_HINT.rsplit(" ", 1)[-1])
+        link = urlsplit(_REGISTRY_HOSTS_HINT.rsplit(" ", 1)[-1])
         blob = urlsplit(_PROJECT_URL).path + "/blob/main/"
         assert link.netloc == "github.com"
         assert link.path.startswith(blob)
@@ -3759,83 +3752,6 @@ class TestTetheredIntegration:
         page = Path(__file__).parent.parent / "docs" / "security" / "network.md"
         rows = re.findall(r"^\| `([a-z0-9.-]+:\d+)` \|", page.read_text(encoding="utf-8"), re.M)
         assert sorted(rows) == sorted(_REGISTRY_HOSTS)
-
-    @respx.mock
-    def test_runs_under_host_activate_policy(self, tmp_path):
-        """Local-dev / host process can call tethered.activate() and the CLI's
-        scope() intersects with it instead of overriding it."""
-        (tmp_path / "pyproject.toml").write_text(
-            textwrap.dedent("""\
-            [project]
-            name = "myproject"
-            license = {text = "MIT"}
-            dependencies = ["requests"]
-            """)
-        )
-        _mock_pypi("requests", "MIT")
-
-        tethered.activate(allow=["pypi.org:443", "registry.npmjs.org:443"])
-        runner = CliRunner()
-        result = runner.invoke(main, ["check", "--path", str(tmp_path), "--no-require-lockfile"])
-        assert result.exit_code == 0
-
-    def test_host_activate_without_registries_yields_clean_error(self, tmp_path):
-        """If a host's activate() omits the registry hosts, the user sees a
-        clear ClickException, not a Python traceback."""
-        (tmp_path / "pyproject.toml").write_text(
-            textwrap.dedent("""\
-            [project]
-            name = "myproject"
-            license = {text = "MIT"}
-            dependencies = ["requests"]
-            """)
-        )
-
-        tethered.activate(allow=["only-allowed.example.com:443"])
-        runner = CliRunner()
-        result = runner.invoke(main, ["check", "--path", str(tmp_path)])
-
-        assert result.exit_code != 0
-        # Tethered's own message + our actionable disambiguation.
-        # (Note: when activate() makes the scope's rules empty, tethered drops
-        # the scope and blocks at the activate() layer, so the scope hint
-        # doesn't surface in this path — licenseal's CLI text carries the user.)
-        assert "Blocked by tethered" in result.output
-        assert "pypi.org" in result.output
-        assert "tethered.activate()" in result.output
-        # Make sure we didn't dump a raw traceback at the user.
-        assert "Traceback" not in result.output
-
-    def test_host_outer_scope_without_registries_yields_clean_error(self, tmp_path):
-        """If a host wraps licenseal in an outer tethered.scope() without the
-        registries, the inner scope's hint surfaces and the CLI exits cleanly."""
-        (tmp_path / "pyproject.toml").write_text(
-            textwrap.dedent("""\
-            [project]
-            name = "myproject"
-            license = {text = "MIT"}
-            dependencies = ["requests"]
-            """)
-        )
-
-        # conftest.py installs a global activate(allow=[]); lift it for this
-        # test so the outer scope is the actual blocker. The autouse
-        # _restore_tethered_baseline fixture re-arms activate(allow=[]) at
-        # teardown, so no manual restore is needed.
-        tethered.deactivate()
-        with tethered.scope(allow=["only-allowed.example.com:443"], label="host"):
-            runner = CliRunner()
-            result = runner.invoke(main, ["check", "--path", str(tmp_path)])
-
-        assert result.exit_code != 0
-        assert "Blocked by tethered" in result.output
-        # In the outer-scope path, tethered preserves the inner scope's hint.
-        assert "Hint:" in result.output
-        assert "pypi.org:443" in result.output
-        assert "registry.npmjs.org:443" in result.output
-        # licenseal's actionable disambig mentions enclosing scope as a possibility.
-        assert "enclosing tethered.scope()" in result.output
-        assert "Traceback" not in result.output
 
     @respx.mock
     def test_warns_on_failed_resolution(self, tmp_path):

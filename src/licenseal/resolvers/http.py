@@ -1523,7 +1523,7 @@ class RegistryCache:
         try:
             data = _trim_for_cache(url, inner_fetcher(url, client))
         except BaseException:
-            # The fetch raised (e.g. tethered.EgressBlocked propagating past
+            # The fetch raised (e.g. a refused request propagating past
             # the inner fetcher's httpx.RequestError catch). Don't cache an
             # entry — let the next caller try fresh. Drop the event slot so a
             # retry won't reuse this stale Event, then release waiters.

@@ -33,7 +33,6 @@ dependencies = [
     "httpx>=0.28",
     "packaging>=24.0",
     "semantic-version>=2.10",
-    "tethered>=1.0.0",
     "pyyaml>=6.0.3",
     "defusedxml>=0.7.1",
     # httpx verifies registry certificates against certifi's bundle, and pip
@@ -71,6 +70,12 @@ dev = [
     "pre-commit-hooks>=6.0",
     "omerta>=0.1.2",
     "zizmor>=1.31",
+    {include-group = "egress"},
+]
+# The egress guard the tests and the stress harness run licenseal under; the
+# stress image installs it beside the runtime dependencies.
+egress = [
+    "tethered>=1.0.0",
 ]
 
 [tool.uv]
@@ -159,6 +164,7 @@ DEP002 = [
 ]
 DEP004 = [
     "invoke",  # tasks.py, the development tasks
+    "tethered",  # scripts/stress/licenseal_egress.py, the stress harness
 ]
 
 [tool.bandit]

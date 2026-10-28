@@ -18,7 +18,6 @@ from pathlib import Path
 
 import click
 import httpx
-import tethered
 from rich.console import Console
 from rich.progress import (
     BarColumn,
@@ -117,7 +116,7 @@ _REGISTRY_HOSTS = [
     # Fallback Maven registries — queried after Maven Central, for any POM
     # and for an artifact's ``maven-metadata.xml``, whenever Central gives
     # no usable body for it. See :data:`maven_central._FALLBACK_POM_REGISTRIES`
-    # and docs/security/network.md for the inclusion criterion. tethered allow rules are
+    # and docs/security/network.md for the inclusion criterion. The host check is
     # host:port-granular, so ``dl.google.com:443`` permits the whole host even
     # though licenseal only ever requests its ``/dl/android/maven2`` path — it
     # is the broadest entry here, included solely for that Maven mirror.
@@ -151,7 +150,7 @@ _REGISTRY_HOSTS = [
 ]
 _REQUEST_TIMEOUT_SECONDS = 10.0
 _PROJECT_URL = "https://github.com/shcherbak-ai/licenseal"
-_TETHERED_HINT = (
+_REGISTRY_HOSTS_HINT = (
     f"licenseal requires pypi.org:443, files.pythonhosted.org:443, "
     f"registry.npmjs.org:443, crates.io:443, api.deps.dev:443, "
     f"proxy.golang.org:443, repo.maven.apache.org:443, "
@@ -184,16 +183,35 @@ def _http_headers(command_name: str) -> dict[str, str]:
     }
 
 
-def _registry_client(command_name: str) -> tuple[httpx.Client, list[str]]:
-    """Build the registry client and the allow list of the scope it runs in.
+class _UnlistedHostError(RuntimeError):
+    """A request to a scheme, host, or port outside ``_REGISTRY_HOSTS``; it stops the scan.
 
-    licenseal picks the proxy itself and gives the same answer to the client and
-    to the allow list: a proxy the client found on its own would be refused by
-    the scope. It is the one httpx would pick: ``HTTPS_PROXY``, else
-    ``ALL_PROXY``, or on Windows and macOS the system proxy when no variable names
-    one (``urllib.request.getproxies``). A registry host that ``NO_PROXY`` lists
-    is reached directly. The client is handed its transports, so it reads no
-    proxy setting of its own.
+    Not an ``httpx.RequestError``, which the fetch helpers turn into a failed
+    lookup: a refused request must abort the scan, never read as UNKNOWN.
+    """
+
+
+def _refuse_unlisted_host(request: httpx.Request) -> None:
+    """Refuse a request that is not HTTPS to a host and port of ``_REGISTRY_HOSTS``.
+
+    A request hook of the registry client: httpx runs it before each request is
+    sent, a redirect's included, and it reads the host the request names, not a
+    proxy that carries it.
+    """
+    url = request.url
+    port = url.port or (443 if url.scheme == "https" else 80)
+    if url.scheme != "https" or f"{url.host}:{port}" not in _REGISTRY_HOSTS:
+        raise _UnlistedHostError(f"{url.scheme}://{url.host}:{port}")
+
+
+def _registry_client(command_name: str) -> httpx.Client:
+    """Build the registry client, which sends requests to ``_REGISTRY_HOSTS`` only.
+
+    licenseal picks the proxy itself: the one httpx would pick, ``HTTPS_PROXY``,
+    else ``ALL_PROXY``, or on Windows and macOS the system proxy when no variable
+    names one (``urllib.request.getproxies``). A registry host that ``NO_PROXY``
+    lists is reached directly. The client is handed its transports, so it reads
+    no proxy setting of its own.
 
     The transports keep httpx's ``trust_env`` default, which honors
     ``SSL_CERT_FILE`` and ``SSL_CERT_DIR``, as a proxy that inspects TLS needs.
@@ -218,19 +236,17 @@ def _registry_client(command_name: str) -> tuple[httpx.Client, list[str]]:
     ]
     direct = httpx.HTTPTransport()
     transport = direct
-    allow = list(_REGISTRY_HOSTS)
     if proxy and len(bypassed) < len(hosts):
-        url = httpx.URL(proxy if "://" in proxy else f"http://{proxy}")
-        transport = httpx.HTTPTransport(proxy=url)
-        proxy_host = f"[{url.host}]" if ":" in url.host else url.host
-        allow.append(f"{proxy_host}:{url.port or (443 if url.scheme == 'https' else 80)}")
-    client = httpx.Client(
+        transport = httpx.HTTPTransport(
+            proxy=httpx.URL(proxy if "://" in proxy else f"http://{proxy}")
+        )
+    return httpx.Client(
         timeout=_REQUEST_TIMEOUT_SECONDS,
         headers=_http_headers(command_name),
         transport=transport,
         mounts={f"all://{host}": direct for host in bypassed},
+        event_hooks={"request": [_refuse_unlisted_host]},
     )
-    return client, allow
 
 
 def _worker_count(dep_count: int, max_workers: int) -> int:
@@ -623,15 +639,15 @@ def _resolve_license_infos(
     `all_direct_deps` is the unfiltered direct-dep list
     (both prod and dev) — the lockfile path needs it to attribute group by
     reachability and to drop dev-only chains when `include_dev=False`. The
-    transitive walk runs inside the same `tethered.scope()` block so its
-    registry calls are policy-checked too.
+    transitive walk shares the registry client, so its requests pass the same
+    host check.
 
     ``timings`` collects per-phase wall-clock for the caller's end-of-scan
     summary.
     """
     if not deps and not transitive:
         # No direct deps AND no transitive walk possible → skip the
-        # tethered.scope / progress / threadpool setup entirely. When a
+        # client / progress / threadpool setup entirely. When a
         # transitive walk IS possible we proceed even with zero direct deps:
         # a lockfile is read whether or not a manifest declares anything for
         # its ecosystem (a lockfile with no manifest beside it, or a manifest
@@ -642,12 +658,8 @@ def _resolve_license_infos(
         return []
     # licenseal must work behind a corporate egress proxy, common in the
     # compliance-focused orgs that run it.
-    client, allow = _registry_client(command_name)
     try:
-        with (
-            tethered.scope(allow=allow, label="licenseal.resolve", hint=_TETHERED_HINT),
-            client,
-        ):
+        with _registry_client(command_name) as client:
             # One URL cache for the whole scan. The walker hammers a
             # narrow set of URLs (popular transitives are referenced by
             # many parents at different specs), and the license-resolution
@@ -953,14 +965,10 @@ def _resolve_license_infos(
                     not_found=registry_cache.not_found,
                 )
 
-            # tethered.scope() stores its stack in a ContextVar; per PEP 567,
-            # ContextVars do not cross the thread boundary, so worker threads
-            # start in an empty context. Re-entering scope inside the worker
-            # (decorator / with-block) would enforce *our* scope but lose any
-            # ancestor scope a host may have wrapped us in — silently bypassing
-            # the host's policy. We instead snapshot the active context once
-            # per task on the main thread so each worker enters an independent
-            # copy that carries the full host-plus-licenseal scope stack
+            # Per PEP 567 a worker thread starts in an empty context, outside a
+            # tethered.scope() that an application embedding licenseal entered
+            # around the scan. Snapshot the active context once per task on
+            # the main thread so each worker enters an independent copy of it
             # (a single shared Context cannot be entered concurrently by
             # multiple threads).
             snapshots = [contextvars.copy_context() for _ in deps]
@@ -997,7 +1005,7 @@ def _resolve_license_infos(
             # Wholesale-unreachability gate. The pool has joined, so the cache
             # counters are final. If every registry request failed and nothing
             # resolved, the scan didn't *run* — abort with a hard error (same
-            # tier as an egress-policy block) rather than emit a report of
+            # tier as a refused request) rather than emit a report of
             # all-UNKNOWN that would pass under --no-strict.
             if _registries_unreachable(
                 results,
@@ -1010,7 +1018,7 @@ def _resolve_license_infos(
                     "package registries are unreachable or not responding — typically no "
                     "network connectivity, a proxy or firewall blocking egress, or a "
                     "registry outage. Refusing to report every dependency as UNKNOWN from "
-                    f"a scan that resolved nothing.\n{_TETHERED_HINT}"
+                    f"a scan that resolved nothing.\n{_REGISTRY_HOSTS_HINT}"
                 )
             # Traffic summary so a slow scan explains itself: a large
             # crates.io share means the 1 req/s fallback tail dominated
@@ -1031,12 +1039,10 @@ def _resolve_license_infos(
             # Only now is it known which declarations resolved to the same
             # thing, in a transitive scan and in a direct-only one alike.
             return _merge_duplicate_rows(results)
-    except tethered.EgressBlocked as exc:
+    except _UnlistedHostError as exc:
         raise click.ClickException(
-            f"{exc}\n"
-            "If a host tethered policy is in effect (tethered.activate() or an "
-            "enclosing tethered.scope()), include the hosts above in its allowlist, "
-            "and the proxy licenseal uses, if one is set."
+            f"licenseal refused a request to {_printable(str(exc))}, which is not one of "
+            f"the registry hosts it contacts.\n{_REGISTRY_HOSTS_HINT}"
         ) from exc
 
 
