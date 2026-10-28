@@ -3,10 +3,10 @@
   <img src="docs/assets/licenseal-wordmark.svg" alt="licenseal" width="416">
 </p>
 
-<h1 align="center">Catch incompatible dependency licenses before they block a release</h1>
+<h1 align="center">Catch incompatible dependency licenses <br>before they block a release</h1>
 
 <p align="center">
-  A verdict, not a list · Transitive across 10 ecosystems · No dependency installs
+  A&nbsp;verdict,&nbsp;not&nbsp;a&nbsp;list · Transitive&nbsp;across&nbsp;10&nbsp;ecosystems · No&nbsp;dependency&nbsp;installs
 </p>
 
 <p align="center">
