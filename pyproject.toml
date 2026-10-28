@@ -199,11 +199,13 @@ version_files = [
 tag_format = "v$version"
 annotated_tag = true
 # The hooks run after the version fields are rewritten and before the commit.
-# The last one stops a bump whose release date was not written into
-# CITATION.cff: the changelog heading of the new version has to name the same day.
+# scripts/date_release.py names and dates the [Unreleased] section of the
+# changelog and dates CITATION.cff; the last one stops a bump whose two dates
+# differ.
 pre_bump_hooks = [
     "uv lock --no-upgrade",
     "git add uv.lock",
+    "uv run python scripts/date_release.py",
     "uv run pytest tests/test_changelog.py -q",
 ]
 
