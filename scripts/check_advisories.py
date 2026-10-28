@@ -50,19 +50,11 @@ COOLDOWN_DAYS = 7
 # The advisories of locked versions that the check accepts, by their IDs at
 # osv.dev, with the reasons: a vulnerability that no version the ranges admit
 # fixes. A report of a malicious package (MAL-) is never accepted.
-_MARKDOWNLINT_0_24 = (
-    "a slow parse of the repository's own Markdown or TOML in markdownlint-cli2, fixed in "
-    "0.24.0, which the cooldown admits from 2026-10-28: then raise its range in package.json"
-)
 ACCEPTED_ADVISORIES: dict[str, str] = {
     "GHSA-238p-pmpm-9mq7": (
         "katex, through markdownlint: low severity, fixed in 0.18.2 only, which "
         "micromark-extension-math (^0.16.0) does not admit"
     ),
-    "GHSA-gfr2-rv44-r23c": _MARKDOWNLINT_0_24,
-    "GHSA-r7fv-28h4-cvq7": _MARKDOWNLINT_0_24,
-    "GHSA-vfgh-jcmw-g37q": _MARKDOWNLINT_0_24,
-    "GHSA-r4xh-jqrq-34v2": _MARKDOWNLINT_0_24,
 }
 
 # The batch query of osv.dev, for the advisories of many versions at once.
