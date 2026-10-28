@@ -18,6 +18,10 @@
 </p>
 
 <p align="center">
+  <a href="https://www.producthunt.com/products/licenseal?embed=true&utm_source=badge-featured&utm_medium=badge&utm_campaign=badge-licenseal"><img src="https://api.producthunt.com/widgets/embed-image/v1/featured.svg?post_id=1295295&theme=dark&t=1793188385475" alt="licenseal on Product Hunt" width="200" height="43"></a>
+</p>
+
+<p align="center">
   <a href="https://licenseal.shcherbak.ai/get-started/quick-start/"><strong>Quick start</strong></a> ·
   <a href="https://licenseal.shcherbak.ai/guides/ci/"><strong>CI integration</strong></a> ·
   <a href="https://licenseal.shcherbak.ai/guides/claude-code-skill/"><strong>Claude Code skill</strong></a> ·
