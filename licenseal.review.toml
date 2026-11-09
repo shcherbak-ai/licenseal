@@ -6,6 +6,6 @@
 [[review]]
 ecosystem = "python"
 package = "certifi"
-version = "2026.10.19"
+version = "2026.10.23"
 license = "MPL-2.0"
 note = "Unmodified PyPI dep (direct: a version floor for the certificate bundle httpx uses); MPL-2.0 file-level copyleft only triggers on modifications to MPL-licensed files."

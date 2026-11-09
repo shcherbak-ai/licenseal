@@ -55,6 +55,11 @@ ACCEPTED_ADVISORIES: dict[str, str] = {
         "katex, through markdownlint: low severity, fixed in 0.18.2 only, which "
         "micromark-extension-math (^0.16.0) does not admit"
     ),
+    "GHSA-gg6h-894w-4m9c": (
+        "re2js, through markdownlint: quadratic time only with the LOOKBEHINDS flag, which "
+        "markdownlint never sets; fixed in 2.8.7, which markdownlint 0.42.0, pinned by "
+        "markdownlint-cli2 0.24.0, does not admit"
+    ),
 }
 
 # The batch query of osv.dev, for the advisories of many versions at once.
