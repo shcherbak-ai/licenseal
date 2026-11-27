@@ -26,8 +26,8 @@ permissions:
 # checks a newer one against a list it fetches from uv's publisher at run
 # time, which is not enough for the job that builds the release.
 env:
-  UV_VERSION: "0.13.6"
-  UV_SHA256: "f29c3e94ffabd7e6f3ba521dba169a9b7ec12100bf3257087f0f24f6123f3645"
+  UV_VERSION: "0.13.9"
+  UV_SHA256: "a7fbaff2b9a271d85c1bdb540941090fd1ce011797b4abeb48e4dcd39c2471d5"
 
 jobs:
   publish-gate:
@@ -80,7 +80,7 @@ jobs:
           ref: ${{ github.event.workflow_run.head_sha }}
 
       - name: Install uv
-        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2  # v10.3.3
+        uses: astral-sh/setup-uv@1db35dd8eee11c5894872e0b383ae6c406cf738d  # v10.4.0
         with:
           version: ${{ env.UV_VERSION }}
           checksum: ${{ env.UV_SHA256 }}

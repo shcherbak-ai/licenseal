@@ -5,7 +5,7 @@
 |Package|Ecosystem|Group|Source|License|Risk|Status|
 |---------|-----------|-------|--------|---------|------|--------|
 |[certifi (2026.10.23)](https://pypi.org/project/certifi/)|python|prod|[pyproject.toml](pyproject.toml)|[MPL-2.0](https://spdx.org/licenses/MPL-2.0.html)|weak-copyleft|⚠|
-|[click (8.5.0)](https://pypi.org/project/click/)|python|prod|[pyproject.toml](pyproject.toml)|[BSD-3-Clause](https://spdx.org/licenses/BSD-3-Clause.html)|permissive|✓|
+|[click (8.5.1)](https://pypi.org/project/click/)|python|prod|[pyproject.toml](pyproject.toml)|[BSD-3-Clause](https://spdx.org/licenses/BSD-3-Clause.html)|permissive|✓|
 |[defusedxml (0.7.1)](https://pypi.org/project/defusedxml/)|python|prod|[pyproject.toml](pyproject.toml)|[PSF-2.0](https://spdx.org/licenses/PSF-2.0.html)|permissive|✓|
 |[httpx (0.28.1)](https://pypi.org/project/httpx/)|python|prod|[pyproject.toml](pyproject.toml)|[BSD-3-Clause](https://spdx.org/licenses/BSD-3-Clause.html)|permissive|✓|
 |  └─ [anyio (4.16.0)](https://pypi.org/project/anyio/)|python|prod||[MIT](https://spdx.org/licenses/MIT.html)|permissive|✓|
@@ -16,7 +16,7 @@
 |[packaging (26.3.0)](https://pypi.org/project/packaging/)|python|prod|[pyproject.toml](pyproject.toml)|[Apache-2.0](https://spdx.org/licenses/Apache-2.0.html) OR [BSD-2-Clause](https://spdx.org/licenses/BSD-2-Clause.html)|permissive|✓|
 |[pyyaml (6.0.3)](https://pypi.org/project/pyyaml/)|python|prod|[pyproject.toml](pyproject.toml)|[MIT](https://spdx.org/licenses/MIT.html)|permissive|✓|
 |[rich (15.0.0)](https://pypi.org/project/rich/)|python|prod|[pyproject.toml](pyproject.toml)|[MIT](https://spdx.org/licenses/MIT.html)|permissive|✓|
-|  └─ [markdown-it-py (4.2.0)](https://pypi.org/project/markdown-it-py/)|python|prod||[MIT](https://spdx.org/licenses/MIT.html)|permissive|✓|
+|  └─ [markdown-it-py (4.3.0)](https://pypi.org/project/markdown-it-py/)|python|prod||[MIT](https://spdx.org/licenses/MIT.html)|permissive|✓|
 |  └─ [mdurl (0.1.2)](https://pypi.org/project/mdurl/)|python|prod||[MIT](https://spdx.org/licenses/MIT.html)|permissive|✓|
 |  └─ [pygments (2.21.0)](https://pypi.org/project/pygments/)|python|prod||[BSD-2-Clause](https://spdx.org/licenses/BSD-2-Clause.html)|permissive|✓|
 |[semantic-version (2.10.0)](https://pypi.org/project/semantic-version/)|python|prod|[pyproject.toml](pyproject.toml)|[BSD-3-Clause](https://spdx.org/licenses/BSD-3-Clause.html)|permissive|✓|
