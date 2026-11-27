@@ -12,6 +12,7 @@ description: "Which directory licenseal scans, the directories it skips, how to 
 These directory names are skipped at every depth, in every ecosystem:
 
 - **VCS / caches**: `.git`, `.tox`, `.nox`, `__pycache__`, `node_modules`
+- **Test, linter, and notebook caches**: `.pytest_cache`, `.mypy_cache`, `.ruff_cache`, `.hypothesis`, `.pytype`, `.ipynb_checkpoints`
 - **Sample / fixture trees**: `examples`, `fixtures`, `__fixtures__`
 - **Build / dist / vendoring outputs**: `build`, `dist`, `target`, `.eggs`, `site-packages`, `vendor`, `__pypackages__`, `.pdm-build`
 - **JS framework build outputs & legacy package-manager trees**: `.next`, `.nuxt`, `.svelte-kit`, `.yarn`, `bower_components`, `jspm_packages`

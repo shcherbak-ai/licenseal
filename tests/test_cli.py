@@ -67,8 +67,10 @@ from tests._helpers import (
     _DEEP,
     _assert_gap_fails_only_strict,
     _check_json,
+    _deny_listing,
     _file_diagnostics,
     _record_path_io,
+    _write,
 )
 
 _MISSING_LOCKFILE = (
@@ -2926,6 +2928,30 @@ class TestCheckCommand:
         assert "MIT" in result.output
         # The stderr note replaces the old "No dependencies found." message.
         assert "No dependencies to resolve" in result.output
+
+    @pytest.mark.parametrize(
+        ("unreadable", "exit_code", "gaps"),
+        [(".pytest_cache", 0, 0), ("leftover", 1, 1)],
+    )
+    def test_unreadable_directory_fails_check_unless_a_tool_cache(
+        self, tmp_path, monkeypatch, unreadable, exit_code, gaps
+    ):
+        # A worktree removed in part, holding only a folder Windows refuses to
+        # list: a tool cache is skipped by name, any other is a gap.
+        _write(
+            tmp_path / "pyproject.toml",
+            """\
+            [project]
+            name = "myproject"
+            license = "MIT"
+            dependencies = []
+            """,
+        )
+        (tmp_path / ".claude" / "worktrees" / "part" / unreadable).mkdir(parents=True)
+        _deny_listing(monkeypatch, unreadable)
+        result, data = _check_json(tmp_path)
+        assert result.exit_code == exit_code
+        assert data["summary"]["gaps"] == gaps
 
     @respx.mock
     def test_no_deps_json_emits_valid_document(self, tmp_path):

@@ -36,6 +36,15 @@ BASE_SKIP_DIRS: frozenset[str] = frozenset(
         ".nox",
         "__pycache__",
         "node_modules",
+        # Test, linter, type-checker, and notebook caches, which never hold a
+        # manifest. Matched by exact name only: a generic ``.cache`` may hold
+        # anything.
+        ".pytest_cache",
+        ".mypy_cache",
+        ".ruff_cache",
+        ".hypothesis",
+        ".pytype",
+        ".ipynb_checkpoints",
         # Sample / fixture trees that frequently carry intentionally-broken or
         # frozen manifests not representative of the project's real deps.
         "examples",

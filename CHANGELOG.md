@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file. Each versio
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/), and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Fixed
+
+- **Test, linter, and notebook caches are no longer scanned.** Discovery skips directories named `.pytest_cache`, `.mypy_cache`, `.ruff_cache`, `.hypothesis`, `.pytype`, and `.ipynb_checkpoints`, which never hold a manifest. One that could not be read, such as a cache Windows refuses to open while its deletion waits on another process, was reported as an analysis gap and failed the check. Any other directory that cannot be read remains a gap, as it may hold manifests the scan would miss. See [Directories that are skipped](https://licenseal.shcherbak.ai/concepts/discovery/#directories-that-are-skipped).
+
 ## [1.0.3] - 2026-10-28
 
 ### Changed
@@ -244,6 +250,7 @@ Documentation and package metadata only; CLI behavior is unchanged.
 
 - The aopalliance license URL now resolves to the permissive `LicenseRef-Public-Domain` sentinel instead of a bare `Public-Domain` string that no risk rule recognized, which routed a known public-domain artifact to manual review. The hyphenated `public-domain` publisher spelling normalizes the same way.
 
+[Unreleased]: https://github.com/shcherbak-ai/licenseal/compare/v1.0.3...HEAD
 [1.0.3]: https://github.com/shcherbak-ai/licenseal/compare/v1.0.2...v1.0.3
 [1.0.2]: https://github.com/shcherbak-ai/licenseal/compare/v1.0.1...v1.0.2
 [1.0.1]: https://github.com/shcherbak-ai/licenseal/compare/v1.0.0...v1.0.1

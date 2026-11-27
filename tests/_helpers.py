@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import json
+import os
 import textwrap
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from pathlib import Path
 
 import httpx
@@ -86,6 +87,23 @@ def _write(path: Path, content: str) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(textwrap.dedent(content), encoding="utf-8", newline="\n")
     return path
+
+
+def _deny_listing(monkeypatch: pytest.MonkeyPatch, name: str) -> None:
+    """Make ``os.walk`` fail to list every directory called ``name``.
+
+    The walk lists a directory with ``os.scandir``; the refusal is what Windows
+    answers for a folder whose deletion waits on a handle another process holds.
+    """
+    real_scandir = os.scandir
+
+    def scandir(path: str | os.PathLike[str] = ".") -> Iterator[os.DirEntry[str]]:
+        """List ``path`` unless its name is ``name``."""
+        if os.path.basename(os.fspath(path)) == name:
+            raise PermissionError(13, "Access is denied", os.fspath(path))
+        return real_scandir(path)
+
+    monkeypatch.setattr(os, "scandir", scandir)
 
 
 def _gaps(diags: list[ReadDiagnostic]) -> set[tuple[Path, str]]:

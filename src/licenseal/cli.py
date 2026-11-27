@@ -1222,7 +1222,10 @@ def _scan_licenses(
     help=(
         "Skip these subdirectories during discovery. Accepts one or more paths "
         "(comma-separated) relative to --path or absolute; may also be repeated. "
-        "Subdirectories that contain their own .git are skipped automatically."
+        "Skipped automatically: dependency trees and build outputs (node_modules, "
+        "build, dist, ...), the tool caches .pytest_cache, .mypy_cache, .ruff_cache, "
+        ".hypothesis, .pytype, and .ipynb_checkpoints, virtualenvs, and "
+        "subdirectories that contain their own .git."
     ),
 )
 def check(
@@ -1445,7 +1448,10 @@ def _render_report_to_string(report: AnalysisReport, output_format: str, project
     help=(
         "Skip these subdirectories during discovery. Accepts one or more paths "
         "(comma-separated) relative to --path or absolute; may also be repeated. "
-        "Subdirectories that contain their own .git are skipped automatically."
+        "Skipped automatically: dependency trees and build outputs (node_modules, "
+        "build, dist, ...), the tool caches .pytest_cache, .mypy_cache, .ruff_cache, "
+        ".hypothesis, .pytype, and .ipynb_checkpoints, virtualenvs, and "
+        "subdirectories that contain their own .git."
     ),
 )
 def init_review_file(

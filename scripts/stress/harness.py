@@ -35,7 +35,7 @@ LICENSEAL = ("python", "/harness/licenseal_egress.py")
 EGRESS_BLOCKED = ("licenseal refused a request to", "Blocked by tethered")
 NAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
 
-# Mirrors the walker's documented skip set (docs/ecosystems/index.md) so the inventory counts
+# Mirrors the walker's documented skip set (docs/concepts/discovery.md) so the inventory counts
 # only manifests licenseal is expected to see.
 SKIP_DIRS = frozenset(
     {
@@ -44,6 +44,12 @@ SKIP_DIRS = frozenset(
         ".nox",
         "__pycache__",
         "node_modules",
+        ".pytest_cache",
+        ".mypy_cache",
+        ".ruff_cache",
+        ".hypothesis",
+        ".pytype",
+        ".ipynb_checkpoints",
         "examples",
         "fixtures",
         "__fixtures__",

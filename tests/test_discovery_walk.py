@@ -13,7 +13,9 @@ from unittest.mock import patch
 
 import pytest
 
+from licenseal.discovery._read import collect_read_diagnostics
 from licenseal.discovery._walk import walk_project_files
+from tests._helpers import _deny_listing
 
 
 class TestPackageJsonEdgeCases:
@@ -47,6 +49,53 @@ class TestPackageJsonEdgeCases:
         with patch("licenseal.discovery._walk.os.walk", return_value=BrokenWalk()):
             results = walk_project_files(tmp_path, "package.json")
             assert results == []
+
+
+_TOOL_CACHES = (
+    ".pytest_cache",
+    ".mypy_cache",
+    ".ruff_cache",
+    ".hypothesis",
+    ".pytype",
+    ".ipynb_checkpoints",
+)
+
+
+class TestToolCacheSkip:
+    """Tool caches never hold a manifest: an unreadable one is not a gap."""
+
+    @pytest.mark.parametrize("cache", _TOOL_CACHES)
+    def test_unreadable_tool_cache_is_not_a_gap(self, tmp_path, monkeypatch, cache):
+        (tmp_path / "package.json").write_text(json.dumps({"name": "root"}))
+        cache_dir = tmp_path / "worktree" / cache
+        cache_dir.mkdir(parents=True)
+        (cache_dir / "package.json").write_text(json.dumps({"name": "cached"}))
+        _deny_listing(monkeypatch, cache)
+        with collect_read_diagnostics() as diags:
+            results = walk_project_files(tmp_path, "package.json")
+        assert results == [tmp_path / "package.json"]
+        assert diags == []
+
+    def test_unreadable_directory_of_another_name_is_a_gap(self, tmp_path, monkeypatch):
+        (tmp_path / "package.json").write_text(json.dumps({"name": "root"}))
+        (tmp_path / "worktree" / ".cache").mkdir(parents=True)
+        _deny_listing(monkeypatch, ".cache")
+        with collect_read_diagnostics() as diags:
+            results = walk_project_files(tmp_path, "package.json")
+        assert results == [tmp_path / "package.json"]
+        assert len(diags) == 1
+        assert diags[0].is_gap
+        assert diags[0].path == tmp_path / "worktree" / ".cache"
+        assert "could not be traversed (PermissionError)" in diags[0].reason
+
+    def test_manifest_beside_the_caches_is_found(self, tmp_path):
+        project = tmp_path / "pkg"
+        project.mkdir()
+        (project / "package.json").write_text(json.dumps({"name": "pkg"}))
+        for cache in _TOOL_CACHES:
+            (project / cache).mkdir()
+            (project / cache / "package.json").write_text(json.dumps({"name": cache}))
+        assert walk_project_files(tmp_path, "package.json") == [project / "package.json"]
 
 
 class TestSymlinkSkip:
